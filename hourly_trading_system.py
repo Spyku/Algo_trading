@@ -449,7 +449,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         buy_ratio = buy_votes / total_votes
         avg_proba = np.mean(probas)
 
-        if strategy == 'v2':
+        if strategy in ('v2', 'v3'):
             signal, confidence = classify_signal_v2(buy_votes, total_votes, avg_proba)
         else:
             # V1: original 3-tier
@@ -633,6 +633,89 @@ def simulate_portfolio_v2(signals, initial=1000):
         sig['allocation'] = allocation
 
     return signals
+
+
+# ============================================================
+# STRATEGY V3: COMPARISON (V1 + V2 on same 5-tier signals)
+# ============================================================
+def simulate_portfolio_v3(signals, initial=1000):
+    """
+    Runs BOTH V1 and V2 portfolio simulations on the same V2 signals.
+    V1 mapping: STRONG BUY/BUY -> invested, HOLD -> stay, SELL/STRONG SELL -> cash
+    V2: graduated as before (STRONG=100%, BUY=50%, HOLD=stay, SELL/STRONG SELL=0%)
+    Stores portfolio_v1, portfolio_v2, hold_value in each signal.
+    """
+    if not signals:
+        return signals
+
+    start_price = signals[0]['close']
+
+    # V1 state
+    v1_portfolio = initial
+    v1_position = 'cash'
+    v1_entry_price = None
+
+    # V2 state
+    v2_cash = initial
+    v2_invested = 0.0
+    v2_allocation = 0.0
+    v2_entry_price = None
+
+    for sig in signals:
+        price = sig['close']
+        hold_value = initial * (price / start_price)
+        signal = sig['signal']
+
+        # --- V1: all-in / all-out ---
+        v1_signal = 'BUY' if signal in ('STRONG BUY', 'BUY') else \
+                    'SELL' if signal in ('STRONG SELL', 'SELL') else 'HOLD'
+
+        if v1_signal == 'BUY' and v1_position == 'cash':
+            v1_position = 'invested'
+            v1_entry_price = price
+        elif v1_signal == 'SELL' and v1_position == 'invested':
+            v1_portfolio *= price / v1_entry_price
+            v1_position = 'cash'
+            v1_entry_price = None
+
+        if v1_position == 'invested' and v1_entry_price:
+            v1_current = v1_portfolio * (price / v1_entry_price)
+        else:
+            v1_current = v1_portfolio
+
+        # --- V2: graduated ---
+        if v2_allocation > 0 and v2_entry_price:
+            v2_invested = v2_invested * (price / v2_entry_price)
+            v2_entry_price = price
+
+        if signal == 'STRONG BUY':
+            target = 1.0
+        elif signal == 'BUY':
+            target = 0.5
+        elif signal == 'HOLD':
+            target = v2_allocation
+        else:
+            target = 0.0
+
+        if target != v2_allocation:
+            total = v2_cash + v2_invested
+            v2_invested = total * target
+            v2_cash = total * (1 - target)
+            v2_allocation = target
+            v2_entry_price = price if target > 0 else None
+
+        v2_current = v2_cash + v2_invested
+
+        # Store all three
+        sig['portfolio_v1'] = round(v1_current, 2)
+        sig['portfolio_v2'] = round(v2_current, 2)
+        sig['portfolio_value'] = round(v2_current, 2)
+        sig['hold_value'] = round(hold_value, 2)
+        sig['allocation'] = v2_allocation
+
+    return signals
+
+
 def _eval_one_config(features_np, labels_np, combo, window, n, diag_step, model_factories):
     """Worker: evaluate one (window, combo) config using numpy arrays."""
     min_start = window + 50
@@ -815,9 +898,9 @@ def export_chart_data(all_signals, output_file='hourly_chart_data.json'):
 # ============================================================
 def export_html_dashboard(all_signals, strategy='v1'):
     """Generate a self-contained HTML dashboard from signal data."""
-    suffix = '_v2' if strategy == 'v2' else ''
+    suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
     html_file = f'hourly_dashboard{suffix}.html'
-    strat_label = 'V2 5-tier graduated' if strategy == 'v2' else 'V1 3-tier'
+    strat_label = {'v1': 'V1 (3-tier)', 'v2': 'V2 (5-tier graduated)', 'v3': 'V3 (V1 vs V2 comparison)'}[strategy]
 
     chart_data = {
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -1021,13 +1104,15 @@ function getAssetSummary(name, signals) {{
   const last = signals[signals.length - 1];
   const pnl = ((last.portfolio_value - 1000) / 10).toFixed(1);
   const holdPnl = ((last.hold_value - 1000) / 10).toFixed(1);
+  const v1Pnl = last.portfolio_v1 ? (((last.portfolio_v1 - 1000) / 10).toFixed(1)) : pnl;
+  const v2Pnl = last.portfolio_v2 ? (((last.portfolio_v2 - 1000) / 10).toFixed(1)) : pnl;
   const withActual = signals.filter(s => s.actual === 'UP' || s.actual === 'DOWN');
   const correct = withActual.filter(s =>
     ((s.signal === 'BUY' || s.signal === 'STRONG BUY') && s.actual === 'UP') ||
     ((s.signal === 'SELL' || s.signal === 'STRONG SELL') && s.actual === 'DOWN')
   );
   const acc = withActual.length > 0 ? ((correct.length / withActual.length) * 100).toFixed(1) : 'N/A';
-  return {{ pnl, holdPnl, acc, lastSignal: last.signal, lastClose: last.close, portfolio: last.portfolio_value, allocation: last.allocation }};
+  return {{ pnl, holdPnl, v1Pnl, v2Pnl, acc, lastSignal: last.signal, lastClose: last.close, portfolio: last.portfolio_value, allocation: last.allocation }};
 }}
 
 function sigTagClass(sig) {{
@@ -1050,27 +1135,40 @@ function renderSummaryCards() {{
   for (const [name, signals] of Object.entries(CHART_DATA.assets)) {{
     const s = getAssetSummary(name, signals);
     const isActive = name === activeAsset;
-    const pnlClass = parseFloat(s.pnl) >= 0 ? 'positive' : 'negative';
-    const alpha = parseFloat(s.pnl) - parseFloat(s.holdPnl);
-    const alphaClass = alpha >= 0 ? 'positive' : 'negative';
 
     const card = document.createElement('div');
     card.className = 'summary-card' + (isActive ? ' active' : '');
     card.onclick = () => {{ activeAsset = name; renderAll(); }};
 
-    let allocRow = '';
-    if (STRATEGY === 'v2' && s.allocation !== undefined) {{
-      allocRow = '<div class="stat-row"><span class="stat-label">Allocation</span><span class="stat-value" style="color:var(--purple)">' + (s.allocation * 100).toFixed(0) + '%</span></div>';
+    let body = '<div class="asset-name">' + name + ' <span class="tag ' + sigTagClass(s.lastSignal) + '">' + s.lastSignal + '</span></div>';
+
+    if (STRATEGY === 'v3') {{
+      const v1Class = parseFloat(s.v1Pnl) >= 0 ? 'positive' : 'negative';
+      const v2Class = parseFloat(s.v2Pnl) >= 0 ? 'positive' : 'negative';
+      const v1Alpha = parseFloat(s.v1Pnl) - parseFloat(s.holdPnl);
+      const v2Alpha = parseFloat(s.v2Pnl) - parseFloat(s.holdPnl);
+      body +=
+        '<div class="stat-row"><span class="stat-label">V1 All-in/out</span><span class="stat-value ' + v1Class + '">' + (parseFloat(s.v1Pnl)>=0?'+':'') + s.v1Pnl + '% <small style="color:' + (v1Alpha>=0?'var(--green)':'var(--red)') + '">(a:' + (v1Alpha>=0?'+':'') + v1Alpha.toFixed(1) + ')</small></span></div>' +
+        '<div class="stat-row"><span class="stat-label">V2 Graduated</span><span class="stat-value ' + v2Class + '">' + (parseFloat(s.v2Pnl)>=0?'+':'') + s.v2Pnl + '% <small style="color:' + (v2Alpha>=0?'var(--green)':'var(--red)') + '">(a:' + (v2Alpha>=0?'+':'') + v2Alpha.toFixed(1) + ')</small></span></div>' +
+        '<div class="stat-row"><span class="stat-label">Buy & Hold</span><span class="stat-value" style="color:var(--text-secondary)">' + (parseFloat(s.holdPnl)>=0?'+':'') + s.holdPnl + '%</span></div>';
+    }} else {{
+      const pnlClass = parseFloat(s.pnl) >= 0 ? 'positive' : 'negative';
+      const alpha = parseFloat(s.pnl) - parseFloat(s.holdPnl);
+      const alphaClass = alpha >= 0 ? 'positive' : 'negative';
+      body +=
+        '<div class="stat-row"><span class="stat-label">Portfolio</span><span class="stat-value ' + pnlClass + '">' + (parseFloat(s.pnl)>=0?'+':'') + s.pnl + '%</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Buy & Hold</span><span class="stat-value" style="color:var(--text-secondary)">' + (parseFloat(s.holdPnl)>=0?'+':'') + s.holdPnl + '%</span></div>' +
+        '<div class="stat-row"><span class="stat-label">Alpha</span><span class="stat-value ' + alphaClass + '">' + (alpha>=0?'+':'') + alpha.toFixed(1) + '%</span></div>';
     }}
 
-    card.innerHTML =
-      '<div class="asset-name">' + name + ' <span class="tag ' + sigTagClass(s.lastSignal) + '">' + s.lastSignal + '</span></div>' +
-      '<div class="stat-row"><span class="stat-label">Portfolio</span><span class="stat-value ' + pnlClass + '">' + (parseFloat(s.pnl)>=0?'+':'') + s.pnl + '%</span></div>' +
-      '<div class="stat-row"><span class="stat-label">Buy & Hold</span><span class="stat-value" style="color:var(--text-secondary)">' + (parseFloat(s.holdPnl)>=0?'+':'') + s.holdPnl + '%</span></div>' +
-      '<div class="stat-row"><span class="stat-label">Alpha</span><span class="stat-value ' + alphaClass + '">' + (alpha>=0?'+':'') + alpha.toFixed(1) + '%</span></div>' +
-      '<div class="stat-row"><span class="stat-label">Accuracy</span><span class="stat-value" style="color:var(--cyan)">' + s.acc + '%</span></div>' +
-      allocRow +
-      '<div class="mini-bar"><div class="mini-bar-fill" style="width:' + s.acc + '%;background:' + (ASSET_COLORS[name]||{{main:'#3b82f6'}}).main + '"></div></div>';
+    body += '<div class="stat-row"><span class="stat-label">Accuracy</span><span class="stat-value" style="color:var(--cyan)">' + s.acc + '%</span></div>';
+
+    if (STRATEGY !== 'v1' && s.allocation !== undefined) {{
+      body += '<div class="stat-row"><span class="stat-label">Allocation</span><span class="stat-value" style="color:var(--purple)">' + (s.allocation * 100).toFixed(0) + '%</span></div>';
+    }}
+
+    body += '<div class="mini-bar"><div class="mini-bar-fill" style="width:' + s.acc + '%;background:' + (ASSET_COLORS[name]||{{main:'#3b82f6'}}).main + '"></div></div>';
+    card.innerHTML = body;
     row.appendChild(card);
   }}
 }}
@@ -1095,7 +1193,7 @@ function renderContent() {{
 
   if (activeTab === 'portfolio') {{
     container.innerHTML =
-      '<div class="chart-panel"><h3>PORTFOLIO VALUE vs BUY & HOLD -- ' + activeAsset + '</h3><div class="chart-wrapper main"><canvas id="chartPortfolio"></canvas></div></div>' +
+      '<div class="chart-panel"><h3>' + (STRATEGY==='v3' ? 'V1 vs V2 vs BUY & HOLD' : 'PORTFOLIO VALUE vs BUY & HOLD') + ' -- ' + activeAsset + '</h3><div class="chart-wrapper main"><canvas id="chartPortfolio"></canvas></div></div>' +
       '<div class="two-col">' +
         '<div class="chart-panel"><h3>SIGNAL CONFIDENCE</h3><div class="chart-wrapper secondary"><canvas id="chartConf"></canvas></div></div>' +
         '<div class="chart-panel"><h3>SIGNAL DISTRIBUTION</h3><div class="chart-wrapper secondary"><canvas id="chartDist"></canvas></div></div>' +
@@ -1144,10 +1242,19 @@ function sigColor(sig) {{
 
 function renderPortfolioChart(signals, color) {{
   const ctx = document.getElementById('chartPortfolio').getContext('2d');
-  const datasets = [
-    {{ label:'ML Portfolio', data:signals.map(s=>s.portfolio_value), borderColor:color.main, backgroundColor:color.main+'18', fill:true, borderWidth:2, pointRadius:0, tension:0.3 }},
-    {{ label:'Buy & Hold', data:signals.map(s=>s.hold_value), borderColor:'#64748b', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false, tension:0.3 }},
-  ];
+  let datasets;
+  if (STRATEGY === 'v3') {{
+    datasets = [
+      {{ label:'V1 All-in/out', data:signals.map(s=>s.portfolio_v1), borderColor:'#3b82f6', backgroundColor:'#3b82f618', fill:false, borderWidth:2, pointRadius:0, tension:0.3 }},
+      {{ label:'V2 Graduated', data:signals.map(s=>s.portfolio_v2), borderColor:'#22c55e', backgroundColor:'#22c55e18', fill:false, borderWidth:2, pointRadius:0, tension:0.3 }},
+      {{ label:'Buy & Hold', data:signals.map(s=>s.hold_value), borderColor:'#64748b', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false, tension:0.3 }},
+    ];
+  }} else {{
+    datasets = [
+      {{ label:'ML Portfolio', data:signals.map(s=>s.portfolio_value), borderColor:color.main, backgroundColor:color.main+'18', fill:true, borderWidth:2, pointRadius:0, tension:0.3 }},
+      {{ label:'Buy & Hold', data:signals.map(s=>s.hold_value), borderColor:'#64748b', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false, tension:0.3 }},
+    ];
+  }}
   charts.portfolio = new Chart(ctx, {{
     type:'line', data:{{ labels:makeLabels(signals), datasets }},
     options:{{ ...chartDefaults, interaction:{{ intersect:false, mode:'index' }} }}
@@ -1284,7 +1391,7 @@ renderAll();
     return html_file
 def run_mode_a(assets_list, strategy='v1'):
     """Full review: update -> diagnostic -> best models -> signals -> chart."""
-    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
+    strat_label = {'v1': 'V1 (3-tier)', 'v2': 'V2 (5-tier graduated)', 'v3': 'V3 (V1 vs V2 comparison)'}[strategy]
     print("\n" + "=" * 60)
     print(f"  MODE A: FULL HOURLY REVIEW  [{strat_label}]")
     print("=" * 60)
@@ -1311,7 +1418,9 @@ def run_mode_a(assets_list, strategy='v1'):
         window = config['best_window']
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS, strategy=strategy)
-        if strategy == 'v2':
+        if strategy == 'v3':
+            signals = simulate_portfolio_v3(signals)
+        elif strategy == 'v2':
             signals = simulate_portfolio_v2(signals)
         else:
             signals = simulate_portfolio(signals)
@@ -1319,12 +1428,12 @@ def run_mode_a(assets_list, strategy='v1'):
 
         if signals:
             latest = signals[-1]
-            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy == 'v2' else ''
+            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy in ('v2', 'v3') else ''
             print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price={latest['close']:,.2f}{alloc_str}")
 
     # Step 4: Export
-    suffix = '_v2' if strategy == 'v2' else ''
+    suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
     export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
     export_html_dashboard(all_signals, strategy=strategy)
 
@@ -1333,7 +1442,7 @@ def run_mode_a(assets_list, strategy='v1'):
     print("=" * 60)
 def run_mode_b(assets_list, strategy='v1'):
     """Quick run: update -> read hourly_best_models.csv -> signals -> chart."""
-    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
+    strat_label = {'v1': 'V1 (3-tier)', 'v2': 'V2 (5-tier graduated)', 'v3': 'V3 (V1 vs V2 comparison)'}[strategy]
     print("\n" + "=" * 60)
     print(f"  MODE B: QUICK HOURLY RUN  [{strat_label}]")
     print("=" * 60)
@@ -1374,7 +1483,9 @@ def run_mode_b(assets_list, strategy='v1'):
         window = int(row['best_window'])
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS, strategy=strategy)
-        if strategy == 'v2':
+        if strategy == 'v3':
+            signals = simulate_portfolio_v3(signals)
+        elif strategy == 'v2':
             signals = simulate_portfolio_v2(signals)
         else:
             signals = simulate_portfolio(signals)
@@ -1382,12 +1493,12 @@ def run_mode_b(assets_list, strategy='v1'):
 
         if signals:
             latest = signals[-1]
-            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy == 'v2' else ''
+            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy in ('v2', 'v3') else ''
             print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price={latest['close']:,.2f}{alloc_str}")
 
     # Step 3: Export
-    suffix = '_v2' if strategy == 'v2' else ''
+    suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
     export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
     export_html_dashboard(all_signals, strategy=strategy)
 
@@ -1422,8 +1533,9 @@ def main():
     print("  2. V2 -- 5-tier (STRONG BUY / BUY / HOLD / SELL / STRONG SELL)")
     print(f"          Graduated sizing: STRONG=100%, Normal=50%, HOLD=stay")
     print(f"          Confidence threshold for STRONG: {CONFIDENCE_THRESHOLD}%")
-    strat_choice = input("Enter choice (1-2): ").strip()
-    strategy = 'v2' if strat_choice == '2' else 'v1'
+    print("  3. V3 -- Comparison (V1 vs V2 vs Buy&Hold on same chart)")
+    strat_choice = input("Enter choice (1-3): ").strip()
+    strategy = 'v2' if strat_choice == '2' else 'v3' if strat_choice == '3' else 'v1'
 
     # Asset selection
     print("\nWhich indices?")
@@ -1438,7 +1550,7 @@ def main():
     else:
         assets_list = list(ASSETS.keys())
 
-    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
+    strat_label = {'v1': 'V1 (3-tier)', 'v2': 'V2 (5-tier graduated)', 'v3': 'V3 (V1 vs V2 comparison)'}[strategy]
     print(f"\nAssets: {', '.join(assets_list)}")
     print(f"Mode: {'A (Full Review)' if mode == 'A' else 'B (Quick Run)'}")
     print(f"Strategy: {strat_label}")
@@ -1448,7 +1560,7 @@ def main():
     else:
         run_mode_b(assets_list, strategy=strategy)
 
-    suffix = '_v2' if strategy == 'v2' else ''
+    suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
     print(f"\nDone!")
     print(f"  Data: hourly_chart_data{suffix}.json")
     print(f"  Dashboard: hourly_dashboard{suffix}.html (open in browser)")
