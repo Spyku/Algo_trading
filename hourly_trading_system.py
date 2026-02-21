@@ -62,6 +62,9 @@ REPLAY_HOURS = 200        # Hours of history for chart (~25 trading days)
 DIAG_STEP = 24             # Diagnostic: evaluate every 24 hours (~1 per trading day)
 DIAG_WINDOWS = [100, 200, 300, 500, 700]  # Training windows to test
 
+# Strategy V2: 5-tier signal thresholds
+CONFIDENCE_THRESHOLD = 70  # % confidence for STRONG signals
+
 
 # ============================================================
 # DATA DOWNLOAD (yfinance)
@@ -379,14 +382,14 @@ ALL_MODELS = get_all_models()
 # ============================================================
 # SIGNAL GENERATION (hourly walk-forward)
 # ============================================================
-def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS):
+def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS, strategy='v1'):
     """
     Generate hourly signals using walk-forward training.
     Returns list of signal dicts.
     """
     print(f"\n  Generating hourly signals for {asset_name} "
           f"(models={'+'.join(model_names)}, window={window_size}h, "
-          f"replay={replay_hours}h)...")
+          f"replay={replay_hours}h, strategy={strategy})...")
 
     df_raw = load_data(asset_name)
     if df_raw is None:
@@ -444,20 +447,24 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         buy_votes = sum(votes)
         total_votes = len(votes)
         buy_ratio = buy_votes / total_votes
-
-        if buy_ratio > 0.5:
-            signal = 'BUY'
-        elif buy_ratio == 0:
-            signal = 'SELL'
-        else:
-            signal = 'HOLD'
-
-        # Confidence
         avg_proba = np.mean(probas)
-        if signal == 'SELL':
-            confidence = (1 - avg_proba) * 100
+
+        if strategy == 'v2':
+            signal, confidence = classify_signal_v2(buy_votes, total_votes, avg_proba)
         else:
-            confidence = avg_proba * 100
+            # V1: original 3-tier
+            if buy_ratio > 0.5:
+                signal = 'BUY'
+            elif buy_ratio == 0:
+                signal = 'SELL'
+            else:
+                signal = 'HOLD'
+
+            # Confidence
+            if signal == 'SELL':
+                confidence = (1 - avg_proba) * 100
+            else:
+                confidence = avg_proba * 100
 
         # Check actual outcome
         actual = None
@@ -533,8 +540,99 @@ def simulate_portfolio(signals, initial=1000):
 
 
 # ============================================================
-# DIAGNOSTIC (CPU combos parallel, GPU combos sequential)
+# STRATEGY V2: 5-TIER GRADUATED SIGNALS
 # ============================================================
+def classify_signal_v2(buy_votes, total_votes, avg_proba):
+    """
+    5-tier signal classification based on vote unanimity + confidence.
+    Returns (signal, confidence).
+
+    STRONG BUY:  unanimous BUY  + confidence >= threshold
+    BUY:         majority BUY
+    HOLD:        split / no clear majority
+    SELL:        unanimous SELL (no BUY votes)
+    STRONG SELL: unanimous SELL + confidence >= threshold
+    """
+    buy_ratio = buy_votes / total_votes
+
+    if buy_ratio == 1.0:  # unanimous BUY
+        confidence = avg_proba * 100
+        if confidence >= CONFIDENCE_THRESHOLD:
+            return 'STRONG BUY', confidence
+        return 'BUY', confidence
+    elif buy_ratio > 0.5:  # majority BUY (not unanimous)
+        confidence = avg_proba * 100
+        return 'BUY', confidence
+    elif buy_ratio == 0:  # unanimous SELL
+        confidence = (1 - avg_proba) * 100
+        if confidence >= CONFIDENCE_THRESHOLD:
+            return 'STRONG SELL', confidence
+        return 'SELL', confidence
+    else:  # split (0 < buy_ratio <= 0.5)
+        confidence = max(avg_proba, 1 - avg_proba) * 100
+        return 'HOLD', confidence
+
+
+def simulate_portfolio_v2(signals, initial=1000):
+    """
+    Graduated position sizing portfolio simulation.
+
+    Target allocation per signal:
+      STRONG BUY  -> 100% invested
+      BUY         ->  50% invested
+      HOLD        ->  no change
+      SELL        ->   0% invested (cash)
+      STRONG SELL ->   0% invested (cash)
+
+    Tracks: allocation (0.0, 0.5, 1.0), entry prices per tranche.
+    """
+    if not signals:
+        return signals
+
+    portfolio_cash = initial     # cash portion
+    portfolio_invested = 0.0     # market value of invested portion
+    allocation = 0.0             # 0.0, 0.5, or 1.0
+    entry_price = None
+
+    hold_value = initial
+    start_price = signals[0]['close']
+
+    for sig in signals:
+        price = sig['close']
+        hold_value = initial * (price / start_price)
+
+        # Update invested portion to current market value
+        if allocation > 0 and entry_price:
+            portfolio_invested = portfolio_invested * (price / entry_price)
+            entry_price = price
+
+        signal = sig['signal']
+
+        # Determine target allocation
+        if signal == 'STRONG BUY':
+            target = 1.0
+        elif signal == 'BUY':
+            target = 0.5
+        elif signal == 'HOLD':
+            target = allocation  # no change
+        else:  # SELL or STRONG SELL
+            target = 0.0
+
+        # Rebalance if target changed
+        if target != allocation:
+            total_value = portfolio_cash + portfolio_invested
+
+            portfolio_invested = total_value * target
+            portfolio_cash = total_value * (1 - target)
+            allocation = target
+            entry_price = price if target > 0 else None
+
+        current_value = portfolio_cash + portfolio_invested
+        sig['portfolio_value'] = round(current_value, 2)
+        sig['hold_value'] = round(hold_value, 2)
+        sig['allocation'] = allocation
+
+    return signals
 def _eval_one_config(features_np, labels_np, combo, window, n, diag_step, model_factories):
     """Worker: evaluate one (window, combo) config using numpy arrays."""
     min_start = window + 50
@@ -713,12 +811,482 @@ def export_chart_data(all_signals, output_file='hourly_chart_data.json'):
 
 
 # ============================================================
-# MODE A: Full Review
+# HTML DASHBOARD EXPORT
 # ============================================================
-def run_mode_a(assets_list):
+def export_html_dashboard(all_signals, strategy='v1'):
+    """Generate a self-contained HTML dashboard from signal data."""
+    suffix = '_v2' if strategy == 'v2' else ''
+    html_file = f'hourly_dashboard{suffix}.html'
+    strat_label = 'V2 5-tier graduated' if strategy == 'v2' else 'V1 3-tier'
+
+    chart_data = {
+        'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'type': 'hourly',
+        'strategy': strategy,
+        'prediction_horizon': f'{PREDICTION_HORIZON}h',
+        'assets': {}
+    }
+    for asset_name, signals in all_signals.items():
+        chart_data['assets'][asset_name] = signals
+
+    generated_ts = chart_data['generated']
+    total_sigs = sum(len(s) for s in all_signals.values())
+    per_asset = total_sigs // max(len(all_signals), 1)
+
+    data_json = json.dumps(chart_data)
+
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hourly Trading Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {{
+    --bg-primary: #0a0e17;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2332;
+    --border: #1e293b;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --green: #22c55e;
+    --green-bg: rgba(34,197,94,0.08);
+    --red: #ef4444;
+    --red-bg: rgba(239,68,68,0.08);
+    --blue: #3b82f6;
+    --amber: #f59e0b;
+    --cyan: #06b6d4;
+    --purple: #a78bfa;
+    --accent: #3b82f6;
+  }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{
+    background: var(--bg-primary); color: var(--text-primary);
+    font-family: 'DM Sans', sans-serif; min-height: 100vh; overflow-x: hidden;
+  }}
+  .noise-overlay {{
+    position:fixed; inset:0; z-index:0; pointer-events:none; opacity:0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }}
+  .container {{ position:relative; z-index:1; max-width:1400px; margin:0 auto; padding:24px 20px; }}
+  .header {{
+    display:flex; justify-content:space-between; align-items:flex-start;
+    margin-bottom:28px; padding-bottom:20px; border-bottom:1px solid var(--border);
+  }}
+  .header h1 {{
+    font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:600;
+    letter-spacing:-0.3px; color:var(--text-primary);
+  }}
+  .header h1 span {{ color:var(--accent); }}
+  .header-meta {{
+    font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-muted);
+    text-align:right; line-height:1.7;
+  }}
+  .header-meta .live-dot {{
+    display:inline-block; width:6px; height:6px; background:var(--green);
+    border-radius:50%; margin-right:4px; animation:pulse 2s infinite;
+  }}
+  @keyframes pulse {{ 0%,100%{{opacity:1;}} 50%{{opacity:0.3;}} }}
+  .summary-row {{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:24px; }}
+  .summary-card {{
+    background:var(--bg-card); border:1px solid var(--border); border-radius:8px;
+    padding:16px 18px; transition:background 0.2s; cursor:pointer;
+    position:relative; overflow:hidden;
+  }}
+  .summary-card:hover {{ background:var(--bg-card-hover); }}
+  .summary-card.active {{
+    border-color:var(--accent);
+    box-shadow:0 0 0 1px var(--accent), 0 0 20px rgba(59,130,246,0.08);
+  }}
+  .summary-card .asset-name {{
+    font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:600;
+    color:var(--text-secondary); margin-bottom:10px; display:flex; align-items:center; gap:8px;
+  }}
+  .summary-card .asset-name .tag {{
+    font-size:9px; font-weight:500; padding:2px 6px; border-radius:3px; letter-spacing:0.5px;
+  }}
+  .tag-buy {{ background:var(--green-bg); color:var(--green); }}
+  .tag-sell {{ background:var(--red-bg); color:var(--red); }}
+  .tag-hold {{ background:rgba(245,158,11,0.08); color:var(--amber); }}
+  .summary-card .stat-row {{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px; }}
+  .stat-label {{ font-size:11px; color:var(--text-muted); }}
+  .stat-value {{ font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:500; }}
+  .stat-value.positive {{ color:var(--green); }}
+  .stat-value.negative {{ color:var(--red); }}
+  .mini-bar {{ height:3px; border-radius:2px; margin-top:10px; background:var(--border); overflow:hidden; }}
+  .mini-bar-fill {{ height:100%; border-radius:2px; transition:width 0.6s ease; }}
+  .tab-bar {{
+    display:flex; gap:2px; margin-bottom:20px; background:var(--bg-card);
+    border-radius:6px; padding:3px; border:1px solid var(--border); width:fit-content;
+  }}
+  .tab-btn {{
+    font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:500; padding:6px 14px;
+    background:none; border:none; color:var(--text-muted); cursor:pointer; border-radius:4px;
+    transition:all 0.2s;
+  }}
+  .tab-btn:hover {{ color:var(--text-secondary); }}
+  .tab-btn.active {{ background:var(--accent); color:#fff; }}
+  .chart-panel {{
+    background:var(--bg-card); border:1px solid var(--border); border-radius:8px;
+    padding:20px; margin-bottom:16px;
+  }}
+  .chart-panel h3 {{
+    font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:500;
+    color:var(--text-secondary); margin-bottom:14px; letter-spacing:0.5px;
+  }}
+  .chart-wrapper {{ position:relative; width:100%; }}
+  .chart-wrapper.main {{ height:340px; }}
+  .chart-wrapper.secondary {{ height:200px; }}
+  .signal-table-wrap {{
+    background:var(--bg-card); border:1px solid var(--border); border-radius:8px;
+    padding:16px 18px; max-height:400px; overflow-y:auto;
+  }}
+  .signal-table-wrap h3 {{
+    font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:500;
+    color:var(--text-secondary); margin-bottom:12px;
+  }}
+  table {{ width:100%; border-collapse:collapse; }}
+  th {{
+    font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500;
+    color:var(--text-muted); text-align:left; padding:6px 8px;
+    border-bottom:1px solid var(--border); position:sticky; top:0;
+    background:var(--bg-card); text-transform:uppercase; letter-spacing:0.5px;
+  }}
+  td {{
+    font-family:'JetBrains Mono',monospace; font-size:11px; padding:5px 8px;
+    border-bottom:1px solid rgba(30,41,59,0.5); color:var(--text-secondary);
+  }}
+  tr:hover td {{ background:rgba(59,130,246,0.03); }}
+  .sig-buy {{ color:var(--green); font-weight:600; }}
+  .sig-sell {{ color:var(--red); font-weight:600; }}
+  .sig-hold {{ color:var(--amber); font-weight:600; }}
+  .sig-strong-buy {{ color:var(--green); font-weight:700; text-shadow:0 0 6px rgba(34,197,94,0.3); }}
+  .sig-strong-sell {{ color:var(--red); font-weight:700; text-shadow:0 0 6px rgba(239,68,68,0.3); }}
+  .actual-up {{ color:var(--green); }}
+  .actual-down {{ color:var(--red); }}
+  .correct {{ background:rgba(34,197,94,0.06); }}
+  .wrong {{ background:rgba(239,68,68,0.06); }}
+  .two-col {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }}
+  ::-webkit-scrollbar {{ width:5px; }}
+  ::-webkit-scrollbar-track {{ background:var(--bg-card); }}
+  ::-webkit-scrollbar-thumb {{ background:var(--border); border-radius:3px; }}
+  @media (max-width:900px) {{
+    .summary-row {{ grid-template-columns:1fr; }}
+    .two-col {{ grid-template-columns:1fr; }}
+  }}
+</style>
+</head>
+<body>
+<div class="noise-overlay"></div>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1><span>//</span> HOURLY TRADING DASHBOARD</h1>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+        {PREDICTION_HORIZON}h prediction &middot; Walk-forward ML ensemble &middot; {strat_label}
+      </div>
+    </div>
+    <div class="header-meta">
+      <div><span class="live-dot"></span>Generated {generated_ts}</div>
+      <div>{per_asset} signals per asset</div>
+    </div>
+  </div>
+  <div class="summary-row" id="summaryRow"></div>
+  <div class="tab-bar" id="tabBar">
+    <button class="tab-btn active" data-tab="portfolio">PORTFOLIO</button>
+    <button class="tab-btn" data-tab="price">PRICE + SIGNALS</button>
+    <button class="tab-btn" data-tab="indicators">INDICATORS</button>
+    <button class="tab-btn" data-tab="table">SIGNAL LOG</button>
+  </div>
+  <div id="tabContent"></div>
+</div>
+<script>
+const CHART_DATA = {data_json};
+const STRATEGY = "{strategy}";
+
+const ASSET_COLORS = {{
+  SMI:   {{ main:'#3b82f6', dim:'#2563eb' }},
+  DAX:   {{ main:'#a78bfa', dim:'#7c3aed' }},
+  CAC40: {{ main:'#06b6d4', dim:'#0891b2' }},
+}};
+
+let activeAsset = Object.keys(CHART_DATA.assets)[0];
+let activeTab = 'portfolio';
+let charts = {{}};
+
+function getAssetSummary(name, signals) {{
+  const last = signals[signals.length - 1];
+  const pnl = ((last.portfolio_value - 1000) / 10).toFixed(1);
+  const holdPnl = ((last.hold_value - 1000) / 10).toFixed(1);
+  const withActual = signals.filter(s => s.actual === 'UP' || s.actual === 'DOWN');
+  const correct = withActual.filter(s =>
+    ((s.signal === 'BUY' || s.signal === 'STRONG BUY') && s.actual === 'UP') ||
+    ((s.signal === 'SELL' || s.signal === 'STRONG SELL') && s.actual === 'DOWN')
+  );
+  const acc = withActual.length > 0 ? ((correct.length / withActual.length) * 100).toFixed(1) : 'N/A';
+  return {{ pnl, holdPnl, acc, lastSignal: last.signal, lastClose: last.close, portfolio: last.portfolio_value, allocation: last.allocation }};
+}}
+
+function sigTagClass(sig) {{
+  if (sig.includes('BUY')) return 'tag-buy';
+  if (sig.includes('SELL')) return 'tag-sell';
+  return 'tag-hold';
+}}
+
+function sigCssClass(sig) {{
+  if (sig === 'STRONG BUY') return 'sig-strong-buy';
+  if (sig === 'STRONG SELL') return 'sig-strong-sell';
+  if (sig === 'BUY') return 'sig-buy';
+  if (sig === 'SELL') return 'sig-sell';
+  return 'sig-hold';
+}}
+
+function renderSummaryCards() {{
+  const row = document.getElementById('summaryRow');
+  row.innerHTML = '';
+  for (const [name, signals] of Object.entries(CHART_DATA.assets)) {{
+    const s = getAssetSummary(name, signals);
+    const isActive = name === activeAsset;
+    const pnlClass = parseFloat(s.pnl) >= 0 ? 'positive' : 'negative';
+    const alpha = parseFloat(s.pnl) - parseFloat(s.holdPnl);
+    const alphaClass = alpha >= 0 ? 'positive' : 'negative';
+
+    const card = document.createElement('div');
+    card.className = 'summary-card' + (isActive ? ' active' : '');
+    card.onclick = () => {{ activeAsset = name; renderAll(); }};
+
+    let allocRow = '';
+    if (STRATEGY === 'v2' && s.allocation !== undefined) {{
+      allocRow = '<div class="stat-row"><span class="stat-label">Allocation</span><span class="stat-value" style="color:var(--purple)">' + (s.allocation * 100).toFixed(0) + '%</span></div>';
+    }}
+
+    card.innerHTML =
+      '<div class="asset-name">' + name + ' <span class="tag ' + sigTagClass(s.lastSignal) + '">' + s.lastSignal + '</span></div>' +
+      '<div class="stat-row"><span class="stat-label">Portfolio</span><span class="stat-value ' + pnlClass + '">' + (parseFloat(s.pnl)>=0?'+':'') + s.pnl + '%</span></div>' +
+      '<div class="stat-row"><span class="stat-label">Buy & Hold</span><span class="stat-value" style="color:var(--text-secondary)">' + (parseFloat(s.holdPnl)>=0?'+':'') + s.holdPnl + '%</span></div>' +
+      '<div class="stat-row"><span class="stat-label">Alpha</span><span class="stat-value ' + alphaClass + '">' + (alpha>=0?'+':'') + alpha.toFixed(1) + '%</span></div>' +
+      '<div class="stat-row"><span class="stat-label">Accuracy</span><span class="stat-value" style="color:var(--cyan)">' + s.acc + '%</span></div>' +
+      allocRow +
+      '<div class="mini-bar"><div class="mini-bar-fill" style="width:' + s.acc + '%;background:' + (ASSET_COLORS[name]||{{main:'#3b82f6'}}).main + '"></div></div>';
+    row.appendChild(card);
+  }}
+}}
+
+function renderTabs() {{
+  document.querySelectorAll('.tab-btn').forEach(btn => {{
+    btn.classList.toggle('active', btn.dataset.tab === activeTab);
+    btn.onclick = () => {{ activeTab = btn.dataset.tab; renderAll(); }};
+  }});
+}}
+
+function destroyCharts() {{
+  Object.values(charts).forEach(c => c.destroy());
+  charts = {{}};
+}}
+
+function renderContent() {{
+  destroyCharts();
+  const container = document.getElementById('tabContent');
+  const signals = CHART_DATA.assets[activeAsset];
+  const color = ASSET_COLORS[activeAsset] || {{ main:'#3b82f6' }};
+
+  if (activeTab === 'portfolio') {{
+    container.innerHTML =
+      '<div class="chart-panel"><h3>PORTFOLIO VALUE vs BUY & HOLD -- ' + activeAsset + '</h3><div class="chart-wrapper main"><canvas id="chartPortfolio"></canvas></div></div>' +
+      '<div class="two-col">' +
+        '<div class="chart-panel"><h3>SIGNAL CONFIDENCE</h3><div class="chart-wrapper secondary"><canvas id="chartConf"></canvas></div></div>' +
+        '<div class="chart-panel"><h3>SIGNAL DISTRIBUTION</h3><div class="chart-wrapper secondary"><canvas id="chartDist"></canvas></div></div>' +
+      '</div>';
+    renderPortfolioChart(signals, color);
+    renderConfidenceChart(signals, color);
+    renderDistributionChart(signals);
+  }} else if (activeTab === 'price') {{
+    container.innerHTML =
+      '<div class="chart-panel"><h3>PRICE ACTION + SIGNALS -- ' + activeAsset + '</h3><div class="chart-wrapper main"><canvas id="chartPrice"></canvas></div></div>';
+    renderPriceChart(signals, color);
+  }} else if (activeTab === 'indicators') {{
+    container.innerHTML =
+      '<div class="chart-panel"><h3>RSI (14h) -- ' + activeAsset + '</h3><div class="chart-wrapper secondary"><canvas id="chartRSI"></canvas></div></div>' +
+      '<div class="chart-panel"><h3>BOLLINGER BAND POSITION -- ' + activeAsset + '</h3><div class="chart-wrapper secondary"><canvas id="chartBB"></canvas></div></div>';
+    renderRSIChart(signals, color);
+    renderBBChart(signals, color);
+  }} else if (activeTab === 'table') {{
+    renderSignalTable(signals);
+  }}
+}}
+
+const chartDefaults = {{
+  responsive:true, maintainAspectRatio:false,
+  plugins: {{
+    legend: {{ display:true, labels:{{ color:'#94a3b8', font:{{ family:'JetBrains Mono',size:10 }}, boxWidth:10, padding:15 }} }},
+    tooltip: {{
+      backgroundColor:'#1e293b', titleColor:'#e2e8f0', bodyColor:'#94a3b8',
+      titleFont:{{ family:'JetBrains Mono',size:11 }}, bodyFont:{{ family:'JetBrains Mono',size:10 }},
+      borderColor:'#334155', borderWidth:1, padding:10, cornerRadius:4,
+    }}
+  }},
+  scales: {{
+    x: {{ ticks:{{ color:'#475569', font:{{ family:'JetBrains Mono',size:9 }}, maxTicksLimit:12, maxRotation:0 }}, grid:{{ color:'rgba(30,41,59,0.5)' }} }},
+    y: {{ ticks:{{ color:'#475569', font:{{ family:'JetBrains Mono',size:9 }} }}, grid:{{ color:'rgba(30,41,59,0.5)' }} }}
+  }}
+}};
+
+function makeLabels(signals) {{ return signals.map(s => s.datetime.substring(5)); }}
+
+function sigColor(sig) {{
+  if (sig.includes('BUY')) return '#22c55e';
+  if (sig.includes('SELL')) return '#ef4444';
+  return '#f59e0b';
+}}
+
+function renderPortfolioChart(signals, color) {{
+  const ctx = document.getElementById('chartPortfolio').getContext('2d');
+  const datasets = [
+    {{ label:'ML Portfolio', data:signals.map(s=>s.portfolio_value), borderColor:color.main, backgroundColor:color.main+'18', fill:true, borderWidth:2, pointRadius:0, tension:0.3 }},
+    {{ label:'Buy & Hold', data:signals.map(s=>s.hold_value), borderColor:'#64748b', borderDash:[4,4], borderWidth:1.5, pointRadius:0, fill:false, tension:0.3 }},
+  ];
+  charts.portfolio = new Chart(ctx, {{
+    type:'line', data:{{ labels:makeLabels(signals), datasets }},
+    options:{{ ...chartDefaults, interaction:{{ intersect:false, mode:'index' }} }}
+  }});
+}}
+
+function renderConfidenceChart(signals, color) {{
+  const ctx = document.getElementById('chartConf').getContext('2d');
+  const colors = signals.map(s => sigColor(s.signal));
+  charts.conf = new Chart(ctx, {{
+    type:'bar',
+    data:{{ labels:makeLabels(signals), datasets:[{{ label:'Confidence %', data:signals.map(s=>s.confidence), backgroundColor:colors.map(c=>c+'60'), borderColor:colors, borderWidth:1 }}] }},
+    options:{{ ...chartDefaults, plugins:{{ ...chartDefaults.plugins, legend:{{ display:false }} }}, scales:{{ ...chartDefaults.scales, y:{{ ...chartDefaults.scales.y, min:40, max:100 }} }} }}
+  }});
+}}
+
+function renderDistributionChart(signals) {{
+  const counts = {{}};
+  signals.forEach(s => {{ counts[s.signal] = (counts[s.signal]||0) + 1; }});
+  const labels = Object.keys(counts);
+  const data = Object.values(counts);
+  const bgColors = labels.map(l => sigColor(l) + '40');
+  const bdColors = labels.map(l => sigColor(l));
+  const ctx = document.getElementById('chartDist').getContext('2d');
+  charts.dist = new Chart(ctx, {{
+    type:'doughnut',
+    data:{{ labels, datasets:[{{ data, backgroundColor:bgColors, borderColor:bdColors, borderWidth:2 }}] }},
+    options:{{ responsive:true, maintainAspectRatio:false, plugins:{{ legend:{{ position:'right', labels:{{ color:'#94a3b8', font:{{ family:'JetBrains Mono',size:11 }}, padding:12 }} }} }}, cutout:'65%' }}
+  }});
+}}
+
+function renderPriceChart(signals, color) {{
+  const ctx = document.getElementById('chartPrice').getContext('2d');
+  const buyPts = signals.map(s => s.signal.includes('BUY') ? s.close : null);
+  const sellPts = signals.map(s => s.signal.includes('SELL') ? s.close : null);
+  const datasets = [
+    {{ label:'Close', data:signals.map(s=>s.close), borderColor:color.main, borderWidth:1.5, pointRadius:0, tension:0.2, fill:false }},
+    {{ label:'BUY', data:buyPts, borderColor:'transparent', backgroundColor:'#22c55e', pointRadius:4, pointStyle:'triangle', showLine:false }},
+    {{ label:'SELL', data:sellPts, borderColor:'transparent', backgroundColor:'#ef4444', pointRadius:4, pointStyle:'rect', pointRotation:45, showLine:false }},
+  ];
+  charts.price = new Chart(ctx, {{
+    type:'line', data:{{ labels:makeLabels(signals), datasets }},
+    options:{{ ...chartDefaults, interaction:{{ intersect:false, mode:'index' }} }}
+  }});
+}}
+
+function renderRSIChart(signals, color) {{
+  const ctx = document.getElementById('chartRSI').getContext('2d');
+  charts.rsi = new Chart(ctx, {{
+    type:'line',
+    data:{{ labels:makeLabels(signals), datasets:[{{ label:'RSI 14h', data:signals.map(s=>s.rsi), borderColor:color.main, borderWidth:1.5, pointRadius:0, tension:0.3, fill:false }}] }},
+    options:{{ ...chartDefaults, plugins:{{ ...chartDefaults.plugins, legend:{{ display:false }} }}, scales:{{ ...chartDefaults.scales, y:{{ ...chartDefaults.scales.y, min:20, max:80 }} }} }},
+    plugins:[{{
+      id:'rsiBands',
+      beforeDraw(chart) {{
+        const {{ ctx, chartArea:{{top,bottom,left,right}}, scales:{{y}} }} = chart;
+        const y70=y.getPixelForValue(70), y30=y.getPixelForValue(30);
+        ctx.save();
+        ctx.fillStyle='rgba(239,68,68,0.06)'; ctx.fillRect(left,top,right-left,y70-top);
+        ctx.fillStyle='rgba(34,197,94,0.06)'; ctx.fillRect(left,y30,right-left,bottom-y30);
+        ctx.strokeStyle='#ef444440'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.moveTo(left,y70); ctx.lineTo(right,y70); ctx.stroke();
+        ctx.strokeStyle='#22c55e40';
+        ctx.beginPath(); ctx.moveTo(left,y30); ctx.lineTo(right,y30); ctx.stroke();
+        ctx.restore();
+      }}
+    }}]
+  }});
+}}
+
+function renderBBChart(signals, color) {{
+  const ctx = document.getElementById('chartBB').getContext('2d');
+  charts.bb = new Chart(ctx, {{
+    type:'line',
+    data:{{ labels:makeLabels(signals), datasets:[{{ label:'BB Position', data:signals.map(s=>s.bb_position), borderColor:'#f59e0b', borderWidth:1.5, pointRadius:0, tension:0.3, fill:false }}] }},
+    options:{{ ...chartDefaults, plugins:{{ ...chartDefaults.plugins, legend:{{ display:false }} }} }},
+    plugins:[{{
+      id:'bbBands',
+      beforeDraw(chart) {{
+        const {{ ctx, chartArea:{{top,bottom,left,right}}, scales:{{y}} }} = chart;
+        ctx.save(); ctx.strokeStyle='#64748b40'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        [0,0.5,1].forEach(v => {{
+          const yy=y.getPixelForValue(v);
+          ctx.beginPath(); ctx.moveTo(left,yy); ctx.lineTo(right,yy); ctx.stroke();
+        }});
+        ctx.restore();
+      }}
+    }}]
+  }});
+}}
+
+function renderSignalTable(signals) {{
+  const container = document.getElementById('tabContent');
+  const recent = [...signals].reverse().slice(0,60);
+  let rows = recent.map(s => {{
+    const cls = sigCssClass(s.signal);
+    const actClass = s.actual==='UP' ? 'actual-up' : s.actual==='DOWN' ? 'actual-down' : '';
+    const isCorrect = (s.signal.includes('BUY') && s.actual==='UP') || (s.signal.includes('SELL') && s.actual==='DOWN');
+    const isWrong = s.actual && !isCorrect && s.signal!=='HOLD';
+    const rowClass = isCorrect ? 'correct' : isWrong ? 'wrong' : '';
+    const allocCol = STRATEGY==='v2' ? '<td style="text-align:right">' + (s.allocation!==undefined ? (s.allocation*100).toFixed(0)+'%' : '-') + '</td>' : '';
+    return '<tr class="'+rowClass+'">'+
+      '<td>'+s.datetime+'</td>'+
+      '<td style="text-align:right">'+s.close.toLocaleString('en',{{minimumFractionDigits:2}})+'</td>'+
+      '<td class="'+cls+'">'+s.signal+'</td>'+
+      '<td style="text-align:right">'+s.confidence+'%</td>'+
+      '<td style="text-align:center">'+s.buy_votes+'/'+s.total_votes+'</td>'+
+      '<td style="text-align:right">'+s.rsi+'</td>'+
+      '<td class="'+actClass+'" style="text-align:center">'+(s.actual||'-')+'</td>'+
+      allocCol+
+      '<td style="text-align:right">$'+s.portfolio_value.toFixed(2)+'</td>'+
+      '</tr>';
+  }}).join('');
+
+  const allocHeader = STRATEGY==='v2' ? '<th style="text-align:right">Alloc</th>' : '';
+
+  container.innerHTML =
+    '<div class="signal-table-wrap"><h3>RECENT SIGNALS -- '+activeAsset+' (last 60)</h3><table><thead><tr>' +
+    '<th>Datetime</th><th style="text-align:right">Close</th><th>Signal</th><th style="text-align:right">Conf</th><th style="text-align:center">Votes</th><th style="text-align:right">RSI</th><th style="text-align:center">Actual</th>' +
+    allocHeader +
+    '<th style="text-align:right">Portfolio</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}}
+
+function renderAll() {{ renderSummaryCards(); renderTabs(); renderContent(); }}
+renderAll();
+</script>
+</body>
+</html>'''
+
+    with open(html_file, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+    print(f"  Dashboard saved to {html_file} (open in browser)")
+    return html_file
+def run_mode_a(assets_list, strategy='v1'):
     """Full review: update -> diagnostic -> best models -> signals -> chart."""
+    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
     print("\n" + "=" * 60)
-    print("  MODE A: FULL HOURLY REVIEW")
+    print(f"  MODE A: FULL HOURLY REVIEW  [{strat_label}]")
     print("=" * 60)
 
     # Step 1: Update data
@@ -742,30 +1310,32 @@ def run_mode_a(assets_list):
         model_names = config['models'].split('+')
         window = config['best_window']
 
-        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS)
-        signals = simulate_portfolio(signals)
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS, strategy=strategy)
+        if strategy == 'v2':
+            signals = simulate_portfolio_v2(signals)
+        else:
+            signals = simulate_portfolio(signals)
         all_signals[asset_name] = signals
 
         if signals:
             latest = signals[-1]
+            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy == 'v2' else ''
             print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
-                  f"| price={latest['close']:,.2f}")
+                  f"| price={latest['close']:,.2f}{alloc_str}")
 
     # Step 4: Export
-    export_chart_data(all_signals)
+    suffix = '_v2' if strategy == 'v2' else ''
+    export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
+    export_html_dashboard(all_signals, strategy=strategy)
 
     print("\n" + "=" * 60)
-    print("  MODE A (HOURLY) COMPLETE")
+    print(f"  MODE A (HOURLY) COMPLETE  [{strat_label}]")
     print("=" * 60)
-
-
-# ============================================================
-# MODE B: Quick Run
-# ============================================================
-def run_mode_b(assets_list):
+def run_mode_b(assets_list, strategy='v1'):
     """Quick run: update -> read hourly_best_models.csv -> signals -> chart."""
+    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
     print("\n" + "=" * 60)
-    print("  MODE B: QUICK HOURLY RUN (using hourly_best_models.csv)")
+    print(f"  MODE B: QUICK HOURLY RUN  [{strat_label}]")
     print("=" * 60)
 
     if not os.path.exists('hourly_best_models.csv'):
@@ -803,20 +1373,26 @@ def run_mode_b(assets_list):
         model_names = row['models'].split('+')
         window = int(row['best_window'])
 
-        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS)
-        signals = simulate_portfolio(signals)
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS, strategy=strategy)
+        if strategy == 'v2':
+            signals = simulate_portfolio_v2(signals)
+        else:
+            signals = simulate_portfolio(signals)
         all_signals[asset_name] = signals
 
         if signals:
             latest = signals[-1]
+            alloc_str = f" | alloc={latest.get('allocation', 'N/A')}" if strategy == 'v2' else ''
             print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
-                  f"| price={latest['close']:,.2f}")
+                  f"| price={latest['close']:,.2f}{alloc_str}")
 
     # Step 3: Export
-    export_chart_data(all_signals)
+    suffix = '_v2' if strategy == 'v2' else ''
+    export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
+    export_html_dashboard(all_signals, strategy=strategy)
 
     print("\n" + "=" * 60)
-    print("  MODE B (HOURLY) COMPLETE")
+    print(f"  MODE B (HOURLY) COMPLETE  [{strat_label}]")
     print("=" * 60)
 
 
@@ -840,6 +1416,15 @@ def main():
         print("Invalid choice. Defaulting to B.")
         mode = 'B'
 
+    # Strategy selection
+    print("\nChoose strategy:")
+    print("  1. V1 -- 3-tier (BUY / HOLD / SELL) -- all-in / all-out")
+    print("  2. V2 -- 5-tier (STRONG BUY / BUY / HOLD / SELL / STRONG SELL)")
+    print(f"          Graduated sizing: STRONG=100%, Normal=50%, HOLD=stay")
+    print(f"          Confidence threshold for STRONG: {CONFIDENCE_THRESHOLD}%")
+    strat_choice = input("Enter choice (1-2): ").strip()
+    strategy = 'v2' if strat_choice == '2' else 'v1'
+
     # Asset selection
     print("\nWhich indices?")
     print("  1. All (SMI, DAX, CAC40)")
@@ -853,15 +1438,20 @@ def main():
     else:
         assets_list = list(ASSETS.keys())
 
+    strat_label = 'V1 (3-tier)' if strategy == 'v1' else 'V2 (5-tier graduated)'
     print(f"\nAssets: {', '.join(assets_list)}")
     print(f"Mode: {'A (Full Review)' if mode == 'A' else 'B (Quick Run)'}")
+    print(f"Strategy: {strat_label}")
 
     if mode == 'A':
-        run_mode_a(assets_list)
+        run_mode_a(assets_list, strategy=strategy)
     else:
-        run_mode_b(assets_list)
+        run_mode_b(assets_list, strategy=strategy)
 
-    print("\nDone! Hourly chart data saved to hourly_chart_data.json")
+    suffix = '_v2' if strategy == 'v2' else ''
+    print(f"\nDone!")
+    print(f"  Data: hourly_chart_data{suffix}.json")
+    print(f"  Dashboard: hourly_dashboard{suffix}.html (open in browser)")
 
 
 if __name__ == '__main__':
