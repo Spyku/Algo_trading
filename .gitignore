@@ -1,0 +1,35 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Data files (large, regenerated on each run)
+*_hourly_data.csv
+*_daily_data.csv
+
+# Chart data JSON (regenerated, embedded in HTML dashboards)
+hourly_chart_data.json
+hourly_chart_data_v2.json
+daily_chart_data.json
+
+# IB credentials / logs
+ib_logs/
+*.log
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
