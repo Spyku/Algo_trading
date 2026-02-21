@@ -55,7 +55,7 @@ from pathlib import Path
 
 # --- IB Connection ---
 IB_HOST = '127.0.0.1'
-IB_PORT = 7497          # 7497 = paper, 7496 = live
+IB_PORT = 4002          # 4002 = IB Gateway paper, 4001 = IB Gateway live
 IB_CLIENT_ID = 10       # Unique client ID for this bot
 
 # --- Instrument Mapping ---
@@ -209,8 +209,10 @@ class IBConnection:
             self.ib = IB()
             self.ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
             self.connected = True
+            # Request delayed data as fallback (free, no subscription needed)
+            self.ib.reqMarketDataType(3)
             log.info(f"Connected to IB on {IB_HOST}:{IB_PORT} "
-                     f"(client={IB_CLIENT_ID})")
+                     f"(client={IB_CLIENT_ID}, market data: delayed)")
 
             # Log account info
             account_values = self.ib.accountSummary()

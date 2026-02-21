@@ -39,6 +39,9 @@ def test_ib_connection():
     try:
         ib.connect('127.0.0.1', 4002, clientId=99)
         print("   OK - Connected!")
+        # Request delayed data (free, no subscription needed)
+        ib.reqMarketDataType(3)
+        print("   Set market data type: DELAYED (free)")
     except Exception as e:
         print(f"   FAILED - {e}")
         print("\n   Checklist:")
