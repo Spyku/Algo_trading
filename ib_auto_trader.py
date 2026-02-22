@@ -1,8 +1,13 @@
 """
-IB Automatic Hourly Trader
-============================
+IB Automatic Hourly Trader — Broly 1.2
+========================================
 Fully automatic trading system for European Index CFDs via Interactive Brokers.
-Connects to TWS/IB Gateway, runs the hourly ML model, and places orders.
+Connects to TWS/IB Gateway, runs the Broly 1.2 ML model (V2 features),
+and places orders based on signals.
+
+Pipeline:
+  1. daily_setup.py  → updates data + exports setup_config.json
+  2. This script      → reads config, generates live signal, executes on IB
 
 Instruments:
   SMI   -> IBCH20 (Swiss 20 CFD)
@@ -18,7 +23,8 @@ Risk Controls:
 
 Requirements:
   pip install ib_insync
-  TWS or IB Gateway running with API enabled on port 7497 (paper)
+  TWS or IB Gateway running with API enabled on port 4002 (paper) / 4001 (live)
+  Run daily_setup.py first to create data/setup_config.json
 
 Usage:
   python ib_auto_trader.py              # Run once (check signals, execute)
@@ -65,7 +71,7 @@ INSTRUMENTS = {
         'ib_symbol': 'IBCH20',
         'exchange': 'SMART',
         'currency': 'CHF',
-        'data_file': 'smi_hourly_data.csv',
+        'data_file': 'data/indices/smi_hourly_data.csv',
         'min_order_size': 1,       # Minimum CFD units
         'market_open_utc': 7,      # SIX opens ~07:00 UTC
         'market_close_utc': 16,    # SIX closes ~16:00 UTC
@@ -74,7 +80,7 @@ INSTRUMENTS = {
         'ib_symbol': 'IBDE40',
         'exchange': 'SMART',
         'currency': 'EUR',
-        'data_file': 'dax_hourly_data.csv',
+        'data_file': 'data/indices/dax_hourly_data.csv',
         'min_order_size': 1,
         'market_open_utc': 7,      # XETRA opens ~07:00 UTC
         'market_close_utc': 16,    # XETRA closes ~16:00 UTC
@@ -83,7 +89,7 @@ INSTRUMENTS = {
         'ib_symbol': 'IBFR40',
         'exchange': 'SMART',
         'currency': 'EUR',
-        'data_file': 'cac40_hourly_data.csv',
+        'data_file': 'data/indices/cac40_hourly_data.csv',
         'min_order_size': 1,
         'market_open_utc': 7,      # Euronext opens ~07:00 UTC
         'market_close_utc': 16,    # Euronext closes ~16:30 UTC
@@ -102,8 +108,8 @@ ORDER_TYPE = 'MKT'            # Market orders (use 'LMT' for limit)
 SIGNAL_MIN_CONFIDENCE = 55.0  # Only trade signals above this confidence
 
 # --- File Paths ---
-TRADE_LOG_FILE = 'ib_trade_log.csv'
-STATE_FILE = 'ib_trader_state.json'
+TRADE_LOG_FILE = 'data/ib_trade_log.csv'
+STATE_FILE = 'data/ib_trader_state.json'
 LOG_FILE = 'ib_auto_trader.log'
 
 
@@ -331,28 +337,207 @@ class IBConnection:
 
 
 # ============================================================
-# SIGNAL GENERATION (minimal — generates signal for current hour)
+# LIGHTWEIGHT DATA UPDATE (fetch latest candles only)
 # ============================================================
-def get_current_signal(asset_name):
+def update_market_data():
     """
-    Generate the current hourly signal for an asset.
-    Uses the hourly trading system's feature engineering.
-    Reads hourly_best_models.csv for model config.
+    Quick update: fetch last 5 days of hourly data from yfinance
+    and append any new rows to existing CSVs.
+    Much faster than full download (~5 seconds per asset).
+    """
+    import yfinance as yf
+
+    TICKERS = {
+        'SMI':   '^SSMI',
+        'DAX':   '^GDAXI',
+        'CAC40': '^FCHI',
+    }
+
+    end = datetime.now()
+    start = end - timedelta(days=5)
+
+    for asset_name, ticker in TICKERS.items():
+        data_file = INSTRUMENTS[asset_name]['data_file']
+        try:
+            # Download recent data
+            chunk = yf.download(ticker, start=start.strftime('%Y-%m-%d'),
+                                end=end.strftime('%Y-%m-%d'),
+                                interval='1h', auto_adjust=True, progress=False)
+            if chunk is None or len(chunk) == 0:
+                log.info(f"{asset_name}: No new data from yfinance")
+                continue
+
+            # Normalize columns
+            chunk = chunk.reset_index()
+            if isinstance(chunk.columns, pd.MultiIndex):
+                chunk.columns = ['_'.join(str(c) for c in col).strip('_')
+                                 if isinstance(col, tuple) else col
+                                 for col in chunk.columns]
+
+            # Rename to standard format
+            col_map = {}
+            for c in chunk.columns:
+                cl = c.lower()
+                if 'datetime' in cl or 'date' in cl:
+                    col_map[c] = 'datetime'
+                elif 'open' in cl:
+                    col_map[c] = 'open'
+                elif 'high' in cl:
+                    col_map[c] = 'high'
+                elif 'low' in cl:
+                    col_map[c] = 'low'
+                elif 'close' in cl and 'adj' not in cl:
+                    col_map[c] = 'close'
+                elif 'volume' in cl:
+                    col_map[c] = 'volume'
+            chunk = chunk.rename(columns=col_map)
+
+            needed = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+            if not all(c in chunk.columns for c in needed):
+                log.warning(f"{asset_name}: Missing columns in yfinance data")
+                continue
+
+            chunk = chunk[needed].copy()
+            chunk['datetime'] = pd.to_datetime(chunk['datetime']).dt.tz_localize(None)
+
+            if os.path.exists(data_file):
+                existing = pd.read_csv(data_file)
+                existing['datetime'] = pd.to_datetime(existing['datetime'])
+                last_dt = existing['datetime'].max()
+
+                new_rows = chunk[chunk['datetime'] > last_dt]
+                if len(new_rows) > 0:
+                    combined = pd.concat([existing, new_rows], ignore_index=True)
+                    combined = combined.drop_duplicates(subset='datetime').sort_values('datetime')
+                    combined.to_csv(data_file, index=False)
+                    log.info(f"{asset_name}: Added {len(new_rows)} new rows "
+                             f"(total: {len(combined)})")
+                else:
+                    log.info(f"{asset_name}: Already up to date "
+                             f"(last: {last_dt})")
+            else:
+                log.warning(f"{asset_name}: {data_file} not found — "
+                            f"run daily_setup.py first")
+
+        except Exception as e:
+            log.warning(f"{asset_name}: Data update error: {e}")
+
+
+# ============================================================
+# SIGNAL GENERATION (Broly 1.2 — V2 features)
+# ============================================================
+def load_setup_config():
+    """Load config exported by daily_setup.py."""
+    config_path = 'data/setup_config.json'
+    csv_path = 'data/hourly_best_models.csv'
+
+    if not os.path.exists(config_path):
+        log.error(f"{config_path} not found! Run daily_setup.py first.")
+        return None
+    if not os.path.exists(csv_path):
+        log.error(f"{csv_path} not found! Run daily_setup.py first.")
+        return None
+
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    config['best_models_df'] = pd.read_csv(csv_path)
+    return config
+
+
+def build_hourly_features(df_raw, prediction_horizon=4):
+    """Build base hourly features (same as generate_signals.py)."""
+    df = df_raw.copy()
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    df = df.sort_values('datetime').reset_index(drop=True)
+
+    for c in ['open', 'high', 'low', 'close', 'volume']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df['close'] = df['close'].ffill()
+
+    for h in [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 120, 240]:
+        df[f'logret_{h}h'] = np.log(df['close'] / df['close'].shift(h))
+    for fast, slow in [(4, 24), (8, 48), (8, 120), (24, 120)]:
+        sma_f = df['close'].rolling(fast).mean()
+        sma_s = df['close'].rolling(slow).mean()
+        df[f'spread_{slow}h_{fast}h'] = (sma_f - sma_s) / sma_s
+
+    for w in [20, 50, 100, 200]:
+        df[f'sma{w}h'] = df['close'].rolling(w).mean()
+    df['price_to_sma20h']  = df['close'] / df['sma20h'] - 1
+    df['price_to_sma50h']  = df['close'] / df['sma50h'] - 1
+    df['price_to_sma100h'] = df['close'] / df['sma100h'] - 1
+    df['sma20_to_sma50h']  = df['sma20h'] / df['sma50h'] - 1
+
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    df['rsi_14h'] = 100 - (100 / (1 + rs))
+
+    low14  = df['low'].rolling(14).min()
+    high14 = df['high'].rolling(14).max()
+    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
+
+    bb_mid = df['close'].rolling(20).mean()
+    bb_std = df['close'].rolling(20).std()
+    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+
+    roll_mean = df['close'].rolling(50).mean()
+    roll_std  = df['close'].rolling(50).std()
+    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
+
+    tr = pd.DataFrame({
+        'hl': df['high'] - df['low'],
+        'hc': abs(df['high'] - df['close'].shift(1)),
+        'lc': abs(df['low'] - df['close'].shift(1))
+    }).max(axis=1)
+    df['atr_pct_14h'] = tr.rolling(14).mean() / df['close']
+    df['intraday_range'] = (df['high'] - df['low']) / df['close']
+    df['volatility_12h'] = df['logret_1h'].rolling(12).std()
+    df['volatility_48h'] = df['logret_1h'].rolling(48).std()
+    df['vol_ratio_12_48'] = df['volatility_12h'] / df['volatility_48h']
+
+    if df['volume'].sum() == 0 or df['volume'].isna().all():
+        df['volume_ratio_h'] = 1.0
+    else:
+        df['volume'] = df['volume'].replace(0, np.nan).ffill().bfill()
+        vol_sma = df['volume'].rolling(20).mean()
+        df['volume_ratio_h'] = df['volume'] / vol_sma
+        df['volume_ratio_h'] = df['volume_ratio_h'].fillna(1.0)
+
+    hour = df['datetime'].dt.hour
+    df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+    dow = df['datetime'].dt.dayofweek
+    df['dow_sin'] = np.sin(2 * np.pi * dow / 7)
+    df['dow_cos'] = np.cos(2 * np.pi * dow / 7)
+
+    future_return = df['close'].shift(-prediction_horizon) / df['close'] - 1
+    rolling_median = future_return.rolling(200, min_periods=50).median().shift(prediction_horizon)
+    df['label'] = (future_return > rolling_median).astype(int)
+
+    return df
+
+
+def get_current_signal(asset_name, config=None):
+    """
+    Generate the current hourly signal for an asset using Broly 1.2 V2 pipeline.
+    Reads setup_config.json + hourly_best_models.csv for model config.
     Returns: (signal, confidence, price) or (None, None, None)
     """
-    # Import feature engineering from hourly system
-    # We inline it here to avoid circular imports
-    from hourly_trading_system import (
-        load_data, build_hourly_features, ALL_MODELS, PREDICTION_HORIZON
-    )
     from sklearn.preprocessing import StandardScaler
 
-    # Load best model config
-    if not os.path.exists('hourly_best_models.csv'):
-        log.error("hourly_best_models.csv not found! Run diagnostic first.")
+    # Load config if not provided
+    if config is None:
+        config = load_setup_config()
+    if config is None:
         return None, None, None
 
-    df_best = pd.read_csv('hourly_best_models.csv')
+    df_best = config['best_models_df']
+    features = config['optimal_features']
+    pred_h = config['prediction_horizon']
+
+    # Get model config for this asset
     asset_row = df_best[df_best['coin'] == asset_name]
     if len(asset_row) == 0:
         log.warning(f"No model config for {asset_name} in hourly_best_models.csv")
@@ -361,75 +546,99 @@ def get_current_signal(asset_name):
     model_names = asset_row.iloc[0]['models'].split('+')
     window_size = int(asset_row.iloc[0]['best_window'])
 
-    # Load and prepare data
-    df_raw = load_data(asset_name)
-    if df_raw is None:
+    # Load data
+    data_file = INSTRUMENTS[asset_name]['data_file']
+    if not os.path.exists(data_file):
+        log.error(f"Data file not found: {data_file}")
         return None, None, None
 
-    df_features, feature_cols = build_hourly_features(df_raw)
+    df_raw = pd.read_csv(data_file)
+    log.info(f"{asset_name}: Loaded {len(df_raw)} rows from {data_file}")
+
+    # Build V2 features
+    try:
+        from features_v2 import build_features_v2_hourly
+        df_base = build_hourly_features(df_raw, pred_h)
+        df_v2, _all_cols = build_features_v2_hourly(df_base, original_builder=None)
+    except ImportError:
+        log.warning("features_v2 not found, using base features only")
+        df_v2 = build_hourly_features(df_raw, pred_h)
+
+    # Use optimal feature subset
+    use_cols = [c for c in features if c in df_v2.columns]
+    if len(use_cols) < 5:
+        log.error(f"{asset_name}: Only {len(use_cols)} features available")
+        return None, None, None
+
+    df_features = df_v2.dropna(subset=use_cols + ['label']).reset_index(drop=True)
+
     if len(df_features) < window_size + 50:
-        log.warning(f"{asset_name}: not enough data for window={window_size}")
+        log.warning(f"{asset_name}: Not enough data ({len(df_features)}) for window={window_size}")
         return None, None, None
 
-    # Use last row as test, preceding window as train
+    # Use last row as current, preceding window as training
     n = len(df_features)
     i = n - 1
     row = df_features.iloc[i]
 
     train_start = max(0, i - window_size)
     train = df_features.iloc[train_start:i]
-    X_train = train[feature_cols]
+    X_train = train[use_cols]
     y_train = train['label'].values
-    X_test = df_features.iloc[i:i+1][feature_cols]
+    X_test = df_features.iloc[i:i+1][use_cols]
 
     if len(np.unique(y_train)) < 2:
-        log.warning(f"{asset_name}: insufficient label variety in training data")
+        log.warning(f"{asset_name}: Insufficient label variety in training window")
         return None, None, None
 
     # Scale
     scaler = StandardScaler()
-    X_train_s = pd.DataFrame(scaler.fit_transform(X_train),
-                             columns=feature_cols, index=X_train.index)
-    X_test_s = pd.DataFrame(scaler.transform(X_test),
-                            columns=feature_cols, index=X_test.index)
+    X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=use_cols, index=X_train.index)
+    X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=use_cols, index=X_test.index)
 
     # Predict with ensemble
-    votes = []
-    probas = []
+    try:
+        from hardware_config import get_all_models
+        ALL_MODELS = get_all_models()
+    except ImportError:
+        log.error("hardware_config.py not found!")
+        return None, None, None
+
+    votes, probas = [], []
     for model_name in model_names:
         try:
             model = ALL_MODELS[model_name]()
             model.fit(X_train_s, y_train)
-            pred = model.predict(X_test_s)[0]
-            proba = model.predict_proba(X_test_s)[0]
-            votes.append(pred)
-            probas.append(proba[1])
+            votes.append(model.predict(X_test_s)[0])
+            probas.append(model.predict_proba(X_test_s)[0][1])
         except Exception as e:
             log.warning(f"{asset_name}/{model_name}: prediction error: {e}")
 
     if not votes:
         return None, None, None
 
+    # Signal classification (same logic as generate_signals.py)
     buy_votes = sum(votes)
     total_votes = len(votes)
     buy_ratio = buy_votes / total_votes
+    avg_proba = np.mean(probas)
 
     if buy_ratio > 0.5:
         signal = 'BUY'
+        confidence = avg_proba * 100
     elif buy_ratio == 0:
         signal = 'SELL'
+        confidence = (1 - avg_proba) * 100
     else:
         signal = 'HOLD'
-
-    avg_proba = np.mean(probas)
-    confidence = (1 - avg_proba) * 100 if signal == 'SELL' else avg_proba * 100
+        confidence = max(avg_proba, 1 - avg_proba) * 100
 
     price = float(row['close'])
     dt = row['datetime']
 
     log.info(f"{asset_name} @ {dt} | Signal: {signal} ({confidence:.1f}%) | "
              f"Price: {price:,.2f} | Models: {'+'.join(model_names)} "
-             f"({buy_votes}/{total_votes} buy)")
+             f"({buy_votes}/{total_votes} buy) | Features: {len(use_cols)}")
 
     return signal, round(confidence, 1), price
 
@@ -791,24 +1000,32 @@ def run_trading_cycle(ib_conn=None):
     risk_mgr = RiskManager(ib_conn, state)
     executor = TradeExecutor(ib_conn, risk_mgr, state)
 
-    # Step 1: Update data
-    log.info("\n--- Updating data ---")
+    # Step 1: Update data (lightweight — just fetch latest candles)
+    log.info("\n--- Updating market data ---")
     try:
-        from hourly_trading_system import update_all_data
-        update_all_data(list(INSTRUMENTS.keys()))
+        update_market_data()
     except Exception as e:
         log.error(f"Data update failed: {e}")
+        log.info("Continuing with existing data...")
+
+    # Step 2: Load Broly config
+    config = load_setup_config()
+    if config is None:
+        log.error("Cannot load setup config. Run daily_setup.py first!")
         if own_connection:
             ib_conn.disconnect()
         return False
 
-    # Step 2: Generate signals and execute
+    log.info(f"Config: {config['n_features']} V2 features, "
+             f"{config['prediction_horizon']}h prediction")
+
+    # Step 3: Generate signals and execute
     log.info("\n--- Generating signals & executing ---")
     results = {}
 
     for asset_name in INSTRUMENTS:
         try:
-            signal, confidence, price = get_current_signal(asset_name)
+            signal, confidence, price = get_current_signal(asset_name, config)
             if signal is None:
                 log.warning(f"{asset_name}: No signal generated")
                 results[asset_name] = 'NO_SIGNAL'

@@ -1,55 +1,75 @@
-# Algo Trading System
+# Broly 1.2 — Algorithmic Trading System
 
-ML-based trading system using walk-forward ensemble models (Random Forest, Gradient Boosting, LightGBM, Logistic Regression) for European indices and crypto.
-
-## Live Dashboards
-
-- **[Hourly Dashboard (V1)](hourly_dashboard.html)** — 3-tier signals (BUY / HOLD / SELL)
-- **[Hourly Dashboard (V2)](hourly_dashboard_v2.html)** — 5-tier graduated (STRONG BUY / BUY / HOLD / SELL / STRONG SELL)
-
-## Systems
-
-| File | Description |
-|------|-------------|
-| `hourly_trading_system.py` | Hourly system: SMI/DAX/CAC40 indices, 4h prediction horizon |
-| `crypto_trading_system.py` | Daily system: BTC/ETH/SOL/XRP/DOGE + SMI/DAX/CAC40 |
-| `ib_auto_trader.py` | Interactive Brokers auto-trader for index CFDs |
-| `hardware_config.py` | Auto-detects DESKTOP vs LAPTOP, configures GPU/CPU/parallelism |
-| `model_diagnostic.py` | Standalone diagnostic tool for daily system |
-| `feature_analysis.py` | Hourly feature importance/selection |
-| `feature_analysis_daily.py` | Daily feature importance/selection |
+ML-powered hourly trading system for European index CFDs (SMI, DAX, CAC40) with Interactive Brokers integration.
 
 ## Architecture
 
-- **Walk-forward validation**: no lookahead bias, models retrained at each step
-- **Ensemble**: majority vote across RF, GB, LGBM (+ LR in some combos)
-- **Diagnostic**: tests 75 configurations (15 model combos x 5 training windows) in parallel
-- **Hardware auto-detection**: GPU (LightGBM) for signal generation, CPU-only parallel for diagnostics
-- **Two strategies**: V1 (all-in/all-out) and V2 (graduated position sizing 50%/100%)
-
-## Setup
-
-```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/algo_trading.git
-cd algo_trading
-
-# Create venv
-python -m venv venv
-venv\Scripts\activate  # Windows
-
-# Install dependencies
-pip install numpy pandas scipy scikit-learn lightgbm ccxt yfinance ib_insync nest_asyncio joblib matplotlib
-
-# Run hourly system
-python hourly_trading_system.py
-
-# Run daily crypto system
-python crypto_trading_system.py
 ```
+algo_trading/
+├── daily_setup.py          # Morning: data update + 75-config diagnostic
+├── generate_signals.py     # Backtest dashboard (1:1, 1:5, 1:10 leverage)
+├── ib_auto_trader.py       # Live trading via Interactive Brokers
+├── ib_test_connection.py   # IB connection test utility
+├── features_v2.py          # V2 feature engineering (momentum/mean-rev/cross-asset)
+├── hardware_config.py      # GPU/CPU model definitions (machine-specific)
+├── broly.py                # Core Broly system
+├── data/
+│   ├── indices/            # SMI, DAX, CAC40 hourly OHLCV CSVs
+│   ├── crypto/             # BTC, ETH, SOL, etc.
+│   ├── setup_config.json   # Generated: optimal features + model config
+│   └── hourly_best_models.csv  # Generated: best model per asset
+├── output/
+│   ├── dashboards/         # Generated HTML dashboards
+│   ├── charts/             # Chart data JSON
+│   ├── backtests/          # Backtest results
+│   └── diagnostics/        # Diagnostic outputs
+└── docs/
+```
+
+## Daily Workflow
+
+```
+1. Morning (once, ~40 min):
+   python daily_setup.py
+   → Downloads/updates hourly data
+   → Runs 75-config diagnostic (5 windows × 15 model combos × all assets)
+   → Exports data/setup_config.json + data/hourly_best_models.csv
+
+2. Backtest (on demand, ~2 min):
+   python generate_signals.py
+   → Walk-forward backtest: last month with last-week marker
+   → Equity curves at 1:1, 1:5, 1:10 leverage (all on same chart)
+   → Interactive HTML dashboard with zoom + legend toggle
+
+3. Live trading (continuous):
+   python ib_test_connection.py           # Verify IB setup
+   python ib_auto_trader.py               # Single cycle
+   python ib_auto_trader.py --loop        # Hourly loop during market hours
+   python ib_auto_trader.py --status      # Check positions
+   python ib_auto_trader.py --close-all   # Emergency close
+```
+
+## Model Pipeline
+
+- **15 optimal V2 features** selected from 50+ candidates via forward selection
+- **Walk-forward training**: retrain ensemble every hour on sliding window
+- **5-tier signals**: STRONG_BUY / BUY / HOLD / SELL / STRONG_SELL
+- **Ensemble voting**: best model combo per asset (LGBM, XGBoost, RF, etc.)
+- **76.1% accuracy** on validation (V2 features vs 71.8% V1)
+
+## Risk Controls (IB Auto Trader)
+
+- Max position: 20% of net liquidation per trade
+- Stop-loss: 2% per position
+- Daily loss limit: 5% of starting equity
+- Max 3 concurrent positions
+- 2h cooldown after stop-loss
+- Market hours enforcement (07:00–16:00 UTC)
 
 ## Requirements
 
-- Python 3.12+ (tested on 3.14)
-- NVIDIA GPU recommended (LightGBM GPU acceleration)
-- Interactive Brokers TWS/Gateway for live trading
+```
+pip install pandas numpy scikit-learn lightgbm xgboost yfinance ib_insync
+```
+
+GPU acceleration (optional): CUDA + LightGBM GPU build.

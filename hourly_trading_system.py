@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from itertools import combinations
 from sklearn.preprocessing import StandardScaler
 from joblib import Parallel, delayed
+from features_v2 import build_features_v2_hourly
 from hardware_config import (
     MACHINE, N_JOBS_PARALLEL, LGBM_DEVICE,
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,
@@ -51,12 +52,34 @@ if sys.platform == 'win32':
 # CONFIGURATION
 # ============================================================
 ASSETS = {
-    'SMI':   {'ticker': '^SSMI',  'file': 'smi_hourly_data.csv'},
-    'DAX':   {'ticker': '^GDAXI', 'file': 'dax_hourly_data.csv'},
-    'CAC40': {'ticker': '^FCHI',  'file': 'cac40_hourly_data.csv'},
+    'SMI':   {'ticker': '^SSMI',  'file': 'data/indices/smi_hourly_data.csv'},
+    'DAX':   {'ticker': '^GDAXI', 'file': 'data/indices/dax_hourly_data.csv'},
+    'CAC40': {'ticker': '^FCHI',  'file': 'data/indices/cac40_hourly_data.csv'},
 }
 
 PREDICTION_HORIZON = 4    # Predict 4 hours ahead (~half a trading day)
+
+# ============================================================
+# OPTIMAL V2 FEATURES (from feature_analysis_v2.py)
+# 15 features -> 76.1% accuracy (best subset of 101)
+# ============================================================
+OPTIMAL_V2_FEATURES = [
+    'logret_240h',          # BASE - 10-day momentum
+    'm_sp500_vol20d',       # MACRO - S&P500 volatility
+    'm_vix_zscore',         # MACRO - VIX normalized
+    'm_sp500_zscore',       # MACRO - S&P500 normalized
+    'logret_24h',           # BASE - 1-day return
+    'volatility_48h',       # BASE - 2-day volatility
+    'xa_sp500_relstr5d',    # CROSS-ASSET - relative strength vs S&P
+    'atr_pct_14h',          # BASE - ATR as % of price
+    'sma20_to_sma50h',      # BASE - MA crossover ratio
+    'zscore_50h',           # BASE - price z-score
+    'xa_sp500_corr30d',     # CROSS-ASSET - 30d correlation with S&P
+    'spread_120h_8h',       # BASE - fast/slow spread
+    'xa_nasdaq_corr10d',    # CROSS-ASSET - 10d correlation with Nasdaq
+    'm_gold_vol20d',        # MACRO - gold volatility
+    'fg_zscore',            # SENTIMENT - Fear & Greed normalized
+]
 DEFAULT_WINDOW = 400      # Default training window (hours)
 REPLAY_HOURS = 200        # Hours of history for chart (~25 trading days)
 DIAG_STEP = 24             # Diagnostic: evaluate every 24 hours (~1 per trading day)
@@ -395,7 +418,13 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
     if df_raw is None:
         return []
 
-    df_features, feature_cols = build_hourly_features(df_raw)
+    # Build V2 features (all 101), then use only optimal 15
+    df_v2_all, _all_v2_cols = build_features_v2_hourly(df_raw, original_builder=build_hourly_features)
+    feature_cols = [c for c in OPTIMAL_V2_FEATURES if c in df_v2_all.columns]
+    if len(feature_cols) < len(OPTIMAL_V2_FEATURES):
+        missing = [c for c in OPTIMAL_V2_FEATURES if c not in df_v2_all.columns]
+        print(f"    WARNING: Missing V2 features: {missing}")
+    df_features = df_v2_all.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
 
     n = len(df_features)
     start_idx = max(window_size + 50, n - replay_hours)
@@ -480,11 +509,11 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
             'confidence': round(float(confidence), 1),
             'buy_votes': int(buy_votes),
             'total_votes': int(total_votes),
-            'rsi': round(float(row['rsi_14h']), 1),
-            'bb_position': round(float(row['bb_position_20h']), 3),
+            'rsi': round(float(row.get('rsi_14h', 0)), 1),
+            'bb_position': round(float(row.get('bb_position_20h', 0)), 3),
             'hourly_change': round(float(row['logret_1h'] * 100), 3),
             'intraday_range': round(float(row['intraday_range'] * 100), 3),
-            'spread_24h_4h': round(float(row['spread_24h_4h'] * 100), 2),
+            'spread_24h_4h': round(float(row.get('spread_24h_4h', 0) * 100), 2),
             'spread_120h_8h': round(float(row['spread_120h_8h'] * 100), 2),
             'actual': actual,
         })
@@ -837,7 +866,10 @@ def run_full_diagnostic(assets_list):
         if df_raw is None:
             continue
 
-        df_features, feature_cols = build_hourly_features(df_raw)
+        # Build V2 features, use optimal 15
+        df_v2_all, _all_v2_cols = build_features_v2_hourly(df_raw, original_builder=build_hourly_features)
+        feature_cols = [c for c in OPTIMAL_V2_FEATURES if c in df_v2_all.columns]
+        df_features = df_v2_all.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
 
         if len(df_features) < 500:
             print(f"  Not enough data ({len(df_features)} rows). Need 500+. Skipping.")
@@ -854,9 +886,9 @@ def run_full_diagnostic(assets_list):
 
     if best_models:
         df_best = pd.DataFrame(best_models)
-        df_best.to_csv('hourly_best_models.csv', index=False)
+        df_best.to_csv('data/hourly_best_models.csv', index=False)
         print(f"\n{'='*60}")
-        print("  HOURLY DIAGNOSTIC RESULTS (saved to hourly_best_models.csv)")
+        print("  HOURLY DIAGNOSTIC RESULTS (saved to data/hourly_best_models.csv)")
         print(f"{'='*60}")
         for row in best_models:
             print(f"  {row['coin']:6s} | window={row['best_window']:4d}h | "
@@ -870,7 +902,7 @@ def run_full_diagnostic(assets_list):
 # ============================================================
 # CHART DATA EXPORT
 # ============================================================
-def export_chart_data(all_signals, output_file='hourly_chart_data.json'):
+def export_chart_data(all_signals, output_file='output/charts/hourly_chart_data.json'):
     """Export all hourly signal data as JSON for chart."""
     chart_data = {
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -899,7 +931,7 @@ def export_chart_data(all_signals, output_file='hourly_chart_data.json'):
 def export_html_dashboard(all_signals, strategy='v1'):
     """Generate a self-contained HTML dashboard from signal data."""
     suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
-    html_file = f'hourly_dashboard{suffix}.html'
+    html_file = f'output/dashboards/hourly_dashboard{suffix}.html'
     strat_label = {'v1': 'V1 (3-tier)', 'v2': 'V2 (5-tier graduated)', 'v3': 'V3 (V1 vs V2 comparison)'}[strategy]
 
     chart_data = {
@@ -1434,7 +1466,7 @@ def run_mode_a(assets_list, strategy='v1'):
 
     # Step 4: Export
     suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
-    export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
+    export_chart_data(all_signals, f'output/charts/hourly_chart_data{suffix}.json')
     export_html_dashboard(all_signals, strategy=strategy)
 
     print("\n" + "=" * 60)
@@ -1447,12 +1479,12 @@ def run_mode_b(assets_list, strategy='v1'):
     print(f"  MODE B: QUICK HOURLY RUN  [{strat_label}]")
     print("=" * 60)
 
-    if not os.path.exists('hourly_best_models.csv'):
+    if not os.path.exists('data/hourly_best_models.csv'):
         print("\nERROR: hourly_best_models.csv not found!")
         print("Please run Mode A first to generate best model configurations.")
         return
 
-    df_best = pd.read_csv('hourly_best_models.csv')
+    df_best = pd.read_csv('data/hourly_best_models.csv')
     print("\nLoaded hourly_best_models.csv:")
     for _, row in df_best.iterrows():
         print(f"  {row['coin']:6s} | window={row['best_window']:4d}h | {row['best_combo']}")
@@ -1499,7 +1531,7 @@ def run_mode_b(assets_list, strategy='v1'):
 
     # Step 3: Export
     suffix = {'v1': '', 'v2': '_v2', 'v3': '_v3'}[strategy]
-    export_chart_data(all_signals, f'hourly_chart_data{suffix}.json')
+    export_chart_data(all_signals, f'output/charts/hourly_chart_data{suffix}.json')
     export_html_dashboard(all_signals, strategy=strategy)
 
     print("\n" + "=" * 60)
