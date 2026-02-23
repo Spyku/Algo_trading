@@ -1,6 +1,0 @@
-coin,best_window,best_combo,accuracy,models
-BTC,50,RF,69.6,RF
-ETH,50,RF+GB,67.1,RF+GB
-SOL,100,RF,67.28,RF
-XRP,30,RF,68.25,RF
-DOGE,50,RF+GB+LR,66.91,RF+GB+LR
