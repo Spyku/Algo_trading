@@ -1,36 +1,37 @@
 """
-IB Automatic Hourly Trader — Broly 1.2
-========================================
-Fully automatic trading system for European Index CFDs via Interactive Brokers.
-Connects to TWS/IB Gateway, runs the Broly 1.2 ML model (V2 features),
-and places orders based on signals.
+IB Automatic Hourly Trader — Broly 1.2 (DAX)
+===============================================
+Automatic hourly trading system for DAX CFD via Interactive Brokers.
+Connects to IB Gateway, waits for each new hourly candle from IB,
+runs the Broly 1.2 ML model (V2 features), and places orders.
 
 Pipeline:
   1. daily_setup.py  → updates data + exports setup_config.json
-  2. This script      → reads config, generates live signal, executes on IB
+  2. This script      → polls IB for new candles, generates signal, executes
 
-Instruments:
-  SMI   -> IBCH20 (Swiss 20 CFD)
-  DAX   -> IBDE40 (Germany 40 CFD)
-  CAC40 -> IBFR40 (France 40 CFD)
+Instrument:
+  DAX -> IBDE40 (Germany 40 CFD)
+
+Data source:
+  Historical hourly bars from IB (no yfinance dependency during trading)
 
 Risk Controls:
-  - Max position size (% of net liquidation)
-  - Stop-loss per trade (% from entry)
-  - Max daily loss limit (% of starting equity)
-  - Max open positions limit
-  - Market hours check (only trades during exchange hours)
+  - Max 1 open position
+  - Stop-loss per trade (2% from entry)
+  - Max daily loss limit (5% of starting equity)
+  - Market hours check (XETRA 07:00–16:00 UTC)
+  - 2h cooldown after stop-loss
 
 Requirements:
   pip install ib_insync
-  TWS or IB Gateway running with API enabled on port 4002 (paper) / 4001 (live)
+  IB Gateway running with API enabled on port 4002 (paper) / 4001 (live)
   Run daily_setup.py first to create data/setup_config.json
 
 Usage:
-  python ib_auto_trader.py              # Run once (check signals, execute)
-  python ib_auto_trader.py --loop       # Run continuously every hour
-  python ib_auto_trader.py --status     # Show positions and P&L
-  python ib_auto_trader.py --close-all  # Close all positions
+  python ib_auto_trader.py              # Run once (check signal, execute)
+  python ib_auto_trader.py --loop       # Wait for candles + trade continuously
+  python ib_auto_trader.py --status     # Show position and P&L
+  python ib_auto_trader.py --close-all  # Close position
 """
 
 import sys
@@ -65,17 +66,8 @@ IB_PORT = 4002          # 4002 = IB Gateway paper, 4001 = IB Gateway live
 IB_CLIENT_ID = 10       # Unique client ID for this bot
 
 # --- Instrument Mapping ---
-# Maps our asset names to IB CFD contracts
+# DAX only — single asset focus
 INSTRUMENTS = {
-    'SMI': {
-        'ib_symbol': 'IBCH20',
-        'exchange': 'SMART',
-        'currency': 'CHF',
-        'data_file': 'data/indices/smi_hourly_data.csv',
-        'min_order_size': 1,       # Minimum CFD units
-        'market_open_utc': 7,      # SIX opens ~07:00 UTC
-        'market_close_utc': 16,    # SIX closes ~16:00 UTC
-    },
     'DAX': {
         'ib_symbol': 'IBDE40',
         'exchange': 'SMART',
@@ -85,22 +77,14 @@ INSTRUMENTS = {
         'market_open_utc': 7,      # XETRA opens ~07:00 UTC
         'market_close_utc': 16,    # XETRA closes ~16:00 UTC
     },
-    'CAC40': {
-        'ib_symbol': 'IBFR40',
-        'exchange': 'SMART',
-        'currency': 'EUR',
-        'data_file': 'data/indices/cac40_hourly_data.csv',
-        'min_order_size': 1,
-        'market_open_utc': 7,      # Euronext opens ~07:00 UTC
-        'market_close_utc': 16,    # Euronext closes ~16:30 UTC
-    },
 }
 
 # --- Risk Controls ---
-MAX_POSITION_PCT = 20.0       # Max % of portfolio per position
+MAX_BUDGET_EUR = 10_000.0     # Fixed max margin budget (EUR)
+CFD_MARGIN_PCT = 5.0          # CFD margin requirement (%)
 STOP_LOSS_PCT = 2.0           # Stop-loss: close if down X% from entry
-MAX_DAILY_LOSS_PCT = 5.0      # Max daily loss: stop trading if hit
-MAX_OPEN_POSITIONS = 3        # Max concurrent open positions
+MAX_DAILY_LOSS_EUR = 2_000.0  # Max daily loss in EUR (stop trading if hit)
+MAX_OPEN_POSITIONS = 1        # Max concurrent open positions (DAX only)
 COOLDOWN_AFTER_STOP = 2       # Hours to wait after a stop-loss triggers
 
 # --- Trading Parameters ---
@@ -110,6 +94,7 @@ SIGNAL_MIN_CONFIDENCE = 55.0  # Only trade signals above this confidence
 # --- File Paths ---
 TRADE_LOG_FILE = 'data/ib_trade_log.csv'
 STATE_FILE = 'data/ib_trader_state.json'
+DASHBOARD_FILE = 'output/dashboards/ib_live_data.json'
 LOG_FILE = 'ib_auto_trader.log'
 
 
@@ -337,90 +322,152 @@ class IBConnection:
 
 
 # ============================================================
-# LIGHTWEIGHT DATA UPDATE (fetch latest candles only)
+# DATA UPDATE (from Interactive Brokers)
 # ============================================================
-def update_market_data():
+def update_market_data(ib_conn):
     """
-    Quick update: fetch last 5 days of hourly data from yfinance
-    and append any new rows to existing CSVs.
-    Much faster than full download (~5 seconds per asset).
+    Fetch latest hourly bars from IB and append to CSV.
+    Uses IB's reqHistoricalData — no yfinance dependency.
+    Only downloads what's missing since last row in CSV.
     """
-    import yfinance as yf
+    asset_name = 'DAX'
+    data_file = INSTRUMENTS[asset_name]['data_file']
 
-    TICKERS = {
-        'SMI':   '^SSMI',
-        'DAX':   '^GDAXI',
-        'CAC40': '^FCHI',
-    }
+    if not ib_conn.connected:
+        log.error("Cannot update data: not connected to IB")
+        return False
 
-    end = datetime.now()
-    start = end - timedelta(days=5)
+    contract = ib_conn.create_cfd_contract(asset_name)
 
-    for asset_name, ticker in TICKERS.items():
-        data_file = INSTRUMENTS[asset_name]['data_file']
-        try:
-            # Download recent data
-            chunk = yf.download(ticker, start=start.strftime('%Y-%m-%d'),
-                                end=end.strftime('%Y-%m-%d'),
-                                interval='1h', auto_adjust=True, progress=False)
-            if chunk is None or len(chunk) == 0:
-                log.info(f"{asset_name}: No new data from yfinance")
-                continue
+    # Determine how far back we need
+    if os.path.exists(data_file):
+        existing = pd.read_csv(data_file)
+        existing['datetime'] = pd.to_datetime(existing['datetime'])
+        last_dt = existing['datetime'].max()
+        hours_behind = (datetime.now() - last_dt).total_seconds() / 3600
+        if hours_behind < 2:
+            log.info(f"DAX: Already up to date (last: {last_dt})")
+            return True
+        # Fetch enough to cover the gap + buffer
+        days_needed = max(1, int(hours_behind / 24) + 2)
+        duration = f'{min(days_needed, 30)} D'
+        log.info(f"DAX: {hours_behind:.0f}h behind, fetching {duration}")
+    else:
+        log.info(f"DAX: No CSV found — bootstrapping with 30 days of hourly data")
+        duration = '30 D'
 
-            # Normalize columns
-            chunk = chunk.reset_index()
-            if isinstance(chunk.columns, pd.MultiIndex):
-                chunk.columns = ['_'.join(str(c) for c in col).strip('_')
-                                 if isinstance(col, tuple) else col
-                                 for col in chunk.columns]
+    try:
+        log.info(f"DAX: Requesting historical data from IB ({duration})...")
+        bars = ib_conn.ib.reqHistoricalData(
+            contract,
+            endDateTime='',
+            durationStr=duration,
+            barSizeSetting='1 hour',
+            whatToShow='MIDPOINT',
+            useRTH=True,           # Regular trading hours only
+            formatDate=1,
+            timeout=30,
+        )
 
-            # Rename to standard format
-            col_map = {}
-            for c in chunk.columns:
-                cl = c.lower()
-                if 'datetime' in cl or 'date' in cl:
-                    col_map[c] = 'datetime'
-                elif 'open' in cl:
-                    col_map[c] = 'open'
-                elif 'high' in cl:
-                    col_map[c] = 'high'
-                elif 'low' in cl:
-                    col_map[c] = 'low'
-                elif 'close' in cl and 'adj' not in cl:
-                    col_map[c] = 'close'
-                elif 'volume' in cl:
-                    col_map[c] = 'volume'
-            chunk = chunk.rename(columns=col_map)
+        if not bars:
+            log.warning("DAX: No historical bars received from IB — check market data subscription")
+            return False
 
-            needed = ['datetime', 'open', 'high', 'low', 'close', 'volume']
-            if not all(c in chunk.columns for c in needed):
-                log.warning(f"{asset_name}: Missing columns in yfinance data")
-                continue
+        # Convert to DataFrame
+        rows = []
+        for bar in bars:
+            rows.append({
+                'datetime': bar.date,
+                'open': bar.open,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume if bar.volume > 0 else 0,
+            })
+        df_new = pd.DataFrame(rows)
+        df_new['datetime'] = pd.to_datetime(df_new['datetime']).dt.tz_localize(None)
 
-            chunk = chunk[needed].copy()
-            chunk['datetime'] = pd.to_datetime(chunk['datetime']).dt.tz_localize(None)
+        if os.path.exists(data_file):
+            existing = pd.read_csv(data_file)
+            existing['datetime'] = pd.to_datetime(existing['datetime'])
+            last_dt = existing['datetime'].max()
 
-            if os.path.exists(data_file):
-                existing = pd.read_csv(data_file)
-                existing['datetime'] = pd.to_datetime(existing['datetime'])
-                last_dt = existing['datetime'].max()
-
-                new_rows = chunk[chunk['datetime'] > last_dt]
-                if len(new_rows) > 0:
-                    combined = pd.concat([existing, new_rows], ignore_index=True)
-                    combined = combined.drop_duplicates(subset='datetime').sort_values('datetime')
-                    combined.to_csv(data_file, index=False)
-                    log.info(f"{asset_name}: Added {len(new_rows)} new rows "
-                             f"(total: {len(combined)})")
-                else:
-                    log.info(f"{asset_name}: Already up to date "
-                             f"(last: {last_dt})")
+            new_rows = df_new[df_new['datetime'] > last_dt]
+            if len(new_rows) > 0:
+                combined = pd.concat([existing, new_rows], ignore_index=True)
+                combined = combined.drop_duplicates(subset='datetime').sort_values('datetime')
+                combined.to_csv(data_file, index=False)
+                log.info(f"DAX: Added {len(new_rows)} new rows from IB "
+                         f"(total: {len(combined)}, last: {combined['datetime'].max()})")
             else:
-                log.warning(f"{asset_name}: {data_file} not found — "
-                            f"run daily_setup.py first")
+                log.info(f"DAX: No new rows after {last_dt}")
+        else:
+            # Bootstrap: create the CSV from scratch
+            os.makedirs(os.path.dirname(data_file), exist_ok=True)
+            df_new = df_new.drop_duplicates(subset='datetime').sort_values('datetime')
+            df_new.to_csv(data_file, index=False)
+            log.info(f"DAX: Bootstrapped {len(df_new)} rows → {data_file}")
+
+        return True
+
+    except Exception as e:
+        log.warning(f"DAX: IB historical data error: {e}")
+        return False
+
+
+def wait_for_new_candle(ib_conn):
+    """
+    Wait until a new hourly candle is available.
+    Polls IB every 5 seconds. Logs status every 2 minutes.
+    Never times out — runs until new data arrives or Ctrl+C.
+    """
+    data_file = INSTRUMENTS['DAX']['data_file']
+
+    if not os.path.exists(data_file):
+        log.error(f"{data_file} not found")
+        return False
+
+    existing = pd.read_csv(data_file)
+    existing['datetime'] = pd.to_datetime(existing['datetime'])
+    last_dt = existing['datetime'].max()
+    log.info(f"Last candle: {last_dt} — polling for next bar...")
+
+    contract = ib_conn.create_cfd_contract('DAX')
+    waited = 0
+
+    while True:
+        try:
+            log.debug(f"Requesting latest bar from IB...")
+            bars = ib_conn.ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr='3600 S',
+                barSizeSetting='1 hour',
+                whatToShow='MIDPOINT',
+                useRTH=True,
+                formatDate=1,
+                timeout=15,
+            )
+
+            if bars:
+                latest_bar_dt = pd.to_datetime(bars[-1].date).tz_localize(None)
+                if waited % 120 == 0 or waited == 0:
+                    log.info(f"Latest IB bar: {latest_bar_dt} (our last: {last_dt})")
+                if latest_bar_dt > last_dt:
+                    log.info(f"New candle detected: {latest_bar_dt}")
+                    return True
+            else:
+                if waited % 120 == 0:
+                    log.warning("IB returned no bars — check market data subscription")
 
         except Exception as e:
-            log.warning(f"{asset_name}: Data update error: {e}")
+            if waited % 120 == 0:
+                log.warning(f"Poll error: {e}")
+
+        time.sleep(5)
+        waited += 5
+        if waited % 120 == 0 and waited > 0:
+            log.info(f"Waiting for new candle... ({waited//60}min, last: {last_dt})")
 
 
 # ============================================================
@@ -673,12 +720,10 @@ class RiskManager:
         return True
 
     def check_daily_loss_limit(self):
-        """Check if daily loss limit has been hit."""
+        """Check if daily loss limit has been hit (fixed EUR amount)."""
         nlv = self.ib.get_net_liquidation()
         if nlv <= 0:
             return True  # Can't check, allow
-
-        start_equity = self.state.get('daily_start_equity', nlv)
 
         # Reset daily tracking if new day
         today = datetime.now().strftime('%Y-%m-%d')
@@ -687,14 +732,15 @@ class RiskManager:
             self.state['daily_pnl'] = 0.0
             self.state['trade_count_today'] = 0
             self.state['last_trade_date'] = today
-            start_equity = nlv
 
-        if start_equity > 0:
-            daily_loss_pct = ((nlv - start_equity) / start_equity) * 100
-            if daily_loss_pct < -MAX_DAILY_LOSS_PCT:
-                log.warning(f"DAILY LOSS LIMIT HIT: {daily_loss_pct:.1f}% "
-                            f"(limit: -{MAX_DAILY_LOSS_PCT}%)")
-                return False
+        start_equity = self.state.get('daily_start_equity', nlv)
+        daily_loss = start_equity - nlv  # Positive = loss
+
+        if daily_loss > MAX_DAILY_LOSS_EUR:
+            log.warning(f"DAILY LOSS LIMIT HIT: -{daily_loss:,.0f} EUR "
+                        f"(limit: -{MAX_DAILY_LOSS_EUR:,.0f} EUR). "
+                        f"No more trades today.")
+            return False
 
         return True
 
@@ -723,21 +769,20 @@ class RiskManager:
 
     def calculate_position_size(self, asset_name, price):
         """
-        Calculate position size based on max position % of portfolio.
-        Returns number of CFD units.
+        Fixed: always 1 unit max.
+        Logs margin info for reference.
         """
-        nlv = self.ib.get_net_liquidation()
-        if nlv <= 0 or price <= 0:
+        if price <= 0:
             return 0
 
-        max_value = nlv * (MAX_POSITION_PCT / 100.0)
-        size = int(max_value / price)
+        margin_per_unit = price * (CFD_MARGIN_PCT / 100.0)
+        size = 1  # ALWAYS 1 unit
 
-        inst = INSTRUMENTS[asset_name]
-        if size < inst['min_order_size']:
-            log.info(f"{asset_name}: Calculated size {size} < minimum "
-                     f"{inst['min_order_size']}. Skipping.")
-            return 0
+        notional = price
+        log.info(f"{asset_name}: Size=1 unit | "
+                 f"Margin={margin_per_unit:,.0f} EUR | "
+                 f"Notional={notional:,.0f} EUR | "
+                 f"Max loss at {STOP_LOSS_PCT}% stop={notional * STOP_LOSS_PCT / 100:,.0f} EUR")
 
         return size
 
@@ -971,6 +1016,132 @@ class TradeExecutor:
 
 
 # ============================================================
+# DASHBOARD EXPORT (writes JSON for live HTML dashboard)
+# ============================================================
+def export_dashboard_data(state, last_signal=None, last_confidence=None,
+                          last_price=None, last_action=None):
+    """
+    Export current state to JSON for the live HTML dashboard.
+    Called after each trading cycle.
+    """
+    try:
+        dashboard = {
+            'updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'budget': MAX_BUDGET_EUR,
+            'margin_pct': CFD_MARGIN_PCT,
+            'stop_loss_pct': STOP_LOSS_PCT,
+            'daily_loss_limit': MAX_DAILY_LOSS_EUR,
+        }
+
+        # Current position
+        positions = state.get('positions', {})
+        if 'DAX' in positions:
+            pos = positions['DAX']
+            pnl_eur = 0
+            pnl_pct = 0
+            if last_price and pos['entry_price'] > 0:
+                if pos['side'] == 'LONG':
+                    pnl_eur = (last_price - pos['entry_price']) * pos['size']
+                    pnl_pct = (last_price / pos['entry_price'] - 1) * 100
+                else:
+                    pnl_eur = (pos['entry_price'] - last_price) * pos['size']
+                    pnl_pct = (pos['entry_price'] / last_price - 1) * 100
+
+            dashboard['position'] = {
+                'active': True,
+                'side': pos['side'],
+                'size': pos['size'],
+                'entry_price': pos['entry_price'],
+                'stop_price': pos['stop_price'],
+                'entry_time': pos['entry_time'],
+                'current_price': last_price or 0,
+                'pnl_eur': round(pnl_eur, 2),
+                'pnl_pct': round(pnl_pct, 3),
+            }
+        else:
+            dashboard['position'] = {'active': False}
+
+        # Last signal
+        dashboard['last_signal'] = {
+            'signal': last_signal or 'N/A',
+            'confidence': last_confidence or 0,
+            'price': last_price or 0,
+            'action': last_action or 'N/A',
+        }
+
+        # Daily stats
+        dashboard['daily'] = {
+            'trades_today': state.get('trade_count_today', 0),
+            'daily_pnl': state.get('daily_pnl', 0),
+            'start_equity': state.get('daily_start_equity', 0),
+        }
+
+        # Trade history (last 50 trades)
+        trades = []
+        if os.path.exists(TRADE_LOG_FILE):
+            try:
+                df = pd.read_csv(TRADE_LOG_FILE)
+                for _, row in df.tail(50).iterrows():
+                    trades.append({
+                        'timestamp': str(row['timestamp']),
+                        'action': str(row['action']),
+                        'asset': str(row['asset']),
+                        'price': float(row['price']),
+                        'size': int(row['size']),
+                        'confidence': float(row.get('confidence', 0)),
+                        'reason': str(row.get('reason', '')),
+                    })
+            except Exception:
+                pass
+        dashboard['trades'] = trades
+
+        # Price history with signals (last 200 hours from CSV)
+        data_file = INSTRUMENTS['DAX']['data_file']
+        price_data = []
+        if os.path.exists(data_file):
+            try:
+                df = pd.read_csv(data_file)
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                df = df.tail(200)
+                for _, row in df.iterrows():
+                    price_data.append({
+                        'dt': row['datetime'].strftime('%Y-%m-%d %H:%M'),
+                        'o': round(float(row['open']), 2),
+                        'h': round(float(row['high']), 2),
+                        'l': round(float(row['low']), 2),
+                        'c': round(float(row['close']), 2),
+                    })
+            except Exception:
+                pass
+        dashboard['prices'] = price_data
+
+        # Mark trade entries/exits on the price chart
+        trade_markers = []
+        if os.path.exists(TRADE_LOG_FILE):
+            try:
+                df = pd.read_csv(TRADE_LOG_FILE)
+                for _, row in df.iterrows():
+                    trade_markers.append({
+                        'dt': str(row['timestamp'])[:16],
+                        'action': str(row['action']),
+                        'price': float(row['price']),
+                        'reason': str(row.get('reason', '')),
+                    })
+            except Exception:
+                pass
+        dashboard['trade_markers'] = trade_markers
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(DASHBOARD_FILE), exist_ok=True)
+        with open(DASHBOARD_FILE, 'w') as f:
+            json.dump(dashboard, f, indent=2)
+        log.info(f"Dashboard data exported to {DASHBOARD_FILE}")
+
+    except Exception as e:
+        log.warning(f"Dashboard export failed: {e}")
+
+
+# ============================================================
 # MAIN TRADING LOOP
 # ============================================================
 def run_trading_cycle(ib_conn=None):
@@ -981,8 +1152,9 @@ def run_trading_cycle(ib_conn=None):
     3. Execute trades
     """
     log.info("=" * 60)
-    log.info("  HOURLY TRADING CYCLE")
+    log.info("  DAX HOURLY TRADING CYCLE")
     log.info(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log.info(f"  Budget: {MAX_BUDGET_EUR:,.0f} EUR | Margin: {CFD_MARGIN_PCT}%")
     log.info("=" * 60)
 
     # Connect to IB if not already
@@ -1000,10 +1172,10 @@ def run_trading_cycle(ib_conn=None):
     risk_mgr = RiskManager(ib_conn, state)
     executor = TradeExecutor(ib_conn, risk_mgr, state)
 
-    # Step 1: Update data (lightweight — just fetch latest candles)
-    log.info("\n--- Updating market data ---")
+    # Step 1: Update DAX data from IB
+    log.info("\n--- Updating DAX data from IB ---")
     try:
-        update_market_data()
+        update_market_data(ib_conn)
     except Exception as e:
         log.error(f"Data update failed: {e}")
         log.info("Continuing with existing data...")
@@ -1022,6 +1194,7 @@ def run_trading_cycle(ib_conn=None):
     # Step 3: Generate signals and execute
     log.info("\n--- Generating signals & executing ---")
     results = {}
+    last_signal = last_confidence = last_price = last_action = None
 
     for asset_name in INSTRUMENTS:
         try:
@@ -1033,6 +1206,12 @@ def run_trading_cycle(ib_conn=None):
 
             action = executor.process_signal(asset_name, signal, confidence, price)
             results[asset_name] = action
+
+            # Capture for dashboard
+            last_signal = signal
+            last_confidence = confidence
+            last_price = price
+            last_action = action
 
         except Exception as e:
             log.error(f"{asset_name}: Error in trading cycle: {e}")
@@ -1057,6 +1236,10 @@ def run_trading_cycle(ib_conn=None):
 
     save_state(state)
 
+    # Export dashboard data for live HTML
+    export_dashboard_data(state, last_signal, last_confidence,
+                          last_price, last_action)
+
     if own_connection:
         ib_conn.disconnect()
 
@@ -1064,9 +1247,13 @@ def run_trading_cycle(ib_conn=None):
 
 
 def run_continuous_loop():
-    """Run trading cycle every hour during market hours."""
+    """
+    Run trading cycle every time a new hourly candle is available.
+    Polls IB for new bars instead of sleeping on a fixed schedule.
+    Only trades DAX during XETRA hours (07:00–16:00 UTC, weekdays).
+    """
     log.info("=" * 60)
-    log.info("  STARTING CONTINUOUS HOURLY TRADING")
+    log.info("  STARTING CONTINUOUS DAX TRADING")
     log.info(f"  Press Ctrl+C to stop")
     log.info("=" * 60)
 
@@ -1078,13 +1265,28 @@ def run_continuous_loop():
         while True:
             now = datetime.utcnow()
 
-            # Only run during rough market hours (7-17 UTC on weekdays)
-            if now.weekday() < 5 and 6 <= now.hour <= 17:
+            # Only run during XETRA hours (7-16 UTC on weekdays)
+            if now.weekday() < 5 and 7 <= now.hour < 16:
                 try:
                     # Reconnect if needed
                     if not ib_conn.connected:
                         ib_conn.connect()
-                    run_trading_cycle(ib_conn)
+
+                    # Bootstrap: if CSV doesn't exist, download from IB
+                    data_file = INSTRUMENTS['DAX']['data_file']
+                    if not os.path.exists(data_file):
+                        log.info("No DAX data — bootstrapping from IB...")
+                        update_market_data(ib_conn)
+                        if not os.path.exists(data_file):
+                            continue
+
+                    # Wait until IB has a new hourly candle
+                    log.info("\n--- Waiting for next hourly candle from IB ---")
+                    candle_ready = wait_for_new_candle(ib_conn)
+
+                    if candle_ready:
+                        run_trading_cycle(ib_conn)
+
                 except Exception as e:
                     log.error(f"Trading cycle error: {e}")
                     # Try to reconnect
@@ -1095,19 +1297,14 @@ def run_continuous_loop():
                     ib_conn = IBConnection()
                     ib_conn.connect()
             else:
-                log.info(f"Outside market hours (UTC {now.hour}:00, "
-                         f"{'weekend' if now.weekday() >= 5 else 'weekday'}). "
-                         f"Sleeping...")
-
-            # Sleep until next hour
-            now = datetime.now()
-            next_hour = (now + timedelta(hours=1)).replace(
-                minute=5, second=0, microsecond=0
-            )
-            sleep_seconds = (next_hour - now).total_seconds()
-            log.info(f"Next cycle: {next_hour.strftime('%H:%M:%S')} "
-                     f"(sleeping {sleep_seconds/60:.0f} min)")
-            time.sleep(max(sleep_seconds, 60))
+                if now.weekday() >= 5:
+                    reason = 'weekend'
+                elif now.hour < 7:
+                    reason = f'pre-market (UTC {now.hour}:00, opens 07:00)'
+                else:
+                    reason = f'post-market (UTC {now.hour}:00, closed 16:00)'
+                log.info(f"Outside XETRA hours ({reason}). Sleeping 10 min...")
+                time.sleep(600)
 
     except KeyboardInterrupt:
         log.info("\nStopping... (Ctrl+C)")
@@ -1119,8 +1316,13 @@ def run_continuous_loop():
 def show_status():
     """Show current positions and P&L."""
     print("=" * 60)
-    print("  IB TRADER STATUS")
+    print("  IB DAX TRADER STATUS")
     print("=" * 60)
+
+    print(f"\n  Budget: {MAX_BUDGET_EUR:,.0f} EUR | "
+          f"Margin: {CFD_MARGIN_PCT}% | "
+          f"Stop-loss: {STOP_LOSS_PCT}% | "
+          f"Daily loss limit: {MAX_DAILY_LOSS_EUR:,.0f} EUR")
 
     state = load_state()
 

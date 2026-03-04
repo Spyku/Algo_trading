@@ -1,0 +1,2 @@
+coin,best_window,best_combo,accuracy,models
+BTC,300,RF+GB+LR,76.07,RF+GB+LR

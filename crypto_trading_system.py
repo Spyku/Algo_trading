@@ -1,12 +1,30 @@
 """
-Crypto & Index ML Trading System
-==================================
-Unified system for crypto (Binance) and stock indices (Yahoo Finance).
-Features:
-  - Mode A: Update data -> Run diagnostic -> Best models -> Signals -> Chart data
-  - Mode B: Update data -> Load best_models.csv -> Signals -> Chart data
-Assets: BTC, ETH, SOL, XRP, DOGE, SMI, DAX, CAC40
-Models: RF, GB, LR, LGBM (no XGB)
+Crypto Hourly Trading System -- V2 Optimized Feature Sets
+============================================================
+Based on crypto_feature_analysis.py V2 results (BTC, 1yr, 117 features).
+Tests two candidate feature sets from the analysis:
+
+  Set A: Top 18 by LGBM importance (71.6% in reduced set test)
+         All technical + 2 cross-asset. Pure signal strength.
+
+  Set B: KEEP 14 consensus (passed all 5 tests: LGBM, permutation,
+         correlation, ablation, reduced sets)
+         7 BASE + 5 MACRO + 1 SENTIMENT + 2 CROSS-ASSET. Diverse sources.
+
+Modes:
+  A. Full diagnostic -- run 105 configs on the active feature set
+  B. Quick run -- use saved best models
+  C. COMPARE -- run both Set A and Set B head-to-head, pick the winner
+
+Outputs:
+  - crypto_hourly_chart_data.json (signal data for web chart)
+  - crypto_hourly_best_models.csv (best model per asset)
+  - {ASSET}_backtest.png (matplotlib chart per asset)
+
+Usage:
+  python Crypto_trading_system.py
+  python Crypto_trading_system.py --set-a
+  python Crypto_trading_system.py --set-b
 """
 
 import sys
@@ -36,9 +54,39 @@ from hardware_config import (
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,
 )
 
+# Matplotlib (non-interactive backend for server/headless)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.patches import FancyBboxPatch
+
 # Windows UTF-8 fix
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+
+# ============================================================
+# CANDIDATE FEATURE SETS (from crypto_feature_analysis.py V2)
+# ============================================================
+
+FEATURE_SET_A = [
+    'hour_cos', 'logret_240h', 'vol_ratio_12_48', 'logret_72h',
+    'rsi_14h', 'logret_120h', 'stoch_k_14h', 'sma20_to_sma50h',
+    'volatility_12h', 'xa_dax_relstr5d', 'xa_sp500_relstr5d',
+    'spread_24h_4h', 'atr_pct_14h', 'volume_ratio_h', 'volatility_48h',
+    'price_to_sma100h', 'logret_4h', 'spread_120h_12h',
+]
+
+FEATURE_SET_B = [
+    'rsi_14h', 'hour_cos', 'hour_sin', 'sma20_to_sma50h', 'logret_72h',
+    'm_sp500_chg5d', 'm_dxy_vol5d', 'xa_dax_corr30d', 'xa_dax_relstr5d',
+    'fg_chg5d', 'm_us10y_chg10d', 'm_eurusd_vol5d', 'm_eurusd_chg5d',
+    'vix_spike',
+]
+
+ACTIVE_FEATURE_SET = 'A'
+
 
 # ============================================================
 # ASSET CONFIGURATION
@@ -51,418 +99,825 @@ ASSETS = {
     'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'doge_hourly_data.csv', 'start': '2019-07-01T00:00:00Z'},
     'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'smi_hourly_data.csv',  'start': None},
     'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'dax_hourly_data.csv',  'start': None},
-    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',     'file': 'cac40_hourly_data.csv','start': None},
+    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'cac40_hourly_data.csv', 'start': None},
 }
 
-PREDICTION_HORIZON = 3   # 3-day prediction
-DEFAULT_WINDOW = 200     # Default training window for signal generation
-REPLAY_DAYS = 35         # Days of history for chart
-STEP = 3                 # Diagnostic step size
+PREDICTION_HORIZON = 4            # default horizon (legacy)
+AVAILABLE_HORIZONS = [1, 4]       # 1h and 4h models
+TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+DEFAULT_WINDOW = 400
+REPLAY_HOURS = 200
+DIAG_STEP = 72
+DIAG_WINDOWS = [48, 72, 100, 150, 200, 300, 500]
+
+# Trading fees (Revolut X taker fee: 0.09% per trade)
+TRADING_FEE = 0.0009  # 0.09% applied on both BUY and SELL
+
+
+# ============================================================
+# FEATURE SET HELPERS
+# ============================================================
+def _get_active_features():
+    if ACTIVE_FEATURE_SET == 'B':
+        return list(FEATURE_SET_B)
+    return list(FEATURE_SET_A)
+
+
+def _get_set_label():
+    if ACTIVE_FEATURE_SET == 'B':
+        return f"Set B (KEEP 14 consensus, {len(FEATURE_SET_B)} features)"
+    return f"Set A (Top 18 LGBM importance, {len(FEATURE_SET_A)} features)"
+
+
+def _build_features(df_raw, asset_name='BTC', feature_override=None, horizon=PREDICTION_HORIZON):
+    df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+    selected = feature_override if feature_override is not None else _get_active_features()
+    missing = [f for f in selected if f not in all_cols]
+    if missing:
+        print(f"    WARNING: features not found (macro_data/ missing?): {missing}")
+        selected = [f for f in selected if f in all_cols]
+    if not selected:
+        print(f"    ERROR: no valid features! Falling back to all {len(all_cols)} columns.")
+        selected = all_cols
+    return df_full, selected
+
 
 # ============================================================
 # DATA DOWNLOAD: BINANCE (ccxt)
 # ============================================================
 def download_binance(asset_name, update_only=True):
-    """Download or update hourly data from Binance."""
     import ccxt
     config = ASSETS[asset_name]
     filepath = config['file']
     exchange = ccxt.binance()
-
     symbol = config['ticker']
     timeframe = '1h'
     limit = 1000
 
-    # If file exists and update_only, just fetch new data
     if os.path.exists(filepath) and update_only:
         df_existing = pd.read_csv(filepath)
         df_existing['datetime'] = pd.to_datetime(df_existing['datetime'])
         last_ts = int(df_existing['timestamp'].max()) + 1
-        print(f"  Updating {asset_name} from {df_existing['datetime'].max()}...")
-    else:
-        df_existing = None
-        last_ts = exchange.parse8601(config['start'])
-        print(f"  Downloading full history for {asset_name}...")
+        print(f"  Updating {asset_name} from {df_existing['datetime'].iloc[-1]}...")
 
-    end_ts = exchange.milliseconds()
-    all_candles = []
-    current_ts = last_ts
-    batch_count = 0
-
-    while current_ts < end_ts:
-        try:
-            candles = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts, limit=limit)
+        all_new = []
+        since = last_ts
+        while True:
+            candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
             if not candles:
                 break
-            all_candles.extend(candles)
-            batch_count += 1
-            current_ts = candles[-1][0] + 1
+            for c in candles:
+                all_new.append({
+                    'timestamp': c[0],
+                    'datetime': pd.Timestamp(c[0], unit='ms'),
+                    'open': c[1], 'high': c[2], 'low': c[3],
+                    'close': c[4], 'volume': c[5],
+                })
+            since = candles[-1][0] + 1
+            if len(candles) < limit:
+                break
+            time.sleep(0.1)
 
-            if batch_count % 10 == 0:
-                current_date = exchange.iso8601(candles[-1][0])
-                print(f"    Batch {batch_count}: up to {current_date}")
-
-            time.sleep(exchange.rateLimit / 1000)
-        except Exception as e:
-            print(f"    Error: {e}. Retrying in 5s...")
-            time.sleep(5)
-            continue
-
-    if not all_candles:
-        print(f"  No new data for {asset_name}.")
-        return
-
-    # Build DataFrame
-    df_new = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df_new['datetime'] = pd.to_datetime(df_new['timestamp'], unit='ms')
-    df_new = df_new[['datetime', 'timestamp', 'open', 'high', 'low', 'close', 'volume']]
-
-    # Merge with existing
-    if df_existing is not None:
-        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        if all_new:
+            df_new = pd.DataFrame(all_new)
+            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            df_combined = df_combined.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
+            df_combined.to_csv(filepath, index=False)
+            print(f"    {asset_name}: {len(df_new)} new candles -> {len(df_combined)} total")
+        else:
+            print(f"    {asset_name}: already up to date ({len(df_existing)} candles)")
+            df_combined = df_existing
+        return df_combined
     else:
-        df_combined = df_new
+        print(f"  Downloading {asset_name} full history from Binance...")
+        since_str = config.get('start', '2020-01-01T00:00:00Z')
+        since = exchange.parse8601(since_str)
+        all_candles = []
+        while True:
+            candles = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            if not candles:
+                break
+            for c in candles:
+                all_candles.append({
+                    'timestamp': c[0],
+                    'datetime': pd.Timestamp(c[0], unit='ms'),
+                    'open': c[1], 'high': c[2], 'low': c[3],
+                    'close': c[4], 'volume': c[5],
+                })
+            since = candles[-1][0] + 1
+            if len(candles) < limit:
+                break
+            time.sleep(0.1)
+        df = pd.DataFrame(all_candles)
+        df = df.drop_duplicates(subset='timestamp').sort_values('timestamp').reset_index(drop=True)
+        df.to_csv(filepath, index=False)
+        print(f"    {asset_name}: {len(df)} candles downloaded")
+        return df
 
-    df_combined = df_combined.drop_duplicates(subset=['timestamp'])
-    df_combined = df_combined.sort_values('timestamp').reset_index(drop=True)
 
-    df_combined.to_csv(filepath, index=False)
-    print(f"  {asset_name}: {len(df_combined):,} total candles saved to {filepath}")
-
-
+# ============================================================
+# DATA DOWNLOAD: YFINANCE
+# ============================================================
 def _normalize_yf_chunk(chunk):
-    """Normalize a yfinance DataFrame chunk to flat columns."""
     df = chunk.copy()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    if df.index.name or isinstance(df.index, pd.DatetimeIndex):
+    df.columns = [c.lower().strip() for c in df.columns]
+    if df.index.name and 'date' in df.index.name.lower():
         df = df.reset_index()
-    rename_map = {}
-    for col in df.columns:
-        cl = str(col).strip().lower()
-        if cl in ('datetime', 'date', 'index', 'timestamp'):
-            rename_map[col] = 'datetime'
-        elif cl == 'open': rename_map[col] = 'open'
-        elif cl == 'high': rename_map[col] = 'high'
-        elif cl == 'low': rename_map[col] = 'low'
-        elif cl == 'close': rename_map[col] = 'close'
-        elif cl == 'volume': rename_map[col] = 'volume'
-    df = df.rename(columns=rename_map)
-    df = df.loc[:, ~df.columns.duplicated()]
+    if 'date' in df.columns:
+        df = df.rename(columns={'date': 'datetime'})
     if 'datetime' not in df.columns:
-        for fallback in ['Datetime', 'Date', 'index']:
-            if fallback in df.columns:
-                df = df.rename(columns={fallback: 'datetime'})
-                break
-    if 'datetime' not in df.columns:
-        return None
+        df['datetime'] = df.index
+        df = df.reset_index(drop=True)
     df['datetime'] = pd.to_datetime(df['datetime'])
     if df['datetime'].dt.tz is not None:
-        df['datetime'] = df['datetime'].dt.tz_convert(None)
-    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df['datetime'] = df['datetime'].dt.tz_localize(None)
+    needed = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+    for col in needed:
         if col not in df.columns:
             df[col] = 0
-    df['timestamp'] = ((df['datetime'] - pd.Timestamp('1970-01-01')).dt.total_seconds() * 1000).astype(int)
-    return df[['datetime', 'timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    return df[needed].copy()
 
 
 def download_yfinance(asset_name, update_only=True):
-    """Download or update hourly data from Yahoo Finance (stock indices)."""
     import yfinance as yf
     config = ASSETS[asset_name]
     filepath = config['file']
     ticker = config['ticker']
 
-    end_date = datetime.now()
-
     if os.path.exists(filepath) and update_only:
         df_existing = pd.read_csv(filepath)
         df_existing['datetime'] = pd.to_datetime(df_existing['datetime'])
-        start_date = df_existing['datetime'].max() - timedelta(days=1)
-        print(f"  Updating {asset_name} from {start_date.date()}...")
+        print(f"  Updating {asset_name} from {df_existing['datetime'].iloc[-1]}...")
+        chunk = yf.download(ticker, period='5d', interval='1h', progress=False)
+        if chunk is not None and len(chunk) > 0:
+            df_new = _normalize_yf_chunk(chunk)
+            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            df_combined = df_combined.drop_duplicates(subset='datetime').sort_values('datetime').reset_index(drop=True)
+            df_combined.to_csv(filepath, index=False)
+            print(f"    {asset_name}: {len(df_new)} new candles -> {len(df_combined)} total")
+            return df_combined
+        else:
+            print(f"    {asset_name}: no new data")
+            return df_existing
     else:
-        df_existing = None
-        start_date = end_date - timedelta(days=729)
         print(f"  Downloading {asset_name} hourly data (last 2 years)...")
-
-    all_chunks = []
-    chunk_start = start_date
-    chunk_num = 0
-
-    while chunk_start < end_date:
-        chunk_end = min(chunk_start + timedelta(days=59), end_date)
-        try:
-            data = yf.download(
-                ticker,
-                start=chunk_start.strftime('%Y-%m-%d'),
-                end=chunk_end.strftime('%Y-%m-%d'),
-                interval='1h',
-                progress=False,
-                auto_adjust=True
-            )
-            if len(data) > 0:
-                normalized = _normalize_yf_chunk(data)
-                if normalized is not None:
-                    all_chunks.append(normalized)
-                    chunk_num += 1
-                    if chunk_num % 3 == 0:
-                        print(f"    Chunk {chunk_num}: up to {chunk_end.date()}")
-        except Exception as e:
-            print(f"    Error downloading chunk: {e}")
-
-        chunk_start = chunk_end
-        time.sleep(0.5)
-
-    if not all_chunks:
-        print(f"  No data downloaded for {asset_name}.")
-        return
-
-    df_new = pd.concat(all_chunks, ignore_index=True)
-
-    if df_existing is not None:
-        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-    else:
-        df_combined = df_new
-
-    df_combined = df_combined.drop_duplicates(subset=['timestamp'])
-    df_combined = df_combined.sort_values('timestamp').reset_index(drop=True)
-
-    df_combined.to_csv(filepath, index=False)
-    print(f"  {asset_name}: {len(df_combined):,} total candles saved to {filepath}")
+        all_chunks = []
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=729)
+        chunk_days = 59
+        current_start = start_date
+        while current_start < end_date:
+            current_end = min(current_start + timedelta(days=chunk_days), end_date)
+            try:
+                chunk = yf.download(ticker, start=current_start.strftime('%Y-%m-%d'),
+                    end=current_end.strftime('%Y-%m-%d'), interval='1h', progress=False)
+                if chunk is not None and len(chunk) > 0:
+                    all_chunks.append(_normalize_yf_chunk(chunk))
+            except Exception as e:
+                print(f"    Warning: chunk {current_start.date()} -> {current_end.date()}: {e}")
+            current_start = current_end
+            time.sleep(0.2)
+        if not all_chunks:
+            print(f"    {asset_name}: no data downloaded!")
+            return None
+        df = pd.concat(all_chunks, ignore_index=True)
+        df = df.drop_duplicates(subset='datetime').sort_values('datetime').reset_index(drop=True)
+        df.to_csv(filepath, index=False)
+        print(f"    {asset_name}: {len(df)} hourly candles downloaded")
+        return df
 
 
 def download_asset(asset_name, update_only=True):
-    """Download data for any asset (auto-selects source)."""
     config = ASSETS[asset_name]
     if config['source'] == 'binance':
-        download_binance(asset_name, update_only)
-    elif config['source'] == 'yfinance':
-        download_yfinance(asset_name, update_only)
+        return download_binance(asset_name, update_only)
+    else:
+        return download_yfinance(asset_name, update_only)
 
 
 def update_all_data(assets_list=None):
-    """Download/update data for all (or specified) assets."""
     if assets_list is None:
         assets_list = list(ASSETS.keys())
-
     print("\n" + "=" * 60)
-    print("  UPDATING DATA")
+    print("  UPDATING HOURLY DATA")
     print("=" * 60)
-
     for asset_name in assets_list:
-        config = ASSETS[asset_name]
-        file_exists = os.path.exists(config['file'])
-        if file_exists:
-            print(f"\n[{asset_name}] File exists. Updating...")
-        else:
-            print(f"\n[{asset_name}] File not found. Downloading fresh...")
-        download_asset(asset_name, update_only=file_exists)
-
-    print("\nData update complete.")
+        try:
+            download_asset(asset_name, update_only=True)
+        except Exception as e:
+            print(f"  ERROR updating {asset_name}: {e}")
 
 
-# ============================================================
-# DATA LOADING & FEATURE ENGINEERING
-# ============================================================
 def load_data(asset_name):
-    """Load hourly CSV data for an asset."""
     config = ASSETS[asset_name]
     filepath = config['file']
     if not os.path.exists(filepath):
-        print(f"  WARNING: {filepath} not found.")
+        print(f"  WARNING: {filepath} not found. Run update first.")
         return None
     df = pd.read_csv(filepath)
     df['datetime'] = pd.to_datetime(df['datetime'])
     df = df.sort_values('datetime').reset_index(drop=True)
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['close']).reset_index(drop=True)
     return df
 
 
-def hourly_to_daily(df):
-    """Aggregate hourly candles to daily OHLCV."""
-    df = df.copy()
-    df['date'] = df['datetime'].dt.date
-    daily = df.groupby('date').agg(
-        open=('open', 'first'),
-        high=('high', 'max'),
-        low=('low', 'min'),
-        close=('close', 'last'),
-        volume=('volume', 'sum')
-    ).reset_index()
-    daily['date'] = pd.to_datetime(daily['date'])
-    daily = daily.sort_values('date').reset_index(drop=True)
-    return daily
+# ============================================================
+# HOURLY FEATURE ENGINEERING (ALL 36 technical features)
+# ============================================================
+def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
+    df = df_hourly.copy()
 
+    for period in [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 120, 240]:
+        df[f'logret_{period}h'] = np.log(df['close'] / df['close'].shift(period))
 
-def build_features(df_daily):
-    """
-    Build all normalized features from daily OHLCV data.
-    Returns (DataFrame with features + labels, feature_cols list).
-    """
-    df = df_daily.copy()
+    df['spread_24h_4h']   = df['logret_24h']  - df['logret_4h']
+    df['spread_48h_4h']   = df['logret_48h']  - df['logret_4h']
+    df['spread_120h_8h']  = df['logret_120h'] - df['logret_8h']
+    df['spread_240h_24h'] = df['logret_240h'] - df['logret_24h']
+    df['spread_48h_12h']  = df['logret_48h']  - df['logret_12h']
+    df['spread_120h_12h'] = df['logret_120h'] - df['logret_12h']
 
-    # --- Log Returns ---
-    for period in [1, 2, 3, 5, 7, 10, 14, 20, 30]:
-        df[f'logret_{period}d'] = np.log(df['close'] / df['close'].shift(period))
-    for period in [50, 100, 250]:
-        df[f'logret_{period}d'] = np.log(df['close'] / df['close'].shift(period))
+    df['sma20h']  = df['close'].rolling(20).mean()
+    df['sma50h']  = df['close'].rolling(50).mean()
+    df['sma100h'] = df['close'].rolling(100).mean()
+    df['sma200h'] = df['close'].rolling(200).mean()
+    df['price_to_sma20h']  = df['close'] / df['sma20h'] - 1
+    df['price_to_sma50h']  = df['close'] / df['sma50h'] - 1
+    df['price_to_sma100h'] = df['close'] / df['sma100h'] - 1
+    df['sma20_to_sma50h']  = df['sma20h'] / df['sma50h'] - 1
 
-    # --- Log Return Spreads ---
-    df['spread_log10_log2']   = df['logret_10d']  - df['logret_2d']
-    df['spread_log20_log2']   = df['logret_20d']  - df['logret_2d']
-    df['spread_log30_log2']   = df['logret_30d']  - df['logret_2d']
-    df['spread_log30_log10']  = df['logret_30d']  - df['logret_10d']
-    df['spread_log7_log3']    = df['logret_7d']   - df['logret_3d']
-    df['spread_log250_log10'] = df['logret_250d'] - df['logret_10d']
-
-    # --- Price-to-SMA Ratios ---
-    df['sma20']  = df['close'].rolling(20).mean()
-    df['sma50']  = df['close'].rolling(50).mean()
-    df['sma200'] = df['close'].rolling(200).mean()
-    df['price_to_sma20']  = df['close'] / df['sma20'] - 1
-    df['price_to_sma50']  = df['close'] / df['sma50'] - 1
-    df['price_to_sma200'] = df['close'] / df['sma200'] - 1
-    df['sma20_to_sma50']  = df['sma20'] / df['sma50'] - 1
-
-    # --- RSI 14 ---
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
-    df['rsi_14'] = 100 - (100 / (1 + rs))
+    df['rsi_14h'] = 100 - (100 / (1 + rs))
 
-    # --- Stochastic %K ---
     low14  = df['low'].rolling(14).min()
     high14 = df['high'].rolling(14).max()
-    df['stoch_k'] = 100 * (df['close'] - low14) / (high14 - low14)
+    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
 
-    # --- Bollinger Band Position ---
     bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
-    df['bb_position'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
 
-    # --- Z-Score (30 day) ---
-    roll_mean = df['close'].rolling(30).mean()
-    roll_std  = df['close'].rolling(30).std()
-    df['zscore_30d'] = (df['close'] - roll_mean) / roll_std
+    roll_mean = df['close'].rolling(50).mean()
+    roll_std  = df['close'].rolling(50).std()
+    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
 
-    # --- ATR % ---
     tr = pd.DataFrame({
         'hl': df['high'] - df['low'],
         'hc': abs(df['high'] - df['close'].shift(1)),
         'lc': abs(df['low'] - df['close'].shift(1))
     }).max(axis=1)
-    df['atr_pct'] = tr.rolling(14).mean() / df['close']
+    df['atr_pct_14h'] = tr.rolling(14).mean() / df['close']
 
-    # --- Volatility ---
-    df['volatility_10d'] = df['logret_1d'].rolling(10).std()
-    df['volatility_30d'] = df['logret_1d'].rolling(30).std()
-    df['vol_ratio_10_30'] = df['volatility_10d'] / df['volatility_30d']
+    df['intraday_range'] = (df['high'] - df['low']) / df['close']
 
-    # --- Volume Features (handle indices with 0/NaN volume) ---
+    df['volatility_12h'] = df['logret_1h'].rolling(12).std()
+    df['volatility_48h'] = df['logret_1h'].rolling(48).std()
+    df['vol_ratio_12_48'] = df['volatility_12h'] / df['volatility_48h']
+
     if df['volume'].sum() == 0 or df['volume'].isna().all():
-        df['volume_ratio'] = 1.0
-        df['volume_change'] = 0.0
+        df['volume_ratio_h'] = 1.0
     else:
         df['volume'] = df['volume'].replace(0, np.nan).ffill().bfill()
-        vol_sma20 = df['volume'].rolling(20).mean()
-        df['volume_ratio']  = df['volume'] / vol_sma20
-        df['volume_change'] = df['volume'].pct_change(5)
-        df['volume_ratio']  = df['volume_ratio'].fillna(1.0)
-        df['volume_change'] = df['volume_change'].fillna(0.0)
+        vol_sma = df['volume'].rolling(20).mean()
+        df['volume_ratio_h'] = df['volume'] / vol_sma
+        df['volume_ratio_h'] = df['volume_ratio_h'].fillna(1.0)
 
-    # --- Day of Week (cyclical) ---
-    dow = df['date'].dt.dayofweek
+    hour = df['datetime'].dt.hour
+    df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+    dow = df['datetime'].dt.dayofweek
     df['dow_sin'] = np.sin(2 * np.pi * dow / 7)
     df['dow_cos'] = np.cos(2 * np.pi * dow / 7)
 
-    # --- Labels ---
-    future_return = df['close'].shift(-PREDICTION_HORIZON) / df['close'] - 1
-    rolling_median = future_return.rolling(90, min_periods=30).median().shift(PREDICTION_HORIZON)
+    # ---- DERIVATIVES ----
+    # First derivative (velocity) — already captured by logret_1h, but explicit:
+    df['price_velocity_1h'] = df['close'].diff() / df['close'].shift(1)     # pct change
+    df['price_velocity_4h'] = df['close'].diff(4) / df['close'].shift(4)
+
+    # Second derivative (acceleration) — change in the rate of change
+    df['price_accel_1h'] = df['logret_1h'].diff()          # d²price/dt² (1h resolution)
+    df['price_accel_4h'] = df['logret_4h'].diff(4)         # d²price/dt² (4h resolution)
+    df['price_accel_12h'] = df['logret_12h'].diff(12)      # d²price/dt² (12h resolution)
+    df['price_accel_24h'] = df['logret_24h'].diff(24)      # d²price/dt² (24h resolution)
+
+    # Jerk (third derivative) — change in acceleration
+    df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d³price/dt³
+
+    future_return = df['close'].shift(-horizon) / df['close'] - 1
+    rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
     df['label'] = (future_return > rolling_median).astype(int)
 
-    # Feature columns
     feature_cols = [
-        'logret_1d', 'logret_2d', 'logret_3d', 'logret_5d', 'logret_7d',
-        'logret_10d', 'logret_14d', 'logret_20d', 'logret_30d',
-        'spread_log10_log2', 'spread_log20_log2', 'spread_log30_log2',
-        'spread_log30_log10', 'spread_log7_log3', 'spread_log250_log10',
-        'price_to_sma20', 'price_to_sma50', 'price_to_sma200', 'sma20_to_sma50',
-        'rsi_14', 'stoch_k', 'bb_position', 'zscore_30d', 'atr_pct',
-        'volatility_10d', 'volatility_30d', 'vol_ratio_10_30',
-        'volume_ratio', 'volume_change',
-        'dow_sin', 'dow_cos',
+        'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
+        'logret_8h', 'logret_12h', 'logret_24h', 'logret_48h', 'logret_72h',
+        'logret_120h', 'logret_240h',
+        'spread_24h_4h', 'spread_48h_4h', 'spread_120h_8h',
+        'spread_240h_24h', 'spread_48h_12h', 'spread_120h_12h',
+        'price_to_sma20h', 'price_to_sma50h', 'price_to_sma100h', 'sma20_to_sma50h',
+        'rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
+        'atr_pct_14h', 'intraday_range',
+        'volatility_12h', 'volatility_48h', 'vol_ratio_12_48',
+        'volume_ratio_h',
+        'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
+        'price_velocity_1h', 'price_velocity_4h',
+        'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
+        'price_jerk_1h',
     ]
 
-    keep_cols = ['date', 'close', 'high', 'low', 'volume'] + feature_cols + ['label']
+    keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label']
     df = df[keep_cols].copy()
-    # Debug: show NaN counts before dropping
+
     nan_counts = df[feature_cols + ['label']].isna().sum()
     nan_cols = nan_counts[nan_counts > 0]
     if len(nan_cols) > 0:
         print(f"    Rows before dropna: {len(df)}")
-        print(f"    Columns with NaN: {dict(nan_cols)}")
+        nan_summary = {k: v for k, v in dict(nan_cols).items() if v > 0}
+        top_nan = sorted(nan_summary.items(), key=lambda x: -x[1])[:5]
+        print(f"    Top NaN columns: {dict(top_nan)}")
 
     df = df.dropna().reset_index(drop=True)
     print(f"    Rows after dropna: {len(df)}")
-
     return df, feature_cols
+
+
+# ============================================================
+# V2: MACRO & SENTIMENT FEATURES
+# ============================================================
+MACRO_DIR = 'macro_data'
+_macro_cache = {}
+
+
+def _load_macro_csv(filename):
+    if filename in _macro_cache:
+        return _macro_cache[filename]
+    path = os.path.join(MACRO_DIR, filename)
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path, parse_dates=[0], index_col=0)
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        _macro_cache[filename] = df
+        return df
+    except Exception as e:
+        print(f"  Warning: Could not load {path}: {e}")
+        return None
+
+
+def _compute_macro_features(macro_df, prefix='m_'):
+    features = pd.DataFrame(index=macro_df.index)
+    for col in macro_df.columns:
+        if col in ('fear_greed_label',):
+            continue
+        s = macro_df[col].astype(float)
+        tag = f"{prefix}{col.lower()}"
+        roll_mean = s.rolling(50, min_periods=10).mean()
+        roll_std = s.rolling(50, min_periods=10).std()
+        features[f'{tag}_zscore'] = (s - roll_mean) / (roll_std + 1e-10)
+        for window in [1, 5, 10]:
+            features[f'{tag}_chg{window}d'] = s.pct_change(window) * 100
+        for window in [5, 20]:
+            features[f'{tag}_vol{window}d'] = s.pct_change().rolling(window, min_periods=3).std() * 100
+    return features
+
+
+def _compute_vix_regime(macro_df):
+    features = pd.DataFrame(index=macro_df.index)
+    if 'VIX' not in macro_df.columns:
+        return features
+    vix = macro_df['VIX'].astype(float)
+    features['vix_low'] = (vix < 15).astype(float)
+    features['vix_normal'] = ((vix >= 15) & (vix < 25)).astype(float)
+    features['vix_high'] = ((vix >= 25) & (vix < 35)).astype(float)
+    features['vix_extreme'] = (vix >= 35).astype(float)
+    features['vix_rising_5d'] = (vix.diff(5) > 0).astype(float)
+    features['vix_spike'] = (vix.pct_change() > 0.15).astype(float)
+    return features
+
+
+def _compute_fear_greed_features(fg_df, prefix='fg_'):
+    features = pd.DataFrame(index=fg_df.index)
+    fg = fg_df['fear_greed'].astype(float)
+    features[f'{prefix}value'] = fg
+    features[f'{prefix}zscore'] = (fg - fg.rolling(50, min_periods=10).mean()) / (fg.rolling(50, min_periods=10).std() + 1e-10)
+    for w in [1, 5, 10]:
+        features[f'{prefix}chg{w}d'] = fg.diff(w)
+    for w in [5, 20]:
+        features[f'{prefix}ma{w}d'] = fg.rolling(w, min_periods=3).mean()
+    features[f'{prefix}extreme_fear'] = (fg < 20).astype(float)
+    features[f'{prefix}extreme_greed'] = (fg > 80).astype(float)
+    return features
+
+
+def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
+    features = pd.DataFrame(index=cross_df.index)
+    if target_col not in cross_df.columns:
+        return features
+    target_ret = cross_df[target_col].pct_change()
+    for col in cross_df.columns:
+        if col == target_col:
+            continue
+        other_ret = cross_df[col].pct_change()
+        tag = f"{prefix}{col.lower()}"
+        for w in [10, 30]:
+            features[f'{tag}_corr{w}d'] = target_ret.rolling(w, min_periods=5).corr(other_ret)
+        features[f'{tag}_relstr5d'] = (
+            target_ret.rolling(5, min_periods=3).mean() -
+            other_ret.rolling(5, min_periods=3).mean()
+        ) * 100
+    return features
+
+
+def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON):
+    df, base_cols = build_hourly_features(df_hourly, horizon=horizon)
+    all_cols = list(base_cols)
+    added = 0
+
+    if not os.path.exists(MACRO_DIR):
+        print(f"    macro_data/ not found -- technical features only")
+        return df, all_cols
+
+    df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+
+    macro_df = _load_macro_csv('macro_daily.csv')
+    if macro_df is not None:
+        macro_feats = _compute_macro_features(macro_df, prefix='m_')
+        vix_feats = _compute_vix_regime(macro_df)
+        macro_all = pd.concat([macro_feats, vix_feats], axis=1)
+        macro_all['_merge_date'] = macro_all.index.normalize()
+        df = df.merge(macro_all, on='_merge_date', how='left')
+        new_cols = [c for c in macro_all.columns if c != '_merge_date']
+        all_cols.extend(new_cols)
+        added += len(new_cols)
+
+    fg_df = _load_macro_csv('fear_greed.csv')
+    if fg_df is not None:
+        fg_feats = _compute_fear_greed_features(fg_df)
+        fg_feats['_merge_date'] = fg_feats.index.normalize()
+        df = df.merge(fg_feats, on='_merge_date', how='left')
+        new_cols = [c for c in fg_feats.columns if c != '_merge_date']
+        all_cols.extend(new_cols)
+        added += len(new_cols)
+
+    cross_df = _load_macro_csv('cross_asset.csv')
+    if cross_df is not None:
+        asset_map = {
+            'BTC': 'BTC_USD', 'ETH': 'ETH_USD',
+            'SOL': 'BTC_USD', 'XRP': 'BTC_USD', 'DOGE': 'BTC_USD',
+            'SMI': 'DAX', 'DAX': 'DAX', 'CAC40': 'DAX',
+        }
+        target_col = asset_map.get(asset_name, 'BTC_USD')
+        xa_feats = _compute_cross_asset_features(cross_df, target_col, prefix='xa_')
+        if len(xa_feats.columns) > 0:
+            xa_feats['_merge_date'] = xa_feats.index.normalize()
+            df = df.merge(xa_feats, on='_merge_date', how='left')
+            new_cols = [c for c in xa_feats.columns if c != '_merge_date']
+            all_cols.extend(new_cols)
+            added += len(new_cols)
+
+    df = df.drop(columns=['_merge_date'], errors='ignore')
+    if '_merge_date' in all_cols:
+        all_cols.remove('_merge_date')
+    all_cols = list(dict.fromkeys(all_cols))
+    all_cols = [c for c in all_cols if c in df.columns]
+    macro_cols = [c for c in all_cols if c not in base_cols]
+    if macro_cols:
+        df[macro_cols] = df[macro_cols].ffill()
+
+    print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+    return df, all_cols
 
 
 # ============================================================
 # MODELS
 # ============================================================
-# MODELS (from hardware_config — auto-detects LAPTOP vs DESKTOP)
 ALL_MODELS = get_all_models()
+
+
+# ============================================================
+# FEATURE ANALYSIS (integrated from crypto_feature_analysis.py)
+# ============================================================
+ANALYSIS_WINDOW = 500
+ANALYSIS_STEP = 72
+
+
+def _classify_feature(feat):
+    """Classify a feature into its category."""
+    if feat.startswith('m_'):
+        return 'MACRO'
+    elif feat.startswith('xa_'):
+        return 'CROSS-ASSET'
+    elif feat.startswith('fg_') or feat == 'vix_spike':
+        return 'SENTIMENT'
+    else:
+        return 'BASE'
+
+
+def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP):
+    """Fast walk-forward test with LGBM only. Returns accuracy."""
+    from lightgbm import LGBMClassifier
+
+    n = len(df_features)
+    min_start = window + 50
+    if n < min_start + 30:
+        return 0, 0
+
+    correct = 0
+    total = 0
+
+    for i in range(min_start, n, step):
+        train = df_features.iloc[max(0, i - window):i]
+        test_row = df_features.iloc[i:i+1]
+        X_train = train[feature_cols]
+        y_train = train['label'].values
+        X_test = test_row[feature_cols]
+        y_true = test_row['label'].values[0]
+
+        if len(np.unique(y_train)) < 2:
+            continue
+
+        scaler = StandardScaler()
+        X_train_s = pd.DataFrame(scaler.fit_transform(X_train),
+                                 columns=feature_cols, index=X_train.index)
+        X_test_s = pd.DataFrame(scaler.transform(X_test),
+                                columns=feature_cols, index=X_test.index)
+
+        model = LGBMClassifier(
+            n_estimators=200, max_depth=6, learning_rate=0.05,
+            class_weight='balanced', verbose=-1, random_state=42,
+            device=LGBM_DEVICE
+        )
+        model.fit(X_train_s, y_train)
+        pred = model.predict(X_test_s)[0]
+        if pred == y_true:
+            correct += 1
+        total += 1
+
+    return (correct / total * 100 if total > 0 else 0), total
+
+
+def _test_lgbm_importance(df_features, feature_cols):
+    """Train LGBM and extract feature importance."""
+    from lightgbm import LGBMClassifier
+
+    print("\n  [1/5] LGBM Feature Importance (gain-based)")
+    n = len(df_features)
+    train = df_features.iloc[:int(n * 0.7)]
+    X = train[feature_cols]
+    y = train['label'].values
+
+    scaler = StandardScaler()
+    X_s = pd.DataFrame(scaler.fit_transform(X), columns=feature_cols)
+
+    model = LGBMClassifier(
+        n_estimators=200, max_depth=6, learning_rate=0.05,
+        class_weight='balanced', verbose=-1, random_state=42,
+        device=LGBM_DEVICE
+    )
+    model.fit(X_s, y)
+
+    importance = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    importance['pct'] = importance['importance'] / importance['importance'].sum() * 100
+    importance['cumulative_pct'] = importance['pct'].cumsum()
+
+    for _, row in importance.head(20).iterrows():
+        bar = '#' * int(row['pct'] * 2)
+        ftype = _classify_feature(row['feature'])
+        print(f"    {row['feature']:30s} {row['pct']:5.1f}% [{ftype:>10s}] {bar}")
+
+    low_count = len(importance[importance['pct'] < 1.0])
+    print(f"    ... {low_count} features below 1% importance")
+    return importance
+
+
+def _test_permutation_importance(df_features, feature_cols):
+    """Shuffle each feature and measure accuracy drop."""
+    print("\n  [2/5] Permutation Importance")
+    baseline_acc, n_tests = _quick_accuracy(df_features, feature_cols)
+    print(f"    Baseline: {baseline_acc:.1f}% (n={n_tests})")
+
+    results = []
+    for feat in feature_cols:
+        df_shuffled = df_features.copy()
+        df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
+        shuffled_acc, _ = _quick_accuracy(df_shuffled, feature_cols)
+        drop = baseline_acc - shuffled_acc
+        results.append({'feature': feat, 'acc_drop': drop})
+        print(f"    {feat:30s} drop: {drop:+5.1f}%")
+
+    return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
+
+
+def _test_ablation(df_features, feature_cols):
+    """Drop each feature one at a time and measure accuracy."""
+    print("\n  [3/5] Ablation Test (drop one at a time)")
+    baseline_acc, _ = _quick_accuracy(df_features, feature_cols)
+    print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}%")
+
+    results = []
+    for feat in feature_cols:
+        reduced = [f for f in feature_cols if f != feat]
+        acc, _ = _quick_accuracy(df_features, reduced)
+        change = acc - baseline_acc
+        results.append({'dropped': feat, 'accuracy': acc, 'change': change})
+        marker = ' ** IMPROVES' if change > 0.3 else ''
+        print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+5.1f}%){marker}")
+
+    return pd.DataFrame(results).sort_values('change', ascending=False)
+
+
+def _test_reduced_sets(df_features, feature_cols, importance_df):
+    """Test accuracy with top-N features."""
+    print("\n  [4/5] Reduced Feature Sets (top-N by importance)")
+    ranked = importance_df['feature'].tolist()
+
+    results = []
+    test_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50]
+    test_sizes = [n for n in test_sizes if n < len(feature_cols)]
+    test_sizes.append(len(feature_cols))
+
+    for n_feat in test_sizes:
+        top_n = ranked[:n_feat]
+        acc, _ = _quick_accuracy(df_features, top_n)
+        results.append({'n_features': n_feat, 'accuracy': acc})
+        bar = '#' * int(acc * 0.5)
+        print(f"    Top {n_feat:3d} features: {acc:5.1f}% {bar}")
+
+    df_results = pd.DataFrame(results)
+    best_row = df_results.loc[df_results['accuracy'].idxmax()]
+    print(f"\n    OPTIMAL: Top {int(best_row['n_features'])} -> {best_row['accuracy']:.1f}%")
+    return df_results
+
+
+def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
+    """Score features across all tests, return optimal list."""
+    print("\n  [5/5] Scoring & Selection")
+    scores = {f: 0 for f in feature_cols}
+
+    # LGBM importance
+    for _, row in importance_df.iterrows():
+        f = row['feature']
+        if row['pct'] >= 5:
+            scores[f] += 3
+        elif row['pct'] >= 2:
+            scores[f] += 2
+        elif row['pct'] >= 1:
+            scores[f] += 1
+        else:
+            scores[f] -= 1
+
+    # Permutation
+    if permutation_df is not None:
+        for _, row in permutation_df.iterrows():
+            f = row['feature']
+            if row['acc_drop'] > 0.5:
+                scores[f] += 2
+            elif row['acc_drop'] > 0:
+                scores[f] += 1
+            else:
+                scores[f] -= 1
+
+    # Ablation
+    if ablation_df is not None:
+        for _, row in ablation_df.iterrows():
+            f = row['dropped']
+            if row['change'] > 0.3:
+                scores[f] -= 3
+            elif row['change'] > 0:
+                scores[f] -= 1
+
+    score_df = pd.DataFrame([
+        {'feature': f, 'score': s, 'category': _classify_feature(f)}
+        for f, s in scores.items()
+    ]).sort_values('score', ascending=False)
+
+    keep = score_df[score_df['score'] >= 1]['feature'].tolist()
+    maybe = score_df[(score_df['score'] >= -1) & (score_df['score'] < 1)]['feature'].tolist()
+    drop = score_df[score_df['score'] < -1]['feature'].tolist()
+
+    print(f"    KEEP:  {len(keep)} features (score >= 1)")
+    print(f"    MAYBE: {len(maybe)} features (score -1 to 0)")
+    print(f"    DROP:  {len(drop)} features (score < -1)")
+
+    # Print keep list
+    for f in keep:
+        ftype = _classify_feature(f)
+        print(f"      + {f} (score: {scores[f]}) [{ftype}]")
+
+    return score_df, keep, maybe, drop
+
+
+def run_feature_analysis(asset_name, df_features, all_feature_cols):
+    """
+    Run full 5-test feature analysis on one asset.
+    Returns the optimal feature list.
+    """
+    print(f"\n{'='*60}")
+    print(f"  FEATURE ANALYSIS: {asset_name} ({len(all_feature_cols)} features)")
+    print(f"{'='*60}")
+
+    t0 = time.time()
+
+    # 1. LGBM importance
+    importance_df = _test_lgbm_importance(df_features, all_feature_cols)
+
+    # 2. Permutation importance
+    permutation_df = _test_permutation_importance(df_features, all_feature_cols)
+
+    # 3. Ablation
+    ablation_df = _test_ablation(df_features, all_feature_cols)
+
+    # 4. Reduced sets
+    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df)
+
+    # 5. Score and select
+    score_df, keep, maybe, drop = _score_features(
+        all_feature_cols, importance_df, ablation_df, permutation_df)
+
+    elapsed = time.time() - t0
+    print(f"\n  Feature analysis completed in {elapsed/60:.1f} minutes")
+
+    # Determine optimal set: KEEP features + test with/without MAYBE
+    optimal_features = list(keep)
+
+    # Quick test: KEEP only vs KEEP + MAYBE
+    if maybe:
+        acc_keep, _ = _quick_accuracy(df_features, keep)
+        acc_all, _ = _quick_accuracy(df_features, keep + maybe)
+        print(f"\n  KEEP only ({len(keep)} features): {acc_keep:.1f}%")
+        print(f"  KEEP + MAYBE ({len(keep) + len(maybe)} features): {acc_all:.1f}%")
+        if acc_all > acc_keep + 0.5:
+            optimal_features = keep + maybe
+            print(f"  >>> Using KEEP + MAYBE ({len(optimal_features)} features)")
+        else:
+            print(f"  >>> Using KEEP only ({len(optimal_features)} features)")
+    else:
+        print(f"\n  >>> Using KEEP ({len(optimal_features)} features)")
+
+    # Also check best reduced set from test 4
+    if reduced_df is not None and len(reduced_df) > 0:
+        best_n_row = reduced_df.loc[reduced_df['accuracy'].idxmax()]
+        best_n = int(best_n_row['n_features'])
+        best_n_acc = best_n_row['accuracy']
+        ranked = importance_df['feature'].tolist()
+        top_n_features = ranked[:best_n]
+
+        opt_acc, _ = _quick_accuracy(df_features, optimal_features)
+        print(f"  Scored optimal ({len(optimal_features)}): {opt_acc:.1f}%")
+        print(f"  Top-{best_n} by LGBM: {best_n_acc:.1f}%")
+
+        if best_n_acc > opt_acc + 1.0:
+            optimal_features = top_n_features
+            print(f"  >>> Switching to Top-{best_n} by LGBM (better by {best_n_acc - opt_acc:.1f}%)")
+
+    # Save analysis results
+    score_df.to_csv(f'crypto_feature_analysis_{asset_name.lower()}_auto.csv', index=False)
+
+    print(f"\n  OPTIMAL FEATURES ({len(optimal_features)}):")
+    for f in optimal_features:
+        print(f"    {f} [{_classify_feature(f)}]")
+
+    return optimal_features
 
 
 # ============================================================
 # SIGNAL GENERATION
 # ============================================================
-def generate_signals(asset_name, model_names, window_size, replay_days=REPLAY_DAYS):
-    """
-    Generate signals for the last `replay_days` using walk-forward training.
-    Returns list of signal dicts suitable for chart data.
-    """
-    print(f"\n  Generating signals for {asset_name} "
-          f"(models={'+'.join(model_names)}, window={window_size}d, "
-          f"replay={replay_days}d)...")
+def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS,
+                     feature_override=None, horizon=PREDICTION_HORIZON):
+    set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
+    print(f"\n  Generating {horizon}h-ahead signals for {asset_name} "
+          f"(models={'+'.join(model_names)}, window={window_size}h, "
+          f"replay={replay_hours}h, {set_label})...")
 
     df_raw = load_data(asset_name)
     if df_raw is None:
         return []
 
-    df_daily = hourly_to_daily(df_raw)
-
-    # Feature columns defined here for scaler DataFrame wrapping
-    feature_cols = [
-        'logret_1d', 'logret_2d', 'logret_3d', 'logret_5d', 'logret_7d',
-        'logret_10d', 'logret_14d', 'logret_20d', 'logret_30d',
-        'spread_log10_log2', 'spread_log20_log2', 'spread_log30_log2',
-        'spread_log30_log10', 'spread_log7_log3', 'spread_log250_log10',
-        'price_to_sma20', 'price_to_sma50', 'price_to_sma200', 'sma20_to_sma50',
-        'rsi_14', 'stoch_k', 'bb_position', 'zscore_30d', 'atr_pct',
-        'volatility_10d', 'volatility_30d', 'vol_ratio_10_30',
-        'volume_ratio', 'volume_change',
-        'dow_sin', 'dow_cos',
-    ]
-
-    df_features, feature_cols = build_features(df_daily)
-
+    df_features, feature_cols = _build_features(df_raw, asset_name, feature_override=feature_override, horizon=horizon)
     n = len(df_features)
-    start_idx = max(window_size + 50, n - replay_days)
+    start_idx = max(window_size + 50, n - replay_hours)
 
     signals = []
+    count = 0
 
     for i in range(start_idx, n):
         row = df_features.iloc[i]
-        date_str = row['date'].strftime('%Y-%m-%d')
+        dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
-        # Training data
         train_start = max(0, i - window_size)
         train = df_features.iloc[train_start:i]
         X_train = train[feature_cols]
         y_train = train['label'].values
-
         X_test = df_features.iloc[i:i+1][feature_cols]
 
         if len(np.unique(y_train)) < 2:
@@ -470,15 +925,12 @@ def generate_signals(asset_name, model_names, window_size, replay_days=REPLAY_DA
         if X_train.isnull().any().any() or X_test.isnull().any().any():
             continue
 
-        # Scale (keep as DataFrame with feature names)
         scaler = StandardScaler()
         X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols, index=X_train.index)
         X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=feature_cols, index=X_test.index)
 
-        # Get predictions from each model
         votes = []
         probas = []
-        model_details = {}
 
         for model_name in model_names:
             try:
@@ -487,18 +939,13 @@ def generate_signals(asset_name, model_names, window_size, replay_days=REPLAY_DA
                 pred = model.predict(X_test_s)[0]
                 proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
-                probas.append(proba[1])  # probability of class 1 (BUY)
-                model_details[model_name] = {
-                    'prediction': int(pred),
-                    'probability': float(proba[1])
-                }
+                probas.append(proba[1])
             except Exception:
                 continue
 
         if not votes:
             continue
 
-        # Ensemble: majority vote
         buy_votes = sum(votes)
         total_votes = len(votes)
         buy_ratio = buy_votes / total_votes
@@ -510,104 +957,255 @@ def generate_signals(asset_name, model_names, window_size, replay_days=REPLAY_DA
         else:
             signal = 'HOLD'
 
-        # Confidence: average probability of the winning side
         avg_proba = np.mean(probas)
         if signal == 'SELL':
             confidence = (1 - avg_proba) * 100
         else:
             confidence = avg_proba * 100
 
-        # Check actual outcome (if we have future data)
         actual = None
-        if i + PREDICTION_HORIZON < n:
-            future_close = df_features.iloc[i + PREDICTION_HORIZON]['close']
+        if i + horizon < n:
+            future_close = df_features.iloc[i + horizon]['close']
             actual_return = (future_close / row['close'] - 1) * 100
             actual = 'UP' if actual_return > 0 else 'DOWN'
 
         signals.append({
-            'date': date_str,
+            'datetime': dt_str,
             'close': float(row['close']),
             'signal': signal,
             'confidence': round(float(confidence), 1),
             'buy_votes': int(buy_votes),
             'total_votes': int(total_votes),
-            'rsi': round(float(row['rsi_14']), 1),
-            'bb_position': round(float(row['bb_position']), 3),
-            'volume_ratio': round(float(row['volume_ratio']), 2),
-            'daily_change': round(float(row['logret_1d'] * 100), 2),
-            'spread_log20_log2': round(float(row['spread_log20_log2'] * 100), 2),
-            'spread_log250_log10': round(float(row.get('spread_log250_log10', 0) * 100), 2),
+            'rsi': round(float(row.get('rsi_14h', 0)), 1),
+            'bb_position': round(float(row.get('bb_position_20h', 0)), 3),
+            'volume_ratio': round(float(row.get('volume_ratio_h', 1)), 2),
+            'hourly_change': round(float(row.get('logret_1h', 0) * 100), 3),
+            'intraday_range': round(float(row.get('intraday_range', 0) * 100), 3),
+            'spread_120h_8h': round(float(row.get('spread_120h_8h', 0) * 100), 2),
             'actual': actual,
         })
 
-        if (i - start_idx) % 10 == 0:
-            print(f"    {date_str}: {signal} ({confidence:.0f}%) | "
-                  f"price=${row['close']:,.2f}")
+        count += 1
+        if count % 50 == 0:
+            print(f"    [{count}] {dt_str}: {signal} ({confidence:.0f}%) "
+                  f"| price=${row['close']:,.2f}")
 
-    print(f"  Generated {len(signals)} signals for {asset_name}")
+    print(f"  Generated {len(signals)} hourly signals for {asset_name}")
     return signals
 
 
 # ============================================================
-# PORTFOLIO SIMULATION ($1000 starting)
+# PORTFOLIO SIMULATION
 # ============================================================
 def simulate_portfolio(signals, initial=1000):
-    """
-    Simulate a $1000 portfolio based on signals.
-    BUY = invest, SELL = go to cash, HOLD = keep current position.
-    Returns signals list with portfolio_value and hold_value added.
-    """
     if not signals:
         return signals
-
-    portfolio = initial
-    hold_value = initial
-    position = 'cash'  # 'invested' or 'cash'
-    entry_price = None
+    cash = initial
+    btc_held = 0
+    position = 'cash'
     start_price = signals[0]['close']
 
     for sig in signals:
         price = sig['close']
-
-        # Buy & Hold benchmark
         hold_value = initial * (price / start_price)
 
-        # ML strategy
         if sig['signal'] == 'BUY' and position == 'cash':
+            # BUY: spend cash, pay fee, get BTC
+            btc_held = cash * (1 - TRADING_FEE) / price
+            cash = 0
             position = 'invested'
-            entry_price = price
         elif sig['signal'] == 'SELL' and position == 'invested':
-            # Realize gains/losses
-            pnl_ratio = price / entry_price
-            portfolio *= pnl_ratio
+            # SELL: sell BTC, pay fee, get cash
+            cash = btc_held * price * (1 - TRADING_FEE)
+            btc_held = 0
             position = 'cash'
-            entry_price = None
 
-        # Current portfolio value
-        if position == 'invested' and entry_price:
-            current_value = portfolio * (price / entry_price)
+        if position == 'invested':
+            current_value = btc_held * price
         else:
-            current_value = portfolio
+            current_value = cash
 
         sig['portfolio_value'] = round(current_value, 2)
         sig['hold_value'] = round(hold_value, 2)
-
     return signals
 
 
 # ============================================================
-# DIAGNOSTIC (CPU parallel, GPU sequential)
+# BACKTEST CHART (matplotlib)
 # ============================================================
-DIAG_WINDOWS = [30, 50, 70, 90, 100]
+def generate_backtest_chart(asset_name, signals, model_info=None):
+    """
+    Generate a multi-panel PNG chart for the asset backtest.
+    Saves to {asset}_backtest.png and opens it.
 
-def _eval_one_config_daily(features_np, labels_np, combo, window, n, step, model_factories):
-    """Worker: evaluate one (window, combo) config using numpy arrays."""
-    min_start = window + 50
-    if n < min_start + 30:
+    Panel 1: Price + BUY/SELL markers
+    Panel 2: Portfolio ($1000) vs Buy & Hold
+    Panel 3: Stats summary bar
+    """
+    if not signals or len(signals) < 5:
+        print(f"  Not enough signals to chart for {asset_name}")
         return None
 
+    # Prepare data
+    dates = pd.to_datetime([s['datetime'] for s in signals])
+    prices = [s['close'] for s in signals]
+    portfolio = [s.get('portfolio_value', 1000) for s in signals]
+    hold = [s.get('hold_value', 1000) for s in signals]
+    sigs = [s['signal'] for s in signals]
+
+    buy_dates  = [d for d, s in zip(dates, sigs) if s == 'BUY']
+    buy_prices = [p for p, s in zip(prices, sigs) if s == 'BUY']
+    sell_dates  = [d for d, s in zip(dates, sigs) if s == 'SELL']
+    sell_prices = [p for p, s in zip(prices, sigs) if s == 'SELL']
+
+    # Stats
+    n_buy  = sum(1 for s in sigs if s == 'BUY')
+    n_sell = sum(1 for s in sigs if s == 'SELL')
+    n_hold = sum(1 for s in sigs if s == 'HOLD')
+    total  = len(sigs)
+
+    # Accuracy
+    correct = sum(1 for s in signals if s.get('actual') is not None and (
+        (s['signal'] == 'BUY' and s['actual'] == 'UP') or
+        (s['signal'] == 'SELL' and s['actual'] == 'DOWN')
+    ))
+    with_actual = sum(1 for s in signals if s.get('actual') is not None and s['signal'] in ('BUY', 'SELL'))
+    accuracy = (correct / with_actual * 100) if with_actual > 0 else 0
+
+    strategy_return = (portfolio[-1] / portfolio[0] - 1) * 100
+    hold_return = (hold[-1] / hold[0] - 1) * 100
+    alpha = strategy_return - hold_return
+
+    latest = signals[-1]
+
+    # Model info string
+    if model_info:
+        model_str = f"{model_info['best_combo']} | w={model_info['best_window']}h | {model_info['accuracy']:.1f}% diag"
+    else:
+        model_str = ""
+
+    # --- PLOT ---
+    fig = plt.figure(figsize=(16, 10), facecolor='#0b1120')
+    fig.subplots_adjust(hspace=0.08, top=0.88, bottom=0.06, left=0.07, right=0.97)
+
+    # Colors
+    c_bg     = '#0b1120'
+    c_card   = '#111b2e'
+    c_green  = '#06d6a0'
+    c_red    = '#ef476f'
+    c_blue   = '#118ab2'
+    c_gold   = '#ffd166'
+    c_text   = '#e0e6f0'
+    c_muted  = '#6b7a94'
+    c_grid   = '#1e2d4a'
+
+    # TITLE BAR
+    fig.text(0.07, 0.95, f'{asset_name}', fontsize=28, fontweight='bold', color=c_text,
+             fontfamily='monospace')
+    fig.text(0.07, 0.91, f'V2 Backtest  |  {_get_set_label()}  |  {model_str}',
+             fontsize=11, color=c_muted, fontfamily='monospace')
+
+    # Latest signal badge
+    sig_color = c_green if latest['signal'] == 'BUY' else c_red if latest['signal'] == 'SELL' else c_gold
+    fig.text(0.78, 0.945, f"LATEST: {latest['signal']}  {latest['confidence']:.0f}%",
+             fontsize=16, fontweight='bold', color=sig_color, fontfamily='monospace',
+             bbox=dict(boxstyle='round,pad=0.4', facecolor=sig_color + '20', edgecolor=sig_color, linewidth=1.5))
+    fig.text(0.78, 0.91, f"${latest['close']:,.2f}  |  RSI {latest['rsi']}  |  {latest['datetime']}",
+             fontsize=9, color=c_muted, fontfamily='monospace')
+
+    # Panel 1: Price + signals
+    ax1 = fig.add_subplot(3, 1, (1, 2))
+    ax1.set_facecolor(c_bg)
+    ax1.plot(dates, prices, color=c_blue, linewidth=1.2, alpha=0.9, label='Price')
+    ax1.scatter(buy_dates, buy_prices, color=c_green, marker='^', s=60, zorder=5,
+                label=f'BUY ({n_buy})', alpha=0.85, edgecolors='white', linewidth=0.3)
+    ax1.scatter(sell_dates, sell_prices, color=c_red, marker='v', s=60, zorder=5,
+                label=f'SELL ({n_sell})', alpha=0.85, edgecolors='white', linewidth=0.3)
+    ax1.set_ylabel('Price ($)', color=c_muted, fontsize=10)
+    ax1.tick_params(colors=c_muted, labelsize=9)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    ax1.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(dates) // (24 * 8))))
+    ax1.grid(True, alpha=0.15, color=c_grid)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.spines['left'].set_color(c_grid)
+    ax1.spines['bottom'].set_color(c_grid)
+    ax1.legend(loc='upper left', fontsize=9, facecolor=c_card, edgecolor=c_grid,
+               labelcolor=c_text, framealpha=0.9)
+    ax1.set_xticklabels([])
+
+    # Panel 2: Portfolio vs Hold
+    ax2 = fig.add_subplot(3, 1, 3)
+    ax2.set_facecolor(c_bg)
+    ax2.plot(dates, portfolio, color=c_green, linewidth=2, label=f'Strategy (${portfolio[-1]:,.0f})')
+    ax2.plot(dates, hold, color=c_muted, linewidth=1.5, linestyle='--', label=f'Buy & Hold (${hold[-1]:,.0f})')
+    ax2.axhline(y=1000, color=c_grid, linewidth=0.8, linestyle=':')
+    ax2.fill_between(dates, portfolio, hold, where=[p > h for p, h in zip(portfolio, hold)],
+                     alpha=0.08, color=c_green)
+    ax2.fill_between(dates, portfolio, hold, where=[p <= h for p, h in zip(portfolio, hold)],
+                     alpha=0.08, color=c_red)
+    ax2.set_ylabel('Portfolio ($)', color=c_muted, fontsize=10)
+    ax2.set_xlabel('', fontsize=10, color=c_muted)
+    ax2.tick_params(colors=c_muted, labelsize=9)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %d %H:%M'))
+    ax2.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(dates) // (24 * 8))))
+    ax2.grid(True, alpha=0.15, color=c_grid)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.spines['left'].set_color(c_grid)
+    ax2.spines['bottom'].set_color(c_grid)
+    ax2.legend(loc='upper left', fontsize=9, facecolor=c_card, edgecolor=c_grid,
+               labelcolor=c_text, framealpha=0.9)
+
+    # Stats text in top-right of panel 2
+    stats_text = (
+        f"Strategy: {'+' if strategy_return > 0 else ''}{strategy_return:.1f}%\n"
+        f"Buy&Hold: {'+' if hold_return > 0 else ''}{hold_return:.1f}%\n"
+        f"Alpha: {'+' if alpha > 0 else ''}{alpha:.1f}%\n"
+        f"Accuracy: {accuracy:.1f}% ({correct}/{with_actual})\n"
+        f"Signals: {n_buy}B / {n_sell}S / {n_hold}H"
+    )
+    ax2.text(0.98, 0.95, stats_text, transform=ax2.transAxes, fontsize=9,
+             fontfamily='monospace', color=c_text, verticalalignment='top',
+             horizontalalignment='right',
+             bbox=dict(boxstyle='round,pad=0.5', facecolor=c_card, edgecolor=c_grid, alpha=0.9))
+
+    # Save
+    filename = f'{asset_name}_backtest.png'
+    fig.savefig(filename, dpi=150, facecolor=c_bg, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Chart saved: {filename}")
+
+    # Try to open (Windows)
+    if sys.platform == 'win32':
+        try:
+            os.startfile(filename)
+        except Exception:
+            pass
+
+    return filename
+
+
+# ============================================================
+# DIAGNOSTIC (CPU parallel)
+# ============================================================
+def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4):
+    min_start = window + 50
+    if n < min_start + 50:
+        return None
     correct = 0
     total = 0
+
+    # Portfolio simulation: all-in when BUY, all-out when SELL
+    portfolio = 1.0       # normalized starting capital
+    in_position = False
+    entry_price = 0
+    trades = 0
+    wins = 0
+    peak = 1.0
+    max_dd = 0.0
+    total_gain = 0.0      # sum of winning trade returns
+    total_loss = 0.0      # sum of losing trade returns
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
@@ -615,18 +1213,15 @@ def _eval_one_config_daily(features_np, labels_np, combo, window, n, step, model
         y_train = labels_np[train_start:i]
         X_test  = features_np[i:i+1]
         y_true  = labels_np[i]
-
         if len(np.unique(y_train)) < 2:
             continue
         if np.isnan(X_train).any() or np.isnan(X_test).any():
             continue
-
         mean = X_train.mean(axis=0)
         std  = X_train.std(axis=0)
         std[std == 0] = 1.0
         X_train_s = (X_train - mean) / std
         X_test_s  = (X_test - mean) / std
-
         votes = []
         for model_name in combo:
             try:
@@ -636,26 +1231,75 @@ def _eval_one_config_daily(features_np, labels_np, combo, window, n, step, model
                 votes.append(pred)
             except Exception:
                 continue
-
         if not votes:
             continue
-
         ensemble_pred = 1 if sum(votes) > len(votes) / 2 else 0
         if ensemble_pred == y_true:
             correct += 1
         total += 1
 
+        # Portfolio logic
+        price = closes_np[i]
+        if ensemble_pred == 1 and not in_position:
+            # BUY — pay fee
+            in_position = True
+            entry_price = price * (1 + TRADING_FEE)  # effective entry = price + fee
+        elif ensemble_pred == 0 and in_position:
+            # SELL — pay fee
+            sell_price = price * (1 - TRADING_FEE)  # effective exit = price - fee
+            trade_return = (sell_price - entry_price) / entry_price
+            portfolio *= (1 + trade_return)
+            trades += 1
+            if trade_return > 0:
+                wins += 1
+                total_gain += trade_return
+            else:
+                total_loss += trade_return
+            in_position = False
+
+        # Max drawdown tracking
+        current_val = portfolio * (price / entry_price) if in_position else portfolio
+        if current_val > peak:
+            peak = current_val
+        dd = (peak - current_val) / peak
+        if dd > max_dd:
+            max_dd = dd
+
+    # Close open position at end (with fee)
+    if in_position and total > 0:
+        last_price = closes_np[n - 1]
+        sell_price = last_price * (1 - TRADING_FEE)
+        trade_return = (sell_price - entry_price) / entry_price
+        portfolio *= (1 + trade_return)
+        trades += 1
+        if trade_return > 0:
+            wins += 1
+
     if total == 0:
         return None
-    return ('+'.join(combo), window, correct / total, total)
+
+    accuracy = correct / total
+    cum_return = (portfolio - 1.0) * 100  # percentage return
+    win_rate = (wins / trades * 100) if trades > 0 else 0
+    avg_gain = (total_gain / wins * 100) if wins > 0 else 0
+    avg_loss = (total_loss / (trades - wins) * 100) if (trades - wins) > 0 else 0
+
+    # Combined score: accuracy × (1 + return/100)
+    # This rewards configs that are both accurate AND profitable
+    # A 75% accurate model with +20% return scores: 0.75 × 1.20 = 0.90
+    # A 76% accurate model with -5% return scores:  0.76 × 0.95 = 0.72
+    profit_factor = 1 + cum_return / 100
+    combined_score = accuracy * max(profit_factor, 0.01)  # floor at 0.01 to avoid negative scores
+
+    return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
+            trades, avg_gain, avg_loss, max_dd * 100, combined_score)
 
 
-# Diagnostic models: ALL on CPU for parallel execution (GPU overhead kills small data)
 DIAG_MODELS = get_diagnostic_models()
 
 
 def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
-    """Run diagnostic: ALL configs in parallel on CPU."""
+    """Run diagnostic and return best config + all results."""
     combos = []
     model_names = list(ALL_MODELS.keys())
     for r in range(1, len(model_names) + 1):
@@ -667,82 +1311,139 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
         for combo in combos:
             all_configs.append((combo, window))
 
-    print(f"  {len(all_configs)} configs, ALL parallel ({N_JOBS_PARALLEL} workers, step={STEP})...")
+    print(f"  {len(all_configs)} configs, ALL parallel ({N_JOBS_PARALLEL} workers, step={DIAG_STEP})...")
 
     n = len(df_features)
     features_np = df_features[feature_cols].values.astype(np.float64)
     labels_np = df_features['label'].values.astype(np.int32)
+    closes_np = df_features['close'].values.astype(np.float64)
 
     all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=5)(
-        delayed(_eval_one_config_daily)(
-            features_np, labels_np, combo, window, n, STEP, DIAG_MODELS
+        delayed(_eval_one_config)(
+            features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
         )
         for combo, window in all_configs
     )
 
-    # Find best
-    best_acc = 0
+    best_score = 0
     best_config = None
+    sorted_results = []
 
     for result in all_results:
         if result is None:
             continue
-        combo_name, window, acc, n_total = result
-        if acc > best_acc:
-            best_acc = acc
+        combo_name, window, acc, n_total, cum_ret, win_rate, trades, avg_gain, avg_loss, max_dd, combined_score = result
+        sorted_results.append(result)
+        if combined_score > best_score:
+            best_score = combined_score
             best_config = {
                 'coin': asset_name,
                 'best_window': window,
                 'best_combo': combo_name,
                 'accuracy': round(acc * 100, 2),
                 'models': combo_name,
+                'return_pct': round(cum_ret, 2),
+                'win_rate': round(win_rate, 1),
+                'trades': trades,
+                'combined_score': round(combined_score, 4),
             }
-        print(f"    w={window:3d} | {combo_name:20s} | acc={acc*100:.1f}% (n={n_total})"
-              f"{'  <-- BEST' if acc == best_acc else ''}")
+        print(f"    w={window:4d}h | {combo_name:20s} | acc={acc*100:5.1f}% "
+              f"ret={cum_ret:+6.1f}% win={win_rate:4.0f}% score={combined_score:.3f} (n={n_total})"
+              f"{'  <-- BEST' if combined_score == best_score else ''}")
+
+    # ========================================================
+    # CLEAR BEST MODEL RECOMMENDATION
+    # ========================================================
+    if best_config:
+        # Top 5 by combined score
+        sorted_results.sort(key=lambda x: -x[10])  # index 10 = combined_score
+        top5 = sorted_results[:5]
+
+        print()
+        print("  " + "=" * 76)
+        print(f"  |{'':4s}BEST MODEL for {asset_name:6s}{'':48s}|")
+        print("  " + "=" * 76)
+        print(f"  |{'':4s}Models:   {best_config['best_combo']:60s}|")
+        w_str = f"{best_config['best_window']}h"
+        print(f"  |{'':4s}Window:   {w_str:60s}|")
+        acc_str = f"{best_config['accuracy']:.1f}%"
+        print(f"  |{'':4s}Accuracy: {acc_str:60s}|")
+        ret_str = f"{best_config['return_pct']:+.1f}% (after 0.09% fees)"
+        print(f"  |{'':4s}Return:   {ret_str:60s}|")
+        wr_str = f"{best_config['win_rate']:.0f}% ({best_config['trades']} trades)"
+        print(f"  |{'':4s}Win Rate: {wr_str:60s}|")
+        sc_str = f"{best_config['combined_score']:.4f}"
+        print(f"  |{'':4s}Score:    {sc_str:60s}|")
+        print("  " + "-" * 76)
+        print(f"  |{'':4s}{'Rank':5s}{'Combo':22s}{'Window':8s}{'Acc':7s}{'Return':9s}"
+              f"{'Win%':6s}{'Trades':7s}{'Score':8s}  |")
+        print("  " + "-" * 76)
+        for rank, result in enumerate(top5, 1):
+            combo_name, window, acc, n_total, cum_ret, win_rate, trades, avg_gain, avg_loss, max_dd, combined_score = result
+            marker = " <--" if rank == 1 else ""
+            print(f"  |{'':4s}{rank:<5d}{combo_name:22s}{window:5d}h  {acc*100:5.1f}%"
+                  f"  {cum_ret:+6.1f}%  {win_rate:4.0f}%  {trades:5d}"
+                  f"  {combined_score:.3f}{marker:>4s} |")
+        print("  " + "=" * 76)
+        print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']}h")
+        print(f"  >>> Score = accuracy × profit_factor (rewards being RIGHT and PROFITABLE)")
+        print()
 
     return best_config
 
 
-def run_full_diagnostic(assets_list):
-    """Run diagnostic across all assets, save best_models.csv."""
+def run_full_diagnostic(assets_list, diag_years=2, feature_override=None):
+    set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
     print("\n" + "=" * 60)
-    print("  RUNNING MODEL DIAGNOSTIC")
+    print(f"  RUNNING HOURLY DIAGNOSTIC (last {diag_years} year{'s' if diag_years > 1 else ''})")
+    print(f"  Features: {set_label}")
     print("=" * 60)
 
+    diag_hours = diag_years * 365 * 24
     best_models = []
 
     for asset_name in assets_list:
         print(f"\n--- {asset_name} ---")
-
         df_raw = load_data(asset_name)
         if df_raw is None:
             continue
 
-        df_daily = hourly_to_daily(df_raw)
-        df_features, feature_cols = build_features(df_daily)
+        df_features, feature_cols = _build_features(df_raw, asset_name, feature_override=feature_override)
 
-        if len(df_features) < 200:
-            print(f"  Not enough data ({len(df_features)} rows). Skipping.")
+        total_rows = len(df_features)
+        if total_rows > diag_hours:
+            df_features = df_features.tail(diag_hours).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_features):,} rows (last {diag_years}y)")
+
+        if len(df_features) < 500:
+            print(f"  Not enough data ({len(df_features)} rows). Need 500+. Skipping.")
             continue
 
-        print(f"  {len(df_features):,} daily rows, {len(feature_cols)} features")
+        print(f"  {len(df_features):,} hourly rows, {len(feature_cols)} features")
 
         best_config = run_diagnostic_for_asset(asset_name, df_features, feature_cols)
         if best_config:
             best_models.append(best_config)
-            print(f"\n  BEST: window={best_config['best_window']}d, "
-                  f"combo={best_config['best_combo']}, "
-                  f"acc={best_config['accuracy']:.1f}%")
 
     if best_models:
+        set_tag = 'custom'
+        if feature_override is None:
+            set_tag = f'set_{ACTIVE_FEATURE_SET.lower()}'
+        csv_name = f'crypto_hourly_best_models_{set_tag}.csv'
+
         df_best = pd.DataFrame(best_models)
-        df_best.to_csv('best_models.csv', index=False)
+        df_best.to_csv(csv_name, index=False)
+        df_best.to_csv('crypto_hourly_best_models.csv', index=False)
+
         print(f"\n{'='*60}")
-        print("  RESULTS (saved to best_models.csv)")
+        print(f"  DIAGNOSTIC COMPLETE -- RECOMMENDED MODELS")
         print(f"{'='*60}")
         for row in best_models:
-            print(f"  {row['coin']:6s} | window={row['best_window']:3d}d | "
-                  f"{row['best_combo']:20s} | {row['accuracy']:.1f}%")
+            print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}%")
+        print(f"{'='*60}")
+        print(f"  Saved to {csv_name}")
+    else:
+        print("\nNo diagnostic results.")
 
     return best_models
 
@@ -750,52 +1451,146 @@ def run_full_diagnostic(assets_list):
 # ============================================================
 # CHART DATA EXPORT
 # ============================================================
-def export_chart_data(all_signals, output_file='chart_data.json'):
-    """
-    Export all signal data as JSON for chart generation.
-    Structure: { "generated": "...", "assets": { "BTC": [...], ... } }
-    """
+def export_chart_data(all_signals, output_file='crypto_hourly_chart_data.json'):
     chart_data = {
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'type': 'hourly',
+        'prediction_horizon': f'{PREDICTION_HORIZON}h',
+        'feature_set': ACTIVE_FEATURE_SET,
         'assets': {}
     }
-
     for asset_name, signals in all_signals.items():
         chart_data['assets'][asset_name] = signals
-
     with open(output_file, 'w') as f:
         json.dump(chart_data, f, indent=2)
-
     print(f"\nChart data saved to {output_file}")
-    print(f"  Assets: {', '.join(all_signals.keys())}")
-    total_signals = sum(len(s) for s in all_signals.values())
-    print(f"  Total signals: {total_signals}")
-
     return output_file
 
 
 # ============================================================
-# MODE A: Full Review
+# MODE A: Full Review (auto-tests both feature sets per asset)
 # ============================================================
-def run_mode_a(assets_list):
-    """Full review: update data -> diagnostic -> best models -> signals -> chart."""
+def run_mode_a(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
     print("\n" + "=" * 60)
-    print("  MODE A: FULL REVIEW")
+    print(f"  MODE A: FULL REVIEW — {horizon}h HORIZON")
+    print(f"  Testing Set A ({len(FEATURE_SET_A)} features) vs Set B ({len(FEATURE_SET_B)} features)")
     print("=" * 60)
 
-    # Step 1: Update data
     update_all_data(assets_list)
+    diag_hours = diag_years * 365 * 24
+    best_models = []
 
-    # Step 2: Run diagnostic
-    best_models = run_full_diagnostic(assets_list)
+    for asset_name in assets_list:
+        print(f"\n{'='*60}")
+        print(f"  EVALUATING: {asset_name} ({horizon}h horizon)")
+        print(f"{'='*60}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+
+        total_rows = len(df_full)
+        if total_rows > diag_hours:
+            df_full = df_full.tail(diag_hours).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+
+        if len(df_full) < 500:
+            print(f"  Not enough data ({len(df_full)} rows). Need 500+. Skipping.")
+            continue
+
+        # Validate both feature sets
+        set_a_valid = [f for f in FEATURE_SET_A if f in all_cols]
+        set_b_valid = [f for f in FEATURE_SET_B if f in all_cols]
+
+        missing_a = [f for f in FEATURE_SET_A if f not in all_cols]
+        missing_b = [f for f in FEATURE_SET_B if f not in all_cols]
+        if missing_a:
+            print(f"  WARNING: Set A missing: {missing_a}")
+        if missing_b:
+            print(f"  WARNING: Set B missing: {missing_b}")
+
+        # Align rows for fair comparison
+        df_a = df_full.dropna(subset=set_a_valid + ['label']).reset_index(drop=True)
+        df_b = df_full.dropna(subset=set_b_valid + ['label']).reset_index(drop=True)
+        min_rows = min(len(df_a), len(df_b))
+        df_a = df_a.tail(min_rows).reset_index(drop=True)
+        df_b = df_b.tail(min_rows).reset_index(drop=True)
+        print(f"  Aligned to {min_rows:,} rows | A: {len(set_a_valid)} features | B: {len(set_b_valid)} features")
+
+        # Test Set A
+        print(f"\n  --- SET A: {len(set_a_valid)} features (LGBM importance) ---")
+        t0 = time.time()
+        result_a = run_diagnostic_for_asset(asset_name, df_a, set_a_valid)
+        time_a = time.time() - t0
+
+        # Test Set B
+        print(f"\n  --- SET B: {len(set_b_valid)} features (consensus) ---")
+        t0 = time.time()
+        result_b = run_diagnostic_for_asset(asset_name, df_b, set_b_valid)
+        time_b = time.time() - t0
+
+        # Pick winner by combined score (accuracy × profit)
+        score_a = result_a.get('combined_score', 0) if result_a else 0
+        score_b = result_b.get('combined_score', 0) if result_b else 0
+        acc_a = result_a['accuracy'] if result_a else 0
+        acc_b = result_b['accuracy'] if result_b else 0
+        ret_a = result_a.get('return_pct', 0) if result_a else 0
+        ret_b = result_b.get('return_pct', 0) if result_b else 0
+
+        print(f"\n  {'='*50}")
+        print(f"  {asset_name} FEATURE SET RESULT:")
+        if result_a:
+            print(f"    Set A: {acc_a:.1f}% acc | {ret_a:+.1f}% ret | score={score_a:.3f} | {result_a['best_combo']} | w={result_a['best_window']}h | {time_a:.0f}s")
+        if result_b:
+            print(f"    Set B: {acc_b:.1f}% acc | {ret_b:+.1f}% ret | score={score_b:.3f} | {result_b['best_combo']} | w={result_b['best_window']}h | {time_b:.0f}s")
+
+        if score_a >= score_b:
+            winner = result_a
+            winner_set = 'A'
+        else:
+            winner = result_b
+            winner_set = 'B'
+
+        if winner:
+            winner['feature_set'] = winner_set
+            winner['horizon'] = horizon
+            best_models.append(winner)
+            print(f"    >>> WINNER: Set {winner_set} (score={winner.get('combined_score', 0):.3f}, "
+                  f"acc={winner['accuracy']:.1f}%, ret={winner.get('return_pct', 0):+.1f}%)")
+        print(f"  {'='*50}")
 
     if not best_models:
-        print("No diagnostic results. Aborting.")
+        print("\nNo diagnostic results. Aborting.")
         return
 
-    # Step 3: Generate signals using best models
+    # Save best models (merge with existing horizons)
+    csv_path = 'crypto_hourly_best_models.csv'
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4  # legacy rows are 4h
+        # Remove rows for current (asset, horizon) combos
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+
+    print(f"\n{'='*60}")
+    print(f"  BEST MODELS SAVED — {horizon}h HORIZON ({csv_path})")
+    print(f"{'='*60}")
+    for row in best_models:
+        fs = row.get('feature_set', '?')
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | Set {fs} | {horizon}h")
+    print(f"{'='*60}")
+
+    # Generate signals + charts with winning configs
     print("\n" + "=" * 60)
-    print("  GENERATING SIGNALS (best models)")
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
     print("=" * 60)
 
     all_signals = {}
@@ -803,18 +1598,21 @@ def run_mode_a(assets_list):
         asset_name = config['coin']
         model_names = config['models'].split('+')
         window = config['best_window']
+        fs = config.get('feature_set', 'A')
+        feature_override = list(FEATURE_SET_A) if fs == 'A' else list(FEATURE_SET_B)
 
-        signals = generate_signals(asset_name, model_names, window, REPLAY_DAYS)
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                   feature_override=feature_override, horizon=horizon)
         signals = simulate_portfolio(signals)
         all_signals[asset_name] = signals
 
-        # Print latest signal
+        generate_backtest_chart(asset_name, signals, model_info=config)
+
         if signals:
             latest = signals[-1]
-            print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
+            print(f"\n  >> {asset_name} LATEST ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price=${latest['close']:,.2f}")
 
-    # Step 4: Export chart data
     export_chart_data(all_signals)
 
     print("\n" + "=" * 60)
@@ -823,63 +1621,92 @@ def run_mode_a(assets_list):
 
 
 # ============================================================
-# MODE B: Quick Run (best models from CSV)
+# MODE B: Quick Run (uses saved best models)
 # ============================================================
-def run_mode_b(assets_list):
-    """Quick run: update data -> read best_models.csv -> signals -> chart."""
+def run_mode_b(assets_list, horizon_filter=None):
     print("\n" + "=" * 60)
-    print("  MODE B: QUICK RUN (using best_models.csv)")
+    print("  MODE B: QUICK HOURLY RUN (saved best models)")
     print("=" * 60)
 
-    # Check for best_models.csv
-    if not os.path.exists('best_models.csv'):
-        print("\nERROR: best_models.csv not found!")
-        print("Please run Mode A first to generate best model configurations.")
+    if not os.path.exists('crypto_hourly_best_models.csv'):
+        print("\nERROR: crypto_hourly_best_models.csv not found!")
+        print("Please run Mode A first to find best models.")
         return
 
-    df_best = pd.read_csv('best_models.csv')
-    print("\nLoaded best_models.csv:")
-    for _, row in df_best.iterrows():
-        print(f"  {row['coin']:6s} | window={row['best_window']:3d}d | {row['best_combo']}")
+    df_best = pd.read_csv('crypto_hourly_best_models.csv')
+    if 'horizon' not in df_best.columns:
+        df_best['horizon'] = 4  # legacy = 4h
 
-    # Filter to requested assets
+    # Filter by horizon if specified
+    if horizon_filter is not None:
+        df_best = df_best[df_best['horizon'] == horizon_filter].reset_index(drop=True)
+        if df_best.empty:
+            print(f"\nERROR: No {horizon_filter}h models found in CSV. Run Mode A with {horizon_filter}h first.")
+            return
+
+    print("\nLoaded best models:")
+    for _, row in df_best.iterrows():
+        fs = row.get('feature_set', '?')
+        h = int(row.get('horizon', 4))
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | Set {fs} | {h}h")
+
     available_in_csv = set(df_best['coin'].values)
     assets_to_run = [a for a in assets_list if a in available_in_csv]
     missing = [a for a in assets_list if a not in available_in_csv]
-
     if missing:
-        print(f"\nWARNING: No best model config for: {', '.join(missing)}")
-        print("Run Mode A to include these assets in the diagnostic.")
+        print(f"\nWARNING: No best model for: {', '.join(missing)}")
+        print("Run Mode A first for these assets.")
 
     if not assets_to_run:
         print("No assets to process.")
         return
 
-    # Step 1: Update data
     update_all_data(assets_to_run)
 
-    # Step 2: Generate signals
     print("\n" + "=" * 60)
-    print("  GENERATING SIGNALS")
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
     print("=" * 60)
 
     all_signals = {}
     for asset_name in assets_to_run:
-        row = df_best[df_best['coin'] == asset_name].iloc[0]
-        model_names = row['models'].split('+')
-        window = int(row['best_window'])
+        asset_rows = df_best[df_best['coin'] == asset_name]
+        for _, row in asset_rows.iterrows():
+            model_names = row['models'].split('+')
+            window = int(row['best_window'])
+            fs = row.get('feature_set', 'A')
+            h = int(row.get('horizon', 4))
 
-        signals = generate_signals(asset_name, model_names, window, REPLAY_DAYS)
-        signals = simulate_portfolio(signals)
-        all_signals[asset_name] = signals
+            # Mode D saves optimal features in the CSV
+            if fs in ('D', 'E2', 'E3') and 'optimal_features' in row and pd.notna(row.get('optimal_features', '')):
+                feature_override = row['optimal_features'].split(',')
+            elif fs == 'B':
+                feature_override = list(FEATURE_SET_B)
+            else:
+                feature_override = list(FEATURE_SET_A)
 
-        # Print latest signal
-        if signals:
-            latest = signals[-1]
-            print(f"\n  >> {asset_name} LATEST: {latest['signal']} ({latest['confidence']:.0f}%) "
-                  f"| price=${latest['close']:,.2f}")
+            model_info = {
+                'best_combo': row['best_combo'],
+                'best_window': window,
+                'accuracy': row['accuracy'],
+                'feature_set': fs,
+                'horizon': h,
+            }
 
-    # Step 3: Export chart data
+            signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                       feature_override=feature_override, horizon=h)
+            signals = simulate_portfolio(signals)
+
+            label = f"{asset_name}_{h}h"
+            all_signals[label] = signals
+
+            chart_suffix = f"_{h}h" if h != 4 else ""
+            generate_backtest_chart(f"{asset_name}{chart_suffix}", signals, model_info=model_info)
+
+            if signals:
+                latest = signals[-1]
+                print(f"\n  >> {asset_name} ({h}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                      f"| price=${latest['close']:,.2f} | Set {fs}")
+
     export_chart_data(all_signals)
 
     print("\n" + "=" * 60)
@@ -888,26 +1715,754 @@ def run_mode_b(assets_list):
 
 
 # ============================================================
+# MODE C: HEAD-TO-HEAD COMPARISON
+# ============================================================
+def run_mode_c(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
+    print("\n" + "=" * 60)
+    print(f"  MODE C: SET A vs SET B COMPARISON — {horizon}h HORIZON")
+    print(f"  Set A: {len(FEATURE_SET_A)} features (top 18 by LGBM importance)")
+    print(f"  Set B: {len(FEATURE_SET_B)} features (KEEP 14 consensus)")
+    print("=" * 60)
+
+    update_all_data(assets_list)
+    diag_hours = diag_years * 365 * 24
+    comparison_results = []
+    winning_models = []  # Save winner per asset for Mode B
+
+    for asset_name in assets_list:
+        print(f"\n{'='*60}")
+        print(f"  COMPARING: {asset_name}")
+        print(f"{'='*60}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+        total_rows = len(df_full)
+        if total_rows > diag_hours:
+            df_full = df_full.tail(diag_hours).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+
+        if len(df_full) < 500:
+            print(f"  Not enough data ({len(df_full)} rows). Need 500+. Skipping.")
+            continue
+
+        set_a_valid = [f for f in FEATURE_SET_A if f in all_cols]
+        set_b_valid = [f for f in FEATURE_SET_B if f in all_cols]
+
+        missing_a = [f for f in FEATURE_SET_A if f not in all_cols]
+        missing_b = [f for f in FEATURE_SET_B if f not in all_cols]
+        if missing_a:
+            print(f"  WARNING: Set A missing: {missing_a}")
+        if missing_b:
+            print(f"  WARNING: Set B missing: {missing_b}")
+
+        df_a = df_full.dropna(subset=set_a_valid + ['label']).reset_index(drop=True)
+        df_b = df_full.dropna(subset=set_b_valid + ['label']).reset_index(drop=True)
+        min_rows = min(len(df_a), len(df_b))
+        df_a = df_a.tail(min_rows).reset_index(drop=True)
+        df_b = df_b.tail(min_rows).reset_index(drop=True)
+        print(f"  Aligned to {min_rows:,} rows | A: {len(set_a_valid)} features | B: {len(set_b_valid)} features")
+
+        print(f"\n  --- SET A ---")
+        t0 = time.time()
+        result_a = run_diagnostic_for_asset(asset_name, df_a, set_a_valid)
+        time_a = time.time() - t0
+
+        print(f"\n  --- SET B ---")
+        t0 = time.time()
+        result_b = run_diagnostic_for_asset(asset_name, df_b, set_b_valid)
+        time_b = time.time() - t0
+
+        acc_a = result_a['accuracy'] if result_a else 0
+        acc_b = result_b['accuracy'] if result_b else 0
+        score_a = result_a.get('combined_score', 0) if result_a else 0
+        score_b = result_b.get('combined_score', 0) if result_b else 0
+        ret_a = result_a.get('return_pct', 0) if result_a else 0
+        ret_b = result_b.get('return_pct', 0) if result_b else 0
+
+        print(f"\n{'='*60}")
+        print(f"  HEAD-TO-HEAD: {asset_name}")
+        print(f"{'='*60}")
+        if result_a:
+            print(f"  Set A: {acc_a:.1f}% acc | {ret_a:+.1f}% ret | score={score_a:.3f} | {result_a['best_combo']} | w={result_a['best_window']}h | {time_a:.0f}s")
+        if result_b:
+            print(f"  Set B: {acc_b:.1f}% acc | {ret_b:+.1f}% ret | score={score_b:.3f} | {result_b['best_combo']} | w={result_b['best_window']}h | {time_b:.0f}s")
+
+        if result_a and result_b:
+            score_diff = score_a - score_b
+            if score_diff > 0.01:
+                winner = 'SET A WINS'
+            elif score_diff < -0.01:
+                winner = 'SET B WINS'
+            else:
+                winner = 'TIE'
+            print(f"\n  >>> {winner} (score diff={score_diff:+.3f})")
+            comparison_results.append({
+                'asset': asset_name,
+                'set_a_acc': acc_a, 'set_a_ret': ret_a, 'set_a_score': round(score_a, 4),
+                'set_a_combo': result_a['best_combo'],
+                'set_a_window': result_a['best_window'],
+                'set_b_acc': acc_b, 'set_b_ret': ret_b, 'set_b_score': round(score_b, 4),
+                'set_b_combo': result_b['best_combo'],
+                'set_b_window': result_b['best_window'],
+                'diff': round(score_diff, 4),
+                'winner': 'A' if score_diff > 0.01 else ('B' if score_diff < -0.01 else 'TIE'),
+            })
+
+            # Save winning config for Mode B
+            if score_a >= score_b:
+                winning_models.append(result_a)
+            else:
+                winning_models.append(result_b)
+
+    if comparison_results:
+        print(f"\n{'='*60}")
+        print("  COMPARISON SUMMARY")
+        print(f"{'='*60}")
+        a_wins = sum(1 for r in comparison_results if r['winner'] == 'A')
+        b_wins = sum(1 for r in comparison_results if r['winner'] == 'B')
+        ties   = sum(1 for r in comparison_results if r['winner'] == 'TIE')
+        avg_a = np.mean([r['set_a_acc'] for r in comparison_results])
+        avg_b = np.mean([r['set_b_acc'] for r in comparison_results])
+
+        for r in comparison_results:
+            print(f"  {r['asset']:6s} | A: {r['set_a_acc']:.1f}% acc, {r['set_a_ret']:+.1f}% ret, score={r['set_a_score']:.3f} "
+                  f"| B: {r['set_b_acc']:.1f}% acc, {r['set_b_ret']:+.1f}% ret, score={r['set_b_score']:.3f} | {r['winner']}")
+
+        print(f"\n  Set A avg: {avg_a:.1f}% | Set B avg: {avg_b:.1f}%")
+        print(f"  A wins: {a_wins} | B wins: {b_wins} | Ties: {ties}")
+
+        if avg_a > avg_b + 0.5:
+            print(f"\n  >>> OVERALL: SET A recommended (avg +{avg_a - avg_b:.1f}%)")
+        elif avg_b > avg_a + 0.5:
+            print(f"\n  >>> OVERALL: SET B recommended (avg +{avg_b - avg_a:.1f}%)")
+        else:
+            print(f"\n  >>> OVERALL: Too close to call.")
+
+        df_comp = pd.DataFrame(comparison_results)
+        df_comp.to_csv('crypto_feature_set_comparison.csv', index=False)
+
+    # Save winning models for Mode B (merge with existing horizons)
+    if winning_models:
+        for wm in winning_models:
+            wm['horizon'] = horizon
+        csv_path = 'crypto_hourly_best_models.csv'
+        df_winners = pd.DataFrame(winning_models)
+        if os.path.exists(csv_path):
+            df_existing = pd.read_csv(csv_path)
+            if 'horizon' not in df_existing.columns:
+                df_existing['horizon'] = 4
+            for wm in winning_models:
+                mask = (df_existing['coin'] == wm['coin']) & (df_existing['horizon'] == horizon)
+                df_existing = df_existing[~mask]
+            df_winners = pd.concat([df_existing, df_winners], ignore_index=True)
+        df_winners.to_csv(csv_path, index=False)
+        print(f"\n  Saved winning models ({horizon}h) to {csv_path}:")
+        for row in winning_models:
+            print(f"    {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | {horizon}h")
+
+    print(f"\n{'='*60}")
+    print("  COMPARISON COMPLETE")
+    print(f"{'='*60}")
+
+
+# ============================================================
+# MODE D: FULL PIPELINE (feature analysis + diagnostic + signals)
+# ============================================================
+def run_mode_d(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
+    """
+    Complete pipeline from scratch:
+    1. Build all ~124 features
+    2. Run 5-test feature analysis to find optimal subset
+    3. Run 75-config diagnostic with optimal features
+    4. Save best models
+    5. Generate signals + backtest charts
+    """
+    print("\n" + "=" * 60)
+    print(f"  MODE D: FULL PIPELINE — {horizon}h HORIZON")
+    print(f"  Starts from ALL features, finds optimal subset per asset")
+    print("=" * 60)
+
+    update_all_data(assets_list)
+    diag_hours = diag_years * 365 * 24
+    best_models = []
+
+    for asset_name in assets_list:
+        print(f"\n{'='*60}")
+        print(f"  FULL PIPELINE: {asset_name} ({horizon}h horizon)")
+        print(f"{'='*60}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        # Step 1: Build ALL features
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+
+        total_rows = len(df_full)
+        if total_rows > diag_hours:
+            df_full = df_full.tail(diag_hours).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+
+        # Drop NaN for analysis
+        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
+            continue
+
+        # Step 2: Feature analysis (5 tests → optimal subset)
+        optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
+
+        if not optimal_features or len(optimal_features) < 3:
+            print(f"  Feature analysis produced too few features ({len(optimal_features or [])}). Skipping.")
+            continue
+
+        # Step 3: Run diagnostic with optimal features
+        print(f"\n{'='*60}")
+        print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)")
+        print(f"{'='*60}")
+
+        df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
+        print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
+
+        best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features)
+
+        if best_config:
+            best_config['feature_set'] = 'D'
+            best_config['n_features'] = len(optimal_features)
+            best_config['optimal_features'] = ','.join(optimal_features)
+            best_config['horizon'] = horizon
+            best_models.append(best_config)
+
+    if not best_models:
+        print("\nNo results. Aborting.")
+        return
+
+    # Save best models (merge with existing horizons)
+    csv_path = 'crypto_hourly_best_models.csv'
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+    df_best.to_csv('crypto_hourly_best_models_mode_d.csv', index=False)
+
+    print(f"\n{'='*60}")
+    print(f"  BEST MODELS SAVED — {horizon}h HORIZON")
+    print(f"{'='*60}")
+    for row in best_models:
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | "
+              f"{row['accuracy']:.1f}% | {row['n_features']} features | {horizon}h")
+    print(f"{'='*60}")
+
+    # Step 4: Generate signals + charts
+    print("\n" + "=" * 60)
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
+    print("=" * 60)
+
+    all_signals = {}
+    for config in best_models:
+        asset_name = config['coin']
+        model_names = config['models'].split('+')
+        window = config['best_window']
+        feature_override = config['optimal_features'].split(',')
+
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                   feature_override=feature_override, horizon=horizon)
+        signals = simulate_portfolio(signals)
+        all_signals[asset_name] = signals
+
+        generate_backtest_chart(asset_name, signals, model_info=config)
+
+        if signals:
+            latest = signals[-1]
+            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                  f"| price=${latest['close']:,.2f}")
+
+    export_chart_data(all_signals)
+
+    print("\n" + "=" * 60)
+    print("  MODE D COMPLETE (full pipeline)")
+    print("=" * 60)
+
+
+# ============================================================
+# MODE E: ITERATIVE REFINEMENT (2nd/3rd pass on Mode D results)
+# ============================================================
+def _load_mode_d_config(asset_name, horizon):
+    """Load the Mode D (or previous E) result for a given asset/horizon."""
+    csv_path = 'crypto_hourly_best_models.csv'
+    if not os.path.exists(csv_path):
+        return None
+    df = pd.read_csv(csv_path)
+    if 'horizon' not in df.columns:
+        df['horizon'] = 4
+    mask = (df['coin'] == asset_name) & (df['horizon'] == horizon)
+    match = df[mask]
+    if match.empty:
+        return None
+    row = match.iloc[0]
+    return {
+        'coin': row['coin'],
+        'models': row['models'],
+        'best_combo': row['best_combo'],
+        'best_window': int(row['best_window']),
+        'accuracy': row['accuracy'],
+        'feature_set': row.get('feature_set', 'D'),
+        'optimal_features': str(row.get('optimal_features', '')),
+        'horizon': int(row.get('horizon', 4)),
+    }
+
+
+def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
+    """
+    Iteration 2: Refine features + finer window grid.
+    1. Leave-one-out: drop each feature, keep only those that help
+    2. Add-back: try each dropped feature, add if it helps
+    3. Expanded window grid around winner (step=25h)
+    4. Finer DIAG_STEP=24
+    """
+    prev_features = prev_config['optimal_features'].split(',')
+    prev_features = [f for f in prev_features if f in all_cols]
+    prev_window = prev_config['best_window']
+    prev_acc = prev_config['accuracy']
+
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+
+    # --- Step 1: Leave-One-Out Refinement ---
+    print(f"\n  [ITER2 1/3] Leave-One-Out Refinement (finer step=24)...")
+    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24)
+    print(f"    Baseline: {baseline_acc:.1f}% ({len(prev_features)} features)")
+
+    features_to_drop = []
+    for feat in prev_features:
+        reduced = [f for f in prev_features if f != feat]
+        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24)
+        change = acc - baseline_acc
+        if change > 0.3:
+            features_to_drop.append(feat)
+            print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+.1f}%) ** REMOVING")
+        elif change < -0.5:
+            print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+.1f}%) ** ESSENTIAL")
+
+    refined_features = [f for f in prev_features if f not in features_to_drop]
+    if features_to_drop:
+        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+        print(f"\n    Removed {len(features_to_drop)}: {', '.join(features_to_drop)}")
+        print(f"    {len(prev_features)} -> {len(refined_features)} features | {baseline_acc:.1f}% -> {new_acc:.1f}%")
+        if new_acc < baseline_acc - 0.5:
+            print(f"    Refinement hurt accuracy — reverting.")
+            refined_features = list(prev_features)
+    else:
+        print(f"    No features to drop.")
+
+    # --- Step 2: Add-Back Test ---
+    print(f"\n  [ITER2 2/3] Add-Back Test (try adding dropped features)...")
+    dropped_features = [f for f in all_cols if f not in refined_features]
+    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+    added = []
+
+    # Only test features that were in the top 50% by LGBM importance (speed optimization)
+    from lightgbm import LGBMClassifier
+    model_imp = LGBMClassifier(n_estimators=200, max_depth=6, verbose=-1,
+                                device=LGBM_DEVICE, random_state=42)
+    df_clean = df_features.dropna(subset=all_cols + ['label'])
+    X = df_clean[all_cols].tail(5000)
+    y = df_clean['label'].tail(5000)
+    if len(np.unique(y)) >= 2:
+        model_imp.fit(X, y)
+        imp = pd.Series(model_imp.feature_importances_, index=all_cols)
+        imp = imp.sort_values(ascending=False)
+        candidates = [f for f in imp.index[:len(all_cols)//2] if f not in refined_features]
+    else:
+        candidates = dropped_features[:30]
+
+    print(f"    Testing {len(candidates)} candidate features...")
+    for feat in candidates:
+        test_set = refined_features + [feat]
+        test_df = df_features.dropna(subset=test_set + ['label'])
+        if len(test_df) < 500:
+            continue
+        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+        if acc > current_acc + 0.5:
+            added.append(feat)
+            refined_features.append(feat)
+            current_acc = acc
+            print(f"    Add {feat:30s} -> {acc:5.1f}% (+{acc - current_acc + 0.5:.1f}%) ** ADDING")
+
+    if added:
+        print(f"\n    Added {len(added)} features: {', '.join(added)}")
+    else:
+        print(f"    No features improved accuracy.")
+
+    print(f"\n    Final feature count: {len(refined_features)}")
+
+    # --- Step 3: Expanded Window Grid ---
+    print(f"\n  [ITER2 3/3] Expanded Window Search (around w={prev_window}h)...")
+
+    # Build fine grid around winner: ±100h in steps of 25h
+    fine_windows = sorted(set(
+        [max(48, prev_window + offset) for offset in range(-100, 125, 25)]
+    ))
+    print(f"    Testing windows: {fine_windows}")
+
+    # Run diagnostic with refined features + fine windows
+    # Temporarily override DIAG_WINDOWS and DIAG_STEP
+    global DIAG_WINDOWS, DIAG_STEP
+    orig_windows = DIAG_WINDOWS
+    orig_step = DIAG_STEP
+    DIAG_WINDOWS = fine_windows
+    DIAG_STEP = 24
+
+    df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
+    print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step=24")
+
+    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features)
+
+    DIAG_WINDOWS = orig_windows
+    DIAG_STEP = orig_step
+
+    if best_config:
+        best_config['feature_set'] = 'E2'
+        best_config['n_features'] = len(refined_features)
+        best_config['optimal_features'] = ','.join(refined_features)
+        best_config['horizon'] = horizon
+        best_config['iteration'] = 2
+        print(f"\n  ITERATION 2 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+              f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
+        print(f"  vs PREVIOUS:        {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{prev_config['accuracy']:.1f}%")
+        improvement = best_config['accuracy'] - prev_acc
+        print(f"  Improvement: {improvement:+.1f}%")
+
+    return best_config, refined_features
+
+
+def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
+    """
+    Iteration 3: Ultra-fine tuning.
+    1. Very fine window grid (±40h, step=10h) around winner
+    2. DIAG_STEP=12 (most granular)
+    3. Feature interaction test: products of top-5 features
+    """
+    prev_features = prev_config['optimal_features'].split(',')
+    prev_features = [f for f in prev_features if f in all_cols]
+    prev_window = prev_config['best_window']
+    prev_acc = prev_config['accuracy']
+
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+
+    # --- Step 1: Feature Interaction Test ---
+    print(f"\n  [ITER3 1/2] Feature Interaction Test (top-5 pairs)...")
+
+    # Get top 5 most important features
+    from lightgbm import LGBMClassifier
+    df_clean = df_features.dropna(subset=prev_features + ['label']).reset_index(drop=True)
+    model_imp = LGBMClassifier(n_estimators=200, max_depth=6, verbose=-1,
+                                device=LGBM_DEVICE, random_state=42)
+    X = df_clean[prev_features].tail(5000)
+    y = df_clean['label'].tail(5000)
+    if len(np.unique(y)) < 2:
+        top5 = prev_features[:5]
+    else:
+        model_imp.fit(X, y)
+        imp = pd.Series(model_imp.feature_importances_, index=prev_features).sort_values(ascending=False)
+        top5 = list(imp.index[:5])
+    print(f"    Top 5: {top5}")
+
+    # Test interactions (product of pairs)
+    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24)
+    interaction_features = []
+    tested_features = list(prev_features)
+
+    for i in range(len(top5)):
+        for j in range(i + 1, len(top5)):
+            f1, f2 = top5[i], top5[j]
+            int_name = f"{f1}_x_{f2}"
+            df_features[int_name] = df_features[f1] * df_features[f2]
+
+            test_set = tested_features + [int_name]
+            test_df = df_features.dropna(subset=test_set + ['label'])
+            if len(test_df) < 500:
+                continue
+            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+            if acc > current_acc + 0.3:
+                interaction_features.append(int_name)
+                tested_features.append(int_name)
+                current_acc = acc
+                print(f"    {int_name:40s} -> {acc:5.1f}% ** ADDING")
+            else:
+                print(f"    {int_name:40s} -> {acc:5.1f}%")
+                # Clean up unused interaction
+                if int_name in df_features.columns:
+                    df_features.drop(columns=[int_name], inplace=True)
+
+    if interaction_features:
+        print(f"\n    Added {len(interaction_features)} interactions: {', '.join(interaction_features)}")
+    else:
+        print(f"    No interactions improved accuracy.")
+
+    refined_features = list(tested_features)
+
+    # --- Step 2: Ultra-Fine Window Grid ---
+    print(f"\n  [ITER3 2/2] Ultra-Fine Window Search (around w={prev_window}h, step=10)...")
+
+    fine_windows = sorted(set(
+        [max(48, prev_window + offset) for offset in range(-40, 50, 10)]
+    ))
+    print(f"    Testing windows: {fine_windows}")
+
+    global DIAG_WINDOWS, DIAG_STEP
+    orig_windows = DIAG_WINDOWS
+    orig_step = DIAG_STEP
+    DIAG_WINDOWS = fine_windows
+    DIAG_STEP = 12
+
+    df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
+    print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step=12")
+
+    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features)
+
+    DIAG_WINDOWS = orig_windows
+    DIAG_STEP = orig_step
+
+    if best_config:
+        best_config['feature_set'] = 'E3'
+        best_config['n_features'] = len(refined_features)
+        best_config['optimal_features'] = ','.join(refined_features)
+        best_config['horizon'] = horizon
+        best_config['iteration'] = 3
+        print(f"\n  ITERATION 3 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+              f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
+        improvement = best_config['accuracy'] - prev_acc
+        print(f"  Improvement over iter 2: {improvement:+.1f}%")
+
+    return best_config, refined_features
+
+
+def run_mode_e(assets_list, diag_years=2, horizon=PREDICTION_HORIZON, iterations='2'):
+    """
+    Mode E: Iterative refinement of Mode D results.
+    iteration='2'  → run 2nd pass only
+    iteration='23' → run 2nd + 3rd pass
+    """
+    do_iter3 = '3' in iterations
+
+    print("\n" + "=" * 60)
+    print(f"  MODE E: ITERATIVE REFINEMENT — {horizon}h HORIZON")
+    print(f"  Iterations: {'2nd + 3rd pass' if do_iter3 else '2nd pass only'}")
+    print("=" * 60)
+
+    update_all_data(assets_list)
+    diag_hours = diag_years * 365 * 24
+    final_models = []
+
+    for asset_name in assets_list:
+        print(f"\n{'='*60}")
+        print(f"  REFINING: {asset_name} ({horizon}h)")
+        print(f"{'='*60}")
+
+        # Load previous Mode D (or E) result
+        prev_config = _load_mode_d_config(asset_name, horizon)
+        if prev_config is None:
+            print(f"  ERROR: No existing model for {asset_name} {horizon}h.")
+            print(f"  Run Mode D first!")
+            continue
+
+        prev_features = prev_config['optimal_features']
+        if not prev_features or prev_features == 'nan':
+            print(f"  ERROR: No optimal features saved for {asset_name}.")
+            print(f"  Run Mode D first (not Mode A).")
+            continue
+
+        print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{prev_config['accuracy']:.1f}% | {len(prev_features.split(','))} features")
+
+        # Build features
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+
+        total_rows = len(df_full)
+        if total_rows > diag_hours:
+            df_full = df_full.tail(diag_hours).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+
+        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data. Skipping.")
+            continue
+
+        # --- ITERATION 2 ---
+        print(f"\n{'='*60}")
+        print(f"  ITERATION 2: FEATURE REFINEMENT + FINER GRID")
+        print(f"{'='*60}")
+
+        iter2_config, iter2_features = _run_iteration_2(
+            asset_name, df_clean, prev_config, all_cols, horizon)
+
+        if iter2_config is None:
+            print("  Iteration 2 failed. Keeping previous config.")
+            final_models.append(prev_config)
+            continue
+
+        # --- ITERATION 3 (optional) ---
+        if do_iter3:
+            print(f"\n{'='*60}")
+            print(f"  ITERATION 3: ULTRA-FINE TUNING")
+            print(f"{'='*60}")
+
+            iter3_config, iter3_features = _run_iteration_3(
+                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon)
+
+            if iter3_config and iter3_config['accuracy'] > iter2_config['accuracy']:
+                final_config = iter3_config
+                print(f"\n  >>> Using iteration 3 result (better by "
+                      f"{iter3_config['accuracy'] - iter2_config['accuracy']:+.1f}%)")
+            else:
+                final_config = iter2_config
+                print(f"\n  >>> Keeping iteration 2 result (iter 3 didn't improve)")
+        else:
+            final_config = iter2_config
+
+        final_models.append(final_config)
+
+        # Summary
+        original_acc = prev_config['accuracy']
+        final_acc = final_config['accuracy']
+        print(f"\n  {'='*50}")
+        print(f"  REFINEMENT SUMMARY: {asset_name} ({horizon}h)")
+        print(f"  {'='*50}")
+        print(f"  Before: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{original_acc:.1f}% | {len(prev_config['optimal_features'].split(','))} features")
+        print(f"  After:  {final_config['best_combo']} | w={final_config['best_window']}h | "
+              f"{final_acc:.1f}% | {final_config['n_features']} features")
+        print(f"  Total improvement: {final_acc - original_acc:+.1f}%")
+        print(f"  {'='*50}")
+
+    if not final_models:
+        print("\nNo results. Aborting.")
+        return
+
+    # Save (merge with existing)
+    csv_path = 'crypto_hourly_best_models.csv'
+    df_best = pd.DataFrame(final_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in final_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+
+    print(f"\n{'='*60}")
+    print(f"  MODE E COMPLETE — RESULTS SAVED")
+    print(f"{'='*60}")
+    for m in final_models:
+        fs = m.get('feature_set', 'E')
+        print(f"  {m['coin']:6s} -> {m['best_combo']:20s} | w={m['best_window']:4d}h | "
+              f"{m['accuracy']:.1f}% | {m.get('n_features', '?')} features | {fs} | {horizon}h")
+
+    # Generate signals + charts
+    print("\n" + "=" * 60)
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
+    print("=" * 60)
+
+    all_signals = {}
+    for config in final_models:
+        asset_name = config['coin']
+        model_names = config['models'].split('+')
+        window = config['best_window']
+        feature_override = config['optimal_features'].split(',')
+
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                   feature_override=feature_override, horizon=horizon)
+        signals = simulate_portfolio(signals)
+        all_signals[asset_name] = signals
+
+        generate_backtest_chart(asset_name, signals, model_info=config)
+
+        if signals:
+            latest = signals[-1]
+            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                  f"| price=${latest['close']:,.2f}")
+
+    export_chart_data(all_signals)
+
+    print("\n" + "=" * 60)
+    print("  MODE E COMPLETE")
+    print("=" * 60)
+
+
+# ============================================================
 # MAIN MENU
 # ============================================================
 def main():
+    global ACTIVE_FEATURE_SET
+
+    if '--set-a' in sys.argv:
+        ACTIVE_FEATURE_SET = 'A'
+    elif '--set-b' in sys.argv:
+        ACTIVE_FEATURE_SET = 'B'
+
+    has_macro = os.path.exists(MACRO_DIR)
+
     print("=" * 60)
-    print("  ML TRADING SYSTEM")
+    print("  CRYPTO HOURLY ML TRADING SYSTEM -- V2 OPTIMIZED")
     print("  Crypto: BTC, ETH, SOL, XRP, DOGE")
     print("  Indices: SMI, DAX, CAC40")
+    print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
+    print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND (Set B needs it!)'}")
     print("=" * 60)
+    print(f"\n  Set A: {len(FEATURE_SET_A)} features (top 18 by LGBM importance, 71.6% in test)")
+    print(f"  Set B: {len(FEATURE_SET_B)} features (consensus across 5 tests)")
 
-    # Mode selection
     print("\nChoose mode:")
-    print("  A. Full review (update data + diagnostic + best models + chart)")
-    print("  B. Quick run (update data + use best_models.csv + chart)")
-    mode = input("\nEnter A or B: ").strip().upper()
+    print("  A. Full review (tests both feature sets, picks winner, signals + chart)")
+    print("  B. Quick run (use saved best models + signals + chart)")
+    print("  C. Compare Set A vs Set B (diagnostic only)")
+    print("  D. FULL PIPELINE (feature analysis from scratch → diagnostic → signals)")
+    print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D results)")
+    mode = input("\nEnter A, B, C, D, or E: ").strip().upper()
 
-    if mode not in ('A', 'B'):
+    if mode not in ('A', 'B', 'C', 'D', 'E'):
         print("Invalid choice. Defaulting to B.")
         mode = 'B'
 
-    # Asset selection
+    # Mode E iteration choice
+    e_iterations = '2'
+    if mode == 'E':
+        print("\nRefinement iterations:")
+        print("  1. 2nd pass only (feature refinement + finer grid, ~1-2h)")
+        print("  2. 2nd + 3rd pass (+ interactions + ultra-fine grid, ~3-4h)")
+        iter_choice = input("Enter 1 or 2 [1]: ").strip()
+        if iter_choice == '2':
+            e_iterations = '23'
+        else:
+            e_iterations = '2'
+
+    # Feature set selection only for Mode C (Mode A auto-tests both, Mode B reads CSV, Mode D analyzes from scratch)
+    if mode == 'C':
+        pass  # Mode C always tests both
+
     print("\nWhich assets?")
     print("  1. All (crypto + indices)")
     print("  2. Crypto only (BTC, ETH, SOL, XRP, DOGE)")
@@ -926,15 +2481,59 @@ def main():
     else:
         assets_list = list(ASSETS.keys())
 
+    mode_labels = {'A': 'Full Review', 'B': 'Quick Run', 'C': 'Compare',
+                   'D': 'Full Pipeline', 'E': 'Iterative Refinement'}
     print(f"\nAssets: {', '.join(assets_list)}")
-    print(f"Mode: {'A (Full Review)' if mode == 'A' else 'B (Quick Run)'}")
+    print(f"Mode: {mode} ({mode_labels.get(mode, mode)})")
 
-    if mode == 'A':
-        run_mode_a(assets_list)
+    # Horizon selection
+    print("\nPrediction horizon:")
+    print("  1. 1 hour ahead")
+    print("  2. 4 hours ahead (current default)")
+    print("  3. Both (1h + 4h — runs everything twice)")
+    h_choice = input("Enter choice (1-3) [2]: ").strip()
+    if h_choice == '1':
+        horizons = [1]
+    elif h_choice == '3':
+        horizons = [1, 4]
     else:
-        run_mode_b(assets_list)
+        horizons = [4]
+    print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-    print("\nDone! Chart data saved to chart_data.json")
+    diag_years = 2
+    if mode in ('A', 'C', 'D', 'E'):
+        print("\nDiagnostic data range:")
+        print("  1. Last 4 years  (slowest)")
+        print("  2. Last 2 years  (recommended)")
+        print("  3. Last 1 year   (fastest)")
+        range_choice = input("Enter choice (1-3): ").strip()
+        if range_choice == '1':
+            diag_years = 4
+        elif range_choice == '3':
+            diag_years = 1
+        else:
+            diag_years = 2
+        print(f"Diagnostic range: last {diag_years} year{'s' if diag_years > 1 else ''}")
+
+    for h in horizons:
+        if len(horizons) > 1:
+            print(f"\n{'#'*60}")
+            print(f"  RUNNING {h}h HORIZON")
+            print(f"{'#'*60}")
+
+        if mode == 'A':
+            run_mode_a(assets_list, diag_years=diag_years, horizon=h)
+        elif mode == 'C':
+            run_mode_c(assets_list, diag_years=diag_years, horizon=h)
+        elif mode == 'D':
+            run_mode_d(assets_list, diag_years=diag_years, horizon=h)
+        elif mode == 'E':
+            run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
+        else:
+            horizon_filter = h if len(horizons) == 1 else None
+            run_mode_b(assets_list, horizon_filter=horizon_filter)
+
+    print("\nDone!")
 
 
 if __name__ == '__main__':

@@ -1,0 +1,5 @@
+asset,threshold,final_value,return_pct,buy_hold_return,alpha,trades,win_rate,avg_win,avg_loss,max_drawdown,pred_accuracy
+BTC,All Signals,7481.49,49.63,-0.86,50.49,66,78.8,0.91,-0.47,3.47,69.4
+BTC,>60%,7369.24,47.38,-0.86,48.24,45,88.9,1.02,-0.38,3.47,70.5
+BTC,>70%,6064.83,21.3,-0.86,22.16,18,100.0,1.08,0.0,0.78,68.7
+BTC,>80%,5426.6,8.53,-0.86,9.39,6,83.3,1.68,-0.1,0.56,67.1

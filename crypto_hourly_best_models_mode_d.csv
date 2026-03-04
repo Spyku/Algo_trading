@@ -1,0 +1,2 @@
+coin,best_window,best_combo,accuracy,models,feature_set,n_features,optimal_features
+BTC,300,RF+GB+LR+LGBM,75.21,RF+GB+LR+LGBM,D,30,"logret_240h,hour_cos,logret_120h,logret_72h,xa_dax_relstr5d,price_accel_24h,vol_ratio_12_48,volume_ratio_h,stoch_k_14h,sma20_to_sma50h,xa_sp500_relstr5d,volatility_12h,price_to_sma100h,price_accel_12h,atr_pct_14h,spread_48h_4h,rsi_14h,spread_24h_4h,volatility_48h,xa_nasdaq_relstr5d,intraday_range,logret_48h,xa_eth_usd_relstr5d,zscore_50h,price_accel_4h,logret_12h,m_nasdaq_chg1d,spread_120h_12h,logret_3h,bb_position_20h"

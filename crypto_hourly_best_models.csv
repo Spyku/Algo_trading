@@ -1,0 +1,3 @@
+coin,best_window,best_combo,accuracy,models,return_pct,win_rate,trades,combined_score,feature_set,horizon
+BTC,100,RF+LR+LGBM,72.5,RF+LR+LGBM,59.62,68.6,35,1.1573,A,4
+BTC,150,LR,55.46,LR,57.95,71.0,31,0.876,A,1
