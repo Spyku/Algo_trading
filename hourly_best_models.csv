@@ -1,4 +1,0 @@
-coin,best_window,best_combo,accuracy,models
-SMI,300,RF+GB+LGBM,78.23,RF+GB+LGBM
-DAX,100,RF+GB+LGBM,77.59,RF+GB+LGBM
-CAC40,200,RF+GB,77.65,RF+GB
