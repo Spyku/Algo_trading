@@ -1,30 +1,27 @@
 """
-Crypto Hourly Trading System -- V2 Optimized Feature Sets
+Crypto Hourly Trading System
 ============================================================
-Based on crypto_feature_analysis.py V2 results (BTC, 1yr, 117 features).
-Tests two candidate feature sets from the analysis:
-
-  Set A: Top 18 by LGBM importance (71.6% in reduced set test)
-         All technical + 2 cross-asset. Pure signal strength.
-
-  Set B: KEEP 14 consensus (passed all 5 tests: LGBM, permutation,
-         correlation, ablation, reduced sets)
-         7 BASE + 5 MACRO + 1 SENTIMENT + 2 CROSS-ASSET. Diverse sources.
+ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
+125 features → walk-forward ML → BUY/SELL/HOLD signals.
 
 Modes:
-  A. Full diagnostic -- run 105 configs on the active feature set
-  B. Quick run -- use saved best models
-  C. COMPARE -- run both Set A and Set B head-to-head, pick the winner
+  A. Full review (Set A vs B)    B. Quick run (saved models)
+  C. Compare Set A vs B          D. Full pipeline (feature analysis → diagnostic)
+  E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
+
+CLI Usage (skip all menus):
+  python crypto_trading_system.py B BTC 4,8h          # Mode B, BTC, both horizons
+  python crypto_trading_system.py D ETH 8h 1y         # Mode D, ETH, 8h, 1 year
+  python crypto_trading_system.py D BTC,ETH 4,8h 2y   # Mode D, multiple assets
+  python crypto_trading_system.py B                    # Mode B, all assets, default 4h
+
+Interactive shortcuts:
+  python crypto_trading_system.py    # Menu → select 5 for quick BTC, 6 for ETH, 7 for XRP
 
 Outputs:
-  - crypto_hourly_chart_data.json (signal data for web chart)
-  - crypto_hourly_best_models.csv (best model per asset)
-  - {ASSET}_backtest.png (matplotlib chart per asset)
-
-Usage:
-  python Crypto_trading_system.py
-  python Crypto_trading_system.py --set-a
-  python Crypto_trading_system.py --set-b
+  charts/{ASSET}_backtest.png
+  models/crypto_hourly_best_models.csv
+  models/crypto_hourly_chart_data.json
 """
 
 import sys
@@ -32,17 +29,39 @@ import os
 
 # ============================================================
 # SUPPRESS ALL WARNINGS (must be before other imports)
+# Must be set before ANY sklearn/joblib imports so child processes inherit it
 # ============================================================
 os.environ['PYTHONWARNINGS'] = 'ignore'
+os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+# Force loky to inherit env vars on Windows
+os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count() or 4)
 import warnings
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=DeprecationWarning)
+# Suppress sklearn parallel warnings specifically
+warnings.filterwarnings('ignore', message='.*sklearn.utils.parallel.*')
+warnings.filterwarnings('ignore', message='.*does not have valid feature names.*')
 
 import time
 import json
+import contextlib
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Suppress stderr at file descriptor level (works with child processes on Windows)."""
+    try:
+        old_stderr_fd = os.dup(2)
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        os.dup2(old_stderr_fd, 2)
+        os.close(devnull_fd)
+        os.close(old_stderr_fd)
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -92,26 +111,27 @@ ACTIVE_FEATURE_SET = 'A'
 # ASSET CONFIGURATION
 # ============================================================
 ASSETS = {
-    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
-    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'doge_hourly_data.csv', 'start': '2019-07-01T00:00:00Z'},
-    'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'smi_hourly_data.csv',  'start': None},
-    'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'dax_hourly_data.csv',  'start': None},
-    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'cac40_hourly_data.csv', 'start': None},
+    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
+    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
+    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
+    'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'data/doge_hourly_data.csv', 'start': '2019-07-01T00:00:00Z'},
+    'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
+    'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
+    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
 }
 
 PREDICTION_HORIZON = 4            # default horizon (legacy)
-AVAILABLE_HORIZONS = [1, 4]       # 1h and 4h models
+AVAILABLE_HORIZONS = [4, 8]       # 4h and 8h models
+
+# Create output folders
+for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
+    os.makedirs(_d, exist_ok=True)
 TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 DEFAULT_WINDOW = 400
 REPLAY_HOURS = 200
 DIAG_STEP = 72
 DIAG_WINDOWS = [48, 72, 100, 150, 200, 300, 500]
-
-# Trading fees (Revolut X taker fee: 0.09% per trade)
-TRADING_FEE = 0.0009  # 0.09% applied on both BUY and SELL
 
 
 # ============================================================
@@ -389,6 +409,13 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
         df['volume_ratio_h'] = df['volume'] / vol_sma
         df['volume_ratio_h'] = df['volume_ratio_h'].fillna(1.0)
 
+    # VVR: Volume-to-Volatility Ratio (distinguishes real moves from noise)
+    vol_12 = df['close'].pct_change().rolling(12).std()
+    vol_12 = vol_12.replace(0, np.nan)
+    df['vvr_12h'] = df['volume_ratio_h'] / vol_12
+    df['vvr_12h'] = df['vvr_12h'].fillna(1.0)
+    df['vvr_12h'] = df['vvr_12h'].clip(0, 20)  # cap outliers
+
     hour = df['datetime'].dt.hour
     df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
@@ -424,7 +451,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
         'rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
         'atr_pct_14h', 'intraday_range',
         'volatility_12h', 'volatility_48h', 'vol_ratio_12_48',
-        'volume_ratio_h',
+        'volume_ratio_h', 'vvr_12h',
         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
         'price_velocity_1h', 'price_velocity_4h',
         'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
@@ -450,7 +477,11 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
 # ============================================================
 # V2: MACRO & SENTIMENT FEATURES
 # ============================================================
-MACRO_DIR = 'macro_data'
+MACRO_DIR = 'data/macro_data'
+DATA_DIR = 'data'
+CHARTS_DIR = 'charts'
+MODELS_DIR = 'models'
+CONFIG_DIR = 'config'
 _macro_cache = {}
 
 
@@ -569,7 +600,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON):
     if cross_df is not None:
         asset_map = {
             'BTC': 'BTC_USD', 'ETH': 'ETH_USD',
-            'SOL': 'BTC_USD', 'XRP': 'BTC_USD', 'DOGE': 'BTC_USD',
+            'XRP': 'BTC_USD', 'DOGE': 'BTC_USD',
             'SMI': 'DAX', 'DAX': 'DAX', 'CAC40': 'DAX',
         }
         target_col = asset_map.get(asset_name, 'BTC_USD')
@@ -619,9 +650,12 @@ def _classify_feature(feat):
         return 'BASE'
 
 
-def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP):
-    """Fast walk-forward test with LGBM only. Returns accuracy."""
+def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+    """Fast walk-forward test with LGBM only. Returns accuracy.
+    device: override LGBM device ('cpu' for parallel safety, None = use default)."""
     from lightgbm import LGBMClassifier
+
+    lgbm_device = device if device else LGBM_DEVICE
 
     n = len(df_features)
     min_start = window + 50
@@ -651,7 +685,7 @@ def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANAL
         model = LGBMClassifier(
             n_estimators=200, max_depth=6, learning_rate=0.05,
             class_weight='balanced', verbose=-1, random_state=42,
-            device=LGBM_DEVICE
+            device=lgbm_device
         )
         model.fit(X_train_s, y_train)
         pred = model.predict(X_test_s)[0]
@@ -699,35 +733,71 @@ def _test_lgbm_importance(df_features, feature_cols):
     return importance
 
 
+def _perm_one_feature(df_features, feature_cols, feat, baseline_acc):
+    """Helper for parallel permutation test."""
+    import os, warnings
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    warnings.simplefilter('ignore')
+    df_shuffled = df_features.copy()
+    df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
+    shuffled_acc, _ = _quick_accuracy(df_shuffled, feature_cols, device='cpu')
+    return feat, baseline_acc - shuffled_acc
+
+
 def _test_permutation_importance(df_features, feature_cols):
-    """Shuffle each feature and measure accuracy drop."""
-    print("\n  [2/5] Permutation Importance")
+    """Shuffle each feature and measure accuracy drop. Parallelized."""
+    print("\n  [2/5] Permutation Importance (parallel)")
     baseline_acc, n_tests = _quick_accuracy(df_features, feature_cols)
     print(f"    Baseline: {baseline_acc:.1f}% (n={n_tests})")
 
+    n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
+    print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
+    t0 = time.time()
+    with _suppress_stderr():
+        perm_results = Parallel(n_jobs=n_workers, verbose=0)(
+            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc)
+            for feat in feature_cols
+        )
+    print(f"    Done in {(time.time() - t0)/60:.1f} min")
+
     results = []
-    for feat in feature_cols:
-        df_shuffled = df_features.copy()
-        df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-        shuffled_acc, _ = _quick_accuracy(df_shuffled, feature_cols)
-        drop = baseline_acc - shuffled_acc
+    for feat, drop in perm_results:
         results.append({'feature': feat, 'acc_drop': drop})
         print(f"    {feat:30s} drop: {drop:+5.1f}%")
 
     return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
 
 
+def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc):
+    """Helper for parallel ablation test."""
+    import os, warnings
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    warnings.simplefilter('ignore')
+    reduced = [f for f in feature_cols if f != feat]
+    acc, _ = _quick_accuracy(df_features, reduced, device='cpu')
+    return feat, acc, acc - baseline_acc
+
+
 def _test_ablation(df_features, feature_cols):
-    """Drop each feature one at a time and measure accuracy."""
-    print("\n  [3/5] Ablation Test (drop one at a time)")
+    """Drop each feature one at a time and measure accuracy. Parallelized."""
+    print("\n  [3/5] Ablation Test (parallel, drop one at a time)")
     baseline_acc, _ = _quick_accuracy(df_features, feature_cols)
     print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}%")
 
+    n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
+    print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
+    t0 = time.time()
+    with _suppress_stderr():
+        ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
+            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc)
+            for feat in feature_cols
+        )
+    print(f"    Done in {(time.time() - t0)/60:.1f} min")
+
     results = []
-    for feat in feature_cols:
-        reduced = [f for f in feature_cols if f != feat]
-        acc, _ = _quick_accuracy(df_features, reduced)
-        change = acc - baseline_acc
+    for feat, acc, change in ablation_results:
         results.append({'dropped': feat, 'accuracy': acc, 'change': change})
         marker = ' ** IMPROVES' if change > 0.3 else ''
         print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+5.1f}%){marker}")
@@ -735,19 +805,38 @@ def _test_ablation(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
+def _reduced_one_set(df_features, ranked, n_feat):
+    """Helper for parallel reduced set test."""
+    import os, warnings
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    warnings.simplefilter('ignore')
+    top_n = ranked[:n_feat]
+    acc, _ = _quick_accuracy(df_features, top_n, device='cpu')
+    return n_feat, acc
+
+
 def _test_reduced_sets(df_features, feature_cols, importance_df):
-    """Test accuracy with top-N features."""
-    print("\n  [4/5] Reduced Feature Sets (top-N by importance)")
+    """Test accuracy with top-N features. Parallelized."""
+    print("\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)")
     ranked = importance_df['feature'].tolist()
 
-    results = []
     test_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50]
     test_sizes = [n for n in test_sizes if n < len(feature_cols)]
     test_sizes.append(len(feature_cols))
 
-    for n_feat in test_sizes:
-        top_n = ranked[:n_feat]
-        acc, _ = _quick_accuracy(df_features, top_n)
+    n_workers = min(N_JOBS_PARALLEL, len(test_sizes))
+    print(f"    Testing {len(test_sizes)} set sizes ({n_workers} workers)...")
+    t0 = time.time()
+    with _suppress_stderr():
+        reduced_results = Parallel(n_jobs=n_workers, verbose=0)(
+            delayed(_reduced_one_set)(df_features, ranked, n_feat)
+            for n_feat in test_sizes
+        )
+    print(f"    Done in {(time.time() - t0)/60:.1f} min")
+
+    results = []
+    for n_feat, acc in sorted(reduced_results):
         results.append({'n_features': n_feat, 'accuracy': acc})
         bar = '#' * int(acc * 0.5)
         print(f"    Top {n_feat:3d} features: {acc:5.1f}% {bar}")
@@ -880,7 +969,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
             print(f"  >>> Switching to Top-{best_n} by LGBM (better by {best_n_acc - opt_acc:.1f}%)")
 
     # Save analysis results
-    score_df.to_csv(f'crypto_feature_analysis_{asset_name.lower()}_auto.csv', index=False)
+    score_df.to_csv(f'{MODELS_DIR}/crypto_feature_analysis_{asset_name.lower()}_auto.csv', index=False)
 
     print(f"\n  OPTIMAL FEATURES ({len(optimal_features)}):")
     for f in optimal_features:
@@ -1171,7 +1260,8 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
              bbox=dict(boxstyle='round,pad=0.5', facecolor=c_card, edgecolor=c_grid, alpha=0.9))
 
     # Save
-    filename = f'{asset_name}_backtest.png'
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+    filename = f'{CHARTS_DIR}/{asset_name}_backtest.png'
     fig.savefig(filename, dpi=150, facecolor=c_bg, bbox_inches='tight')
     plt.close(fig)
     print(f"  Chart saved: {filename}")
@@ -1190,6 +1280,10 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
 # DIAGNOSTIC (CPU parallel)
 # ============================================================
 def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4):
+    import os, warnings
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    warnings.simplefilter('ignore')
     min_start = window + 50
     if n < min_start + 50:
         return None
@@ -1284,12 +1378,16 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     avg_gain = (total_gain / wins * 100) if wins > 0 else 0
     avg_loss = (total_loss / (trades - wins) * 100) if (trades - wins) > 0 else 0
 
-    # Combined score: accuracy × (1 + return/100)
-    # This rewards configs that are both accurate AND profitable
-    # A 75% accurate model with +20% return scores: 0.75 × 1.20 = 0.90
-    # A 76% accurate model with -5% return scores:  0.76 × 0.95 = 0.72
+    # Combined score: accuracy × profit_factor^1.5 × drawdown_penalty
+    # profit_factor raised to 1.5 = profit weighted 50% more than accuracy
+    # drawdown_penalty = gentle penalty for max drawdown > 20%
+    # Examples:
+    #   75% acc, +20% ret, 15% DD: 0.75 × 1.20^1.5 × 1.0  = 0.986
+    #   76% acc, -5% ret,  10% DD: 0.76 × 0.95^1.5 × 1.0  = 0.703
+    #   70% acc, +40% ret, 30% DD: 0.70 × 1.40^1.5 × 0.95 = 1.103
     profit_factor = 1 + cum_return / 100
-    combined_score = accuracy * max(profit_factor, 0.01)  # floor at 0.01 to avoid negative scores
+    dd_penalty = max(0.5, 1.0 - max(0, max_dd - 0.20) * 0.5)  # penalize DD > 20%
+    combined_score = accuracy * (max(profit_factor, 0.01) ** 1.5) * dd_penalty
 
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
             trades, avg_gain, avg_loss, max_dd * 100, combined_score)
@@ -1312,18 +1410,22 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
             all_configs.append((combo, window))
 
     print(f"  {len(all_configs)} configs, ALL parallel ({N_JOBS_PARALLEL} workers, step={DIAG_STEP})...")
+    print(f"  Running... (no output until complete)")
 
     n = len(df_features)
     features_np = df_features[feature_cols].values.astype(np.float64)
     labels_np = df_features['label'].values.astype(np.int32)
     closes_np = df_features['close'].values.astype(np.float64)
 
-    all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=5)(
-        delayed(_eval_one_config)(
-            features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+    t_diag = time.time()
+    with _suppress_stderr():
+        all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
+            delayed(_eval_one_config)(
+                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+            )
+            for combo, window in all_configs
         )
-        for combo, window in all_configs
-    )
+    print(f"  Diagnostic completed in {(time.time() - t_diag)/60:.1f} minutes")
 
     best_score = 0
     best_config = None
@@ -1433,7 +1535,7 @@ def run_full_diagnostic(assets_list, diag_years=2, feature_override=None):
 
         df_best = pd.DataFrame(best_models)
         df_best.to_csv(csv_name, index=False)
-        df_best.to_csv('crypto_hourly_best_models.csv', index=False)
+        df_best.to_csv(f'{MODELS_DIR}/crypto_hourly_best_models.csv', index=False)
 
         print(f"\n{'='*60}")
         print(f"  DIAGNOSTIC COMPLETE -- RECOMMENDED MODELS")
@@ -1451,7 +1553,248 @@ def run_full_diagnostic(assets_list, diag_years=2, feature_override=None):
 # ============================================================
 # CHART DATA EXPORT
 # ============================================================
-def export_chart_data(all_signals, output_file='crypto_hourly_chart_data.json'):
+def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_agree'):
+    """
+    Generate interactive HTML charts (Plotly) showing:
+    - Price + 4h/8h BUY/SELL markers + combined strategy
+    - Portfolio equity vs buy & hold
+    Creates 2 files: {asset}_strategy_1month.html and {asset}_strategy_1week.html
+    """
+    os.makedirs(CHARTS_DIR, exist_ok=True)
+
+    # Merge signals by datetime
+    sig4_map = {s['datetime']: s for s in (signals_4h or [])}
+    sig8_map = {s['datetime']: s for s in (signals_8h or [])}
+    all_times = sorted(set(list(sig4_map.keys()) + list(sig8_map.keys())))
+
+    if not all_times:
+        print("  No signals to chart.")
+        return
+
+    # Build merged data
+    merged = []
+    for dt in all_times:
+        s4 = sig4_map.get(dt)
+        s8 = sig8_map.get(dt)
+        price = (s4 or s8)['close']
+
+        # Get individual signals
+        sig4 = s4['signal'] if s4 else 'HOLD'
+        conf4 = s4['confidence'] if s4 else 50
+        sig8 = s8['signal'] if s8 else 'HOLD'
+        conf8 = s8['confidence'] if s8 else 50
+
+        # Combined strategy
+        if strategy == 'both_agree':
+            if sig4 == 'SELL' or sig8 == 'SELL':
+                combined = 'SELL'
+            elif sig4 == 'BUY' and sig8 == 'BUY' and conf4 >= MIN_CONFIDENCE and conf8 >= MIN_CONFIDENCE:
+                combined = 'BUY'
+            else:
+                combined = 'HOLD'
+        else:  # 'either'
+            if sig4 == 'SELL' or sig8 == 'SELL':
+                combined = 'SELL'
+            elif (sig4 == 'BUY' and conf4 >= MIN_CONFIDENCE) or (sig8 == 'BUY' and conf8 >= MIN_CONFIDENCE):
+                combined = 'BUY'
+            else:
+                combined = 'HOLD'
+
+        merged.append({
+            'datetime': dt, 'close': price,
+            'sig4': sig4, 'conf4': conf4,
+            'sig8': sig8, 'conf8': conf8,
+            'combined': combined,
+            'rsi': (s4 or s8).get('rsi', 0),
+        })
+
+    # Simulate combined strategy portfolio
+    cash = 1000.0
+    held = 0.0
+    in_position = False
+    entry_price = 0
+    start_price = merged[0]['close']
+    trades = 0
+    wins = 0
+
+    for m in merged:
+        price = m['close']
+        m['buy_hold'] = 1000 * (price / start_price)
+
+        if m['combined'] == 'BUY' and not in_position:
+            held = cash * (1 - TRADING_FEE) / price
+            cash = 0
+            in_position = True
+            entry_price = price
+            trades += 1
+        elif m['combined'] == 'SELL' and in_position:
+            cash = held * price * (1 - TRADING_FEE)
+            if price > entry_price:
+                wins += 1
+            held = 0
+            in_position = False
+
+        m['portfolio'] = cash + held * price if in_position else cash
+
+    # Generate for 1 month and 1 week
+    for label, hours in [('1month', 720), ('1week', 168)]:
+        data = merged[-hours:] if len(merged) >= hours else merged
+        if not data:
+            continue
+
+        # JSON encode for plotly
+        dates = [d['datetime'] for d in data]
+        prices = [d['close'] for d in data]
+        portfolios = [round(d['portfolio'], 2) for d in data]
+        buy_holds = [round(d['buy_hold'], 2) for d in data]
+
+        # Signal markers
+        buy4_x, buy4_y, buy4_t = [], [], []
+        sell4_x, sell4_y, sell4_t = [], [], []
+        buy8_x, buy8_y, buy8_t = [], [], []
+        sell8_x, sell8_y, sell8_t = [], [], []
+        comb_buy_x, comb_buy_y, comb_buy_t = [], [], []
+        comb_sell_x, comb_sell_y, comb_sell_t = [], [], []
+
+        for d in data:
+            if d['sig4'] == 'BUY':
+                buy4_x.append(d['datetime']); buy4_y.append(d['close'])
+                buy4_t.append(f"4h BUY {d['conf4']:.0f}%")
+            elif d['sig4'] == 'SELL':
+                sell4_x.append(d['datetime']); sell4_y.append(d['close'])
+                sell4_t.append(f"4h SELL {d['conf4']:.0f}%")
+            if d['sig8'] == 'BUY':
+                buy8_x.append(d['datetime']); buy8_y.append(d['close'])
+                buy8_t.append(f"8h BUY {d['conf8']:.0f}%")
+            elif d['sig8'] == 'SELL':
+                sell8_x.append(d['datetime']); sell8_y.append(d['close'])
+                sell8_t.append(f"8h SELL {d['conf8']:.0f}%")
+            if d['combined'] == 'BUY':
+                comb_buy_x.append(d['datetime']); comb_buy_y.append(d['close'])
+                comb_buy_t.append(f"STRATEGY BUY")
+            elif d['combined'] == 'SELL':
+                comb_sell_x.append(d['datetime']); comb_sell_y.append(d['close'])
+                comb_sell_t.append(f"STRATEGY SELL")
+
+        # Stats
+        strat_ret = (portfolios[-1] / 1000 - 1) * 100
+        bh_ret = (buy_holds[-1] / 1000 - 1) * 100
+        alpha = strat_ret - bh_ret
+        period_trades = len(comb_buy_x)
+        win_rate = (wins / trades * 100) if trades > 0 else 0
+
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{asset_name} Strategy — {label}</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+  body {{ margin: 0; padding: 0; background: #0a0e17; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }}
+  .header {{ padding: 20px 30px; display: flex; justify-content: space-between; align-items: center; }}
+  .header h1 {{ margin: 0; font-size: 28px; color: #fff; }}
+  .header .sub {{ color: #888; font-size: 14px; }}
+  .stats {{ display: flex; gap: 30px; padding: 0 30px 10px; }}
+  .stat {{ text-align: center; }}
+  .stat .val {{ font-size: 24px; font-weight: bold; }}
+  .stat .label {{ font-size: 11px; color: #888; text-transform: uppercase; }}
+  .pos {{ color: #00e676; }}
+  .neg {{ color: #ff5252; }}
+  #chart1, #chart2 {{ width: 100%; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <h1>{asset_name} — {label.replace('1', '1 ').title()}</h1>
+    <div class="sub">Strategy: {strategy} | 4h + 8h models | Min confidence: {MIN_CONFIDENCE}%</div>
+  </div>
+  <div style="text-align:right">
+    <div class="sub">Last: ${prices[-1]:,.4f}</div>
+    <div class="sub">{dates[-1]}</div>
+  </div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="val {'pos' if strat_ret > 0 else 'neg'}">{strat_ret:+.1f}%</div><div class="label">Strategy</div></div>
+  <div class="stat"><div class="val {'pos' if bh_ret > 0 else 'neg'}">{bh_ret:+.1f}%</div><div class="label">Buy & Hold</div></div>
+  <div class="stat"><div class="val {'pos' if alpha > 0 else 'neg'}">{alpha:+.1f}%</div><div class="label">Alpha</div></div>
+  <div class="stat"><div class="val">{period_trades}</div><div class="label">Trades</div></div>
+  <div class="stat"><div class="val">{win_rate:.0f}%</div><div class="label">Win Rate</div></div>
+</div>
+<div id="chart1"></div>
+<div id="chart2"></div>
+<script>
+var dates = {json.dumps(dates)};
+var prices = {json.dumps(prices)};
+var portfolios = {json.dumps(portfolios)};
+var buyHolds = {json.dumps(buy_holds)};
+
+// Price chart
+var priceTrace = {{x: dates, y: prices, type: 'scatter', mode: 'lines', name: 'Price',
+  line: {{color: '#4fc3f7', width: 1.5}}}};
+
+var buy4 = {{x: {json.dumps(buy4_x)}, y: {json.dumps(buy4_y)}, mode: 'markers', name: '4h BUY',
+  text: {json.dumps(buy4_t)}, marker: {{color: '#00e676', symbol: 'triangle-up', size: 7, opacity: 0.6}}}};
+var sell4 = {{x: {json.dumps(sell4_x)}, y: {json.dumps(sell4_y)}, mode: 'markers', name: '4h SELL',
+  text: {json.dumps(sell4_t)}, marker: {{color: '#ff5252', symbol: 'triangle-down', size: 7, opacity: 0.6}}}};
+var buy8 = {{x: {json.dumps(buy8_x)}, y: {json.dumps(buy8_y)}, mode: 'markers', name: '8h BUY',
+  text: {json.dumps(buy8_t)}, marker: {{color: '#00e676', symbol: 'diamond', size: 9, opacity: 0.8}}}};
+var sell8 = {{x: {json.dumps(sell8_x)}, y: {json.dumps(sell8_y)}, mode: 'markers', name: '8h SELL',
+  text: {json.dumps(sell8_t)}, marker: {{color: '#ff5252', symbol: 'diamond', size: 9, opacity: 0.8}}}};
+var combBuy = {{x: {json.dumps(comb_buy_x)}, y: {json.dumps(comb_buy_y)}, mode: 'markers', name: 'STRATEGY BUY',
+  text: {json.dumps(comb_buy_t)}, marker: {{color: '#00e676', symbol: 'star', size: 14, line: {{width: 1, color: '#fff'}}}}}};
+var combSell = {{x: {json.dumps(comb_sell_x)}, y: {json.dumps(comb_sell_y)}, mode: 'markers', name: 'STRATEGY SELL',
+  text: {json.dumps(comb_sell_t)}, marker: {{color: '#ff5252', symbol: 'star', size: 14, line: {{width: 1, color: '#fff'}}}}}};
+
+var layout1 = {{
+  title: {{text: 'Price + Signals', font: {{color: '#ccc', size: 14}}}},
+  paper_bgcolor: '#0a0e17', plot_bgcolor: '#0f1520',
+  font: {{color: '#888'}},
+  xaxis: {{gridcolor: '#1a2030', rangeslider: {{visible: false}}}},
+  yaxis: {{title: 'Price ($)', gridcolor: '#1a2030', tickformat: ',.2f'}},
+  legend: {{x: 0, y: 1.15, orientation: 'h', font: {{size: 11}}}},
+  height: 420, margin: {{l: 60, r: 30, t: 50, b: 40}},
+  hovermode: 'x unified',
+}};
+
+Plotly.newPlot('chart1', [priceTrace, buy4, sell4, buy8, sell8, combBuy, combSell], layout1, {{responsive: true}});
+
+// Portfolio chart
+var stratTrace = {{x: dates, y: portfolios, type: 'scatter', mode: 'lines', name: 'Strategy',
+  line: {{color: '#00e676', width: 2}}, fill: 'tozeroy', fillcolor: 'rgba(0,230,118,0.05)'}};
+var bhTrace = {{x: dates, y: buyHolds, type: 'scatter', mode: 'lines', name: 'Buy & Hold',
+  line: {{color: '#888', width: 1.5, dash: 'dash'}}}};
+var baseLine = {{x: [dates[0], dates[dates.length-1]], y: [1000, 1000], type: 'scatter', mode: 'lines',
+  name: '$1000', line: {{color: '#444', width: 1, dash: 'dot'}}, showlegend: false}};
+
+var layout2 = {{
+  title: {{text: 'Portfolio ($1,000 start)', font: {{color: '#ccc', size: 14}}}},
+  paper_bgcolor: '#0a0e17', plot_bgcolor: '#0f1520',
+  font: {{color: '#888'}},
+  xaxis: {{gridcolor: '#1a2030'}},
+  yaxis: {{title: 'Value ($)', gridcolor: '#1a2030', tickformat: ',.0f'}},
+  legend: {{x: 0, y: 1.15, orientation: 'h', font: {{size: 11}}}},
+  height: 320, margin: {{l: 60, r: 30, t: 50, b: 40}},
+  hovermode: 'x unified',
+}};
+
+Plotly.newPlot('chart2', [stratTrace, bhTrace, baseLine], layout2, {{responsive: true}});
+</script>
+</body>
+</html>"""
+
+        filename = f'{CHARTS_DIR}/{asset_name}_strategy_{label}.html'
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html)
+        print(f"  Interactive chart: {filename}")
+
+    print(f"  Strategy: {strategy} | Trades: {trades} | Win rate: {win_rate:.0f}% | Alpha: {alpha:+.1f}%")
+
+
+# ============================================================
+# CHART DATA EXPORT
+# ============================================================
+def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_hourly_chart_data.json'):
     chart_data = {
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'type': 'hourly',
@@ -1567,7 +1910,7 @@ def run_mode_a(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
         return
 
     # Save best models (merge with existing horizons)
-    csv_path = 'crypto_hourly_best_models.csv'
+    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
     df_best = pd.DataFrame(best_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -1628,12 +1971,12 @@ def run_mode_b(assets_list, horizon_filter=None):
     print("  MODE B: QUICK HOURLY RUN (saved best models)")
     print("=" * 60)
 
-    if not os.path.exists('crypto_hourly_best_models.csv'):
+    if not os.path.exists(f'{MODELS_DIR}/crypto_hourly_best_models.csv'):
         print("\nERROR: crypto_hourly_best_models.csv not found!")
         print("Please run Mode A first to find best models.")
         return
 
-    df_best = pd.read_csv('crypto_hourly_best_models.csv')
+    df_best = pd.read_csv(f'{MODELS_DIR}/crypto_hourly_best_models.csv')
     if 'horizon' not in df_best.columns:
         df_best['horizon'] = 4  # legacy = 4h
 
@@ -1843,13 +2186,13 @@ def run_mode_c(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
             print(f"\n  >>> OVERALL: Too close to call.")
 
         df_comp = pd.DataFrame(comparison_results)
-        df_comp.to_csv('crypto_feature_set_comparison.csv', index=False)
+        df_comp.to_csv(f'{MODELS_DIR}/crypto_feature_set_comparison.csv', index=False)
 
     # Save winning models for Mode B (merge with existing horizons)
     if winning_models:
         for wm in winning_models:
             wm['horizon'] = horizon
-        csv_path = 'crypto_hourly_best_models.csv'
+        csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
         df_winners = pd.DataFrame(winning_models)
         if os.path.exists(csv_path):
             df_existing = pd.read_csv(csv_path)
@@ -1945,7 +2288,7 @@ def run_mode_d(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
         return
 
     # Save best models (merge with existing horizons)
-    csv_path = 'crypto_hourly_best_models.csv'
+    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
     df_best = pd.DataFrame(best_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -1956,7 +2299,7 @@ def run_mode_d(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
             df_existing = df_existing[~mask]
         df_best = pd.concat([df_existing, df_best], ignore_index=True)
     df_best.to_csv(csv_path, index=False)
-    df_best.to_csv('crypto_hourly_best_models_mode_d.csv', index=False)
+    df_best.to_csv(f'{MODELS_DIR}/crypto_hourly_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
     print(f"  BEST MODELS SAVED — {horizon}h HORIZON")
@@ -2002,7 +2345,7 @@ def run_mode_d(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
 # ============================================================
 def _load_mode_d_config(asset_name, horizon):
     """Load the Mode D (or previous E) result for a given asset/horizon."""
-    csv_path = 'crypto_hourly_best_models.csv'
+    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
     if not os.path.exists(csv_path):
         return None
     df = pd.read_csv(csv_path)
@@ -2361,7 +2704,7 @@ def run_mode_e(assets_list, diag_years=2, horizon=PREDICTION_HORIZON, iterations
         return
 
     # Save (merge with existing)
-    csv_path = 'crypto_hourly_best_models.csv'
+    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
     df_best = pd.DataFrame(final_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -2415,6 +2758,131 @@ def run_mode_e(assets_list, diag_years=2, horizon=PREDICTION_HORIZON, iterations
 # ============================================================
 # MAIN MENU
 # ============================================================
+def _run_quick_asset(asset):
+    """Quick Mode B for a single asset, both horizons, with combined summary + interactive charts."""
+    print("=" * 60)
+    print(f"  Quick {asset}: Mode B, 4h+8h")
+    print("=" * 60)
+
+    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    if not os.path.exists(csv_path):
+        print("  ERROR: No models found!")
+        return
+
+    df_best = pd.read_csv(csv_path)
+    if 'horizon' not in df_best.columns:
+        df_best['horizon'] = 4
+
+    # Run Mode B for PNG charts (200h)
+    results = {}
+    for h in [4, 8]:
+        row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
+        if row.empty:
+            print(f"\n  No {h}h model for {asset}")
+            continue
+
+        print(f"\n{'#'*60}")
+        print(f"  RUNNING {h}h HORIZON")
+        print(f"{'#'*60}")
+        run_mode_b([asset], horizon_filter=h)
+
+        # Capture latest signal from chart data
+        json_path = f'{MODELS_DIR}/crypto_hourly_chart_data.json'
+        if os.path.exists(json_path):
+            with open(json_path) as f:
+                chart_data = json.load(f)
+            key = f"{asset}_{h}h"
+            if key in chart_data and chart_data[key]:
+                last = chart_data[key][-1]
+                r = row.iloc[0]
+                results[h] = {
+                    'signal': last.get('signal', '?'),
+                    'confidence': last.get('confidence', 0),
+                    'price': last.get('close', 0),
+                    'model': r['best_combo'],
+                    'window': int(r['best_window']),
+                    'accuracy': r['accuracy'],
+                    'feature_set': r.get('feature_set', '?'),
+                }
+
+    # Generate interactive HTML charts (720h for both horizons)
+    print(f"\n{'#'*60}")
+    print(f"  GENERATING INTERACTIVE STRATEGY CHARTS")
+    print(f"{'#'*60}")
+
+    # Determine strategy
+    strategy_map = {'BTC': 'both_agree', 'ETH': 'either', 'XRP': 'either'}
+    strategy = strategy_map.get(asset, 'both_agree')
+
+    signals_4h = None
+    signals_8h = None
+    for h in [4, 8]:
+        row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
+        if row.empty:
+            continue
+        r = row.iloc[0]
+        model_names = r['models'].split('+')
+        window = int(r['best_window'])
+        fs = r.get('feature_set', 'A')
+        opt = r.get('optimal_features', '')
+
+        if fs in ('D', 'E2', 'E3') and pd.notna(opt) and str(opt).strip() and str(opt).strip() != 'nan':
+            feature_override = [f.strip() for f in str(opt).split(',') if f.strip() and f.strip() != 'nan']
+        elif fs == 'B':
+            feature_override = list(FEATURE_SET_B)
+        else:
+            feature_override = list(FEATURE_SET_A)
+
+        print(f"  Generating {h}h signals (720h)...")
+        sigs = generate_signals(asset, model_names, window, 720,
+                                feature_override=feature_override, horizon=h)
+        sigs = simulate_portfolio(sigs)
+        if h == 4:
+            signals_4h = sigs
+        else:
+            signals_8h = sigs
+
+    if signals_4h or signals_8h:
+        generate_strategy_html(asset, signals_4h, signals_8h, strategy=strategy)
+
+    # Combined summary
+    if results:
+        print(f"\n{'='*60}")
+        print(f"  {asset} COMBINED SUMMARY")
+        print(f"{'='*60}")
+        for h, r in sorted(results.items()):
+            emoji = '🟢' if r['signal'] == 'BUY' else '🔴' if r['signal'] == 'SELL' else '🟡'
+            print(f"  {emoji} {h}h: {r['signal']} ({r['confidence']:.0f}%) | {r['model']} | w={r['window']}h | {r['accuracy']:.1f}% diag")
+
+        if len(results) == 2:
+            s4 = results.get(4, {}).get('signal', 'HOLD')
+            s8 = results.get(8, {}).get('signal', 'HOLD')
+            c4 = results.get(4, {}).get('confidence', 0)
+            c8 = results.get(8, {}).get('confidence', 0)
+
+            if s4 == 'SELL' or s8 == 'SELL':
+                combined = 'SELL'
+                reason = 'at least one model says SELL'
+            elif s4 == 'BUY' and s8 == 'BUY' and c4 >= MIN_CONFIDENCE and c8 >= MIN_CONFIDENCE:
+                combined = 'BUY (both agree)'
+                reason = f'4h+8h both BUY with {c4:.0f}%/{c8:.0f}%'
+            elif s4 == 'BUY' or s8 == 'BUY':
+                which = '4h' if s4 == 'BUY' else '8h'
+                combined = f'BUY (either — {which})'
+                reason = f'{which} says BUY'
+            else:
+                combined = 'HOLD'
+                reason = 'neither model says BUY'
+
+            price = results.get(4, results.get(8, {})).get('price', 0)
+            print(f"\n  >>> COMBINED [{strategy}]: {combined}")
+            print(f"  >>> Reason: {reason}")
+            print(f"  >>> Price: ${price:,.4f}" if price < 100 else f"  >>> Price: ${price:,.2f}")
+        print(f"{'='*60}")
+
+    print("\nDone!")
+
+
 def main():
     global ACTIVE_FEATURE_SET
 
@@ -2425,95 +2893,150 @@ def main():
 
     has_macro = os.path.exists(MACRO_DIR)
 
-    print("=" * 60)
-    print("  CRYPTO HOURLY ML TRADING SYSTEM -- V2 OPTIMIZED")
-    print("  Crypto: BTC, ETH, SOL, XRP, DOGE")
-    print("  Indices: SMI, DAX, CAC40")
-    print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
-    print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND (Set B needs it!)'}")
-    print("=" * 60)
-    print(f"\n  Set A: {len(FEATURE_SET_A)} features (top 18 by LGBM importance, 71.6% in test)")
-    print(f"  Set B: {len(FEATURE_SET_B)} features (consensus across 5 tests)")
+    # ================================================================
+    # CLI SHORTCUT: python crypto_trading_system.py D BTC 8h 1y
+    # Supports: MODE [ASSETS] [HORIZON] [YEARS]
+    # Examples:
+    #   python crypto_trading_system.py B BTC 8h
+    #   python crypto_trading_system.py D BTC,ETH 4h 1y
+    #   python crypto_trading_system.py D BTC 8h 2y
+    #   python crypto_trading_system.py B              (all assets, 4h default)
+    # ================================================================
+    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if cli_args and cli_args[0].upper() in ('A', 'B', 'C', 'D', 'E', '5', '6', '7'):
+        mode = cli_args[0].upper()
 
-    print("\nChoose mode:")
-    print("  A. Full review (tests both feature sets, picks winner, signals + chart)")
-    print("  B. Quick run (use saved best models + signals + chart)")
-    print("  C. Compare Set A vs Set B (diagnostic only)")
-    print("  D. FULL PIPELINE (feature analysis from scratch → diagnostic → signals)")
-    print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D results)")
-    mode = input("\nEnter A, B, C, D, or E: ").strip().upper()
+        # Shortcuts 5/6/7 from CLI
+        if mode in ('5', '6', '7'):
+            shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
+            _run_quick_asset(shortcut_map[mode])
+            return
 
-    if mode not in ('A', 'B', 'C', 'D', 'E'):
-        print("Invalid choice. Defaulting to B.")
-        mode = 'B'
-
-    # Mode E iteration choice
-    e_iterations = '2'
-    if mode == 'E':
-        print("\nRefinement iterations:")
-        print("  1. 2nd pass only (feature refinement + finer grid, ~1-2h)")
-        print("  2. 2nd + 3rd pass (+ interactions + ultra-fine grid, ~3-4h)")
-        iter_choice = input("Enter 1 or 2 [1]: ").strip()
-        if iter_choice == '2':
-            e_iterations = '23'
+        # Parse assets (default: all)
+        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y'):
+            assets_list = [a.strip().upper() for a in cli_args[1].split(',') if a.strip().upper() in ASSETS]
+            if not assets_list:
+                assets_list = list(ASSETS.keys())
         else:
-            e_iterations = '2'
+            assets_list = list(ASSETS.keys())
 
-    # Feature set selection only for Mode C (Mode A auto-tests both, Mode B reads CSV, Mode D analyzes from scratch)
-    if mode == 'C':
-        pass  # Mode C always tests both
+        # Parse horizon (default: 4,8h for Mode B, 4h for others)
+        horizons = [4, 8] if mode == 'B' else [4]
+        for a in cli_args:
+            if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
+                horizons = [int(h) for h in a[:-1].split(',')]
 
-    print("\nWhich assets?")
-    print("  1. All (crypto + indices)")
-    print("  2. Crypto only (BTC, ETH, SOL, XRP, DOGE)")
-    print("  3. Indices only (SMI, DAX, CAC40)")
-    print("  4. Choose specific")
-    choice = input("Enter choice (1-4): ").strip()
+        # Parse years (default: 1y for Mode D, 2y otherwise)
+        diag_years = 1 if mode == 'D' else 2
+        for a in cli_args:
+            if a.lower().endswith('y') and a[:-1].isdigit():
+                diag_years = int(a[:-1])
 
-    if choice == '2':
-        assets_list = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE']
-    elif choice == '3':
-        assets_list = ['SMI', 'DAX', 'CAC40']
-    elif choice == '4':
-        print(f"Available: {', '.join(ASSETS.keys())}")
-        selected = input("Enter comma-separated names: ").strip().upper()
-        assets_list = [a.strip() for a in selected.split(',') if a.strip() in ASSETS]
+        e_iterations = '2'
+
+        print("=" * 60)
+        print(f"  CLI: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)} | {diag_years}y")
+        print("=" * 60)
+
     else:
-        assets_list = list(ASSETS.keys())
 
-    mode_labels = {'A': 'Full Review', 'B': 'Quick Run', 'C': 'Compare',
-                   'D': 'Full Pipeline', 'E': 'Iterative Refinement'}
-    print(f"\nAssets: {', '.join(assets_list)}")
-    print(f"Mode: {mode} ({mode_labels.get(mode, mode)})")
+        print("=" * 60)
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- V2 OPTIMIZED")
+        print("  Crypto: BTC, ETH, XRP, DOGE")
+        print("  Indices: SMI, DAX, CAC40")
+        print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
+        print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND (Set B needs it!)'}")
+        print("=" * 60)
 
-    # Horizon selection
-    print("\nPrediction horizon:")
-    print("  1. 1 hour ahead")
-    print("  2. 4 hours ahead (current default)")
-    print("  3. Both (1h + 4h — runs everything twice)")
-    h_choice = input("Enter choice (1-3) [2]: ").strip()
-    if h_choice == '1':
-        horizons = [1]
-    elif h_choice == '3':
-        horizons = [1, 4]
-    else:
-        horizons = [4]
-    print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
+        print("\nChoose mode:")
+        print("  A. Full review (tests both feature sets, picks winner)")
+        print("  B. Quick run (saved models + signals + chart)")
+        print("  C. Compare Set A vs Set B")
+        print("  D. FULL PIPELINE (feature analysis → diagnostic → signals)")
+        print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D)")
+        print("  ---")
+        print("  5. Quick BTC (Mode B, both 4h+8h)")
+        print("  6. Quick ETH (Mode B, both 4h+8h)")
+        print("  7. Quick XRP (Mode B, both 4h+8h)")
+        mode = input("\nEnter A-E or 5-7: ").strip().upper()
 
-    diag_years = 2
-    if mode in ('A', 'C', 'D', 'E'):
-        print("\nDiagnostic data range:")
-        print("  1. Last 4 years  (slowest)")
-        print("  2. Last 2 years  (recommended)")
-        print("  3. Last 1 year   (fastest)")
-        range_choice = input("Enter choice (1-3): ").strip()
-        if range_choice == '1':
-            diag_years = 4
-        elif range_choice == '3':
-            diag_years = 1
+        # Shortcuts 5/6/7
+        if mode in ('5', '6', '7'):
+            shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
+            _run_quick_asset(shortcut_map[mode])
+            return
+
+        if mode not in ('A', 'B', 'C', 'D', 'E'):
+            print("Invalid choice. Defaulting to B.")
+            mode = 'B'
+
+        # Mode E iteration choice
+        e_iterations = '2'
+        if mode == 'E':
+            print("\nRefinement iterations:")
+            print("  1. 2nd pass only (feature refinement + finer grid, ~1-2h)")
+            print("  2. 2nd + 3rd pass (+ interactions + ultra-fine grid, ~3-4h)")
+            iter_choice = input("Enter 1 or 2 [1]: ").strip()
+            if iter_choice == '2':
+                e_iterations = '23'
+            else:
+                e_iterations = '2'
+
+        # Feature set selection only for Mode C (Mode A auto-tests both, Mode B reads CSV, Mode D analyzes from scratch)
+        if mode == 'C':
+            pass  # Mode C always tests both
+
+        print("\nWhich assets?")
+        print("  1. All (crypto + indices)")
+        print("  2. Crypto only (BTC, ETH, XRP, DOGE)")
+        print("  3. Indices only (SMI, DAX, CAC40)")
+        print("  4. Choose specific")
+        choice = input("Enter choice (1-4): ").strip()
+
+        if choice == '2':
+            assets_list = ['BTC', 'ETH', 'XRP', 'DOGE']
+        elif choice == '3':
+            assets_list = ['SMI', 'DAX', 'CAC40']
+        elif choice == '4':
+            print(f"Available: {', '.join(ASSETS.keys())}")
+            selected = input("Enter comma-separated names: ").strip().upper()
+            assets_list = [a.strip() for a in selected.split(',') if a.strip() in ASSETS]
         else:
-            diag_years = 2
-        print(f"Diagnostic range: last {diag_years} year{'s' if diag_years > 1 else ''}")
+            assets_list = list(ASSETS.keys())
+
+        mode_labels = {'A': 'Full Review', 'B': 'Quick Run', 'C': 'Compare',
+                       'D': 'Full Pipeline', 'E': 'Iterative Refinement'}
+        print(f"\nAssets: {', '.join(assets_list)}")
+        print(f"Mode: {mode} ({mode_labels.get(mode, mode)})")
+
+        # Horizon selection
+        print("\nPrediction horizon:")
+        print("  1. 4 hours ahead (default)")
+        print("  2. 8 hours ahead")
+        print("  3. Both (4h + 8h)")
+        h_choice = input("Enter choice (1-3) [1]: ").strip()
+        if h_choice == '2':
+            horizons = [8]
+        elif h_choice == '3':
+            horizons = [4, 8]
+        else:
+            horizons = [4]
+        print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
+
+        diag_years = 2
+        if mode in ('A', 'C', 'D', 'E'):
+            print("\nDiagnostic data range:")
+            print("  1. Last 4 years  (slowest)")
+            print("  2. Last 2 years  (recommended)")
+            print("  3. Last 1 year   (fastest)")
+            range_choice = input("Enter choice (1-3): ").strip()
+            if range_choice == '1':
+                diag_years = 4
+            elif range_choice == '3':
+                diag_years = 1
+            else:
+                diag_years = 2
+            print(f"Diagnostic range: last {diag_years} year{'s' if diag_years > 1 else ''}")
 
     for h in horizons:
         if len(horizons) > 1:

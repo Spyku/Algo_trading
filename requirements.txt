@@ -1,30 +1,10 @@
-# ============================================
-# Algo Trading System — Requirements
-# ============================================
-
-# Data Sources
-ccxt>=4.0                   # Binance crypto data
-yfinance>=0.2.30            # Yahoo Finance indices data
-
-# ML / Models
-scikit-learn>=1.4
-lightgbm>=4.3               # GPU build installed separately — see setup script
-
-# Data & Numerics
-numpy>=1.26
-pandas>=2.2
-scipy>=1.12
-
-# Async / IB
-ib_insync>=0.9.86           # Interactive Brokers API wrapper
-nest_asyncio>=1.6           # asyncio compat
-
-# Parallelism
-joblib>=1.3
-
-# Visualization (optional, for dashboard/charts)
-matplotlib>=3.8
-
-# Utilities
-pytz>=2024.1
-requests>=2.31
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+lightgbm>=4.0
+joblib
+matplotlib
+ccxt>=4.0
+yfinance
+pynacl
+cryptography
