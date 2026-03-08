@@ -41,7 +41,8 @@ np.random.seed(42)
 TRADING_FEE  = 0.0009
 MIN_CONFIDENCE = 75
 DIAG_STEP    = 72
-HOLDOUT_HOURS = 500   # NEW: reserved for out-of-sample test
+HOLDOUT_HOURS = 720   # NEW: reserved for out-of-sample test (30 days → ~30 steps at step=24)
+HOLDOUT_STEP  = 24    # NEW: finer step for holdout eval (more data points, stabler estimate)
 N_BOOTSTRAP  = 500    # NEW: bootstrap resamples for CI
 N_PERMUTATIONS = 100  # NEW: permutation test iterations (use 500 in production)
 
@@ -332,27 +333,29 @@ def test_holdout(df, feature_cols, window=200, model_name='RF'):
     df_train   = df.iloc[:-HOLDOUT_HOURS].reset_index(drop=True)
     df_holdout = df.iloc[-HOLDOUT_HOURS:].reset_index(drop=True)
 
-    print(f"  Train:   {len(df_train):,} rows")
-    print(f"  Holdout: {len(df_holdout):,} rows")
+    n_holdout_steps = len(df_holdout) // HOLDOUT_STEP
+    print(f"  Train:   {len(df_train):,} rows  (step={DIAG_STEP}h)")
+    print(f"  Holdout: {len(df_holdout):,} rows  (step={HOLDOUT_STEP}h → ~{n_holdout_steps} eval points)")
 
     # Evaluate on training window (mirrors what Mode D does today)
-    print(f"\n  Evaluating on TRAIN window...")
+    print(f"\n  Evaluating on TRAIN window (step={DIAG_STEP})...")
     t0 = time.time()
-    train_result = _eval_config(df_train, feature_cols, window=window, model_name=model_name)
+    train_result = _eval_config(df_train, feature_cols, window=window, step=DIAG_STEP, model_name=model_name)
     print(f"  Done in {time.time()-t0:.1f}s")
 
     if train_result is None:
         print("  Not enough data for train eval")
         return
 
-    # Evaluate SAME config on holdout (no re-training, no re-selection)
-    print(f"\n  Evaluating on HOLDOUT window...")
+    # Evaluate SAME config on holdout with FINER step (more eval points = stabler estimate)
+    # REAL SYSTEM: use step=24 for holdout eval in run_mode_d()
+    print(f"\n  Evaluating on HOLDOUT window (step={HOLDOUT_STEP})...")
     t0 = time.time()
-    holdout_result = _eval_config(df_holdout, feature_cols, window=window, model_name=model_name)
+    holdout_result = _eval_config(df_holdout, feature_cols, window=window, step=HOLDOUT_STEP, model_name=model_name)
     print(f"  Done in {time.time()-t0:.1f}s")
 
     if holdout_result is None:
-        print("  Not enough holdout data for evaluation (need >500h)")
+        print("  Not enough holdout data for evaluation")
         return
 
     # Report

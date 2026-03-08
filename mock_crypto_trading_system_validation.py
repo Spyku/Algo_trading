@@ -43,7 +43,7 @@ try:
         bootstrap_ci,
         _make_mock_signals,
         _calmar, _sharpe, _score_new, _score_old,
-        TRADING_FEE, DIAG_STEP, HOLDOUT_HOURS,
+        TRADING_FEE, DIAG_STEP, HOLDOUT_HOURS, HOLDOUT_STEP,
     )
 except ImportError as e:
     print(f"ERROR: Could not import from mock_crypto_trading_system.py")
@@ -100,8 +100,8 @@ def test_v1_holdout_stability():
         df_train   = df_use.iloc[:-HOLDOUT_HOURS].reset_index(drop=True)
         df_holdout = df_use.iloc[-HOLDOUT_HOURS:].reset_index(drop=True)
 
-        r_train = _eval_config(df_train, INFORMATIVE_COLS, window=150, model_name='RF')
-        r_hold  = _eval_config(df_holdout, INFORMATIVE_COLS, window=150, model_name='RF')
+        r_train = _eval_config(df_train, INFORMATIVE_COLS, window=150, step=DIAG_STEP, model_name='RF')
+        r_hold  = _eval_config(df_holdout, INFORMATIVE_COLS, window=150, step=24, model_name='RF')
 
         if r_train is None or r_hold is None:
             _fail(f'seed_{seed}_eval', 'eval returned None')
@@ -285,15 +285,19 @@ def test_v3_permutation_anchors():
         else:
             _fail('anchor_noise_not_significant', f'p={p_noise:.3f} — permutation test has false positives!')
 
-    # ── Anchor B: near-perfect label ─────────────────────
-    print(f"\n  Anchor B: near-perfect label (expect p < 0.10)...")
+    # ── Anchor B: feature-derived label (definitively learnable) ──
+    print(f"\n  Anchor B: feature-derived label (expect p < 0.10)...")
+    print(f"    Note: label = sign(logret_4h) + 15% noise — directly learnable from features")
+    print(f"    (Future-price label fails on random walk: no autocorrelation to exploit)")
     df_signal = df_use.copy()
-    # Label = 1 if price will go up 4h later, with 15% noise
-    true_label = (df_signal['close'].shift(-4) > df_signal['close']).astype(int)
+    # Label derived from a feature the model CAN see: logret_4h > 0 → label=1
+    # With 15% random noise flips. LR/RF learns this because logret_4h is in INFORMATIVE_COLS.
+    # This proves the permutation test CAN detect real signal when signal exists.
+    true_label = (df_signal['logret_4h'] > 0).astype(int)
     noise_mask = np.random.RandomState(42).random(len(df_signal)) < 0.15
     df_signal['label'] = np.where(noise_mask,
-                                   1 - true_label.fillna(0).astype(int),
-                                   true_label.fillna(0).astype(int))
+                                   1 - true_label.astype(int),
+                                   true_label.astype(int))
     p_signal, acc_signal = _run_perm_test(df_signal, 'signal', n_perm=100)
 
     if p_signal is None:
