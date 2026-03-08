@@ -28,3 +28,5 @@ Thumbs.db
 # Allow specific files
 !requirements.txt
 !.gitignore
+public.pem 
+btc_hourly_data.csv 
