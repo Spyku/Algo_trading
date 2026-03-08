@@ -5,8 +5,7 @@ ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 125 features → walk-forward ML → BUY/SELL/HOLD signals.
 
 Modes:
-  A. Full review (Set A vs B)    B. Quick run (saved models)
-  C. Compare Set A vs B          D. Full pipeline (feature analysis → diagnostic)
+  B. Quick run (saved models)    D. Full pipeline (feature analysis → diagnostic)
   E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage (skip all menus):
@@ -650,45 +649,37 @@ def _classify_feature(feat):
         return 'BASE'
 
 
-def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
-    """Fast walk-forward test with LGBM only.
-    Returns (accuracy, alpha, n_tests).
-    Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
+def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+    """Fast walk-forward test with LGBM only. Returns accuracy.
     device: override LGBM device ('cpu' for parallel safety, None = use default)."""
     from lightgbm import LGBMClassifier
 
     lgbm_device = device if device else LGBM_DEVICE
+
     n = len(df_features)
     min_start = window + 50
     if n < min_start + 30:
-        return 0, 0, 0
+        return 0, 0
 
     correct = 0
     total = 0
 
-    # Portfolio simulation alongside accuracy
-    cash     = 1.0
-    in_pos   = False
-    entry_px = 0.0
-    start_px = float(df_features.iloc[min_start]['close'])
-
     for i in range(min_start, n, step):
-        train    = df_features.iloc[max(0, i - window):i]
+        train = df_features.iloc[max(0, i - window):i]
         test_row = df_features.iloc[i:i+1]
-        X_train  = train[feature_cols]
-        y_train  = train['label'].values
-        X_test   = test_row[feature_cols]
-        y_true   = test_row['label'].values[0]
-        price    = float(test_row['close'].values[0])
+        X_train = train[feature_cols]
+        y_train = train['label'].values
+        X_test = test_row[feature_cols]
+        y_true = test_row['label'].values[0]
 
         if len(np.unique(y_train)) < 2:
             continue
 
-        scaler    = StandardScaler()
+        scaler = StandardScaler()
         X_train_s = pd.DataFrame(scaler.fit_transform(X_train),
                                  columns=feature_cols, index=X_train.index)
-        X_test_s  = pd.DataFrame(scaler.transform(X_test),
-                                 columns=feature_cols, index=X_test.index)
+        X_test_s = pd.DataFrame(scaler.transform(X_test),
+                                columns=feature_cols, index=X_test.index)
 
         model = LGBMClassifier(
             n_estimators=200, max_depth=6, learning_rate=0.05,
@@ -697,36 +688,11 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
         )
         model.fit(X_train_s, y_train)
         pred = model.predict(X_test_s)[0]
-
         if pred == y_true:
             correct += 1
         total += 1
 
-        # Portfolio: BUY on pred=1, SELL on pred=0
-        if pred == 1 and not in_pos:
-            in_pos   = True
-            entry_px = price * (1 + TRADING_FEE)
-        elif pred == 0 and in_pos:
-            cash   *= (price * (1 - TRADING_FEE)) / entry_px
-            in_pos  = False
-
-    # Close open position at end
-    if in_pos and total > 0:
-        last_px = float(df_features.iloc[-1]['close'])
-        cash   *= (last_px * (1 - TRADING_FEE)) / entry_px
-
-    last_px   = float(df_features.iloc[-1]['close'])
-    strat_ret = (cash - 1.0) * 100
-    bh_ret    = (last_px / start_px - 1) * 100
-    alpha     = round(strat_ret - bh_ret, 2)
-    accuracy  = correct / total * 100 if total > 0 else 0
-    return accuracy, alpha, total
-
-
-def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
-    """Backward-compatible wrapper — returns (accuracy, n_tests). Used by Mode E."""
-    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device)
-    return acc, n
+    return (correct / total * 100 if total > 0 else 0), total
 
 
 def _test_lgbm_importance(df_features, feature_cols):
@@ -766,90 +732,87 @@ def _test_lgbm_importance(df_features, feature_cols):
     return importance
 
 
-def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
-    """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop)."""
+def _perm_one_feature(df_features, feature_cols, feat, baseline_acc):
+    """Helper for parallel permutation test."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     df_shuffled = df_features.copy()
     df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu')
-    return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha
+    shuffled_acc, _ = _quick_accuracy(df_shuffled, feature_cols, device='cpu')
+    return feat, baseline_acc - shuffled_acc
 
 
 def _test_permutation_importance(df_features, feature_cols):
-    """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
+    """Shuffle each feature and measure accuracy drop. Parallelized."""
     print("\n  [2/5] Permutation Importance (parallel)")
-    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols)
-    print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
+    baseline_acc, n_tests = _quick_accuracy(df_features, feature_cols)
+    print(f"    Baseline: {baseline_acc:.1f}% (n={n_tests})")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
     print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
     t0 = time.time()
     with _suppress_stderr():
         perm_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
     results = []
-    for feat, acc_drop, alpha_drop in perm_results:
-        results.append({'feature': feat, 'acc_drop': acc_drop, 'alpha_drop': alpha_drop})
-        print(f"    {feat:30s} acc_drop: {acc_drop:+5.1f}%  alpha_drop: {alpha_drop:+6.1f}%")
+    for feat, drop in perm_results:
+        results.append({'feature': feat, 'acc_drop': drop})
+        print(f"    {feat:30s} drop: {drop:+5.1f}%")
 
     return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
 
 
-def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
-    """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change)."""
+def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc):
+    """Helper for parallel ablation test."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     reduced = [f for f in feature_cols if f != feat]
-    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu')
-    return feat, acc, acc - baseline_acc, alpha - baseline_alpha
+    acc, _ = _quick_accuracy(df_features, reduced, device='cpu')
+    return feat, acc, acc - baseline_acc
 
 
 def _test_ablation(df_features, feature_cols):
-    """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
+    """Drop each feature one at a time and measure accuracy. Parallelized."""
     print("\n  [3/5] Ablation Test (parallel, drop one at a time)")
-    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols)
-    print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
+    baseline_acc, _ = _quick_accuracy(df_features, feature_cols)
+    print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}%")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
     print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
     t0 = time.time()
     with _suppress_stderr():
         ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
     results = []
-    for feat, acc, acc_change, alpha_change in ablation_results:
-        results.append({'dropped': feat, 'accuracy': acc,
-                        'change': acc_change, 'alpha_change': alpha_change})
-        marker = ' ** IMPROVES' if acc_change > 0.3 or alpha_change > 3 else ''
-        print(f"    Drop {feat:30s} -> {acc:5.1f}% ({acc_change:+5.1f}%)  "
-              f"alpha_chg: {alpha_change:+6.1f}%{marker}")
+    for feat, acc, change in ablation_results:
+        results.append({'dropped': feat, 'accuracy': acc, 'change': change})
+        marker = ' ** IMPROVES' if change > 0.3 else ''
+        print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+5.1f}%){marker}")
 
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
 def _reduced_one_set(df_features, ranked, n_feat):
-    """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score)."""
+    """Helper for parallel reduced set test."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     top_n = ranked[:n_feat]
-    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu')
-    combined = acc * (1 + max(alpha, 0) / 100)
-    return n_feat, acc, alpha, combined
+    acc, _ = _quick_accuracy(df_features, top_n, device='cpu')
+    return n_feat, acc
 
 
 def _test_reduced_sets(df_features, feature_cols, importance_df):
@@ -872,18 +835,14 @@ def _test_reduced_sets(df_features, feature_cols, importance_df):
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
     results = []
-    for n_feat, acc, alpha, combined in sorted(reduced_results):
-        results.append({'n_features': n_feat, 'accuracy': acc,
-                        'alpha': alpha, 'combined_score': combined})
+    for n_feat, acc in sorted(reduced_results):
+        results.append({'n_features': n_feat, 'accuracy': acc})
         bar = '#' * int(acc * 0.5)
-        print(f"    Top {n_feat:3d} features: {acc:5.1f}% acc | {alpha:+6.1f}% alpha | "
-              f"score={combined:.1f}  {bar}")
+        print(f"    Top {n_feat:3d} features: {acc:5.1f}% {bar}")
 
     df_results = pd.DataFrame(results)
-    best_row = df_results.loc[df_results['combined_score'].idxmax()]
-    print(f"\n    OPTIMAL: Top {int(best_row['n_features'])} -> "
-          f"{best_row['accuracy']:.1f}% acc | {best_row['alpha']:+.1f}% alpha | "
-          f"score={best_row['combined_score']:.1f}")
+    best_row = df_results.loc[df_results['accuracy'].idxmax()]
+    print(f"\n    OPTIMAL: Top {int(best_row['n_features'])} -> {best_row['accuracy']:.1f}%")
     return df_results
 
 
@@ -904,43 +863,25 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
         else:
             scores[f] -= 1
 
-    # Permutation — accuracy drop + alpha drop
+    # Permutation
     if permutation_df is not None:
         for _, row in permutation_df.iterrows():
             f = row['feature']
-            # Accuracy signal
             if row['acc_drop'] > 0.5:
                 scores[f] += 2
             elif row['acc_drop'] > 0:
                 scores[f] += 1
             else:
                 scores[f] -= 1
-            # Alpha signal (shuffling this feature kills alpha = it matters)
-            alpha_drop = row.get('alpha_drop', 0)
-            if alpha_drop > 10:
-                scores[f] += 2
-            elif alpha_drop > 3:
-                scores[f] += 1
-            elif alpha_drop < -3:
-                scores[f] -= 1
 
-    # Ablation — accuracy change + alpha change
+    # Ablation
     if ablation_df is not None:
         for _, row in ablation_df.iterrows():
             f = row['dropped']
-            # Accuracy signal
             if row['change'] > 0.3:
                 scores[f] -= 3
             elif row['change'] > 0:
                 scores[f] -= 1
-            # Alpha signal (dropping this feature improves alpha = it was hurting)
-            alpha_change = row.get('alpha_change', 0)
-            if alpha_change > 5:
-                scores[f] -= 2
-            elif alpha_change > 2:
-                scores[f] -= 1
-            elif alpha_change < -5:
-                scores[f] += 1
 
     score_df = pd.DataFrame([
         {'feature': f, 'score': s, 'category': _classify_feature(f)}
@@ -996,17 +937,13 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     # Determine optimal set: KEEP features + test with/without MAYBE
     optimal_features = list(keep)
 
-    # Quick test: KEEP only vs KEEP + MAYBE — use combined_score = acc × (1 + alpha/100)
+    # Quick test: KEEP only vs KEEP + MAYBE
     if maybe:
-        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep)
-        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe)
-        score_keep = acc_keep * (1 + max(alpha_keep, 0) / 100)
-        score_all  = acc_all  * (1 + max(alpha_all,  0) / 100)
-        print(f"\n  KEEP only       ({len(keep):3d} feat): {acc_keep:.1f}% acc | "
-              f"{alpha_keep:+.1f}% alpha | score={score_keep:.1f}")
-        print(f"  KEEP + MAYBE    ({len(keep)+len(maybe):3d} feat): {acc_all:.1f}% acc | "
-              f"{alpha_all:+.1f}% alpha | score={score_all:.1f}")
-        if score_all > score_keep + 1.0:
+        acc_keep, _ = _quick_accuracy(df_features, keep)
+        acc_all, _ = _quick_accuracy(df_features, keep + maybe)
+        print(f"\n  KEEP only ({len(keep)} features): {acc_keep:.1f}%")
+        print(f"  KEEP + MAYBE ({len(keep) + len(maybe)} features): {acc_all:.1f}%")
+        if acc_all > acc_keep + 0.5:
             optimal_features = keep + maybe
             print(f"  >>> Using KEEP + MAYBE ({len(optimal_features)} features)")
         else:
@@ -1014,26 +951,21 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     else:
         print(f"\n  >>> Using KEEP ({len(optimal_features)} features)")
 
-    # Also check best reduced set from test 4 — compare by combined_score
+    # Also check best reduced set from test 4
     if reduced_df is not None and len(reduced_df) > 0:
-        best_n_row     = reduced_df.loc[reduced_df['combined_score'].idxmax()]
-        best_n         = int(best_n_row['n_features'])
-        best_n_score   = best_n_row['combined_score']
-        best_n_acc     = best_n_row['accuracy']
-        best_n_alpha   = best_n_row['alpha']
-        ranked         = importance_df['feature'].tolist()
+        best_n_row = reduced_df.loc[reduced_df['accuracy'].idxmax()]
+        best_n = int(best_n_row['n_features'])
+        best_n_acc = best_n_row['accuracy']
+        ranked = importance_df['feature'].tolist()
         top_n_features = ranked[:best_n]
 
-        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features)
-        opt_score = opt_acc * (1 + max(opt_alpha, 0) / 100)
-        print(f"  Scored optimal  ({len(optimal_features):3d} feat): {opt_acc:.1f}% acc | "
-              f"{opt_alpha:+.1f}% alpha | score={opt_score:.1f}")
-        print(f"  Top-{best_n} by LGBM ({best_n:3d} feat): {best_n_acc:.1f}% acc | "
-              f"{best_n_alpha:+.1f}% alpha | score={best_n_score:.1f}")
+        opt_acc, _ = _quick_accuracy(df_features, optimal_features)
+        print(f"  Scored optimal ({len(optimal_features)}): {opt_acc:.1f}%")
+        print(f"  Top-{best_n} by LGBM: {best_n_acc:.1f}%")
 
-        if best_n_score > opt_score + 2.0:
+        if best_n_acc > opt_acc + 1.0:
             optimal_features = top_n_features
-            print(f"  >>> Switching to Top-{best_n} (score +{best_n_score - opt_score:.1f})")
+            print(f"  >>> Switching to Top-{best_n} by LGBM (better by {best_n_acc - opt_acc:.1f}%)")
 
     # Save analysis results
     score_df.to_csv(f'{MODELS_DIR}/crypto_feature_analysis_{asset_name.lower()}_auto.csv', index=False)
@@ -2065,168 +1997,6 @@ def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_hourly_char
     return output_file
 
 
-# ============================================================
-# MODE A: Full Review (auto-tests both feature sets per asset)
-# ============================================================
-def run_mode_a(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
-    print("\n" + "=" * 60)
-    print(f"  MODE A: FULL REVIEW — {horizon}h HORIZON")
-    print(f"  Testing Set A ({len(FEATURE_SET_A)} features) vs Set B ({len(FEATURE_SET_B)} features)")
-    print("=" * 60)
-
-    # Download macro data first (VIX, DXY, S&P500, Fear&Greed, cross-asset)
-    print("\n  Updating macro & sentiment data...")
-    try:
-        import download_macro_data
-        download_macro_data.main()
-    except ImportError:
-        print("  WARNING: download_macro_data.py not found — macro features may be stale.")
-    except Exception as e:
-        print(f"  WARNING: Macro data update failed: {e}")
-
-    update_all_data(assets_list)
-    diag_hours = diag_years * 365 * 24
-    best_models = []
-
-    for asset_name in assets_list:
-        print(f"\n{'='*60}")
-        print(f"  EVALUATING: {asset_name} ({horizon}h horizon)")
-        print(f"{'='*60}")
-
-        df_raw = load_data(asset_name)
-        if df_raw is None:
-            continue
-
-        print(f"\n  Building all features (horizon={horizon}h)...")
-        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
-
-        total_rows = len(df_full)
-        if total_rows > diag_hours:
-            df_full = df_full.tail(diag_hours).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
-
-        if len(df_full) < 500:
-            print(f"  Not enough data ({len(df_full)} rows). Need 500+. Skipping.")
-            continue
-
-        # Validate both feature sets
-        set_a_valid = [f for f in FEATURE_SET_A if f in all_cols]
-        set_b_valid = [f for f in FEATURE_SET_B if f in all_cols]
-
-        missing_a = [f for f in FEATURE_SET_A if f not in all_cols]
-        missing_b = [f for f in FEATURE_SET_B if f not in all_cols]
-        if missing_a:
-            print(f"  WARNING: Set A missing: {missing_a}")
-        if missing_b:
-            print(f"  WARNING: Set B missing: {missing_b}")
-
-        # Align rows for fair comparison
-        df_a = df_full.dropna(subset=set_a_valid + ['label']).reset_index(drop=True)
-        df_b = df_full.dropna(subset=set_b_valid + ['label']).reset_index(drop=True)
-        min_rows = min(len(df_a), len(df_b))
-        df_a = df_a.tail(min_rows).reset_index(drop=True)
-        df_b = df_b.tail(min_rows).reset_index(drop=True)
-        print(f"  Aligned to {min_rows:,} rows | A: {len(set_a_valid)} features | B: {len(set_b_valid)} features")
-
-        # Test Set A
-        print(f"\n  --- SET A: {len(set_a_valid)} features (LGBM importance) ---")
-        t0 = time.time()
-        result_a = run_diagnostic_for_asset(asset_name, df_a, set_a_valid)
-        time_a = time.time() - t0
-
-        # Test Set B
-        print(f"\n  --- SET B: {len(set_b_valid)} features (consensus) ---")
-        t0 = time.time()
-        result_b = run_diagnostic_for_asset(asset_name, df_b, set_b_valid)
-        time_b = time.time() - t0
-
-        # Pick winner by combined score (accuracy × profit)
-        score_a = result_a.get('combined_score', 0) if result_a else 0
-        score_b = result_b.get('combined_score', 0) if result_b else 0
-        acc_a = result_a['accuracy'] if result_a else 0
-        acc_b = result_b['accuracy'] if result_b else 0
-        ret_a = result_a.get('return_pct', 0) if result_a else 0
-        ret_b = result_b.get('return_pct', 0) if result_b else 0
-
-        print(f"\n  {'='*50}")
-        print(f"  {asset_name} FEATURE SET RESULT:")
-        if result_a:
-            print(f"    Set A: {acc_a:.1f}% acc | {ret_a:+.1f}% ret | score={score_a:.3f} | {result_a['best_combo']} | w={result_a['best_window']}h | {time_a:.0f}s")
-        if result_b:
-            print(f"    Set B: {acc_b:.1f}% acc | {ret_b:+.1f}% ret | score={score_b:.3f} | {result_b['best_combo']} | w={result_b['best_window']}h | {time_b:.0f}s")
-
-        if score_a >= score_b:
-            winner = result_a
-            winner_set = 'A'
-        else:
-            winner = result_b
-            winner_set = 'B'
-
-        if winner:
-            winner['feature_set'] = winner_set
-            winner['horizon'] = horizon
-            best_models.append(winner)
-            print(f"    >>> WINNER: Set {winner_set} (score={winner.get('combined_score', 0):.3f}, "
-                  f"acc={winner['accuracy']:.1f}%, ret={winner.get('return_pct', 0):+.1f}%)")
-        print(f"  {'='*50}")
-
-    if not best_models:
-        print("\nNo diagnostic results. Aborting.")
-        return
-
-    # Save best models (merge with existing horizons)
-    csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
-    df_best = pd.DataFrame(best_models)
-    if os.path.exists(csv_path):
-        df_existing = pd.read_csv(csv_path)
-        if 'horizon' not in df_existing.columns:
-            df_existing['horizon'] = 4  # legacy rows are 4h
-        # Remove rows for current (asset, horizon) combos
-        for m in best_models:
-            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
-            df_existing = df_existing[~mask]
-        df_best = pd.concat([df_existing, df_best], ignore_index=True)
-    df_best.to_csv(csv_path, index=False)
-
-    print(f"\n{'='*60}")
-    print(f"  BEST MODELS SAVED — {horizon}h HORIZON ({csv_path})")
-    print(f"{'='*60}")
-    for row in best_models:
-        fs = row.get('feature_set', '?')
-        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | Set {fs} | {horizon}h")
-    print(f"{'='*60}")
-
-    # Generate signals + charts with winning configs
-    print("\n" + "=" * 60)
-    print("  GENERATING SIGNALS & BACKTEST CHARTS")
-    print("=" * 60)
-
-    all_signals = {}
-    for config in best_models:
-        asset_name = config['coin']
-        model_names = config['models'].split('+')
-        window = config['best_window']
-        fs = config.get('feature_set', 'A')
-        feature_override = list(FEATURE_SET_A) if fs == 'A' else list(FEATURE_SET_B)
-
-        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon)
-        signals = simulate_portfolio(signals)
-        all_signals[asset_name] = signals
-
-        generate_backtest_chart(asset_name, signals, model_info=config)
-
-        if signals:
-            latest = signals[-1]
-            print(f"\n  >> {asset_name} LATEST ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
-                  f"| price=${latest['close']:,.2f}")
-
-    export_chart_data(all_signals)
-
-    print("\n" + "=" * 60)
-    print("  MODE A COMPLETE")
-    print("=" * 60)
-
 
 # ============================================================
 # MODE B: Quick Run (uses saved best models)
@@ -2238,7 +2008,7 @@ def run_mode_b(assets_list, horizon_filter=None):
 
     if not os.path.exists(f'{MODELS_DIR}/crypto_hourly_best_models.csv'):
         print("\nERROR: crypto_hourly_best_models.csv not found!")
-        print("Please run Mode A first to find best models.")
+        print("Please run Mode D first to find best models.")
         return
 
     df_best = pd.read_csv(f'{MODELS_DIR}/crypto_hourly_best_models.csv')
@@ -2249,7 +2019,7 @@ def run_mode_b(assets_list, horizon_filter=None):
     if horizon_filter is not None:
         df_best = df_best[df_best['horizon'] == horizon_filter].reset_index(drop=True)
         if df_best.empty:
-            print(f"\nERROR: No {horizon_filter}h models found in CSV. Run Mode A with {horizon_filter}h first.")
+            print(f"\nERROR: No {horizon_filter}h models found in CSV. Run Mode D with {horizon_filter}h first.")
             return
 
     print("\nLoaded best models:")
@@ -2263,7 +2033,7 @@ def run_mode_b(assets_list, horizon_filter=None):
     missing = [a for a in assets_list if a not in available_in_csv]
     if missing:
         print(f"\nWARNING: No best model for: {', '.join(missing)}")
-        print("Run Mode A first for these assets.")
+        print("Run Mode D first for these assets.")
 
     if not assets_to_run:
         print("No assets to process.")
@@ -2321,160 +2091,6 @@ def run_mode_b(assets_list, horizon_filter=None):
     print("  MODE B COMPLETE")
     print("=" * 60)
 
-
-# ============================================================
-# MODE C: HEAD-TO-HEAD COMPARISON
-# ============================================================
-def run_mode_c(assets_list, diag_years=2, horizon=PREDICTION_HORIZON):
-    print("\n" + "=" * 60)
-    print(f"  MODE C: SET A vs SET B COMPARISON — {horizon}h HORIZON")
-    print(f"  Set A: {len(FEATURE_SET_A)} features (top 18 by LGBM importance)")
-    print(f"  Set B: {len(FEATURE_SET_B)} features (KEEP 14 consensus)")
-    print("=" * 60)
-
-    update_all_data(assets_list)
-    diag_hours = diag_years * 365 * 24
-    comparison_results = []
-    winning_models = []  # Save winner per asset for Mode B
-
-    for asset_name in assets_list:
-        print(f"\n{'='*60}")
-        print(f"  COMPARING: {asset_name}")
-        print(f"{'='*60}")
-
-        df_raw = load_data(asset_name)
-        if df_raw is None:
-            continue
-
-        print(f"\n  Building all features (horizon={horizon}h)...")
-        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
-        total_rows = len(df_full)
-        if total_rows > diag_hours:
-            df_full = df_full.tail(diag_hours).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
-
-        if len(df_full) < 500:
-            print(f"  Not enough data ({len(df_full)} rows). Need 500+. Skipping.")
-            continue
-
-        set_a_valid = [f for f in FEATURE_SET_A if f in all_cols]
-        set_b_valid = [f for f in FEATURE_SET_B if f in all_cols]
-
-        missing_a = [f for f in FEATURE_SET_A if f not in all_cols]
-        missing_b = [f for f in FEATURE_SET_B if f not in all_cols]
-        if missing_a:
-            print(f"  WARNING: Set A missing: {missing_a}")
-        if missing_b:
-            print(f"  WARNING: Set B missing: {missing_b}")
-
-        df_a = df_full.dropna(subset=set_a_valid + ['label']).reset_index(drop=True)
-        df_b = df_full.dropna(subset=set_b_valid + ['label']).reset_index(drop=True)
-        min_rows = min(len(df_a), len(df_b))
-        df_a = df_a.tail(min_rows).reset_index(drop=True)
-        df_b = df_b.tail(min_rows).reset_index(drop=True)
-        print(f"  Aligned to {min_rows:,} rows | A: {len(set_a_valid)} features | B: {len(set_b_valid)} features")
-
-        print(f"\n  --- SET A ---")
-        t0 = time.time()
-        result_a = run_diagnostic_for_asset(asset_name, df_a, set_a_valid)
-        time_a = time.time() - t0
-
-        print(f"\n  --- SET B ---")
-        t0 = time.time()
-        result_b = run_diagnostic_for_asset(asset_name, df_b, set_b_valid)
-        time_b = time.time() - t0
-
-        acc_a = result_a['accuracy'] if result_a else 0
-        acc_b = result_b['accuracy'] if result_b else 0
-        score_a = result_a.get('combined_score', 0) if result_a else 0
-        score_b = result_b.get('combined_score', 0) if result_b else 0
-        ret_a = result_a.get('return_pct', 0) if result_a else 0
-        ret_b = result_b.get('return_pct', 0) if result_b else 0
-
-        print(f"\n{'='*60}")
-        print(f"  HEAD-TO-HEAD: {asset_name}")
-        print(f"{'='*60}")
-        if result_a:
-            print(f"  Set A: {acc_a:.1f}% acc | {ret_a:+.1f}% ret | score={score_a:.3f} | {result_a['best_combo']} | w={result_a['best_window']}h | {time_a:.0f}s")
-        if result_b:
-            print(f"  Set B: {acc_b:.1f}% acc | {ret_b:+.1f}% ret | score={score_b:.3f} | {result_b['best_combo']} | w={result_b['best_window']}h | {time_b:.0f}s")
-
-        if result_a and result_b:
-            score_diff = score_a - score_b
-            if score_diff > 0.01:
-                winner = 'SET A WINS'
-            elif score_diff < -0.01:
-                winner = 'SET B WINS'
-            else:
-                winner = 'TIE'
-            print(f"\n  >>> {winner} (score diff={score_diff:+.3f})")
-            comparison_results.append({
-                'asset': asset_name,
-                'set_a_acc': acc_a, 'set_a_ret': ret_a, 'set_a_score': round(score_a, 4),
-                'set_a_combo': result_a['best_combo'],
-                'set_a_window': result_a['best_window'],
-                'set_b_acc': acc_b, 'set_b_ret': ret_b, 'set_b_score': round(score_b, 4),
-                'set_b_combo': result_b['best_combo'],
-                'set_b_window': result_b['best_window'],
-                'diff': round(score_diff, 4),
-                'winner': 'A' if score_diff > 0.01 else ('B' if score_diff < -0.01 else 'TIE'),
-            })
-
-            # Save winning config for Mode B
-            if score_a >= score_b:
-                winning_models.append(result_a)
-            else:
-                winning_models.append(result_b)
-
-    if comparison_results:
-        print(f"\n{'='*60}")
-        print("  COMPARISON SUMMARY")
-        print(f"{'='*60}")
-        a_wins = sum(1 for r in comparison_results if r['winner'] == 'A')
-        b_wins = sum(1 for r in comparison_results if r['winner'] == 'B')
-        ties   = sum(1 for r in comparison_results if r['winner'] == 'TIE')
-        avg_a = np.mean([r['set_a_acc'] for r in comparison_results])
-        avg_b = np.mean([r['set_b_acc'] for r in comparison_results])
-
-        for r in comparison_results:
-            print(f"  {r['asset']:6s} | A: {r['set_a_acc']:.1f}% acc, {r['set_a_ret']:+.1f}% ret, score={r['set_a_score']:.3f} "
-                  f"| B: {r['set_b_acc']:.1f}% acc, {r['set_b_ret']:+.1f}% ret, score={r['set_b_score']:.3f} | {r['winner']}")
-
-        print(f"\n  Set A avg: {avg_a:.1f}% | Set B avg: {avg_b:.1f}%")
-        print(f"  A wins: {a_wins} | B wins: {b_wins} | Ties: {ties}")
-
-        if avg_a > avg_b + 0.5:
-            print(f"\n  >>> OVERALL: SET A recommended (avg +{avg_a - avg_b:.1f}%)")
-        elif avg_b > avg_a + 0.5:
-            print(f"\n  >>> OVERALL: SET B recommended (avg +{avg_b - avg_a:.1f}%)")
-        else:
-            print(f"\n  >>> OVERALL: Too close to call.")
-
-        df_comp = pd.DataFrame(comparison_results)
-        df_comp.to_csv(f'{MODELS_DIR}/crypto_feature_set_comparison.csv', index=False)
-
-    # Save winning models for Mode B (merge with existing horizons)
-    if winning_models:
-        for wm in winning_models:
-            wm['horizon'] = horizon
-        csv_path = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
-        df_winners = pd.DataFrame(winning_models)
-        if os.path.exists(csv_path):
-            df_existing = pd.read_csv(csv_path)
-            if 'horizon' not in df_existing.columns:
-                df_existing['horizon'] = 4
-            for wm in winning_models:
-                mask = (df_existing['coin'] == wm['coin']) & (df_existing['horizon'] == horizon)
-                df_existing = df_existing[~mask]
-            df_winners = pd.concat([df_existing, df_winners], ignore_index=True)
-        df_winners.to_csv(csv_path, index=False)
-        print(f"\n  Saved winning models ({horizon}h) to {csv_path}:")
-        for row in winning_models:
-            print(f"    {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | {horizon}h")
-
-    print(f"\n{'='*60}")
-    print("  COMPARISON COMPLETE")
-    print(f"{'='*60}")
 
 
 # ============================================================
@@ -2891,7 +2507,7 @@ def run_mode_e(assets_list, diag_years=2, horizon=PREDICTION_HORIZON, iterations
         prev_features = prev_config['optimal_features']
         if not prev_features or prev_features == 'nan':
             print(f"  ERROR: No optimal features saved for {asset_name}.")
-            print(f"  Run Mode D first (not Mode A).")
+            print(f"  Run Mode D first.")
             continue
 
         print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
@@ -3169,7 +2785,7 @@ def main():
     #   python crypto_trading_system.py B              (all assets, 4h default)
     # ================================================================
     cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    if cli_args and cli_args[0].upper() in ('A', 'B', 'C', 'D', 'E', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'E', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -3215,16 +2831,14 @@ def main():
         print("=" * 60)
 
         print("\nChoose mode:")
-        print("  A. Full review (tests both feature sets, picks winner)")
         print("  B. Quick run (saved models + signals + chart)")
-        print("  C. Compare Set A vs Set B")
         print("  D. FULL PIPELINE (feature analysis → diagnostic → signals)")
         print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D)")
         print("  ---")
         print("  5. Quick BTC (Mode B, both 4h+8h)")
         print("  6. Quick ETH (Mode B, both 4h+8h)")
         print("  7. Quick XRP (Mode B, both 4h+8h)")
-        mode = input("\nEnter A-E or 5-7: ").strip().upper()
+        mode = input("\nEnter B/D/E or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
         if mode in ('5', '6', '7'):
@@ -3232,7 +2846,7 @@ def main():
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('A', 'B', 'C', 'D', 'E'):
+        if mode not in ('B', 'D', 'E'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
@@ -3247,10 +2861,6 @@ def main():
                 e_iterations = '23'
             else:
                 e_iterations = '2'
-
-        # Feature set selection only for Mode C (Mode A auto-tests both, Mode B reads CSV, Mode D analyzes from scratch)
-        if mode == 'C':
-            pass  # Mode C always tests both
 
         print("\nWhich assets?")
         print("  1. All (crypto + indices)")
@@ -3270,8 +2880,7 @@ def main():
         else:
             assets_list = list(ASSETS.keys())
 
-        mode_labels = {'A': 'Full Review', 'B': 'Quick Run', 'C': 'Compare',
-                       'D': 'Full Pipeline', 'E': 'Iterative Refinement'}
+        mode_labels = {'B': 'Quick Run', 'D': 'Full Pipeline', 'E': 'Iterative Refinement'}
         print(f"\nAssets: {', '.join(assets_list)}")
         print(f"Mode: {mode} ({mode_labels.get(mode, mode)})")
 
@@ -3290,7 +2899,7 @@ def main():
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
         diag_years = 2
-        if mode in ('A', 'C', 'D', 'E'):
+        if mode in ('D', 'E'):
             print("\nDiagnostic data range:")
             print("  1. Last 4 years  (slowest)")
             print("  2. Last 2 years  (recommended)")
@@ -3310,11 +2919,7 @@ def main():
             print(f"  RUNNING {h}h HORIZON")
             print(f"{'#'*60}")
 
-        if mode == 'A':
-            run_mode_a(assets_list, diag_years=diag_years, horizon=h)
-        elif mode == 'C':
-            run_mode_c(assets_list, diag_years=diag_years, horizon=h)
-        elif mode == 'D':
+        if mode == 'D':
             run_mode_d(assets_list, diag_years=diag_years, horizon=h)
         elif mode == 'E':
             run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
