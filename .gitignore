@@ -31,3 +31,4 @@ Thumbs.db
 public.pem 
 btc_hourly_data.csv 
 .tmp.driveupload/ 
+*.bak 
