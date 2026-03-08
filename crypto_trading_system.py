@@ -1681,6 +1681,11 @@ def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_ag
             if price > o_entry: o_wins += 1
             o_held = 0; o_in = False
 
+    o_final = o_cash + o_held * merged[-1]['close'] if o_in else o_cash
+    o_strat_ret = (o_final / 1000 - 1) * 100
+    o_bh_ret = (merged[-1]['close'] / merged[0]['close'] - 1) * 100
+    o_alpha = o_strat_ret - o_bh_ret
+
     for label, hours in [('1month', 720), ('1week', 168)]:
         data = merged[-hours:] if len(merged) >= hours else merged
         if not data:
@@ -1821,7 +1826,7 @@ Plotly.newPlot('cPort',[
             f.write(html)
         print(f"  Interactive chart: {filename}")
 
-    print(f"  Strategy: {strategy} | Trades: {o_trades} | Win rate: {(o_wins/o_trades*100) if o_trades else 0:.0f}% | Alpha: {alpha:+.1f}%")
+    print(f"  Strategy: {strategy} | Trades: {o_trades} | Win rate: {(o_wins/o_trades*100) if o_trades else 0:.0f}% | Alpha: {o_alpha:+.1f}%")
 
 
 def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='both_agree'):
@@ -3057,8 +3062,9 @@ def _run_quick_asset(asset):
             with open(json_path) as f:
                 chart_data = json.load(f)
             key = f"{asset}_{h}h"
-            if key in chart_data and chart_data[key]:
-                last = chart_data[key][-1]
+            assets = chart_data.get('assets', chart_data)
+            if key in assets and assets[key]:
+                last = assets[key][-1]
                 r = row.iloc[0]
                 results[h] = {
                     'signal': last.get('signal', '?'),
