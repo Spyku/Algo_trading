@@ -1,0 +1,30 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+
+# Data (too large for git)
+data/
+charts/
+models/
+config/
+
+# Secrets
+private.pem
+telegram_config.json
+revolut_x_config.json
+revolut_position.json
+*.json
+
+# System
+*.csv
+*.png
+*.html
+.DS_Store
+Thumbs.db
+
+# Allow specific files
+!requirements.txt
+!.gitignore
