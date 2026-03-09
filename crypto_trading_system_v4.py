@@ -2,10 +2,10 @@
 Crypto Hourly Trading System
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
-125 features → walk-forward ML → BUY/SELL/HOLD signals.
+125 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
 Modes:
-  B. Quick run (saved models)    D. Full pipeline (feature analysis → diagnostic)
+  B. Quick run (saved models)    D. Full pipeline (feature analysis -> diagnostic)
   E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage (skip all menus):
@@ -15,7 +15,7 @@ CLI Usage (skip all menus):
   python crypto_trading_system.py B                    # Mode B, all assets, default 4h
 
 Interactive shortcuts:
-  python crypto_trading_system.py    # Menu → select 5 for quick BTC, 6 for ETH, 7 for XRP
+  python crypto_trading_system.py    # Menu -> select 5 for quick BTC, 6 for ETH, 7 for XRP
 
 Outputs:
   charts/{ASSET}_backtest.png
@@ -47,6 +47,8 @@ warnings.filterwarnings('ignore', message='.*does not have valid feature names.*
 import time
 import json
 import contextlib
+import logging
+from logging.handlers import RotatingFileHandler
 
 
 @contextlib.contextmanager
@@ -325,6 +327,7 @@ def update_all_data(assets_list=None):
         try:
             download_asset(asset_name, update_only=True)
         except Exception as e:
+            LOG.error(f"ERROR updating {asset_name}: {e}")
             print(f"  ERROR updating {asset_name}: {e}")
 
 
@@ -378,13 +381,11 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
     high14 = df['high'].rolling(14).max()
     df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
 
-    bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
-    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    df['bb_position_20h'] = (df['close'] - (df['sma20h'] - 2 * bb_std)) / (4 * bb_std)  # reuse sma20h
 
-    roll_mean = df['close'].rolling(50).mean()
     roll_std  = df['close'].rolling(50).std()
-    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
+    df['zscore_50h'] = (df['close'] - df['sma50h']) / roll_std  # reuse sma50h
 
     tr = pd.DataFrame({
         'hl': df['high'] - df['low'],
@@ -422,18 +423,18 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
     df['dow_cos'] = np.cos(2 * np.pi * dow / 7)
 
     # ---- DERIVATIVES ----
-    # First derivative (velocity) — already captured by logret_1h, but explicit:
+    # First derivative (velocity) -- already captured by logret_1h, but explicit:
     df['price_velocity_1h'] = df['close'].diff() / df['close'].shift(1)     # pct change
     df['price_velocity_4h'] = df['close'].diff(4) / df['close'].shift(4)
 
-    # Second derivative (acceleration) — change in the rate of change
-    df['price_accel_1h'] = df['logret_1h'].diff()          # d²price/dt² (1h resolution)
-    df['price_accel_4h'] = df['logret_4h'].diff(4)         # d²price/dt² (4h resolution)
-    df['price_accel_12h'] = df['logret_12h'].diff(12)      # d²price/dt² (12h resolution)
-    df['price_accel_24h'] = df['logret_24h'].diff(24)      # d²price/dt² (24h resolution)
+    # Second derivative (acceleration) -- change in the rate of change
+    df['price_accel_1h'] = df['logret_1h'].diff()          # d^2price/dt^2 (1h resolution)
+    df['price_accel_4h'] = df['logret_4h'].diff(4)         # d^2price/dt^2 (4h resolution)
+    df['price_accel_12h'] = df['logret_12h'].diff(12)      # d^2price/dt^2 (12h resolution)
+    df['price_accel_24h'] = df['logret_24h'].diff(24)      # d^2price/dt^2 (24h resolution)
 
-    # Jerk (third derivative) — change in acceleration
-    df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d³price/dt³
+    # Jerk (third derivative) -- change in acceleration
+    df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
     rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
@@ -477,6 +478,29 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
 # ============================================================
 MACRO_DIR = 'data/macro_data'
 DATA_DIR = 'data'
+LOG_DIR = 'logs'
+
+def _setup_logger():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logger = logging.getLogger('trading_system')
+    if logger.handlers:
+        return logger  # already configured
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter('%(asctime)s | %(levelname)-7s | %(message)s',
+                            datefmt='%Y-%m-%d %H:%M:%S')
+    # Rotating file: 10MB max, keep 10 backups
+    fh = RotatingFileHandler(
+        f'{LOG_DIR}/trading_system.log',
+        maxBytes=10 * 1024 * 1024,
+        backupCount=10,
+        encoding='utf-8'
+    )
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    return logger
+
+LOG = _setup_logger()
 CHARTS_DIR = 'charts'
 MODELS_DIR = 'models'
 CONFIG_DIR = 'config'
@@ -652,7 +676,11 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     """Fast walk-forward test with LGBM only.
     Returns (accuracy, alpha, n_tests).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
-    device: override LGBM device ('cpu' for parallel safety, None = use default)."""
+    device: override LGBM device ('cpu' for parallel safety, None = use default).
+
+    Optimised: pure numpy normalisation (no StandardScaler + no pd.DataFrame wrap per step),
+    precomputed NaN mask, sum-based class-balance check.
+    """
     from lightgbm import LGBMClassifier
 
     lgbm_device = device if device else LGBM_DEVICE
@@ -661,32 +689,44 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     if n < min_start + 30:
         return 0, 0, 0
 
-    correct = 0
-    total = 0
+    # Extract to numpy once -- avoids repeated pandas indexing inside the loop
+    feat_idx = [df_features.columns.get_loc(c) for c in feature_cols]
+    feat_np   = df_features[feature_cols].values.astype(np.float64)
+    label_np  = df_features['label'].values.astype(np.int32)
+    close_np  = df_features['close'].values.astype(np.float64)
 
-    # Portfolio simulation alongside accuracy
+    # Precompute NaN mask once
+    nan_rows = np.isnan(feat_np).any(axis=1)
+
+    correct  = 0
+    total    = 0
     cash     = 1.0
     in_pos   = False
     entry_px = 0.0
-    start_px = float(df_features.iloc[min_start]['close'])
+    start_px = close_np[min_start]
 
     for i in range(min_start, n, step):
-        train    = df_features.iloc[max(0, i - window):i]
-        test_row = df_features.iloc[i:i+1]
-        X_train  = train[feature_cols]
-        y_train  = train['label'].values
-        X_test   = test_row[feature_cols]
-        y_true   = test_row['label'].values[0]
-        price    = float(test_row['close'].values[0])
-
-        if len(np.unique(y_train)) < 2:
+        if nan_rows[i]:
+            continue
+        train_start = max(0, i - window)
+        if nan_rows[train_start:i].any():
+            continue
+        X_train = feat_np[train_start:i]
+        y_train = label_np[train_start:i]
+        # Fast class-balance check (avoids np.unique allocation each step)
+        y_sum = y_train.sum()
+        if y_sum == 0 or y_sum == len(y_train):
             continue
 
-        scaler    = StandardScaler()
-        X_train_s = pd.DataFrame(scaler.fit_transform(X_train),
-                                 columns=feature_cols, index=X_train.index)
-        X_test_s  = pd.DataFrame(scaler.transform(X_test),
-                                 columns=feature_cols, index=X_test.index)
+        # Pure numpy normalisation -- same result as StandardScaler, no object overhead
+        mean = X_train.mean(axis=0)
+        std  = X_train.std(axis=0)
+        std[std == 0] = 1.0
+        X_train_s = (X_train - mean) / std
+        X_test_s  = (feat_np[i:i+1] - mean) / std
+
+        y_true = label_np[i]
+        price  = close_np[i]
 
         model = LGBMClassifier(
             n_estimators=200, max_depth=6, learning_rate=0.05,
@@ -710,19 +750,17 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
 
     # Close open position at end
     if in_pos and total > 0:
-        last_px = float(df_features.iloc[-1]['close'])
-        cash   *= (last_px * (1 - TRADING_FEE)) / entry_px
+        cash *= (close_np[-1] * (1 - TRADING_FEE)) / entry_px
 
-    last_px   = float(df_features.iloc[-1]['close'])
     strat_ret = (cash - 1.0) * 100
-    bh_ret    = (last_px / start_px - 1) * 100
+    bh_ret    = (close_np[-1] / start_px - 1) * 100
     alpha     = round(strat_ret - bh_ret, 2)
     accuracy  = correct / total * 100 if total > 0 else 0
     return accuracy, alpha, total
 
 
 def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
-    """Backward-compatible wrapper — returns (accuracy, n_tests). Used by Mode E."""
+    """Backward-compatible wrapper -- returns (accuracy, n_tests). Used by Mode E."""
     acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device)
     return acc, n
 
@@ -733,12 +771,13 @@ def _test_lgbm_importance(df_features, feature_cols):
 
     print("\n  [1/5] LGBM Feature Importance (gain-based)")
     n = len(df_features)
-    train = df_features.iloc[:int(n * 0.7)]
-    X = train[feature_cols]
-    y = train['label'].values
+    cut = int(n * 0.7)
+    X_np = df_features[feature_cols].values[:cut].astype(np.float64)
+    y    = df_features['label'].values[:cut]
 
-    scaler = StandardScaler()
-    X_s = pd.DataFrame(scaler.fit_transform(X), columns=feature_cols)
+    # Pure numpy normalisation -- no StandardScaler + no pd.DataFrame overhead
+    mean = X_np.mean(axis=0); std = X_np.std(axis=0); std[std == 0] = 1.0
+    X_s  = (X_np - mean) / std
 
     model = LGBMClassifier(
         n_estimators=200, max_depth=6, learning_rate=0.05,
@@ -764,22 +803,99 @@ def _test_lgbm_importance(df_features, feature_cols):
     return importance
 
 
-def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
-    """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop)."""
+# ── parallel worker helpers (numpy-based -- no DataFrame copy per worker) ────
+
+def _perm_one_feature(feat_np, label_np, close_np, feature_cols, feat_idx, baseline_acc, baseline_alpha):
+    """Shuffle one column (by index) and score. No DataFrame copy sent to worker."""
+    import os, warnings, numpy as _np
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    shuffled = feat_np.copy()
+    shuffled[:, feat_idx] = _np.random.permutation(shuffled[:, feat_idx])
+    # Build a minimal wrapper so _quick_score can receive numpy directly
+    acc, alpha, _ = _quick_score_np(shuffled, label_np, close_np, len(feature_cols))
+    return feature_cols[feat_idx], baseline_acc - acc, baseline_alpha - alpha
+
+
+def _ablation_one_feature(feat_np, label_np, close_np, feature_cols, feat_idx, baseline_acc, baseline_alpha):
+    """Drop one column (by index) and score."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
-    warnings.simplefilter('ignore')
-    df_shuffled = df_features.copy()
-    df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu')
-    return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha
+    keep_idx = [j for j in range(len(feature_cols)) if j != feat_idx]
+    reduced  = feat_np[:, keep_idx]
+    acc, alpha, _ = _quick_score_np(reduced, label_np, close_np, len(keep_idx))
+    return feature_cols[feat_idx], acc, acc - baseline_acc, alpha - baseline_alpha
 
 
-def _test_permutation_importance(df_features, feature_cols):
+def _reduced_one_set(feat_np, label_np, close_np, ranked_idx, n_feat):
+    """Test top-N features (by index). No DataFrame copy."""
+    import os, warnings
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    warnings.filterwarnings('ignore')
+    top_idx = ranked_idx[:n_feat]
+    acc, alpha, _ = _quick_score_np(feat_np[:, top_idx], label_np, close_np, n_feat)
+    combined = acc * (1 + max(alpha, 0) / 100)
+    return n_feat, acc, alpha, combined
+
+
+def _quick_score_np(feat_np, label_np, close_np, n_cols,
+                    window=ANALYSIS_WINDOW, step=ANALYSIS_STEP):
+    """Numpy-only _quick_score variant used by parallel workers.
+    Receives pre-extracted arrays -- no pandas overhead at all."""
+    from lightgbm import LGBMClassifier
+    import numpy as _np
+    n = len(feat_np)
+    min_start = window + 50
+    if n < min_start + 30:
+        return 0, 0, 0
+
+    nan_rows = _np.isnan(feat_np).any(axis=1)
+    correct  = 0; total = 0
+    cash     = 1.0; in_pos = False; entry_px = 0.0
+    start_px = close_np[min_start]
+
+    for i in range(min_start, n, step):
+        if nan_rows[i]:
+            continue
+        train_start = max(0, i - window)
+        if nan_rows[train_start:i].any():
+            continue
+        X_train = feat_np[train_start:i]
+        y_train = label_np[train_start:i]
+        y_sum = y_train.sum()
+        if y_sum == 0 or y_sum == len(y_train):
+            continue
+        mean = X_train.mean(axis=0); std = X_train.std(axis=0); std[std == 0] = 1.0
+        X_tr_s = (X_train - mean) / std
+        X_te_s = (feat_np[i:i+1] - mean) / std
+        y_true  = label_np[i]
+        price   = close_np[i]
+        mdl = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.05,
+                             class_weight='balanced', verbose=-1, random_state=42, device='cpu')
+        mdl.fit(X_tr_s, y_train)
+        pred = mdl.predict(X_te_s)[0]
+        if pred == y_true:
+            correct += 1
+        total += 1
+        if pred == 1 and not in_pos:
+            in_pos = True; entry_px = price * (1 + TRADING_FEE)
+        elif pred == 0 and in_pos:
+            cash *= (price * (1 - TRADING_FEE)) / entry_px; in_pos = False
+
+    if in_pos and total > 0:
+        cash *= (close_np[-1] * (1 - TRADING_FEE)) / entry_px
+    strat_ret = (cash - 1.0) * 100
+    bh_ret    = (close_np[-1] / start_px - 1) * 100
+    accuracy  = correct / total * 100 if total > 0 else 0
+    return accuracy, round(strat_ret - bh_ret, 2), total
+
+
+# ── orchestrators (extract numpy once, share baseline across tests 2+3) ──────
+
+def _test_permutation_importance(df_features, feature_cols, feat_np, label_np, close_np, baseline_acc, baseline_alpha, n_tests):
     """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
     print("\n  [2/5] Permutation Importance (parallel)")
-    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols)
     print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -787,8 +903,9 @@ def _test_permutation_importance(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         perm_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
-            for feat in feature_cols
+            delayed(_perm_one_feature)(feat_np, label_np, close_np,
+                                       feature_cols, fi, baseline_acc, baseline_alpha)
+            for fi in range(len(feature_cols))
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
@@ -800,21 +917,9 @@ def _test_permutation_importance(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
 
 
-def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
-    """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change)."""
-    import os, warnings
-    os.environ['PYTHONWARNINGS'] = 'ignore'
-    warnings.filterwarnings('ignore')
-    warnings.simplefilter('ignore')
-    reduced = [f for f in feature_cols if f != feat]
-    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu')
-    return feat, acc, acc - baseline_acc, alpha - baseline_alpha
-
-
-def _test_ablation(df_features, feature_cols):
+def _test_ablation(df_features, feature_cols, feat_np, label_np, close_np, baseline_acc, baseline_alpha):
     """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
     print("\n  [3/5] Ablation Test (parallel, drop one at a time)")
-    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols)
     print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -822,8 +927,9 @@ def _test_ablation(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
-            for feat in feature_cols
+            delayed(_ablation_one_feature)(feat_np, label_np, close_np,
+                                           feature_cols, fi, baseline_acc, baseline_alpha)
+            for fi in range(len(feature_cols))
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
@@ -838,22 +944,11 @@ def _test_ablation(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
-def _reduced_one_set(df_features, ranked, n_feat):
-    """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score)."""
-    import os, warnings
-    os.environ['PYTHONWARNINGS'] = 'ignore'
-    warnings.filterwarnings('ignore')
-    warnings.simplefilter('ignore')
-    top_n = ranked[:n_feat]
-    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu')
-    combined = acc * (1 + max(alpha, 0) / 100)
-    return n_feat, acc, alpha, combined
-
-
-def _test_reduced_sets(df_features, feature_cols, importance_df):
+def _test_reduced_sets(df_features, feature_cols, importance_df, feat_np, label_np, close_np):
     """Test accuracy with top-N features. Parallelized."""
     print("\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)")
-    ranked = importance_df['feature'].tolist()
+    ranked      = importance_df['feature'].tolist()
+    ranked_idx  = [list(feature_cols).index(f) for f in ranked]  # column indices
 
     test_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50]
     test_sizes = [n for n in test_sizes if n < len(feature_cols)]
@@ -864,7 +959,7 @@ def _test_reduced_sets(df_features, feature_cols, importance_df):
     t0 = time.time()
     with _suppress_stderr():
         reduced_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_reduced_one_set)(df_features, ranked, n_feat)
+            delayed(_reduced_one_set)(feat_np, label_np, close_np, ranked_idx, n_feat)
             for n_feat in test_sizes
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -902,7 +997,7 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
         else:
             scores[f] -= 1
 
-    # Permutation — accuracy drop + alpha drop
+    # Permutation -- accuracy drop + alpha drop
     if permutation_df is not None:
         for _, row in permutation_df.iterrows():
             f = row['feature']
@@ -922,7 +1017,7 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
             elif alpha_drop < -3:
                 scores[f] -= 1
 
-    # Ablation — accuracy change + alpha change
+    # Ablation -- accuracy change + alpha change
     if ablation_df is not None:
         for _, row in ablation_df.iterrows():
             f = row['dropped']
@@ -965,6 +1060,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     """
     Run full 5-test feature analysis on one asset.
     Returns the optimal feature list.
+    Optimised: extracts numpy arrays once and shares the baseline across tests 2+3.
     """
     print(f"\n{'='*60}")
     print(f"  FEATURE ANALYSIS: {asset_name} ({len(all_feature_cols)} features)")
@@ -972,17 +1068,30 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
 
     t0 = time.time()
 
+    # Extract to numpy once -- shared by all parallel tests (no per-worker DataFrame copy)
+    feat_np   = df_features[all_feature_cols].values.astype(np.float64)
+    label_np  = df_features['label'].values.astype(np.int32)
+    close_np  = df_features['close'].values.astype(np.float64)
+
     # 1. LGBM importance
     importance_df = _test_lgbm_importance(df_features, all_feature_cols)
 
+    # Compute baseline ONCE -- shared by tests 2 (perm) and 3 (ablation)  [fix #3]
+    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, all_feature_cols)
+
     # 2. Permutation importance
-    permutation_df = _test_permutation_importance(df_features, all_feature_cols)
+    permutation_df = _test_permutation_importance(
+        df_features, all_feature_cols, feat_np, label_np, close_np,
+        baseline_acc, baseline_alpha, n_tests)
 
     # 3. Ablation
-    ablation_df = _test_ablation(df_features, all_feature_cols)
+    ablation_df = _test_ablation(
+        df_features, all_feature_cols, feat_np, label_np, close_np,
+        baseline_acc, baseline_alpha)
 
     # 4. Reduced sets
-    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df)
+    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df,
+                                     feat_np, label_np, close_np)
 
     # 5. Score and select
     score_df, keep, maybe, drop = _score_features(
@@ -993,11 +1102,14 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
 
     # Determine optimal set: KEEP features + test with/without MAYBE
     optimal_features = list(keep)
+    fc_list = list(all_feature_cols)  # stable index lookup
 
-    # Quick test: KEEP only vs KEEP + MAYBE — use combined_score = acc × (1 + alpha/100)
+    # Quick test: KEEP only vs KEEP + MAYBE -- use combined_score = acc x (1 + alpha/100)
     if maybe:
-        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep)
-        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe)
+        keep_idx  = np.array([fc_list.index(f) for f in keep],        dtype=np.intp)
+        all_idx   = np.array([fc_list.index(f) for f in keep + maybe], dtype=np.intp)
+        acc_keep,  alpha_keep,  _ = _quick_score_np(feat_np[:, keep_idx],  label_np, close_np, len(keep_idx))
+        acc_all,   alpha_all,   _ = _quick_score_np(feat_np[:, all_idx],   label_np, close_np, len(all_idx))
         score_keep = acc_keep * (1 + max(alpha_keep, 0) / 100)
         score_all  = acc_all  * (1 + max(alpha_all,  0) / 100)
         print(f"\n  KEEP only       ({len(keep):3d} feat): {acc_keep:.1f}% acc | "
@@ -1012,7 +1124,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     else:
         print(f"\n  >>> Using KEEP ({len(optimal_features)} features)")
 
-    # Also check best reduced set from test 4 — compare by combined_score
+    # Also check best reduced set from test 4 -- compare by combined_score
     if reduced_df is not None and len(reduced_df) > 0:
         best_n_row     = reduced_df.loc[reduced_df['combined_score'].idxmax()]
         best_n         = int(best_n_row['n_features'])
@@ -1022,7 +1134,8 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
         ranked         = importance_df['feature'].tolist()
         top_n_features = ranked[:best_n]
 
-        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features)
+        opt_idx   = np.array([fc_list.index(f) for f in optimal_features], dtype=np.intp)
+        opt_acc, opt_alpha, _ = _quick_score_np(feat_np[:, opt_idx], label_np, close_np, len(opt_idx))
         opt_score = opt_acc * (1 + max(opt_alpha, 0) / 100)
         print(f"  Scored optimal  ({len(optimal_features):3d} feat): {opt_acc:.1f}% acc | "
               f"{opt_alpha:+.1f}% alpha | score={opt_score:.1f}")
@@ -1053,7 +1166,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
 def bootstrap_ci(signals, n_bootstrap=500, confidence=0.95):
     """
     Compute bootstrap confidence interval on directional accuracy.
-    Runs on the existing signals list — zero extra compute cost.
+    Runs on the existing signals list -- zero extra compute cost.
 
     Returns (acc_pct, ci_low_pct, ci_high_pct, n) or None if insufficient data.
 
@@ -1061,7 +1174,7 @@ def bootstrap_ci(signals, n_bootstrap=500, confidence=0.95):
         result = bootstrap_ci(signals)
         if result:
             acc, lo, hi, n = result
-            print(f"Accuracy: {acc:.1f}% [95% CI: {lo:.1f}%–{hi:.1f}%] (n={n})")
+            print(f"Accuracy: {acc:.1f}% [95% CI: {lo:.1f}%-{hi:.1f}%] (n={n})")
     """
     if not signals or len(signals) < 10:
         return None
@@ -1120,27 +1233,48 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
     n = len(df_features)
     start_idx = max(window_size + 50, n - replay_hours)
 
+    # ── extract to numpy once ── avoids repeated pandas indexing inside the loop
+    feat_np   = df_features[feature_cols].values.astype(np.float64)
+    label_np  = df_features['label'].values.astype(np.int32)
+    close_np  = df_features['close'].values.astype(np.float64)
+    dt_vals   = df_features['datetime'].values          # numpy datetime64 array
+    nan_rows  = np.isnan(feat_np).any(axis=1)           # precompute once
+    # Metadata columns for signal dict (fallback to 0 if not present)
+    def _col(name, fill=0.0):
+        return df_features[name].values.astype(np.float64) if name in df_features.columns \
+               else np.full(n, fill)
+    rsi_np    = _col('rsi_14h')
+    bb_np     = _col('bb_position_20h')
+    volr_np   = _col('volume_ratio_h', fill=1.0)
+    lr1h_np   = _col('logret_1h')
+    idr_np    = _col('intraday_range')
+    sp8h_np   = _col('spread_120h_8h')
+
     signals = []
     count = 0
 
     for i in range(start_idx, n):
-        row = df_features.iloc[i]
-        dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
-
+        if nan_rows[i]:
+            continue
         train_start = max(0, i - window_size)
-        train = df_features.iloc[train_start:i]
-        X_train = train[feature_cols]
-        y_train = train['label'].values
-        X_test = df_features.iloc[i:i+1][feature_cols]
-
-        if len(np.unique(y_train)) < 2:
-            continue
-        if X_train.isnull().any().any() or X_test.isnull().any().any():
+        if nan_rows[train_start:i].any():
             continue
 
-        scaler = StandardScaler()
-        X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols, index=X_train.index)
-        X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=feature_cols, index=X_test.index)
+        y_train = label_np[train_start:i]
+        y_sum   = y_train.sum()
+        if y_sum == 0 or y_sum == len(y_train):
+            continue
+
+        X_train = feat_np[train_start:i]
+        X_test  = feat_np[i:i+1]
+
+        # Pure numpy normalisation -- no StandardScaler + no pd.DataFrame overhead
+        mean = X_train.mean(axis=0)
+        std  = X_train.std(axis=0);  std[std == 0] = 1.0
+        X_train_s = (X_train - mean) / std
+        X_test_s  = (X_test  - mean) / std
+
+        dt_str = str(dt_vals[i])[:16].replace('T', ' ')
 
         votes = []
         probas = []
@@ -1149,7 +1283,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
             try:
                 model = ALL_MODELS[model_name]()
                 model.fit(X_train_s, y_train)
-                pred = model.predict(X_test_s)[0]
+                pred  = model.predict(X_test_s)[0]
                 proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
                 probas.append(proba[1])
@@ -1159,9 +1293,9 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         if not votes:
             continue
 
-        buy_votes = sum(votes)
+        buy_votes   = sum(votes)
         total_votes = len(votes)
-        buy_ratio = buy_votes / total_votes
+        buy_ratio   = buy_votes / total_votes
 
         if buy_ratio > 0.5:
             signal = 'BUY'
@@ -1170,38 +1304,34 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         else:
             signal = 'HOLD'
 
-        avg_proba = np.mean(probas)
-        if signal == 'SELL':
-            confidence = (1 - avg_proba) * 100
-        else:
-            confidence = avg_proba * 100
+        avg_proba  = float(np.mean(probas))
+        confidence = ((1 - avg_proba) if signal == 'SELL' else avg_proba) * 100
 
         actual = None
         if i + horizon < n:
-            future_close = df_features.iloc[i + horizon]['close']
-            actual_return = (future_close / row['close'] - 1) * 100
+            actual_return = (close_np[i + horizon] / close_np[i] - 1) * 100
             actual = 'UP' if actual_return > 0 else 'DOWN'
 
         signals.append({
-            'datetime': dt_str,
-            'close': float(row['close']),
-            'signal': signal,
-            'confidence': round(float(confidence), 1),
-            'buy_votes': int(buy_votes),
-            'total_votes': int(total_votes),
-            'rsi': round(float(row.get('rsi_14h', 0)), 1),
-            'bb_position': round(float(row.get('bb_position_20h', 0)), 3),
-            'volume_ratio': round(float(row.get('volume_ratio_h', 1)), 2),
-            'hourly_change': round(float(row.get('logret_1h', 0) * 100), 3),
-            'intraday_range': round(float(row.get('intraday_range', 0) * 100), 3),
-            'spread_120h_8h': round(float(row.get('spread_120h_8h', 0) * 100), 2),
-            'actual': actual,
+            'datetime':       dt_str,
+            'close':          float(close_np[i]),
+            'signal':         signal,
+            'confidence':     round(confidence, 1),
+            'buy_votes':      int(buy_votes),
+            'total_votes':    int(total_votes),
+            'rsi':            round(float(rsi_np[i]),  1),
+            'bb_position':    round(float(bb_np[i]),   3),
+            'volume_ratio':   round(float(volr_np[i]), 2),
+            'hourly_change':  round(float(lr1h_np[i]) * 100, 3),
+            'intraday_range': round(float(idr_np[i])  * 100, 3),
+            'spread_120h_8h': round(float(sp8h_np[i]) * 100, 2),
+            'actual':         actual,
         })
 
         count += 1
         if count % 50 == 0:
             print(f"    [{count}] {dt_str}: {signal} ({confidence:.0f}%) "
-                  f"| price=${row['close']:,.2f}")
+                  f"| price=${close_np[i]:,.2f}")
 
     print(f"  Generated {len(signals)} hourly signals for {asset_name}")
     return signals
@@ -1414,7 +1544,7 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
 # ============================================================
 # DIAGNOSTIC (CPU parallel)
 # ============================================================
-def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4):
+def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4, nan_rows=None):
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
@@ -1437,15 +1567,25 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     total_loss = 0.0      # sum of losing trade returns
     trade_returns = []    # individual trade returns for Sharpe/Calmar
 
+    # Precompute per-row NaN mask once (avoid re-scanning the window every step)
+    # Use caller-supplied mask if available (saves recomputing across 105 parallel workers)
+    nan_rows = nan_rows if nan_rows is not None else np.isnan(features_np).any(axis=1)
+
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
+        # Skip immediately if test row has NaN
+        if nan_rows[i]:
+            continue
         X_train = features_np[train_start:i]
         y_train = labels_np[train_start:i]
         X_test  = features_np[i:i+1]
         y_true  = labels_np[i]
-        if len(np.unique(y_train)) < 2:
+        # Fast class-balance check (avoids np.unique allocation each step)
+        y_sum = y_train.sum()
+        if y_sum == 0 or y_sum == len(y_train):
             continue
-        if np.isnan(X_train).any() or np.isnan(X_test).any():
+        # Only scan train window for NaNs if any flagged rows exist in range
+        if nan_rows[train_start:i].any():
             continue
         mean = X_train.mean(axis=0)
         std  = X_train.std(axis=0)
@@ -1471,11 +1611,11 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
         # Portfolio logic
         price = closes_np[i]
         if ensemble_pred == 1 and not in_position:
-            # BUY — pay fee
+            # BUY -- pay fee
             in_position = True
             entry_price = price * (1 + TRADING_FEE)  # effective entry = price + fee
         elif ensemble_pred == 0 and in_position:
-            # SELL — pay fee
+            # SELL -- pay fee
             sell_price = price * (1 - TRADING_FEE)  # effective exit = price - fee
             trade_return = (sell_price - entry_price) / entry_price
             portfolio *= (1 + trade_return)
@@ -1516,10 +1656,10 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     avg_gain = (total_gain / wins * 100) if wins > 0 else 0
     avg_loss = (total_loss / (trades - wins) * 100) if (trades - wins) > 0 else 0
 
-    # ── Improvement 4: Calmar/Sharpe combined score ─────────────────────────
-    # Replaces: accuracy × profit_factor^1.5 × dd_penalty  (heuristic)
+    # -- Improvement 4: Calmar/Sharpe combined score -------------------------
+    # Replaces: accuracy x profit_factor^1.5 x dd_penalty  (heuristic)
     # Calmar  = annualised return / max drawdown  (standard trading metric)
-    # Sharpe  = per-trade mean/std × √104  (annualised, 104 trades/yr at 4h horizon)
+    # Sharpe  = per-trade mean/std x _104  (annualised, 104 trades/yr at 4h horizon)
     # Weights: 45% Calmar + 35% Sharpe + 20% accuracy signal
     # Both clipped to prevent extremes dominating: calmar [-5,10], sharpe [-3,5]
     n_steps_per_year = (365 * 24) / pred_horizon       # e.g. 2190 for 4h
@@ -1539,7 +1679,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
         sharpe_raw = 0.0
     sharpe = max(-3.0, min(5.0, sharpe_raw))           # clip [-3, 5]
 
-    acc_signal = accuracy * 2.0 - 1.0                 # map [0,1] → [-1,+1]
+    acc_signal = accuracy * 2.0 - 1.0                 # map [0,1] -> [-1,+1]
     combined_score = 0.45 * calmar + 0.35 * sharpe + 0.20 * acc_signal
 
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
@@ -1569,12 +1709,15 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
     features_np = df_features[feature_cols].values.astype(np.float64)
     labels_np = df_features['label'].values.astype(np.int32)
     closes_np = df_features['close'].values.astype(np.float64)
+    # Precompute once -- shared read-only across all 105 parallel workers
+    nan_rows_np = np.isnan(features_np).any(axis=1)
 
     t_diag = time.time()
     with _suppress_stderr():
         all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
             delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
+                nan_rows=nan_rows_np
             )
             for combo, window in all_configs
         )
@@ -1643,7 +1786,8 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
                   f"  {combined_score:.3f}{marker:>4s} |")
         print("  " + "=" * 76)
         print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']}h")
-        print(f"  >>> Score = 0.45×Calmar + 0.35×Sharpe + 0.20×Accuracy (industry-standard metrics)")
+        LOG.info(f"MODEL SELECTED | {asset_name} {best_config.get('horizon','?')}h | combo={best_config['best_combo']} | window={best_config['best_window']}h | acc={best_config['accuracy']:.1f}% | score={best_config['combined_score']:.4f} | calmar={best_config.get('calmar',0):.2f} | sharpe={best_config.get('sharpe',0):.2f} | ret={best_config.get('return_pct',0):+.1f}%")
+        print(f"  >>> Score = 0.45xCalmar + 0.35xSharpe + 0.20xAccuracy (industry-standard metrics)")
         print()
 
     return best_config
@@ -1771,7 +1915,7 @@ def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_ag
 <html>
 <head>
 <meta charset="utf-8">
-<title>{asset_name} Strategy — {label}</title>
+<title>{asset_name} Strategy -- {label}</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1791,7 +1935,7 @@ def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_ag
 <body>
 <div class="header">
   <div>
-    <h1>{asset_name} — {label.replace('1', '1 ').title()}</h1>
+    <h1>{asset_name} -- {label.replace('1', '1 ').title()}</h1>
     <div class="sub">Strategy: {strategy} | Min conf: {MIN_CONFIDENCE}% | 0.09% fees</div>
   </div>
   <div style="text-align:right">
@@ -1914,11 +2058,11 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
         if i >= len(all_times) - 1:
             correct = '...'
         elif combined == 'BUY':
-            correct = '✓' if delta > 0 else '✗'
+            correct = '_' if delta > 0 else '_'
         elif combined == 'SELL':
-            correct = '✓' if delta <= 0 else '✗'
+            correct = '_' if delta <= 0 else '_'
         else:
-            correct = '—'
+            correct = '--'
 
         rows.append({
             'dt': dt, 'price': price, 'price_next': price_next,
@@ -1930,12 +2074,12 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
 
     # Stats
     actionable = [r for r in rows[:-1] if r['combined'] in ('BUY', 'SELL')]
-    correct_count = sum(1 for r in actionable if r['correct'] == '✓')
+    correct_count = sum(1 for r in actionable if r['correct'] == '_')
     accuracy = (correct_count / len(actionable) * 100) if actionable else 0
     buy_calls = [r for r in actionable if r['combined'] == 'BUY']
     sell_calls = [r for r in actionable if r['combined'] == 'SELL']
-    correct_buys = sum(1 for r in buy_calls if r['correct'] == '✓')
-    correct_sells = sum(1 for r in sell_calls if r['correct'] == '✓')
+    correct_buys = sum(1 for r in buy_calls if r['correct'] == '_')
+    correct_sells = sum(1 for r in sell_calls if r['correct'] == '_')
 
     price_fmt = ',.2f' if rows[0]['price'] >= 100 else ',.4f'
 
@@ -1947,7 +2091,7 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
             if sig == 'SELL': return 'sell'
             return 'hold'
         dc = 'buy' if r['delta'] > 0.01 else 'sell' if r['delta'] < -0.01 else 'hold'
-        cc = 'right' if r['correct'] == '✓' else 'wrong' if r['correct'] == '✗' else ''
+        cc = 'right' if r['correct'] == '_' else 'wrong' if r['correct'] == '_' else ''
 
         table_rows += f"""<tr>
   <td>{r['dt']}</td>
@@ -1967,7 +2111,7 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
 <html>
 <head>
 <meta charset="utf-8">
-<title>{asset_name} Signal Table — Past Week</title>
+<title>{asset_name} Signal Table -- Past Week</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ background: #0b0f19; color: #c8cdd5; font-family: 'Segoe UI', monospace; font-size: 13px; }}
@@ -2002,8 +2146,8 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
 <body>
 <div class="header">
   <div>
-    <h1>{asset_name} — Signal Table (Past Week)</h1>
-    <div class="sub">Strategy: {strategy} | Min confidence: {MIN_CONFIDENCE}% | Δ = (Price+1h − Price) / Price</div>
+    <h1>{asset_name} -- Signal Table (Past Week)</h1>
+    <div class="sub">Strategy: {strategy} | Min confidence: {MIN_CONFIDENCE}% | _ = (Price+1h _ Price) / Price</div>
   </div>
   <div style="text-align:right">
     <div class="sub">{rows[-1]['dt']}</div>
@@ -2013,15 +2157,15 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
   <div class="stat"><div class="val">{len(actionable)}</div><div class="lbl">Signals</div></div>
   <div class="stat"><div class="val {'blu' if accuracy > 60 else 'red'}">{accuracy:.0f}%</div><div class="lbl">Accuracy</div></div>
   <div class="stat"><div class="val">{len(buy_calls)}</div><div class="lbl">BUY</div></div>
-  <div class="stat"><div class="val">{correct_buys}/{len(buy_calls)}</div><div class="lbl">BUY ✓</div></div>
+  <div class="stat"><div class="val">{correct_buys}/{len(buy_calls)}</div><div class="lbl">BUY _</div></div>
   <div class="stat"><div class="val">{len(sell_calls)}</div><div class="lbl">SELL</div></div>
-  <div class="stat"><div class="val">{correct_sells}/{len(sell_calls)}</div><div class="lbl">SELL ✓</div></div>
+  <div class="stat"><div class="val">{correct_sells}/{len(sell_calls)}</div><div class="lbl">SELL _</div></div>
 </div>
 <div class="legend">
-  <span class="buy">● BUY</span>
-  <span class="sell">● SELL</span>
-  <span class="hold">● HOLD</span>
-  <span>✓ = price moved in predicted direction next hour</span>
+  <span class="buy">_ BUY</span>
+  <span class="sell">_ SELL</span>
+  <span class="hold">_ HOLD</span>
+  <span>_ = price moved in predicted direction next hour</span>
 </div>
 <div class="filter">
   <button class="active" onclick="filterRows('all')">All</button>
@@ -2036,7 +2180,7 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
   <th onclick="sortTable(0)">Time</th>
   <th onclick="sortTable(1)">Price</th>
   <th onclick="sortTable(2)">Price +1h</th>
-  <th onclick="sortTable(3)">Δ 1h</th>
+  <th onclick="sortTable(3)">_ 1h</th>
   <th onclick="sortTable(4)">Strategy</th>
   <th onclick="sortTable(5)">Correct?</th>
   <th onclick="sortTable(6)">4h Signal</th>
@@ -2106,6 +2250,8 @@ def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_hourly_char
 
 
 def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
+    _t_mode_b = time.time()
+    LOG.info(f"MODE B START | assets={assets_list} | horizon_filter={horizon_filter}")
     print("\n" + "=" * 60)
     print("  MODE B: QUICK HOURLY RUN (saved best models)")
     print("=" * 60)
@@ -2149,8 +2295,9 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
             import download_macro_data
             download_macro_data.main()
         except ImportError:
-            print("  WARNING: download_macro_data.py not found — macro features may be stale.")
+            print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
         except Exception as e:
+            LOG.warning(f"Macro data update failed: {e}")
             print(f"  WARNING: Macro data update failed: {e}")
 
         update_all_data(assets_to_run)
@@ -2198,12 +2345,14 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
 
             if signals:
                 latest = signals[-1]
+                LOG.info(f"SIGNAL | {asset_name} {h}h | {latest['signal']} ({latest['confidence']:.0f}%) | price=${latest['close']:,.2f} | model={model_info.get('models','?')} w={model_info.get('best_window','?')}h")
                 print(f"\n  >> {asset_name} ({h}h): {latest['signal']} ({latest['confidence']:.0f}%) "
                       f"| price=${latest['close']:,.2f} | Set {fs}")
 
     export_chart_data(all_signals)
 
     print("\n" + "=" * 60)
+    LOG.info(f"MODE B COMPLETE | duration={(time.time()-_t_mode_b)/60:.1f}min")
     print("  MODE B COMPLETE")
     print("=" * 60)
 
@@ -2217,25 +2366,25 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
     Shuffle labels N times and re-evaluate the best config each time.
     Builds a null distribution to compute p-value.
 
-    p < 0.05 → significant edge (strong)
-    p < 0.10 → marginal edge (acceptable)
-    p > 0.10 → warn: may be noise
-    p > 0.20 → hard warn: results consistent with random chance
+    p < 0.05 -> significant edge (strong)
+    p < 0.10 -> marginal edge (acceptable)
+    p > 0.10 -> warn: may be noise
+    p > 0.20 -> hard warn: results consistent with random chance
 
-    Uses LGBM only (fastest model) for speed. ~1–2 min per asset on desktop.
+    Uses LGBM only (fastest model) for speed. ~1-2 min per asset on desktop.
     """
     import warnings
     warnings.filterwarnings('ignore')
 
     print(f"\n  Permutation significance test ({n_perm} permutations)...")
     print(f"  Asset={asset_name}  window={best_config['best_window']}h  model=LGBM")
-    print(f"  Expected time: ~{n_perm * 0.5 / 60:.0f}–{n_perm * 1.0 / 60:.0f} min")
+    print(f"  Expected time: ~{n_perm * 0.5 / 60:.0f}-{n_perm * 1.0 / 60:.0f} min")
 
     window    = best_config['best_window']
     feat_list = best_config['optimal_features'].split(',') if ',' in str(best_config.get('optimal_features', '')) else feature_cols
     feat_list = [f for f in feat_list if f in df.columns]
     if not feat_list:
-        print("  WARNING: No valid features found — skipping permutation test")
+        print("  WARNING: No valid features found -- skipping permutation test")
         return None
 
     features_np = df[feat_list].values
@@ -2269,7 +2418,7 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
     # Real accuracy
     real_acc = _quick_acc(labels_np)
     if real_acc is None:
-        print("  WARNING: Could not evaluate real config — skipping")
+        print("  WARNING: Could not evaluate real config -- skipping")
         return None
 
     # Null distribution
@@ -2286,33 +2435,35 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
             print(f"    {p+1}/{n_perm} done ({elapsed:.0f}s)...")
 
     if not null_accs:
-        print("  WARNING: No valid null samples — skipping")
+        print("  WARNING: No valid null samples -- skipping")
         return None
 
     p_value = np.mean([a >= real_acc for a in null_accs])
     null_mean = np.mean(null_accs) * 100
     null_std  = np.std(null_accs) * 100
 
-    print(f"\n  ── Permutation Test Result ──────────────────")
+    print(f"\n  -- Permutation Test Result ------------------")
     print(f"  Real accuracy:  {real_acc*100:.1f}%")
-    print(f"  Null mean±std:  {null_mean:.1f}% ± {null_std:.1f}%")
+    print(f"  Null mean_std:  {null_mean:.1f}% _ {null_std:.1f}%")
     print(f"  p-value:        {p_value:.3f}  ({n_perm} permutations)")
 
     if p_value < 0.05:
-        verdict = "✓ SIGNIFICANT  — strong evidence of real edge (p<0.05)"
+        verdict = "_ SIGNIFICANT  -- strong evidence of real edge (p<0.05)"
     elif p_value < 0.10:
-        verdict = "⚡ MARGINAL     — borderline edge, monitor closely (p<0.10)"
+        verdict = "_ MARGINAL     -- borderline edge, monitor closely (p<0.10)"
     elif p_value < 0.20:
-        verdict = "⚠  WEAK        — results may be noise (p<0.20)"
+        verdict = "_  WEAK        -- results may be noise (p<0.20)"
     else:
-        verdict = "✗ NOT SIGNIFICANT — results consistent with random chance (p>0.20)"
+        verdict = "_ NOT SIGNIFICANT -- results consistent with random chance (p>0.20)"
     print(f"  Verdict:        {verdict}")
-    print(f"  ────────────────────────────────────────────")
+    print(f"  --------------------------------------------")
 
     return p_value
 
 
 def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=False):
+    _t_mode_d = time.time()
+    LOG.info(f"MODE D START | assets={assets_list} | horizon={horizon} | years={diag_years}")
     """
     Complete pipeline from scratch:
     1. Build all ~124 features
@@ -2322,7 +2473,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     5. Generate signals + backtest charts
     """
     print("\n" + "=" * 60)
-    print(f"  MODE D: FULL PIPELINE — {horizon}h HORIZON")
+    print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
     print(f"  Starts from ALL features, finds optimal subset per asset")
     print("=" * 60)
 
@@ -2332,8 +2483,10 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         import download_macro_data
         download_macro_data.main()
     except ImportError:
-        print("  WARNING: download_macro_data.py not found — macro features may be stale.")
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
     except Exception as e:
+        LOG.warning(f"Macro data update failed (Mode D): {e}")
+        LOG.warning(f"Macro data update failed (Mode D): {e}")
         print(f"  WARNING: Macro data update failed: {e}")
 
     update_all_data(assets_list)
@@ -2366,7 +2519,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
             continue
 
-        # Step 2: Feature analysis (5 tests → optimal subset)
+        # Step 2: Feature analysis (5 tests -> optimal subset)
         optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
 
         if not optimal_features or len(optimal_features) < 3:
@@ -2390,7 +2543,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             best_config['horizon'] = horizon
             best_models.append(best_config)
 
-            # ── Improvement 3: Permutation test (only if --permtest flag passed) ──
+            # -- Improvement 3: Permutation test (only if --permtest flag passed) --
             if permtest:
                 _run_permutation_test(asset_name, df_diag, optimal_features,
                                       best_config, n_perm=200, horizon=horizon)
@@ -2414,7 +2567,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     df_best.to_csv(f'{MODELS_DIR}/crypto_hourly_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
-    print(f"  BEST MODELS SAVED — {horizon}h HORIZON")
+    print(f"  BEST MODELS SAVED -- {horizon}h HORIZON")
     print(f"{'='*60}")
     for row in best_models:
         print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | "
@@ -2443,11 +2596,13 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
 
         if signals:
             latest = signals[-1]
+            LOG.info(f"SIGNAL | {asset_name} {horizon}h | {latest['signal']} ({latest['confidence']:.0f}%) | price=${latest['close']:,.2f}")
             print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price=${latest['close']:,.2f}")
 
     export_chart_data(all_signals)
 
+    LOG.info(f"MODE D COMPLETE | duration={(time.time()-_t_mode_d)/60:.1f}min | horizon={horizon}")
     print("\n" + "=" * 60)
     print("  MODE D COMPLETE (full pipeline)")
     print("=" * 60)
@@ -2518,7 +2673,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
         print(f"\n    Removed {len(features_to_drop)}: {', '.join(features_to_drop)}")
         print(f"    {len(prev_features)} -> {len(refined_features)} features | {baseline_acc:.1f}% -> {new_acc:.1f}%")
         if new_acc < baseline_acc - 0.5:
-            print(f"    Refinement hurt accuracy — reverting.")
+            print(f"    Refinement hurt accuracy -- reverting.")
             refined_features = list(prev_features)
     else:
         print(f"    No features to drop.")
@@ -2568,7 +2723,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     # --- Step 3: Expanded Window Grid ---
     print(f"\n  [ITER2 3/3] Expanded Window Search (around w={prev_window}h)...")
 
-    # Build fine grid around winner: ±100h in steps of 25h
+    # Build fine grid around winner: _100h in steps of 25h
     fine_windows = sorted(set(
         [max(48, prev_window + offset) for offset in range(-100, 125, 25)]
     ))
@@ -2609,7 +2764,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
 def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     """
     Iteration 3: Ultra-fine tuning.
-    1. Very fine window grid (±40h, step=10h) around winner
+    1. Very fine window grid (_40h, step=10h) around winner
     2. DIAG_STEP=12 (most granular)
     3. Feature interaction test: products of top-5 features
     """
@@ -2709,15 +2864,17 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
 
 
 def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations='2'):
+    _t_mode_e = time.time()
+    LOG.info(f"MODE E START | assets={assets_list} | horizon={horizon} | iterations={iterations}")
     """
     Mode E: Iterative refinement of Mode D results.
-    iteration='2'  → run 2nd pass only
-    iteration='23' → run 2nd + 3rd pass
+    iteration='2'  -> run 2nd pass only
+    iteration='23' -> run 2nd + 3rd pass
     """
     do_iter3 = '3' in iterations
 
     print("\n" + "=" * 60)
-    print(f"  MODE E: ITERATIVE REFINEMENT — {horizon}h HORIZON")
+    print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")
     print(f"  Iterations: {'2nd + 3rd pass' if do_iter3 else '2nd pass only'}")
     print("=" * 60)
 
@@ -2727,8 +2884,9 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         import download_macro_data
         download_macro_data.main()
     except ImportError:
-        print("  WARNING: download_macro_data.py not found — macro features may be stale.")
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
     except Exception as e:
+        LOG.warning(f"Macro data update failed (Mode E): {e}")
         print(f"  WARNING: Macro data update failed: {e}")
 
     update_all_data(assets_list)
@@ -2841,7 +2999,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
     df_best.to_csv(csv_path, index=False)
 
     print(f"\n{'='*60}")
-    print(f"  MODE E COMPLETE — RESULTS SAVED")
+    print(f"  MODE E COMPLETE -- RESULTS SAVED")
     print(f"{'='*60}")
     for m in final_models:
         fs = m.get('feature_set', 'E')
@@ -2870,11 +3028,13 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
 
         if signals:
             latest = signals[-1]
+            LOG.info(f"SIGNAL | {asset_name} {horizon}h | {latest['signal']} ({latest['confidence']:.0f}%) | price=${latest['close']:,.2f}")
             print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price=${latest['close']:,.2f}")
 
     export_chart_data(all_signals)
 
+    LOG.info(f"MODE E COMPLETE | duration={(time.time()-_t_mode_e)/60:.1f}min | horizon={horizon}")
     print("\n" + "=" * 60)
     print("  MODE E COMPLETE")
     print("=" * 60)
@@ -2905,8 +3065,9 @@ def _run_quick_asset(asset):
         import download_macro_data
         download_macro_data.main()
     except ImportError:
-        print("  WARNING: download_macro_data.py not found — macro features may be stale.")
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
     except Exception as e:
+        LOG.warning(f"Macro data update failed (shortcut): {e}")
         print(f"  WARNING: Macro data update failed: {e}")
     update_all_data([asset])
 
@@ -2994,7 +3155,7 @@ def _run_quick_asset(asset):
         print(f"  {asset} COMBINED SUMMARY")
         print(f"{'='*60}")
         for h, r in sorted(results.items()):
-            emoji = '🟢' if r['signal'] == 'BUY' else '🔴' if r['signal'] == 'SELL' else '🟡'
+            emoji = '_' if r['signal'] == 'BUY' else '_' if r['signal'] == 'SELL' else '_'
             print(f"  {emoji} {h}h: {r['signal']} ({r['confidence']:.0f}%) | {r['model']} | w={r['window']}h | {r['accuracy']:.1f}% diag")
 
         if len(results) == 2:
@@ -3013,7 +3174,7 @@ def _run_quick_asset(asset):
                 which = '4h' if s4 == 'BUY' else '8h'
                 conf = c4 if s4 == 'BUY' else c8
                 if conf >= MIN_CONFIDENCE:
-                    combined = f'BUY (either — {which})'
+                    combined = f'BUY (either -- {which})'
                     reason = f'{which} says BUY with {conf:.0f}%'
                 else:
                     combined = 'HOLD'
@@ -3094,12 +3255,12 @@ def main():
         print("  Crypto: BTC, ETH, XRP, DOGE")
         print("  Indices: SMI, DAX, CAC40")
         print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
-        print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND — run download_macro_data.py'}")
+        print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
         print("=" * 60)
 
         print("\nChoose mode:")
         print("  B. Quick run (saved models + signals + chart)")
-        print("  D. FULL PIPELINE (feature analysis → diagnostic → signals)")
+        print("  D. FULL PIPELINE (feature analysis -> diagnostic -> signals)")
         print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D)")
         print("  ---")
         print("  5. Quick BTC (Mode B, both 4h+8h)")
@@ -3169,7 +3330,7 @@ def main():
         diag_years = 1
         if mode in ('D', 'E'):
             print("\nDiagnostic data range:")
-            print("  1. Last 1 year   (recommended — recent market behaviour)")
+            print("  1. Last 1 year   (recommended -- recent market behaviour)")
             print("  2. Last 2 years  (cross-regime test)")
             print("  3. Last 4 years  (slowest)")
             range_choice = input("Enter choice (1-3) [1]: ").strip()
@@ -3181,7 +3342,7 @@ def main():
                 diag_years = 1
             print(f"Diagnostic range: last {diag_years} year{'s' if diag_years > 1 else ''}")
 
-    # Mode B doesn't loop per horizon — it handles all horizons in one call
+    # Mode B doesn't loop per horizon -- it handles all horizons in one call
     if mode == 'B':
         run_mode_b(assets_list, horizon_filter=horizons[0] if len(horizons) == 1 else None)
     else:
