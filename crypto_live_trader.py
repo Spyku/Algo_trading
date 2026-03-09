@@ -20,6 +20,8 @@ import time
 import json
 import urllib.request
 import urllib.error
+import ssl
+_ssl_ctx = ssl._create_unverified_context()
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
@@ -84,7 +86,7 @@ def send_telegram(message, parse_mode='HTML'):
     payload = json.dumps({'chat_id': chat_id, 'text': message, 'parse_mode': parse_mode}).encode('utf-8')
     try:
         req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
             result = json.loads(resp.read().decode())
             if result.get('ok'):
                 print("  ✓ Telegram sent")
@@ -437,7 +439,7 @@ def setup_telegram():
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
             data = json.loads(resp.read().decode())
         if data.get('ok') and data.get('result'):
             chat_id = str(data['result'][-1]['message']['chat']['id'])

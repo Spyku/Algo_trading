@@ -25,6 +25,8 @@ import uuid
 import base64
 import urllib.request
 import urllib.error
+import ssl
+_ssl_ctx = ssl._create_unverified_context()
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -118,7 +120,7 @@ def revx_api(method, path, query='', body=None):
     data = body_str.encode('utf-8') if body_str else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -140,7 +142,7 @@ def get_asset_price(symbol):
     try:
         url = f"{REVX_BASE_URL}/public/order-book/{symbol}"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
             raw = json.loads(resp.read().decode())
         data = raw.get('data', raw)
         asks = data.get('asks', [])
@@ -615,7 +617,7 @@ def check_telegram_commands():
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates?offset={_last_update_id + 1}&timeout=0"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
             data = json.loads(resp.read().decode())
         if not data.get('ok') or not data.get('result'):
             return None
@@ -636,7 +638,7 @@ def _flush_old_updates():
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates?offset=-1"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
             data = json.loads(resp.read().decode())
         if data.get('ok') and data.get('result'):
             _last_update_id = data['result'][-1]['update_id']
