@@ -1036,6 +1036,7 @@ def main():
 
     if needs_config:
         print(f"\n  ⚠️ Max positions not set. Configure now:")
+        print(f"  (Press Enter or type 0 to skip an asset — it will be disabled)")
         for asset, cfg in trading_cfg.items():
             if not cfg.get('enabled'): continue
             has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
@@ -1043,12 +1044,18 @@ def main():
             if cfg['max_position_usd'] <= 0:
                 while True:
                     try:
-                        val = float(input(f"  {asset} max position USD: $").strip())
+                        raw = input(f"  {asset} max position USD (or Enter to skip): $").strip()
+                        if raw == '' or raw == '0':
+                            print(f"  Skipping {asset} — will not trade until max is set.")
+                            break
+                        val = float(raw)
                         if val > 0:
                             cfg['max_position_usd'] = val
                             break
+                        else:
+                            print(f"  Enter a positive amount, or press Enter to skip.")
                     except ValueError:
-                        pass
+                        print(f"  Invalid input. Enter a number, or press Enter to skip.")
         save_trading_config(trading_cfg)
 
     if loop_mode:
