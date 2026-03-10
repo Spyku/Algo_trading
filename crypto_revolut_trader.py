@@ -25,8 +25,6 @@ import uuid
 import base64
 import urllib.request
 import urllib.error
-import ssl
-_ssl_ctx = ssl._create_unverified_context()
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -120,7 +118,7 @@ def revx_api(method, path, query='', body=None):
     data = body_str.encode('utf-8') if body_str else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -142,7 +140,7 @@ def get_asset_price(symbol):
     try:
         url = f"{REVX_BASE_URL}/public/order-book/{symbol}"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             raw = json.loads(resp.read().decode())
         data = raw.get('data', raw)
         asks = data.get('asks', [])
@@ -384,8 +382,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
     if config_8h:
         sig_8h = generate_live_signal(asset, config_8h, df_raw=df_raw)
 
-    # Apply asset-specific strategy
-    action, confidence, reason = compute_asset_signal(sig_4h, sig_8h, strategy)
+    # Apply asset-specific strategy (use per-asset min_confidence if set, else global)
+    min_conf = trading_cfg.get('min_confidence', MIN_CONFIDENCE)
+    action, confidence, reason = compute_asset_signal(sig_4h, sig_8h, strategy, min_conf=min_conf)
     any_sig = sig_4h or sig_8h
     price = any_sig['close'] if any_sig else 0
 
@@ -617,7 +616,7 @@ def check_telegram_commands():
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates?offset={_last_update_id + 1}&timeout=0"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
         if not data.get('ok') or not data.get('result'):
             return None
@@ -638,7 +637,7 @@ def _flush_old_updates():
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates?offset=-1"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
         if data.get('ok') and data.get('result'):
             _last_update_id = data['result'][-1]['update_id']
@@ -777,7 +776,7 @@ def run_loop(trading_cfg, dry_run=False):
             pos = load_position(asset)
             auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
             print(f"  {asset}: {cfg['strategy']} | max=${cfg['max_position_usd']:,.0f} | {auto} | {pos['state'].upper()}")
-    print(f"  Min confidence: {MIN_CONFIDENCE}%")
+    print(f"  Min confidence: {MIN_CONFIDENCE}% (global default — overridden per asset by Mode F)")
     print(f"  Telegram: /stop /status /pause /resume /balance /sync")
     print(f"  Position sync: every 5 min (detects manual trades)")
     print(f"{'='*60}")
@@ -803,7 +802,7 @@ def run_loop(trading_cfg, dry_run=False):
     send_telegram(
         f"🚀 <b>Multi-Asset Trader Started</b>\n\n"
         + "\n".join(asset_lines) + "\n\n"
-        f"BUY needs ≥{MIN_CONFIDENCE}% model confidence\n"
+        f"BUY needs ≥{trading_cfg.get(next(iter(trading_cfg)), {}).get('''min_confidence''', MIN_CONFIDENCE) if trading_cfg else MIN_CONFIDENCE}% model confidence (per-asset)\n"
         f"SELL when either model says SELL\n"
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
         f"📱 /stop /status /pause /resume /balance /sync"
@@ -1038,7 +1037,6 @@ def main():
 
     if needs_config:
         print(f"\n  ⚠️ Max positions not set. Configure now:")
-        print(f"  (Press Enter or type 0 to skip an asset — it will be disabled)")
         for asset, cfg in trading_cfg.items():
             if not cfg.get('enabled'): continue
             has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
@@ -1046,18 +1044,12 @@ def main():
             if cfg['max_position_usd'] <= 0:
                 while True:
                     try:
-                        raw = input(f"  {asset} max position USD (or Enter to skip): $").strip()
-                        if raw == '' or raw == '0':
-                            print(f"  Skipping {asset} — will not trade until max is set.")
-                            break
-                        val = float(raw)
+                        val = float(input(f"  {asset} max position USD: $").strip())
                         if val > 0:
                             cfg['max_position_usd'] = val
                             break
-                        else:
-                            print(f"  Enter a positive amount, or press Enter to skip.")
                     except ValueError:
-                        print(f"  Invalid input. Enter a number, or press Enter to skip.")
+                        pass
         save_trading_config(trading_cfg)
 
     if loop_mode:

@@ -2182,51 +2182,6 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
 
     export_chart_data(all_signals)
 
-    # Generate interactive HTML charts (1-month + 1-week) for each asset
-    # Only when both 4h and 8h are available (or whichever are present)
-    if horizon_filter is None:
-        print("\n" + "=" * 60)
-        print("  GENERATING INTERACTIVE STRATEGY CHARTS")
-        print("=" * 60)
-
-        for asset_name in assets_to_run:
-            try:
-                with open(f'{CONFIG_DIR}/trading_config.json') as _f:
-                    _tcfg = json.load(_f)
-                strategy = _tcfg.get(asset_name, {}).get('strategy', 'both_agree')
-            except Exception:
-                strategy = 'both_agree'
-
-            asset_rows = df_best[df_best['coin'] == asset_name]
-            signals_4h, signals_8h = None, None
-
-            for _, row in asset_rows.iterrows():
-                h = int(row.get('horizon', 4))
-                model_names = row['models'].split('+')
-                window = int(row['best_window'])
-                fs = row.get('feature_set', 'A')
-                opt = row.get('optimal_features', '')
-
-                if fs in ('D', 'E2', 'E3') and pd.notna(opt) and str(opt).strip() and str(opt).strip() != 'nan':
-                    feature_override = [f.strip() for f in str(opt).split(',') if f.strip() and f.strip() != 'nan']
-                elif fs == 'B':
-                    feature_override = list(FEATURE_SET_B)
-                else:
-                    feature_override = list(FEATURE_SET_A)
-
-                print(f"  Generating {h}h signals (720h) for {asset_name}...")
-                sigs = generate_signals(asset_name, model_names, window, 720,
-                                        feature_override=feature_override, horizon=h)
-                sigs = simulate_portfolio(sigs)
-                if h == 4:
-                    signals_4h = sigs
-                else:
-                    signals_8h = sigs
-
-            if signals_4h or signals_8h:
-                generate_strategy_html(asset_name, signals_4h, signals_8h, strategy=strategy)
-                generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy=strategy)
-
     print("\n" + "=" * 60)
     print("  MODE B COMPLETE")
     print("=" * 60)
