@@ -1,10 +1,10 @@
-# Crypto Hourly ML Trading System — v3 / v4
+# Crypto Hourly ML Trading System — v5
 
 Automated machine learning trading system for crypto (BTC, ETH, XRP). Generates hourly BUY/SELL/HOLD signals using dual-horizon (4h + 8h) ensemble ML models with walk-forward validation. Executes trades automatically on Revolut X via Ed25519-signed API.
 
 **Active assets:** BTC, ETH, XRP (SOL removed — poor results)
 **Horizons:** 4h (short-term) and 8h (medium-term) — separate models, features, and windows per horizon
-**Strategies:** BTC = "both_agree" | ETH = "either" | XRP = pending test
+**Strategies:** Set per asset by Mode F (strategy comparison + confidence sweep)
 
 ---
 
@@ -12,34 +12,25 @@ Automated machine learning trading system for crypto (BTC, ETH, XRP). Generates 
 
 | File | Version | Status | Purpose |
 |------|---------|--------|---------|
-| `crypto_trading_system.py` | V3 | ✅ Production | Live trading — DO NOT modify without testing |
-| `crypto_trading_system_v4.py` | V4 | 🧪 Experimental | Improved scoring + CI + permutation test |
+| `crypto_trading_system.py` | V5 | ✅ Production | Live trading — DO NOT modify without testing |
+| `crypto_trading_system_v4.py` | V4 | 📦 Reference | Calmar/Sharpe scoring (superseded) |
+| `crypto_trading_system_v3_old.py` | V3 | 📦 Archive | Original production (superseded) |
 
-### What V4 adds (not in V3)
-1. **Bootstrap CI** — Every Mode B/D/E run now prints `Accuracy: 72.5% [95% CI: 66.3%–78.4%] (n=196)`. Zero extra compute.
-2. **Calmar/Sharpe scoring** — Replaces heuristic `accuracy × profit_factor^1.5 × dd_penalty` with industry-standard `0.45×Calmar + 0.35×Sharpe + 0.20×Accuracy`. Top-5 table shows Calmar and Sharpe columns.
-3. **Permutation significance test** (`--permtest` flag, off by default) — Shuffles labels 200× to compute p-value. Proves the model found real edge, not noise. Adds ~30 min per asset, only runs when explicitly requested.
+### What V5 adds over V4
+1. **New scoring formula** — Replaces `0.45×Calmar + 0.35×Sharpe + 0.20×Accuracy` with `accuracy × (1 + max(return, 0) / 100)`. Directly rewards being right AND making money. Calmar/Sharpe biased toward low-trade configs.
+2. **Mode F — Strategy comparison** — Backtests all 4 strategies (both_agree / either_agree / 4h_only / 8h_only) + confidence threshold sweep (60–90%). Auto-writes best strategy and threshold to `trading_config.json`.
+3. **Per-step timers in Mode D** — Each pipeline stage prints elapsed time.
+4. **hardware_config.py lightened** — `get_diagnostic_models()` uses n_estimators=100 / RF n_jobs=1. Diagnostics now run in ~16 min instead of 40–60 min.
+5. **DIAG_WINDOWS reduced** — [48, 72, 100, 150, 200] (was 7 windows). 75 configs total (was 105).
 
-### Running V4
-```powershell
-# Identical to V3 — drop-in replacement
-python crypto_trading_system_v4.py 5
-python crypto_trading_system_v4.py D BTC 4h 1y
+### V5 Scoring
+```python
+# Diagnostic and Mode F:
+combined_score = accuracy * (1 + max(cum_return, 0) / 100)
 
-# V4-only: permutation test (adds ~30 min per asset)
-python crypto_trading_system_v4.py D BTC 4h 1y --permtest
+# Feature analysis (unchanged from V4):
+combined = acc * (1 + max(alpha, 0) / 100)
 ```
-
-### V4 Validation Status
-All Phase 2 mock tests passed before porting:
-
-| Test | Result | Key number |
-|------|--------|------------|
-| V4 — Calmar/Sharpe edge cases | 11/11 PASS | No crashes on zero trades, flat price, extreme returns |
-| V2 — Bootstrap CI convergence | 4/4 PASS | CI compresses 2.76× as n grows (near-perfect 1/√n) |
-| V1 — Holdout stability | 3/4 PASS, 1 WARN | Gap std=6.1% — WARN expected on synthetic random-walk data |
-| V3 — Permutation anchors | 3/3 PASS | Noise p=0.980, signal p=0.000 |
-| V5 — Full pipeline dry-run | 6/6 PASS | Gap=+1.4%, p=0.000, CI [61.9%–71.2%] on 396 predictions |
 
 ---
 
@@ -51,26 +42,25 @@ If you are Claude reading this in a new conversation, this README is your comple
 
 Alex should upload these files when starting a new conversation:
 1. `README.md` (this file — the master reference)
-2. `crypto_trading_system.py` (V3 production system, ~3300 lines)
-3. `crypto_trading_system_v4.py` (V4 experimental with improvements, ~3200 lines)
-4. `crypto_revolut_trader.py` (auto-trader with Revolut X integration)
-5. `mock_strategy_optimizer.py` (mock combined optimizer — DO NOT deploy to production)
+2. `crypto_trading_system.py` (V5 production system)
+3. `crypto_trading_system_v4.py` (V4 reference — Calmar/Sharpe, kept for comparison)
+4. `crypto_revolut_trader.py` (auto-trader — reads min_confidence from trading_config.json)
+5. `hardware_config.py`
 6. `models/crypto_hourly_best_models.csv` (current best models)
-7. Optionally: `mock_crypto_trading_system.py` and `mock_crypto_trading_system_validation.py` if continuing V4 development
 
 ### Key Rules for Editing This Codebase
 
-1. **Never modify `crypto_trading_system.py` without testing in V4 first.** V3 is production. V4 is the test bed.
+1. **Never modify `crypto_trading_system.py` without testing first.** It is V5 production.
 2. **Horizons are 4h and 8h** (not 1h + 2h). AVAILABLE_HORIZONS = [4, 8]
-3. **CSV merge logic is critical.** When saving to crypto_hourly_best_models.csv, always filter by BOTH coin AND horizon. Wrong filter = overwrite the other horizon's config
-4. **feature_set check must include D.** All current models use Set D with custom optimal_features
-5. **generate_signals() needs feature_override.** When feature_set is D, the caller must pass `feature_override=config['optimal_features'].split(',')`. Without this, it defaults to Set A
-6. **Live trader imports from crypto_trading_system.py.** The filename must be exact — it imports V3, not V4
-7. **Labels are relative to rolling median, not absolute.** `label = 1` means "return in next H hours is above the 168h rolling median return", not just "price goes up"
-8. **No model persistence.** The system retrains from scratch every prediction. No .pkl files. This is intentional
-9. **Each horizon = completely independent model.** Different features, model combo, window, labels. Never mix them
-10. **All timestamps in live trader use Europe/Zurich** via `_to_local()` helper
-11. **Folder structure is v3.** Data in `data/`, models in `models/`, charts in `charts/`, config in `config/`. Root has .py files only
+3. **CSV merge logic is critical.** When saving to crypto_hourly_best_models.csv, always filter by BOTH coin AND horizon.
+4. **generate_signals() needs feature_override.** When feature_set is D, the caller must pass `feature_override=config['optimal_features'].split(',')`.
+5. **Live trader imports from crypto_trading_system.py.** The filename must be exact.
+6. **Labels are relative to rolling median, not absolute.** `label = 1` means return in next H hours is above the 168h rolling median return.
+7. **No model persistence.** The system retrains from scratch every prediction. No .pkl files. This is intentional.
+8. **Each horizon = completely independent model.** Different features, model combo, window, labels. Never mix them.
+9. **All timestamps in live trader use Europe/Zurich** via `_to_local()` helper.
+10. **Folder structure is v3.** Data in `data/`, models in `models/`, charts in `charts/`, config in `config/`. Root has .py files only.
+11. **trading_config.json now has min_confidence per asset** — set by Mode F. Trader reads this. Global MIN_CONFIDENCE=75 is only a fallback.
 
 ---
 
@@ -78,10 +68,10 @@ Alex should upload these files when starting a new conversation:
 
 ### Desktop (Primary — ~2x faster than laptop)
 ```
-CPU:     Intel i7-14700KF (20P/28L cores)
+CPU:     Intel i7-14700KF (20P/28L cores, 26 workers for parallel jobs)
 GPU:     NVIDIA RTX 4080 16GB, CUDA 13.1
 RAM:     32 GB
-Engine:  C:\algo_trading\engine
+Path:    C:\algo_trading\engine
 Venv:    C:\algo_trading\venv
 Activate: C:\algo_trading\venv\Scripts\activate.bat
 ```
@@ -90,7 +80,7 @@ Activate: C:\algo_trading\venv\Scripts\activate.bat
 ```
 CPU:     16 logical cores
 GPU:     NVIDIA RTX 3070 Ti Laptop
-Engine:  C:\Users\Alex\algo_trading\engine
+Path:    C:\Users\Alex\algo_trading\engine
 Venv:    C:\Users\Alex\algo_trading\venv
 Activate: C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
 ```
@@ -102,65 +92,57 @@ Python:   venv (NOT conda)
 LGBM:     GPU-enabled (device='gpu')
 Broker:   Revolut X (0.09% taker fee) for crypto
 User:     Alex, Lausanne, Switzerland (CET/CEST timezone)
+GitHub:   https://github.com/Spyku/Algo_trading
 ```
-
-### Key Python Packages
-numpy 2.4.2, pandas 3.0.1, scipy 1.17.0, scikit-learn 1.8.0, lightgbm 4.6.0 (GPU), ccxt, yfinance, plotly, pynacl, cryptography, joblib, matplotlib
 
 ---
 
-## Complete Folder Structure (v3)
+## Complete Folder Structure
 
 ```
-Algo_trading/                              # repo root (cloned into engine/ on both machines)
+Algo_trading/
 │
 ├── ===== CORE SYSTEM (root .py files) =====
-├── crypto_trading_system.py           # V3 PRODUCTION — Modes B/D/E + shortcuts 5/6/7
-├── crypto_trading_system_v4.py        # V4 EXPERIMENTAL — bootstrap CI, Calmar/Sharpe, --permtest
-├── crypto_revolut_trader.py           # Multi-asset Revolut X auto-trader with position management
+├── crypto_trading_system.py           # V5 PRODUCTION — Modes B/D/E/F + shortcuts 5/6/7
+├── crypto_trading_system_v4.py        # V4 REFERENCE — Calmar/Sharpe scoring (superseded)
+├── crypto_trading_system_v3_old.py    # V3 ARCHIVE — original production (superseded)
+├── crypto_revolut_trader.py           # Multi-asset Revolut X auto-trader
 ├── crypto_live_trader.py              # Required dependency of revolut trader — NOT run directly
-├── mock_strategy_optimizer.py         # Mock combined optimizer (DO NOT deploy to production)
-├── mock_crypto_trading_system.py      # Phase 1 mock tests for V4 improvements
-├── mock_crypto_trading_system_validation.py  # Phase 2 validation tests for V4 improvements
+├── hardware_config.py                 # Machine config — lightweight diagnostic models
 │
-├── ===== INFRASTRUCTURE =====
-├── hardware_config.py                 # AUTO-GENERATED by detect_hardware.py — DO NOT EDIT
-├── detect_hardware.py                 # Run once per machine to generate hardware_config.py
-├── download_macro_data.py             # Downloads VIX, DXY, S&P500, Gold, Fear&Greed → data/macro_data/
-│
-├── ===== DATA (auto-downloaded, gitignored) =====
+├── ===== DATA (auto-downloaded) =====
 ├── data/
-│   ├── btc_hourly_data.csv            # BTC/USDT hourly OHLCV (~75K candles since 2017)
-│   ├── eth_hourly_data.csv            # ETH/USDT hourly OHLCV
-│   ├── xrp_hourly_data.csv            # XRP/USDT hourly OHLCV
+│   ├── btc_hourly_data.csv
+│   ├── eth_hourly_data.csv
+│   ├── xrp_hourly_data.csv
 │   └── macro_data/
-│       ├── macro_daily.csv            # VIX, DXY, S&P500, Nasdaq, Gold, US10Y, EUR/USD, USD/JPY, Oil
-│       ├── fear_greed.csv             # Crypto Fear & Greed Index
-│       └── cross_asset.csv            # DAX, SMI, CAC40 daily
+│       ├── macro_daily.csv
+│       ├── fear_greed.csv
+│       ├── cross_asset.csv
+│       └── macro_hourly.csv
 │
-├── ===== MODELS (gitignored) =====
+├── ===== MODELS =====
 ├── models/
 │   ├── crypto_hourly_best_models.csv  # ** CENTRAL CONFIG ** Best model per (asset, horizon)
-│   ├── crypto_feature_analysis_*.csv  # Feature analysis scores per asset
-│   └── crypto_hourly_chart_data.json  # Signal export for dashboards
+│   ├── crypto_feature_analysis_*.csv
+│   └── crypto_hourly_chart_data.json
 │
-├── ===== CHARTS (generated outputs, gitignored) =====
+├── ===== CHARTS =====
 ├── charts/
-│   ├── {ASSET}_strategy_1week.html    # Interactive 4-panel Plotly chart (168h)
-│   ├── {ASSET}_strategy_1month.html   # Interactive 4-panel Plotly chart (720h)
-│   ├── {ASSET}_signal_table.html      # Signal table with correctness tracking
-│   └── {ASSET}_backtest.png           # Static backtest chart (matplotlib)
+│   ├── {ASSET}_strategy_1week.html
+│   ├── {ASSET}_strategy_1month.html
+│   ├── {ASSET}_signal_table.html
+│   └── {ASSET}_backtest.png
 │
-├── ===== CONFIG (gitignored) =====
+├── ===== CONFIG =====
 ├── config/
-│   ├── telegram_config.json           # Telegram bot token + chat_id
-│   ├── revolut_x_config.json          # Revolut X API key ID + key name
-│   ├── private.pem                    # Ed25519 private key for API signing
-│   ├── public.pem                     # Ed25519 public key
-│   ├── trading_config.json            # Per-asset strategy + max USD
-│   ├── position_BTC.json              # Current BTC position state
-│   ├── position_ETH.json              # Current ETH position state
-│   └── position_XRP.json              # Current XRP position state
+│   ├── telegram_config.json
+│   ├── revolut_x_config.json
+│   ├── private.pem
+│   ├── trading_config.json            # Per-asset strategy + max USD + min_confidence (set by Mode F)
+│   ├── position_BTC.json
+│   ├── position_ETH.json
+│   └── position_XRP.json
 ```
 
 ---
@@ -169,10 +151,11 @@ Algo_trading/                              # repo root (cloned into engine/ on b
 
 ```python
 TRADING_FEE = 0.0009                # 0.09% per trade (Revolut X taker fee)
-MIN_CONFIDENCE = 75                 # Model must be ≥75% sure to trigger BUY
-AVAILABLE_HORIZONS = [4, 8]         # 4h and 8h models
-REPLAY_HOURS = 200                  # Hours of signals to generate in Mode B
-DIAG_STEP = 72                      # Step size for walk-forward diagnostic
+MIN_CONFIDENCE = 75                 # Global fallback — overridden per asset by Mode F
+AVAILABLE_HORIZONS = [4, 8]
+REPLAY_HOURS = 200
+DIAG_STEP = 72
+DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 5 windows × 15 combos = 75 configs
 DATA_DIR = 'data'
 CHARTS_DIR = 'charts'
 MODELS_DIR = 'models'
@@ -182,41 +165,47 @@ MACRO_DIR = 'data/macro_data'
 
 ---
 
-## Current Best Models (models/crypto_hourly_best_models.csv)
+## Modes Quick Reference
 
-| Asset | Horizon | Models | Window | Feature Set | Accuracy | Features |
-|-------|---------|--------|--------|-------------|----------|----------|
-| BTC | 4h | RF+LR+LGBM | 100h | D | 72.5% | 18 features |
-| BTC | 8h | RF+GB+LGBM | 300h | D | 86.3% | 20 features |
-| ETH | 4h | RF+LR | 100h | D | 78.3% | custom |
-| ETH | 8h | RF+LR | 100h | D | 75.0% | custom |
-| XRP | 4h | GB | 100h | D | 69.2% | custom |
-| XRP | 8h | RF+LR | 100h | D | 80.8% | custom |
+| Mode | Purpose | Time (desktop) | When to Run |
+|------|---------|----------------|-------------|
+| **B** | Quick signals from saved models | ~2 min | Daily |
+| **D** | Full pipeline: 125 features → analysis → optimal subset → diagnostic → signals | ~90 min per horizon | Quarterly or after market regime change |
+| **E** | Iterative refinement after Mode D | ~1–4h | After Mode D |
+| **F** | Strategy comparison + confidence sweep → updates trading_config.json | ~seconds | After Mode D (auto), or standalone |
+| **5/6/7** | Shortcuts: Quick BTC/ETH/XRP (Mode B, both horizons) | ~5 min | Daily |
 
-### BTC 8h Feature Set (20 features)
-logret_240h, logret_120h, logret_72h, hour_cos, atr_pct_14h, xa_sp500_relstr5d, vol_ratio_12_48, volatility_48h, xa_dax_relstr5d, price_to_sma100h, price_accel_24h, sma20_to_sma50h, hour_sin, spread_120h_8h, volatility_12h, logret_48h, spread_240h_24h, m_nasdaq_chg1d, price_accel_12h, xa_nasdaq_relstr5d
+### Mode D Timing (desktop, 2y data)
+| Step | 4h | 8h |
+|------|----|----|
+| Macro update | 0.1 min | 0.1 min |
+| Data update | 0.1 min | 0.1 min |
+| Feature build | 0.0 min | 0.0 min |
+| Feature analysis | ~70 min | ~96 min |
+| Diagnostic | ~16 min | ~18 min |
+| Signal generation | ~2 min | ~1 min |
+| **Total** | **~88 min** | **~115 min** |
 
 ---
 
-## Strategy Results — Confirmed Optimal
+## Current Best Models (V5, 2y)
 
-| Asset | Strategy | Alpha | Win Rate | Trades/Month |
-|-------|----------|-------|----------|--------------|
-| BTC | both_agree | +97.2% | 90.0% | 40 |
-| ETH | either | +107.8% | 78.9% | 57 |
-| XRP | pending test | — | — | — |
+| Asset | Horizon | Models | Window | Acc | Return | Score | Features | Run |
+|-------|---------|--------|--------|-----|--------|-------|----------|-----|
+| BTC | 4h | RF+GB+LR | 100h | 80.2% | +125.0% | 1.804 | 125 | V5 2y ✅ |
+| BTC | 8h | RF+GB | 150h | 84.7% | +319.4% | 3.550 | 15 | V5 2y ✅ |
+| ETH | 4h | RF+LR | 100h | 78.3% | — | — | custom | V4 1y ⚠️ |
+| ETH | 8h | RF+LR | 100h | 75.0% | — | — | custom | V4 1y ⚠️ |
+| XRP | 4h | GB | 100h | 69.2% | — | — | custom | V4 1y ⚠️ |
+| XRP | 8h | RF+LR | 100h | 80.8% | — | — | custom | V4 1y ⚠️ |
 
-**Weighted strategy:** Tested and REJECTED — both_agree/either already optimal.
+⚠️ ETH and XRP still use V4 1y Calmar runs — need V5 2y re-run on laptop.
 
-### Strategy Rules
-- **both_agree**: Both 4h AND 8h must agree on BUY/SELL to trigger
-- **either**: If EITHER 4h OR 8h signals BUY/SELL, trigger (more trades, lower precision)
+### BTC 8h Optimal Features (15)
+`logret_120h, xa_dax_relstr5d, price_to_sma100h, logret_240h, xa_sp500_relstr5d, vol_ratio_12_48, hour_cos, volatility_48h, atr_pct_14h, xa_nasdaq_relstr5d, sma20_to_sma50h, hour_sin, logret_72h, spread_24h_4h, m_nasdaq_chg1d`
 
-### Trading Rules
-- **BUY**: Uses full max_position_usd, or all available USD if less
-- **SELL**: Sells ALL held on exchange
-- **Already invested**: BUY is ignored (no top-up)
-- **MIN_CONFIDENCE = 75%**: Model must be ≥75% confident to trigger BUY
+### BTC 4h Optimal Features (125 — all features)
+Full feature set used. No smaller subset scored higher on 2y walk-forward.
 
 ---
 
@@ -224,90 +213,85 @@ logret_240h, logret_120h, logret_72h, hour_cos, atr_pct_14h, xa_sp500_relstr5d, 
 
 ```json
 {
-  "BTC": { "strategy": "both_agree", "symbol": "BTC-USD", "max_position_usd": 10000 },
-  "ETH": { "strategy": "either", "symbol": "ETH-USD", "max_position_usd": 1000 }
+  "BTC": {
+    "strategy": "either_agree",
+    "min_confidence": 75,
+    "symbol": "BTC-USD",
+    "max_position_usd": 10000
+  },
+  "ETH": {
+    "strategy": "either",
+    "symbol": "ETH-USD",
+    "max_position_usd": 1000
+  }
 }
 ```
 
----
-
-## Modes Quick Reference
-
-| Mode | Purpose | Time | When to Run |
-|------|---------|------|-------------|
-| **B** | Quick signals from saved models | ~2 min | Daily |
-| **D** | Full pipeline: 124 features → analysis → optimal subset → diagnostic | ~3-8h | Quarterly |
-| **E** | Iterative refinement of Mode D | ~1-4h | After Mode D |
-| **5/6/7** | Shortcuts: Quick BTC/ETH/XRP (Mode B, both horizons) | ~5 min | Daily |
-
-Modes A and C have been removed (superseded by Mode D).
+`min_confidence` is written automatically by Mode F. The trader reads it per asset. Global `MIN_CONFIDENCE=75` is only a fallback if the field is missing.
 
 ---
 
-## CLI Shortcuts
+## Strategy Comparison Results (BTC V5, 200h replay)
+
+| Strategy | Return | Win Rate | Trades | Score |
+|----------|--------|----------|--------|-------|
+| **either_agree** | **+20.9%** | **90%** | **20** | **0.996** |
+| 8h_only | +18.5% | 83% | 12 | 0.977 |
+| both_agree | +16.4% | 100% | 13 | 0.959 |
+| 4h_only | +15.1% | 88% | 16 | 0.948 |
+
+### Confidence Sweep (either_agree)
+
+| Threshold | Return | Win Rate | Trades | Score |
+|-----------|--------|----------|--------|-------|
+| 60% | +18.5% | 87% | 23 | 0.977 |
+| 65% | +18.5% | 87% | 23 | 0.977 |
+| 70% | +19.4% | 87% | 23 | 0.984 |
+| **75%** | **+20.9%** | **90%** | **20** | **0.996** ← BEST |
+| 80% | +20.8% | 90% | 20 | 0.995 |
+| 85% | +14.9% | 91% | 11 | 0.947 |
+| 90% | +7.1% | 100% | 6 | 0.882 |
+
+---
+
+## CLI Reference
 
 ```powershell
-# V3 (production)
-python crypto_trading_system.py 5              # Quick BTC
-python crypto_trading_system.py 6              # Quick ETH
-python crypto_trading_system.py 7              # Quick XRP
-python crypto_trading_system.py B BTC 4,8h    # Mode B
-python crypto_trading_system.py D BTC 4h 1y   # Mode D
+# Production (V5)
+python crypto_trading_system.py 5                    # Quick BTC
+python crypto_trading_system.py 6                    # Quick ETH
+python crypto_trading_system.py 7                    # Quick XRP
+python crypto_trading_system.py B BTC 4,8h           # Mode B — signals
+python crypto_trading_system.py D BTC 4,8h 2y        # Mode D — full pipeline
+python crypto_trading_system.py F BTC                # Mode F — strategy comparison
 
-# V4 (experimental — same CLI + optional --permtest)
-python crypto_trading_system_v4.py 5
-python crypto_trading_system_v4.py D BTC 4h 1y --permtest
+# Auto-trader
+python crypto_revolut_trader.py
 ```
-
----
-
-## Interactive Charts — 4-Panel Layout
-
-Generated by shortcuts 5/6/7, these are interactive Plotly HTML charts with zoom-synced panels:
-
-**Panel 1:** Price + 4h signals (blue triangles = BUY, red triangles = SELL)
-**Panel 2:** Price + 8h signals
-**Panel 3:** Price + combined strategy signals (both_agree or either)
-**Panel 4:** Portfolio ($1,000 start) vs Buy & Hold
-
-Color scheme (colorblind-friendly): 🔵 Blue = BUY | 🔴 Red = SELL | 🟡 Yellow = HOLD
-
-Files generated per asset:
-- `charts/{ASSET}_strategy_1week.html` (168h window)
-- `charts/{ASSET}_strategy_1month.html` (720h window)
-- `charts/{ASSET}_signal_table.html` (per-hour signal table with correctness)
 
 ---
 
 ## Revolut X Auto-Trader (crypto_revolut_trader.py)
 
-### API Details
-- Base URL: `https://revx.revolut.com/api/1.0`
-- Auth: Ed25519 signing via pynacl + cryptography
-- Price fetch: 3 fallbacks — public orderbook → authenticated tickers → last trades
-
 ### Behavior
-1. **Startup**: Sync positions from exchange → send startup Telegram → immediate full scan
-2. **Every hour**: Sync → download candle → generate 4h+8h signals → apply strategy → execute trade → Telegram
-3. **Between hours (every 5 min)**: Check Telegram commands + sync balances
+1. **Startup**: Sync positions → Telegram → immediate scan
+2. **Every hour**: Sync → download → generate 4h+8h signals → apply strategy → execute → Telegram
+3. **Between hours (every 5 min)**: Telegram commands + balance sync
 
 ### Telegram Commands
 `/stop` `/status` `/pause` `/resume` `/balance` `/sync`
 
----
-
-## Revolut X Account Status (as of Mar 8, 2026)
-
-- USD: $12,697.53
-- BTC: 0.001403 (~$124)
-- ETH: 0.505 (~$1,160)
+### Confidence Handling
+- Trader reads `min_confidence` from `trading_config.json` per asset
+- Falls back to global `MIN_CONFIDENCE=75` if not set
+- Mode F sets this automatically — no manual editing needed
 
 ---
 
 ## System Architecture
 
-### Features (~124 total)
-43 Technical + ~80 Macro (VIX, DXY, S&P500, Nasdaq, Gold, US10Y, Fear&Greed, cross-asset correlations)
+### Features (125 total)
+44 Technical base + 81 Macro/sentiment/cross-asset (VIX, DXY, S&P500, Nasdaq, Gold, US10Y, EUR/USD, USD/JPY, Oil, Fear&Greed, ETH/BTC/DAX correlations)
 
 ### Labels
 ```python
@@ -317,130 +301,70 @@ label = 1 if logret_Xh > median_return else 0
 Adaptive threshold — not just "price goes up".
 
 ### Models
-RF (RandomForest), GB (GradientBoosting), LR (LogisticRegression), LGBM (LightGBM GPU)
-All 15 combinations tested: 4 solo + 6 pairs + 4 triples + 1 quad.
+RF, GB, LR, LGBM — all 15 combinations tested (4 solo + 6 pairs + 4 triples + 1 quad).
 
 ### Walk-Forward Validation
-No future leakage. Train on last `window` hours → predict next candle → step forward. Retrains every hour in live mode.
-
-### V3 Scoring
-```
-combined_score = accuracy × profit_factor^1.5 × drawdown_penalty
-```
-
-### V4 Scoring (Calmar/Sharpe)
-```
-combined_score = 0.45 × Calmar + 0.35 × Sharpe + 0.20 × accuracy_signal
-```
-Calmar = annualised return / max drawdown (clipped to [-5, 10])
-Sharpe = per-trade mean/std × √n_trades (clipped to [-3, 5])
+No future leakage. Train on last `window` hours → predict next candle → step forward `DIAG_STEP=72h`.
 
 ---
 
-## Mock Strategy Optimizer (mock_strategy_optimizer.py)
+## Pending Actions
 
-**Purpose:** Tests 1,400 combinations to find optimal model+strategy+confidence config per asset. Does NOT modify production files.
-
-**Run:** `python mock_strategy_optimizer.py --asset BTC`
-
-### BTC Optimizer Results (Mar 8, 2026)
-
-**STEP 1 (4h) — COMPLETE** (105/105 in ~10.6 hours)
-
-Top 4h results: RF+GB+LR w=48h at +83.1% alpha. Short windows (48h) dominate. Current production config (RF+LR+LGBM, w=100h) is solid but not the top performer.
-
-**STEP 2 (8h) — PENDING** (~14/105 done when last checked)
-
-**STEP 3 (combined strategy) — PENDING** (instant once Step 2 done)
-
----
-
-## Pending Actions / TODO
-
-1. **WAITING:** Laptop mock optimizer to finish (Step 2 8h → Step 3 instant)
-2. **TODO:** Run Mode D for XRP: `python crypto_trading_system.py D XRP 4,8h 1y`
-3. **TODO:** Update `models/crypto_hourly_best_models.csv` with optimizer results once complete
-4. **TODO:** Run V4 on real BTC data to compare Calmar/Sharpe scores vs old heuristic
-5. **DECISION PENDING:** Keep or remove DOGE, SMI, DAX, CAC40 from the system
-6. **DECISION PENDING:** Promote V4 to production once real-data validation done
+1. **TODO:** Run V5 Mode D ETH 4,8h 2y on laptop
+2. **TODO:** Run V5 Mode D XRP 4,8h 2y on laptop
+3. **TODO:** Run Mode F for ETH and XRP after their V5 runs
+4. **TODO:** Push V5 + updated hardware_config.py + README to GitHub (`git push`)
+5. **TODO:** Pull on laptop before running ETH/XRP (`git pull`)
+6. **TODO:** Update best models table once ETH/XRP 2y runs complete
+7. **COMPLETED:** V5 scoring (acc×(1+return/100)) ✅
+8. **COMPLETED:** Mode F (strategy comparison + confidence sweep) ✅
+9. **COMPLETED:** Per-step timers in Mode D ✅
+10. **COMPLETED:** hardware_config diagnostic models lightened ✅
+11. **COMPLETED:** DIAG_WINDOWS reduced to [48,72,100,150,200] ✅
+12. **COMPLETED:** BTC V5 2y run — 4h: RF+GB+LR w=100h 80.2% +125%, 8h: RF+GB w=150h 84.7% +319% ✅
+13. **COMPLETED:** V5 promoted to production, V3 archived as v3_old ✅
 
 ---
 
 ## Session History
 
-1. **Mar 2**: Added V2 macro features (VIX, DXY, yields, Fear&Greed, cross-asset) to crypto system
-2. **Mar 2**: Created crypto_trading_system.py with Mode A/B/C, Set A vs Set B comparison
-3. **Mar 2**: BTC 4h results: Set A 76.5% vs Set B 75.7%. Charts, Mode C saving fix
-4. **Mar 3**: Added Mode D (full feature analysis pipeline), Telegram live trader, initial README
-5. **Mar 4**: Added confidence threshold backtester, derivative features, live trader timing fix
-6. **Mar 4**: Dual horizon support (1h + 4h). Discovered 1h was run with Mode A (55% failure)
-7. **Mar 4**: Fixed critical run_loop bug. Full end-to-end flow verification
-8. **Mar 4**: Added Mode E (iterative refinement 2nd/3rd pass)
-9. **Mar 5**: VVR feature, profit-weighted scoring, small-window test, sklearn warning fix
-10. **Mar 7**: 8h horizon testing — BTC 8h: 80.3% (+26.0% alpha). "Both Agree" strategy: +97.2% alpha, 90% win rate. Migrated folder structure to v3. Revolut X auto-trader created
-11. **Mar 7-8**: ETH analysis (both_agree +107.8% alpha), XRP analysis (4h 69.2%, 8h 80.8%). SOL removed. Per-asset strategies deployed. Revolut X price fetch fix (3-fallback), balance sync, $300 min trade
-12. **Mar 8**: 4-panel interactive Plotly charts (zoom-synced, colorblind-friendly), signal table HTML, weighted strategy tested & rejected, mock optimizer created and running on laptop
-13. **Mar 8**: Mock optimizer Step 1 (4h) COMPLETE — RF+GB+LR w=48h tops at +83.1% alpha. Step 2 (8h) in progress
-14. **Mar 8 (latest)**: Full code review — 2 new bugs fixed (combined summary key lookup, overall alpha leak). Mock test framework built and validated for 4 improvements. V4 created with Improvements 2+3+4. V3 production file kept clean and untouched.
-
-### V4 Development Summary (Mar 8, Session 6-7)
-
-**10 bugs total fixed across sessions 1-6** (8 previous + 2 new):
-- Bug 1-new: `_run_quick_asset` combined summary silently failed — `chart_data[key]` → `chart_data.get('assets', chart_data)[key]`
-- Bug 2-new: `generate_strategy_html` overall alpha showed last-loop value — now computed from full period portfolio sim
-
-**4 improvements designed, validated in mock, ported to V4:**
-- Improvement 1 (holdout): Decided NOT to port — excluding last 720h from training is wrong for time-sensitive assets. Reframed as "regime alignment check" for future work
-- Improvement 2 (bootstrap CI): Ported ✅ — zero compute cost, prints CI on every Mode B/D/E run
-- Improvement 3 (permutation test): Ported ✅ — optional `--permtest` flag, off by default (~30 min per asset)
-- Improvement 4 (Calmar/Sharpe): Ported ✅ — replaces heuristic scoring, adds Calmar/Sharpe columns to top-5 table
+1. **Mar 2**: Added V2 macro features. Created crypto_trading_system.py with Modes A/B/C.
+2. **Mar 2**: BTC 4h: Set A 76.5% vs Set B 75.7%. Charts, Mode C saving fix.
+3. **Mar 3**: Mode D (full feature analysis pipeline), Telegram live trader, README.
+4. **Mar 4**: Confidence threshold backtester, derivative features, live trader timing fix.
+5. **Mar 4**: Dual horizon (1h+4h → 4h+8h). Fixed critical run_loop bug.
+6. **Mar 4**: Mode E (iterative refinement). VVR feature, profit-weighted scoring.
+7. **Mar 7**: 8h horizon — BTC 8h 80.3%. "Both Agree" +97.2% alpha, 90% win rate. Revolut X trader.
+8. **Mar 7-8**: ETH/XRP analysis. SOL removed. Per-asset strategies. Revolut X fixes.
+9. **Mar 8**: 4-panel Plotly charts, signal table HTML. Weighted strategy tested & rejected.
+10. **Mar 8**: V4 created with bootstrap CI + Calmar/Sharpe + --permtest.
+11. **Mar 9 (Sessions 8-9)**: hardware_config lightened. DIAG_WINDOWS reduced. BTC 4h V4: GB+LR w=200h 63% +48.7%.
+12. **Mar 9 (Sessions 10-11)**: V5 created. Scoring replaced. Mode F + confidence sweep. Timers added.
+13. **Mar 9 (Session 12)**: BTC 8h V4: RF+GB+LR+LGBM w=200h 74% +67.6%. Mode F on V4: either_agree + 65%.
+14. **Mar 10 (Session 13)**: V5 Mode D BTC 4,8h 2y. 4h: RF+GB+LR w=100h 80.2% +125%. 8h: RF+GB w=150h 84.7% +319%. Mode F: either_agree + 75%. V5 → production. V3 → archive.
 
 ---
 
 ## File Dependencies
 
 ```
-crypto_trading_system.py  (V3 — production)
+crypto_trading_system.py  (V5 — production)
   ├── imports: hardware_config.py
   ├── reads: data/macro_data/*.csv
   ├── reads/writes: data/{asset}_hourly_data.csv
   ├── reads/writes: models/crypto_hourly_best_models.csv
-  └── writes: charts/*.html, charts/*.png, models/*.json
-
-crypto_trading_system_v4.py  (V4 — experimental, same dependencies as V3)
-  ├── imports: hardware_config.py
-  ├── reads: data/macro_data/*.csv
-  ├── reads/writes: data/{asset}_hourly_data.csv
-  ├── reads/writes: models/crypto_hourly_best_models.csv
+  ├── reads/writes: config/trading_config.json  (Mode F writes strategy + min_confidence)
   └── writes: charts/*.html, charts/*.png, models/*.json
 
 crypto_revolut_trader.py
-  ├── imports: crypto_trading_system.py  ← always V3, never V4
+  ├── imports: crypto_trading_system.py  ← always production filename
   ├── reads: models/crypto_hourly_best_models.csv
-  ├── reads: config/trading_config.json, config/revolut_x_config.json, config/private.pem
+  ├── reads: config/trading_config.json  (strategy + min_confidence per asset)
+  ├── reads: config/revolut_x_config.json, config/private.pem
   ├── reads/writes: config/position_*.json
   └── sends: Revolut X API + Telegram
-
-mock_strategy_optimizer.py
-  ├── imports: crypto_trading_system.py
-  └── reads: models/crypto_hourly_best_models.csv (read-only, never writes)
-
-mock_crypto_trading_system_validation.py
-  └── imports: mock_crypto_trading_system.py
 ```
 
 ---
 
-## Quick Start — New Claude Session Checklist
-
-When starting a new Claude chat:
-
-1. Upload: README.md + crypto_trading_system.py + crypto_trading_system_v4.py + crypto_revolut_trader.py + models/crypto_hourly_best_models.csv
-2. Tell Claude: "Read the README first"
-3. If mock optimizer finished: share results for Step 2 (8h) and Step 3 (combined)
-4. If deploying to desktop: remind about different paths (`C:\algo_trading` vs `C:\Users\Alex\algo_trading\Algo_trading`)
-5. Check pending actions list above for what needs doing
-
----
-
-*Last updated: March 8, 2026 — V3 production stable, V4 experimental with bootstrap CI + Calmar/Sharpe + --permtest*
+*Last updated: March 10, 2026 — V5 production. BTC fully validated on 2y data. ETH/XRP pending V5 re-run on laptop.*
