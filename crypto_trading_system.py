@@ -1,21 +1,27 @@
 """
-Crypto Hourly Trading System
+Crypto Hourly Trading System — V5.4 Production
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 125 features -> walk-forward ML -> BUY/SELL/HOLD signals.
+
+V5.4 (production):
+  - Orphan worker cleanup at Mode D/E start (prevents CPU drain from killed runs)
+  - Phase-specific BLAS thread limits with loky pool reset:
+    Feature analysis: OMP=1 globally (LGBM-only, prevents thread explosion).
+    Before diagnostic: kill loky pool, remove OMP=1, spawn fresh workers.
+    Diagnostic workers get full BLAS parallelism (RF/GB/LR ~20% faster).
+    After diagnostic: restore OMP=1 + kill pool again for next horizon.
+  - Lighter LGBM for feature analysis (n_est=100, depth=4)
+  - LOKY_MAX_CPU_COUNT capped at N_JOBS_PARALLEL
 
 Modes:
   B. Quick run (saved models)    D. Full pipeline (feature analysis -> diagnostic)
   E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage (skip all menus):
-  python crypto_trading_system.py B BTC 4,8h          # Mode B, BTC, both horizons
-  python crypto_trading_system.py D ETH 8h 1y         # Mode D, ETH, 8h, 1 year
-  python crypto_trading_system.py D BTC,ETH 4,8h 2y   # Mode D, multiple assets
-  python crypto_trading_system.py B                    # Mode B, all assets, default 4h
-
-Interactive shortcuts:
-  python crypto_trading_system.py    # Menu -> select 5 for quick BTC, 6 for ETH, 7 for XRP
+  python crypto_trading_system.py B BTC 4,8h
+  python crypto_trading_system.py D ETH 8h 1y
+  python crypto_trading_system.py D BTC,ETH 4,8h 2y
 
 Outputs:
   charts/{ASSET}_backtest.png
@@ -32,8 +38,14 @@ import os
 # ============================================================
 os.environ['PYTHONWARNINGS'] = 'ignore'
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
-# Force loky to inherit env vars on Windows
-os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count() or 4)
+# Prevent hidden multithreading inside parallel workers (numpy, scipy, BLAS)
+# Each joblib worker should be single-threaded; parallelism is at the joblib level.
+# NOTE: These are REMOVED before diagnostic phase (RF/GB/LR need BLAS threads).
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import warnings
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
@@ -71,6 +83,39 @@ from hardware_config import (
     MACHINE, N_JOBS_PARALLEL, LGBM_DEVICE,
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,
 )
+# Cap loky worker pool to configured parallelism (not raw CPU count)
+os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
+
+
+def _kill_orphan_workers():
+    """Kill any orphaned python/loky workers from previous interrupted runs.
+    On Windows, Ctrl+C kills the parent but loky child processes survive,
+    silently eating CPU and slowing down subsequent runs."""
+    import subprocess
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ['wmic', 'process', 'where', "name='python.exe'", 'get', 'processid,commandline'],
+            capture_output=True, text=True, timeout=10
+        )
+        killed = 0
+        for line in result.stdout.splitlines():
+            # Kill loky workers and resource trackers (but not ourselves)
+            if 'loky' in line.lower():
+                # Extract PID (last number on the line)
+                parts = line.strip().split()
+                if parts:
+                    try:
+                        pid = int(parts[-1])
+                        if pid != my_pid:
+                            os.kill(pid, 9)
+                            killed += 1
+                    except (ValueError, OSError):
+                        pass
+        if killed:
+            print(f"  [Cleanup] Killed {killed} orphaned worker(s) from previous runs")
+    except Exception:
+        pass  # non-critical — don't fail if cleanup fails
 
 # Matplotlib (non-interactive backend for server/headless)
 import matplotlib
@@ -690,7 +735,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
                                  columns=feature_cols, index=X_test.index)
 
         model = LGBMClassifier(
-            n_estimators=200, max_depth=6, learning_rate=0.05,
+            n_estimators=100, max_depth=4, learning_rate=0.05,
             class_weight='balanced', verbose=-1, random_state=42,
             device=lgbm_device
         )
@@ -742,7 +787,7 @@ def _test_lgbm_importance(df_features, feature_cols):
     X_s = pd.DataFrame(scaler.fit_transform(X), columns=feature_cols)
 
     model = LGBMClassifier(
-        n_estimators=200, max_depth=6, learning_rate=0.05,
+        n_estimators=100, max_depth=4, learning_rate=0.05,
         class_weight='balanced', verbose=-1, random_state=42,
         device=LGBM_DEVICE
     )
@@ -1534,7 +1579,23 @@ DIAG_MODELS = get_diagnostic_models()
 
 
 def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
-    """Run diagnostic and return best config + all results."""
+    """Run diagnostic and return best config + all results.
+    Kills the loky worker pool and removes BLAS limits before running,
+    so RF/GB/LR get full BLAS parallelism in fresh workers."""
+    from joblib.externals.loky import get_reusable_executor
+
+    # === KEY V5.4 OPTIMIZATION ===
+    # Feature analysis ran with OMP=1 (good for LGBM-only workers).
+    # Diagnostic uses RF/GB/LR which need BLAS threads.
+    # 1. Kill existing loky pool (workers have OMP=1 baked in from import)
+    # 2. Remove BLAS limits from parent env
+    # 3. New workers will spawn fresh WITHOUT OMP=1
+    get_reusable_executor().shutdown(wait=True)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ.pop(var, None)
+    print(f"  [BLAS limits removed, worker pool reset for diagnostic]")
+
     combos = []
     model_names = list(ALL_MODELS.keys())
     for r in range(1, len(model_names) + 1):
@@ -1563,6 +1624,12 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
             for combo, window in all_configs
         )
     print(f"  Diagnostic completed in {(time.time() - t_diag)/60:.1f} minutes")
+
+    # Restore BLAS limits for any subsequent feature analysis (e.g. next horizon)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ[var] = '1'
+    get_reusable_executor().shutdown(wait=True)  # kill diagnostic workers too
 
     best_score = 0
     best_config = None
@@ -2348,6 +2415,9 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     """
     t_mode_start = time.time()
 
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
+
     print("\n" + "=" * 60)
     print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
     print(f"  Starts from ALL features, finds optimal subset per asset")
@@ -2761,6 +2831,9 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
     iteration='23' -> run 2nd + 3rd pass
     """
     do_iter3 = '3' in iterations
+
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
 
     print("\n" + "=" * 60)
     print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")

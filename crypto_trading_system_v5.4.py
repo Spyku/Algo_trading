@@ -5,9 +5,12 @@ ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 125 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
 V5.4 changes vs V5.3:
-  - Two-phase diagnostic: Phase 1 coarse pass (step=144h) on all 75 configs,
-    Phase 2 full precision (step=72h) on top 10 only. ~50% faster diagnostic.
-  All V5.3 optimizations retained (BLAS thread limits, lighter LGBM, LOKY cap).
+  - Phase-specific BLAS thread limits with loky pool reset:
+    Feature analysis: OMP=1 globally (LGBM-only, prevents thread explosion).
+    Before diagnostic: kill loky pool, remove OMP=1, spawn fresh workers.
+    Diagnostic workers get full BLAS parallelism (RF/GB/LR ~20% faster).
+    After diagnostic: restore OMP=1 + kill pool again for next horizon.
+  All V5.3 optimizations retained (lighter LGBM, LOKY cap).
 
 Modes:
   B. Quick run (saved models)    D. Full pipeline (feature analysis -> diagnostic)
@@ -35,6 +38,7 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 # Prevent hidden multithreading inside parallel workers (numpy, scipy, BLAS)
 # Each joblib worker should be single-threaded; parallelism is at the joblib level.
+# NOTE: These are REMOVED before diagnostic phase (RF/GB/LR need BLAS threads).
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
@@ -79,6 +83,37 @@ from hardware_config import (
 )
 # Cap loky worker pool to configured parallelism (not raw CPU count)
 os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
+
+
+def _kill_orphan_workers():
+    """Kill any orphaned python/loky workers from previous interrupted runs.
+    On Windows, Ctrl+C kills the parent but loky child processes survive,
+    silently eating CPU and slowing down subsequent runs."""
+    import subprocess
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ['wmic', 'process', 'where', "name='python.exe'", 'get', 'processid,commandline'],
+            capture_output=True, text=True, timeout=10
+        )
+        killed = 0
+        for line in result.stdout.splitlines():
+            # Kill loky workers and resource trackers (but not ourselves)
+            if 'loky' in line.lower():
+                # Extract PID (last number on the line)
+                parts = line.strip().split()
+                if parts:
+                    try:
+                        pid = int(parts[-1])
+                        if pid != my_pid:
+                            os.kill(pid, 9)
+                            killed += 1
+                    except (ValueError, OSError):
+                        pass
+        if killed:
+            print(f"  [Cleanup] Killed {killed} orphaned worker(s) from previous runs")
+    except Exception:
+        pass  # non-critical — don't fail if cleanup fails
 
 # Matplotlib (non-interactive backend for server/headless)
 import matplotlib
@@ -1542,9 +1577,23 @@ DIAG_MODELS = get_diagnostic_models()
 
 
 def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
-    """Run diagnostic with two-phase optimization:
-    Phase 1: Coarse pass (2x step) on all configs — fast elimination.
-    Phase 2: Full precision on top 10 candidates only."""
+    """Run diagnostic and return best config + all results.
+    Kills the loky worker pool and removes BLAS limits before running,
+    so RF/GB/LR get full BLAS parallelism in fresh workers."""
+    from joblib.externals.loky import get_reusable_executor
+
+    # === KEY V5.4 OPTIMIZATION ===
+    # Feature analysis ran with OMP=1 (good for LGBM-only workers).
+    # Diagnostic uses RF/GB/LR which need BLAS threads.
+    # 1. Kill existing loky pool (workers have OMP=1 baked in from import)
+    # 2. Remove BLAS limits from parent env
+    # 3. New workers will spawn fresh WITHOUT OMP=1
+    get_reusable_executor().shutdown(wait=True)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ.pop(var, None)
+    print(f"  [BLAS limits removed, worker pool reset for diagnostic]")
+
     combos = []
     model_names = list(ALL_MODELS.keys())
     for r in range(1, len(model_names) + 1):
@@ -1556,45 +1605,29 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
         for combo in combos:
             all_configs.append((combo, window))
 
+    print(f"  {len(all_configs)} configs, ALL parallel ({N_JOBS_PARALLEL} workers, step={DIAG_STEP})...")
+    print(f"  Running... (no output until complete)")
+
     n = len(df_features)
     features_np = df_features[feature_cols].values.astype(np.float64)
     labels_np = df_features['label'].values.astype(np.int32)
     closes_np = df_features['close'].values.astype(np.float64)
 
     t_diag = time.time()
-
-    # === PHASE 1: Coarse pass (2x step = half the iterations) ===
-    coarse_step = DIAG_STEP * 2
-    print(f"  Phase 1: Coarse pass — {len(all_configs)} configs, step={coarse_step}h ({N_JOBS_PARALLEL} workers)...")
-    with _suppress_stderr():
-        coarse_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
-            delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, coarse_step, DIAG_MODELS
-            )
-            for combo, window in all_configs
-        )
-    # Rank by combined_score (index 10), keep top 10
-    coarse_valid = [(cfg, res) for cfg, res in zip(all_configs, coarse_results) if res is not None]
-    coarse_valid.sort(key=lambda x: -x[1][10])  # sort by combined_score descending
-    top_n = 10
-    top_configs = [cfg for cfg, res in coarse_valid[:top_n]]
-    print(f"  Phase 1 done in {(time.time() - t_diag)/60:.1f} min — top {top_n} selected for Phase 2")
-    for cfg, res in coarse_valid[:top_n]:
-        combo_name, window, acc, n_total, cum_ret, win_rate, trades, _, _, _, score = res
-        print(f"    [coarse] w={window:4d}h | {combo_name:20s} | acc={acc*100:5.1f}% ret={cum_ret:+6.1f}% score={score:.3f}")
-
-    # === PHASE 2: Full precision on top candidates ===
-    t_phase2 = time.time()
-    print(f"\n  Phase 2: Full precision — {len(top_configs)} configs, step={DIAG_STEP}h ({N_JOBS_PARALLEL} workers)...")
     with _suppress_stderr():
         all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
             delayed(_eval_one_config)(
                 features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
             )
-            for combo, window in top_configs
+            for combo, window in all_configs
         )
-    print(f"  Phase 2 done in {(time.time() - t_phase2)/60:.1f} min")
-    print(f"  Diagnostic total: {(time.time() - t_diag)/60:.1f} minutes")
+    print(f"  Diagnostic completed in {(time.time() - t_diag)/60:.1f} minutes")
+
+    # Restore BLAS limits for any subsequent feature analysis (e.g. next horizon)
+    for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+        os.environ[var] = '1'
+    get_reusable_executor().shutdown(wait=True)  # kill diagnostic workers too
 
     best_score = 0
     best_config = None
@@ -2380,6 +2413,9 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     """
     t_mode_start = time.time()
 
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
+
     print("\n" + "=" * 60)
     print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
     print(f"  Starts from ALL features, finds optimal subset per asset")
@@ -2793,6 +2829,9 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
     iteration='23' -> run 2nd + 3rd pass
     """
     do_iter3 = '3' in iterations
+
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
 
     print("\n" + "=" * 60)
     print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")

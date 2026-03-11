@@ -1,25 +1,21 @@
 """
-Crypto Hourly Trading System — V5.3
+Crypto Hourly Trading System
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 125 features -> walk-forward ML -> BUY/SELL/HOLD signals.
-
-V5.3 changes vs V5:
-  - Feature analysis LGBM lightened: n_estimators=100, max_depth=4 (was 200/6)
-    Same as diagnostic models — feature analysis only needs relative ranking.
-  - LOKY_MAX_CPU_COUNT capped at N_JOBS_PARALLEL (not os.cpu_count())
-    Prevents joblib from spawning more workers than intended.
-  - OMP/MKL/OpenBLAS thread limits set to 1 per worker
-    Prevents numpy/scipy hidden multithreading inside parallel workers.
 
 Modes:
   B. Quick run (saved models)    D. Full pipeline (feature analysis -> diagnostic)
   E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage (skip all menus):
-  python crypto_trading_system_v5.3.py B BTC 4,8h
-  python crypto_trading_system_v5.3.py D ETH 8h 1y
-  python crypto_trading_system_v5.3.py D BTC,ETH 4,8h 2y
+  python crypto_trading_system.py B BTC 4,8h          # Mode B, BTC, both horizons
+  python crypto_trading_system.py D ETH 8h 1y         # Mode D, ETH, 8h, 1 year
+  python crypto_trading_system.py D BTC,ETH 4,8h 2y   # Mode D, multiple assets
+  python crypto_trading_system.py B                    # Mode B, all assets, default 4h
+
+Interactive shortcuts:
+  python crypto_trading_system.py    # Menu -> select 5 for quick BTC, 6 for ETH, 7 for XRP
 
 Outputs:
   charts/{ASSET}_backtest.png
@@ -36,13 +32,8 @@ import os
 # ============================================================
 os.environ['PYTHONWARNINGS'] = 'ignore'
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
-# Prevent hidden multithreading inside parallel workers (numpy, scipy, BLAS)
-# Each joblib worker should be single-threaded; parallelism is at the joblib level.
-os.environ['OMP_NUM_THREADS'] = '1'
-os.environ['MKL_NUM_THREADS'] = '1'
-os.environ['OPENBLAS_NUM_THREADS'] = '1'
-os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
-os.environ['NUMEXPR_NUM_THREADS'] = '1'
+# Force loky to inherit env vars on Windows
+os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count() or 4)
 import warnings
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
@@ -80,38 +71,6 @@ from hardware_config import (
     MACHINE, N_JOBS_PARALLEL, LGBM_DEVICE,
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,
 )
-# Cap loky worker pool to configured parallelism (not raw CPU count)
-os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
-
-
-def _kill_orphan_workers():
-    """Kill any orphaned python/loky workers from previous interrupted runs.
-    On Windows, Ctrl+C kills the parent but loky child processes survive,
-    silently eating CPU and slowing down subsequent runs."""
-    import subprocess
-    my_pid = os.getpid()
-    try:
-        result = subprocess.run(
-            ['wmic', 'process', 'where', "name='python.exe'", 'get', 'processid,commandline'],
-            capture_output=True, text=True, timeout=10
-        )
-        killed = 0
-        for line in result.stdout.splitlines():
-            if 'loky' in line.lower():
-                parts = line.strip().split()
-                if parts:
-                    try:
-                        pid = int(parts[-1])
-                        if pid != my_pid:
-                            os.kill(pid, 9)
-                            killed += 1
-                    except (ValueError, OSError):
-                        pass
-        if killed:
-            print(f"  [Cleanup] Killed {killed} orphaned worker(s) from previous runs")
-    except Exception:
-        pass
-
 
 # Matplotlib (non-interactive backend for server/headless)
 import matplotlib
@@ -731,7 +690,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
                                  columns=feature_cols, index=X_test.index)
 
         model = LGBMClassifier(
-            n_estimators=100, max_depth=4, learning_rate=0.05,
+            n_estimators=200, max_depth=6, learning_rate=0.05,
             class_weight='balanced', verbose=-1, random_state=42,
             device=lgbm_device
         )
@@ -783,7 +742,7 @@ def _test_lgbm_importance(df_features, feature_cols):
     X_s = pd.DataFrame(scaler.fit_transform(X), columns=feature_cols)
 
     model = LGBMClassifier(
-        n_estimators=100, max_depth=4, learning_rate=0.05,
+        n_estimators=200, max_depth=6, learning_rate=0.05,
         class_weight='balanced', verbose=-1, random_state=42,
         device=LGBM_DEVICE
     )
@@ -2389,9 +2348,6 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     """
     t_mode_start = time.time()
 
-    # Kill any orphaned loky workers from previous interrupted runs
-    _kill_orphan_workers()
-
     print("\n" + "=" * 60)
     print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
     print(f"  Starts from ALL features, finds optimal subset per asset")
@@ -2805,9 +2761,6 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
     iteration='23' -> run 2nd + 3rd pass
     """
     do_iter3 = '3' in iterations
-
-    # Kill any orphaned loky workers from previous interrupted runs
-    _kill_orphan_workers()
 
     print("\n" + "=" * 60)
     print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")
