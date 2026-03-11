@@ -128,6 +128,7 @@ for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
 TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
+REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
 DIAG_STEP = 72
 DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 300/500 removed: slow and rarely win
 
@@ -2980,7 +2981,7 @@ def run_strategy_comparison(assets_list, horizons=None):
             row4 = cfg4.iloc[0]
             feats4 = row4['optimal_features'].split(',') if pd.notna(row4.get('optimal_features', '')) else None
             signals_4h = generate_signals(asset, row4['models'].split('+'),
-                                          int(row4['best_window']), REPLAY_HOURS,
+                                          int(row4['best_window']), REPLAY_HOURS_F,
                                           feature_override=feats4, horizon=4)
             signals_4h = simulate_portfolio(signals_4h)
 
@@ -2988,7 +2989,7 @@ def run_strategy_comparison(assets_list, horizons=None):
             row8 = cfg8.iloc[0]
             feats8 = row8['optimal_features'].split(',') if pd.notna(row8.get('optimal_features', '')) else None
             signals_8h = generate_signals(asset, row8['models'].split('+'),
-                                          int(row8['best_window']), REPLAY_HOURS,
+                                          int(row8['best_window']), REPLAY_HOURS_F,
                                           feature_override=feats8, horizon=8)
             signals_8h = simulate_portfolio(signals_8h)
 

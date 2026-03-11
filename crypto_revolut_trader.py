@@ -313,39 +313,67 @@ def sync_positions(trading_cfg, notify=True):
 # ============================================================
 # STRATEGY: COMPUTE SIGNAL PER ASSET
 # ============================================================
-def compute_asset_signal(sig_4h, sig_8h, strategy, min_conf=MIN_CONFIDENCE):
+def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
     """
-    Apply per-asset strategy:
-    - 'both_agree': BUY when both agree, SELL when either says SELL
-    - 'either': BUY when either says BUY, SELL when either says SELL
-    """
-    if strategy == 'both_agree':
-        return compute_combined_signal(sig_4h, sig_8h, min_conf)
+    Apply per-asset strategy using signals from any available horizons.
+    sigs_by_horizon: dict {1: sig_1h, 2: sig_2h, 4: sig_4h, 8: sig_8h} (any subset)
+    Returns (action, confidence, reason).
 
-    if sig_4h is None and sig_8h is None:
+    Strategies: both_agree, either_agree, 4h_only, 8h_only, 1h_only, 2h_only,
+                8h_and_1h, 8h_and_2h, any_agree
+    """
+    if not sigs_by_horizon or all(v is None for v in sigs_by_horizon.values()):
         return 'HOLD', 50, 'no_signal'
 
-    s4 = sig_4h['signal'] if sig_4h else 'HOLD'
-    c4 = sig_4h['confidence'] if sig_4h else 50
-    s8 = sig_8h['signal'] if sig_8h else 'HOLD'
-    c8 = sig_8h['confidence'] if sig_8h else 50
+    def _s(h): return sigs_by_horizon.get(h, {}).get('signal', 'HOLD') if sigs_by_horizon.get(h) else 'HOLD'
+    def _c(h): return sigs_by_horizon.get(h, {}).get('confidence', 50) if sigs_by_horizon.get(h) else 50
 
-    # SELL if either says SELL (always)
-    if s4 == 'SELL' or s8 == 'SELL':
-        if s4 == 'SELL' and s8 == 'SELL':
-            return 'SELL', max(c4, c8), 'both_sell'
-        elif s4 == 'SELL':
-            return 'SELL', c4, '4h_sell'
-        else:
-            return 'SELL', c8, '8h_sell'
+    # --- single horizon ---
+    if strategy in ('4h_only', '8h_only', '1h_only', '2h_only'):
+        h = int(strategy.split('h')[0])
+        s, c = _s(h), _c(h)
+        if s == 'SELL': return 'SELL', c, f'{h}h_sell'
+        if s == 'BUY' and c >= min_conf: return 'BUY', c, f'{h}h_buy'
+        return 'HOLD', c, 'low_conf' if s == 'BUY' else 'no_signal'
 
-    # 'either' strategy
-    if s4 == 'BUY' and c4 >= min_conf:
-        return 'BUY', c4, '4h_buy'
-    if s8 == 'BUY' and c8 >= min_conf:
-        return 'BUY', c8, '8h_buy'
-    if s4 == 'BUY' or s8 == 'BUY':
-        return 'HOLD', max(c4, c8), 'low_conf'
+    # --- multi horizon: determine relevant horizons ---
+    if strategy == 'both_agree':
+        horizons = [4, 8]
+    elif strategy == 'either_agree':
+        horizons = [4, 8]
+    elif strategy == '8h_and_1h':
+        horizons = [8, 1]
+    elif strategy == '8h_and_2h':
+        horizons = [8, 2]
+    elif strategy == 'any_agree':
+        horizons = [h for h in [1, 2, 4, 8] if sigs_by_horizon.get(h)]
+    else:
+        horizons = [4, 8]  # default fallback
+
+    available = [h for h in horizons if sigs_by_horizon.get(h)]
+    if not available:
+        return 'HOLD', 50, 'no_signal'
+
+    # SELL: any relevant horizon says SELL
+    selling = [h for h in available if _s(h) == 'SELL']
+    if selling:
+        reason = '+'.join(f'{h}h' for h in selling) + '_sell'
+        return 'SELL', max(_c(h) for h in selling), reason
+
+    # BUY logic
+    if strategy in ('both_agree', '8h_and_1h', '8h_and_2h'):
+        # AND: all available relevant horizons must BUY with conf >= min_conf
+        if all(_s(h) == 'BUY' and _c(h) >= min_conf for h in available):
+            reason = '+'.join(f'{h}h' for h in available) + '_buy'
+            return 'BUY', min(_c(h) for h in available), reason
+    elif strategy in ('either_agree', 'any_agree'):
+        for h in available:
+            if _s(h) == 'BUY' and _c(h) >= min_conf:
+                return 'BUY', _c(h), f'{h}h_buy'
+
+    # Check if any are low-conf BUY
+    if any(_s(h) == 'BUY' for h in available):
+        return 'HOLD', max(_c(h) for h in available), 'low_conf'
 
     return 'HOLD', 50, 'no_signal'
 
@@ -360,12 +388,19 @@ def process_asset(asset, trading_cfg, dry_run=False):
     symbol = trading_cfg.get('symbol', f'{asset}-USD')
     max_usd = trading_cfg.get('max_position_usd', 0)
 
-    config_4h = load_best_config(asset, horizon=4)
-    config_8h = load_best_config(asset, horizon=8)
-    if not config_4h and not config_8h:
+    # Load configs for all available horizons
+    sigs_by_horizon = {}
+    any_config = False
+    for h in [1, 2, 4, 8]:
+        cfg = load_best_config(asset, horizon=h)
+        if cfg:
+            any_config = True
+            sigs_by_horizon[h] = cfg  # store config temporarily
+
+    if not any_config:
         return None
 
-    # Download data
+    # Download data once
     try:
         download_asset(asset, update_only=True)
     except Exception:
@@ -375,26 +410,31 @@ def process_asset(asset, trading_cfg, dry_run=False):
     if df_raw is None:
         return None
 
-    # Generate signals
-    sig_4h = sig_8h = None
-    if config_4h:
-        sig_4h = generate_live_signal(asset, config_4h, df_raw=df_raw)
-    if config_8h:
-        sig_8h = generate_live_signal(asset, config_8h, df_raw=df_raw)
+    # Generate live signals for each available horizon
+    for h in list(sigs_by_horizon.keys()):
+        cfg = sigs_by_horizon[h]
+        sig = generate_live_signal(asset, cfg, df_raw=df_raw)
+        sigs_by_horizon[h] = sig  # replace config with actual signal
 
-    # Apply asset-specific strategy (use per-asset min_confidence if set, else global)
+    # Apply asset-specific strategy
     min_conf = trading_cfg.get('min_confidence', MIN_CONFIDENCE)
-    action, confidence, reason = compute_asset_signal(sig_4h, sig_8h, strategy, min_conf=min_conf)
-    any_sig = sig_4h or sig_8h
+    action, confidence, reason = compute_asset_signal(sigs_by_horizon, strategy, min_conf=min_conf)
+    any_sig = next((s for s in sigs_by_horizon.values() if s), None)
     price = any_sig['close'] if any_sig else 0
 
     # Reload position (sync may have updated it)
     position = load_position(asset)
 
-    # Log
-    s4_str = f"{sig_4h['signal']}({sig_4h['confidence']:.0f}%)" if sig_4h else "N/A"
-    s8_str = f"{sig_8h['signal']}({sig_8h['confidence']:.0f}%)" if sig_8h else "N/A"
-    print(f"  {asset}: 4h={s4_str} | 8h={s8_str} → {action} ({confidence:.0f}%) [{reason}] | pos={position['state']}")
+    # Log - show all available horizons
+    sig_strs = []
+    for h in sorted(sigs_by_horizon.keys()):
+        s = sigs_by_horizon[h]
+        sig_strs.append(f"{h}h={s['signal']}({s['confidence']:.0f}%)" if s else f"{h}h=N/A")
+    print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.0f}%) [{reason}] | pos={position['state']}")
+
+    # Keep backward compat: expose sig_4h, sig_8h for Telegram message
+    sig_4h = sigs_by_horizon.get(4)
+    sig_8h = sigs_by_horizon.get(8)
 
     # Execute
     executed = False
@@ -957,30 +997,33 @@ def main():
     # Interactive menu
     if len(args) == 0:
         print("\n  Current config:")
+        print(f"  {'Asset':<6} {'Strategy':<14} {'Max USD':>10} {'Enabled':>8} {'Auto':>7} {'Position':>10}")
+        print(f"  {'-'*6} {'-'*14} {'-'*10} {'-'*8} {'-'*7} {'-'*10}")
         for asset, cfg in trading_cfg.items():
             pos = load_position(asset)
             has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
-            status = "✓" if has_model else "✗"
-            auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
-            print(f"    {status} {asset}: {cfg['strategy']} | max=${cfg['max_position_usd']:,.0f} | {auto} | {pos['state'].upper()}")
+            enabled_str = "Yes" if cfg.get('enabled', True) else "No"
+            auto_str    = "Yes" if pos.get('auto_trade') else "No"
+            pos_str     = pos['state'].upper()
+            model_mark  = "" if has_model else " ✗"
+            print(f"  {asset:<6} {cfg['strategy']:<14} ${cfg['max_position_usd']:>9,.0f} {enabled_str:>8} {auto_str:>7} {pos_str:>10}{model_mark}")
 
-        print(f"\n  1. Run once (all assets)")
-        print(f"  2. Loop (hourly)")
+        print(f"\n  1. Start loop (hourly)")
+        print(f"  2. Run once")
         print(f"  3. Dry run (once)")
-        print(f"  4. Configure assets (max positions, enable/disable)")
-        print(f"  5. Toggle auto-trade per asset")
-        print(f"  6. View status / history")
-        print(f"  7. Check balance")
-        print(f"  8. Setup Telegram")
-        ch = input("\n  Enter 1-8: ").strip()
+        print(f"  4. Configure assets")
+        print(f"  5. View trade history")
+        print(f"  6. Check balance")
+        print(f"  7. Setup Telegram")
+        ch = input("\n  Enter 1-7: ").strip()
 
-        if ch == '8': setup_telegram(); return
-        elif ch == '7':
+        if ch == '7': setup_telegram(); return
+        elif ch == '6':
             bal = get_balances()
             for c, b in sorted(bal.items()):
                 if b['total'] > 0: print(f"    {c}: {b['available']:.6f}")
             return
-        elif ch == '6':
+        elif ch == '5':
             for asset in trading_cfg:
                 pos = load_position(asset)
                 trades = pos.get('trades', [])[-5:]
@@ -988,43 +1031,47 @@ def main():
                     print(f"\n  {asset} (last 5):")
                     for t in trades:
                         if t['action'] == 'BUY':
-                            print(f"    🔵 BUY  ${t['price']:,.2f} | {t['time']}")
+                            print(f"    BUY  ${t['price']:,.2f} | {t['time']}")
                         else:
-                            print(f"    🔴 SELL ${t['price']:,.2f} | {t['time']} | {t.get('pnl_pct',0):+.1f}%")
-            return
-        elif ch == '5':
-            for asset in trading_cfg:
-                pos = load_position(asset)
-                current = pos.get('auto_trade', False)
-                resp = input(f"  {asset} auto-trade [{current}] → toggle? (y/n): ").strip().lower()
-                if resp == 'y':
-                    pos['auto_trade'] = not current
-                    save_position(asset, pos)
-                    print(f"    {asset}: {'ENABLED' if pos['auto_trade'] else 'DISABLED'}")
+                            print(f"    SELL ${t['price']:,.2f} | {t['time']} | {t.get('pnl_pct',0):+.1f}%")
             return
         elif ch == '4':
+            VALID_STRATEGIES = ('both_agree', 'either_agree', '4h_only', '8h_only', '1h_only', '2h_only', 'any_agree')
             for asset in trading_cfg:
                 cfg = trading_cfg[asset]
-                print(f"\n  {asset}:")
-                en = input(f"    Enabled [{cfg.get('enabled', True)}]? (y/n/skip): ").strip().lower()
+                pos = load_position(asset)
+                print(f"\n  --- {asset} ---")
+
+                en = input(f"    Enabled (y/n) [{('y' if cfg.get('enabled', True) else 'n')}]: ").strip().lower()
                 if en == 'y': cfg['enabled'] = True
                 elif en == 'n': cfg['enabled'] = False
 
-                strat = input(f"    Strategy [{cfg['strategy']}] (both_agree/either/skip): ").strip().lower()
-                if strat in ('both_agree', 'either'): cfg['strategy'] = strat
+                auto_cur = 'y' if pos.get('auto_trade') else 'n'
+                auto = input(f"    Auto-trade (y/n) [{auto_cur}]: ").strip().lower()
+                if auto == 'y':
+                    pos['auto_trade'] = True
+                    save_position(asset, pos)
+                elif auto == 'n':
+                    pos['auto_trade'] = False
+                    save_position(asset, pos)
 
-                max_inp = input(f"    Max USD [{cfg['max_position_usd']:.0f}] (number/skip): ").strip()
+                max_inp = input(f"    Max USD [{cfg['max_position_usd']:.0f}]: ").strip()
                 if max_inp:
                     try:
                         cfg['max_position_usd'] = float(max_inp)
                     except ValueError:
                         pass
 
+                strat = input(f"    Strategy (Enter for default '{cfg['strategy']}'): ").strip().lower()
+                if strat in VALID_STRATEGIES: cfg['strategy'] = strat
+                elif strat: print(f"    Unknown strategy '{strat}' — keeping [{cfg['strategy']}]")
+
             save_trading_config(trading_cfg)
-            print("\n  Config saved!")
+            print("\n  Config saved.")
             return
         elif ch == '3': dry_run = True
-        elif ch == '2': loop_mode = True
+        elif ch == '2': pass  # run once below
+        elif ch == '1': loop_mode = True
 
     # Ensure max positions are set
     needs_config = False

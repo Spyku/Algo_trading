@@ -1,0 +1,403 @@
+2026-02-24 08:15:42 | INFO    | ============================================================
+2026-02-24 08:15:42 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 08:15:42 | INFO    |   Press Ctrl+C to stop
+2026-02-24 08:15:42 | INFO    | ============================================================
+2026-02-24 08:15:45 | ERROR   | Failed to connect to IB: [WinError 1225] The remote computer refused the network connection
+2026-02-24 08:15:45 | ERROR   | Make sure TWS or IB Gateway is running with API enabled.
+2026-02-24 08:29:58 | INFO    | ============================================================
+2026-02-24 08:29:58 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 08:29:58 | INFO    |   Press Ctrl+C to stop
+2026-02-24 08:29:58 | INFO    | ============================================================
+2026-02-24 08:30:03 | INFO    | Connected to IB on 127.0.0.1:4002 (client=10, market data: delayed)
+2026-02-24 08:34:03 | ERROR   | Failed to connect to IB: Socket disconnect
+2026-02-24 08:34:03 | ERROR   | Make sure TWS or IB Gateway is running with API enabled.
+2026-02-24 08:34:44 | INFO    | ============================================================
+2026-02-24 08:34:44 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 08:34:44 | INFO    |   Press Ctrl+C to stop
+2026-02-24 08:34:44 | INFO    | ============================================================
+2026-02-24 08:34:48 | INFO    | Connected to IB on 127.0.0.1:4002 (client=10, market data: delayed)
+2026-02-24 08:49:10 | INFO    | ============================================================
+2026-02-24 08:49:10 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 08:49:10 | INFO    |   Press Ctrl+C to stop
+2026-02-24 08:49:10 | INFO    | ============================================================
+2026-02-24 08:49:15 | INFO    | Connected to IB on 127.0.0.1:4002 (client=10, market data: delayed)
+2026-02-24 09:22:03 | INFO    | ============================================================
+2026-02-24 09:22:03 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 09:22:03 | INFO    |   Press Ctrl+C to stop
+2026-02-24 09:22:03 | INFO    | ============================================================
+2026-02-24 09:22:07 | INFO    | Connected to IB on 127.0.0.1:4002 (client=10, market data: delayed)
+2026-02-24 09:53:11 | INFO    | Account: DUQ078882 | Net Liquidation: CHF 1,044,296.01
+2026-02-24 09:53:11 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 09:53:12 | INFO    | Last candle: 2026-02-23 16:00:00 — polling for next bar...
+2026-02-24 09:53:15 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-23 16:00:00)
+2026-02-24 09:53:15 | INFO    | New candle detected: 2026-02-24 08:00:00
+2026-02-24 09:53:15 | INFO    | ============================================================
+2026-02-24 09:53:15 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 09:53:15 | INFO    |   Time: 2026-02-24 09:53:15
+2026-02-24 09:53:15 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 09:53:15 | INFO    | ============================================================
+2026-02-24 09:53:15 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 09:53:15 | INFO    | DAX: 18h behind, fetching 2 D
+2026-02-24 09:53:15 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 09:53:15 | INFO    | DAX: Added 12 new rows from IB (total: 4546, last: 2026-02-24 08:00:00)
+2026-02-24 09:53:15 | ERROR   | data/setup_config.json not found! Run daily_setup.py first.
+2026-02-24 09:53:15 | ERROR   | Cannot load setup config. Run daily_setup.py first!
+2026-02-24 09:53:15 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 09:53:15 | INFO    | Last candle: 2026-02-24 08:00:00 — polling for next bar...
+2026-02-24 09:53:15 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 09:55:20 | INFO    | Waiting for new candle... (2min, last: 2026-02-24 08:00:00)
+2026-02-24 09:55:20 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 09:57:24 | INFO    | Waiting for new candle... (4min, last: 2026-02-24 08:00:00)
+2026-02-24 09:57:24 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 09:59:29 | INFO    | Waiting for new candle... (6min, last: 2026-02-24 08:00:00)
+2026-02-24 09:59:29 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:01:33 | INFO    | Waiting for new candle... (8min, last: 2026-02-24 08:00:00)
+2026-02-24 10:01:33 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:03:38 | INFO    | Waiting for new candle... (10min, last: 2026-02-24 08:00:00)
+2026-02-24 10:03:38 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:05:42 | INFO    | Waiting for new candle... (12min, last: 2026-02-24 08:00:00)
+2026-02-24 10:05:42 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:07:47 | INFO    | Waiting for new candle... (14min, last: 2026-02-24 08:00:00)
+2026-02-24 10:07:47 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:09:51 | INFO    | Waiting for new candle... (16min, last: 2026-02-24 08:00:00)
+2026-02-24 10:09:51 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:11:55 | INFO    | Waiting for new candle... (18min, last: 2026-02-24 08:00:00)
+2026-02-24 10:11:56 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:14:00 | INFO    | Waiting for new candle... (20min, last: 2026-02-24 08:00:00)
+2026-02-24 10:14:00 | INFO    | Latest IB bar: 2026-02-24 08:00:00 (our last: 2026-02-24 08:00:00)
+2026-02-24 10:15:02 | INFO    | New candle detected: 2026-02-24 09:00:00
+2026-02-24 10:15:02 | INFO    | ============================================================
+2026-02-24 10:15:02 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 10:15:02 | INFO    |   Time: 2026-02-24 10:15:02
+2026-02-24 10:15:02 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 10:15:02 | INFO    | ============================================================
+2026-02-24 10:15:02 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 10:15:02 | INFO    | DAX: 2h behind, fetching 2 D
+2026-02-24 10:15:02 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 10:15:03 | INFO    | DAX: Added 1 new rows from IB (total: 4547, last: 2026-02-24 09:00:00)
+2026-02-24 10:15:03 | ERROR   | data/setup_config.json not found! Run daily_setup.py first.
+2026-02-24 10:15:03 | ERROR   | Cannot load setup config. Run daily_setup.py first!
+2026-02-24 10:15:03 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 10:15:03 | INFO    | Last candle: 2026-02-24 09:00:00 — polling for next bar...
+2026-02-24 10:15:03 | INFO    | Latest IB bar: 2026-02-24 09:00:00 (our last: 2026-02-24 09:00:00)
+2026-02-24 10:17:07 | INFO    | Waiting for new candle... (2min, last: 2026-02-24 09:00:00)
+2026-02-24 10:17:08 | INFO    | Latest IB bar: 2026-02-24 09:00:00 (our last: 2026-02-24 09:00:00)
+2026-02-24 10:19:12 | INFO    | Waiting for new candle... (4min, last: 2026-02-24 09:00:00)
+2026-02-24 10:19:12 | INFO    | Latest IB bar: 2026-02-24 09:00:00 (our last: 2026-02-24 09:00:00)
+2026-02-24 10:19:58 | INFO    | 
+Stopping... (Ctrl+C)
+2026-02-24 10:19:58 | INFO    | Disconnected from IB
+2026-02-24 10:19:58 | INFO    | Trader stopped.
+2026-02-24 12:49:10 | INFO    | ============================================================
+2026-02-24 12:49:10 | INFO    |   STARTING CONTINUOUS DAX TRADING
+2026-02-24 12:49:10 | INFO    |   Press Ctrl+C to stop
+2026-02-24 12:49:10 | INFO    | ============================================================
+2026-02-24 12:49:10 | INFO    | Connected to IB on 127.0.0.1:4002 (client=10, market data: delayed)
+2026-02-24 12:49:11 | INFO    | Account: DUQ078882 | Net Liquidation: CHF 1,044,056.48
+2026-02-24 12:49:11 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 12:49:11 | INFO    | Last candle: 2026-02-24 09:00:00 — polling for next bar...
+2026-02-24 12:49:11 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 09:00:00)
+2026-02-24 12:49:11 | INFO    | New candle detected: 2026-02-24 11:00:00
+2026-02-24 12:49:11 | INFO    | ============================================================
+2026-02-24 12:49:11 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 12:49:11 | INFO    |   Time: 2026-02-24 12:49:11
+2026-02-24 12:49:11 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 12:49:11 | INFO    | ============================================================
+2026-02-24 12:49:11 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 12:49:11 | INFO    | DAX: 4h behind, fetching 2 D
+2026-02-24 12:49:11 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 12:49:11 | INFO    | DAX: Added 2 new rows from IB (total: 4539, last: 2026-02-24 11:00:00)
+2026-02-24 12:49:12 | INFO    | Config: 15 V2 features, 4h prediction
+2026-02-24 12:49:12 | INFO    | 
+--- Generating signals & executing ---
+2026-02-24 12:49:12 | INFO    | DAX: Loaded 4539 rows from data/indices/dax_hourly_data.csv
+2026-02-24 12:49:15 | INFO    | DAX @ 2026-02-19 16:00:00 | Signal: BUY (80.6%) | Price: 25,016.56 | Models: RF (1/1 buy) | Features: 15
+2026-02-24 12:49:15 | INFO    | 
+Processing DAX: signal=BUY, confidence=80.6%, price=25,016.56
+2026-02-24 12:49:15 | INFO    | DAX: Size=1 unit | Margin=1,251 EUR | Notional=25,017 EUR | Max loss at 2.0% stop=500 EUR
+2026-02-24 12:49:15 | INFO    | OPENING BUY 1 x IBDE40 @ ~25,016.56
+2026-02-24 12:49:16 | INFO    | Order placed: BUY 1 IBDE40 (status: Cancelled)
+2026-02-24 12:49:20 | INFO    | Stop order placed: SELL 1 IBDE40 @ 24531.75 (status: PreSubmitted)
+2026-02-24 12:49:20 | INFO    | TRADE LOGGED: BUY 1 DAX @ 25032.40 | Open BUY | stop=24531.75
+2026-02-24 12:49:20 | INFO    | OPENED: BUY 1 x DAX @ 25,032.40 | Stop: 24,531.75
+2026-02-24 12:49:20 | INFO    | 
+--- Cycle Summary ---
+2026-02-24 12:49:20 | INFO    |   DAX   : OPENED_BUY
+2026-02-24 12:49:20 | INFO    | 
+--- Open Positions ---
+2026-02-24 12:49:20 | INFO    |   DAX   : LONG 1x @ 25,032.40 (stop: 24,531.75)
+2026-02-24 12:49:20 | INFO    | 
+  Net Liquidation: 1,043,962.35
+2026-02-24 12:49:20 | INFO    | Dashboard data exported to output/dashboards/ib_live_data.json
+2026-02-24 12:49:20 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 12:49:20 | INFO    | Last candle: 2026-02-24 11:00:00 — polling for next bar...
+2026-02-24 12:49:20 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 12:51:25 | INFO    | Waiting for new candle... (2min, last: 2026-02-24 11:00:00)
+2026-02-24 12:51:25 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 12:53:29 | INFO    | Waiting for new candle... (4min, last: 2026-02-24 11:00:00)
+2026-02-24 12:53:29 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 12:55:33 | INFO    | Waiting for new candle... (6min, last: 2026-02-24 11:00:00)
+2026-02-24 12:55:33 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 12:57:38 | INFO    | Waiting for new candle... (8min, last: 2026-02-24 11:00:00)
+2026-02-24 12:57:38 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 12:59:42 | INFO    | Waiting for new candle... (10min, last: 2026-02-24 11:00:00)
+2026-02-24 12:59:42 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:01:46 | INFO    | Waiting for new candle... (12min, last: 2026-02-24 11:00:00)
+2026-02-24 13:01:46 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:03:51 | INFO    | Waiting for new candle... (14min, last: 2026-02-24 11:00:00)
+2026-02-24 13:03:51 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:05:55 | INFO    | Waiting for new candle... (16min, last: 2026-02-24 11:00:00)
+2026-02-24 13:05:55 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:07:59 | INFO    | Waiting for new candle... (18min, last: 2026-02-24 11:00:00)
+2026-02-24 13:08:00 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:10:04 | INFO    | Waiting for new candle... (20min, last: 2026-02-24 11:00:00)
+2026-02-24 13:10:04 | INFO    | Latest IB bar: 2026-02-24 11:00:00 (our last: 2026-02-24 11:00:00)
+2026-02-24 13:52:20 | INFO    | New candle detected: 2026-02-24 12:00:00
+2026-02-24 13:52:20 | INFO    | ============================================================
+2026-02-24 13:52:20 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 13:52:20 | INFO    |   Time: 2026-02-24 13:52:20
+2026-02-24 13:52:20 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 13:52:20 | INFO    | ============================================================
+2026-02-24 13:52:20 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 13:52:20 | INFO    | DAX: 3h behind, fetching 2 D
+2026-02-24 13:52:20 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 13:52:21 | INFO    | DAX: Added 1 new rows from IB (total: 4540, last: 2026-02-24 12:00:00)
+2026-02-24 13:52:21 | INFO    | Config: 15 V2 features, 4h prediction
+2026-02-24 13:52:21 | INFO    | 
+--- Generating signals & executing ---
+2026-02-24 13:52:21 | INFO    | DAX: Loaded 4540 rows from data/indices/dax_hourly_data.csv
+2026-02-24 13:52:21 | INFO    | DAX @ 2026-02-19 16:00:00 | Signal: BUY (80.6%) | Price: 25,016.56 | Models: RF (1/1 buy) | Features: 15
+2026-02-24 13:52:21 | INFO    | 
+Processing DAX: signal=BUY, confidence=80.6%, price=25,016.56
+2026-02-24 13:52:21 | INFO    | DAX: Already LONG. Holding.
+2026-02-24 13:52:21 | INFO    | 
+--- Cycle Summary ---
+2026-02-24 13:52:21 | INFO    |   DAX   : HOLD_LONG
+2026-02-24 13:52:21 | INFO    | 
+--- Open Positions ---
+2026-02-24 13:52:21 | INFO    |   DAX   : LONG 1x @ 25,032.40 (stop: 24,531.75)
+2026-02-24 13:52:21 | INFO    | 
+  Net Liquidation: 1,044,131.53
+2026-02-24 13:52:21 | INFO    | Dashboard data exported to output/dashboards/ib_live_data.json
+2026-02-24 13:52:21 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 13:52:21 | INFO    | Last candle: 2026-02-24 12:00:00 — polling for next bar...
+2026-02-24 13:52:21 | INFO    | Latest IB bar: 2026-02-24 12:00:00 (our last: 2026-02-24 12:00:00)
+2026-02-24 15:22:02 | INFO    | New candle detected: 2026-02-24 14:00:00
+2026-02-24 15:22:02 | INFO    | ============================================================
+2026-02-24 15:22:02 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 15:22:02 | INFO    |   Time: 2026-02-24 15:22:02
+2026-02-24 15:22:02 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 15:22:02 | INFO    | ============================================================
+2026-02-24 15:22:02 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 15:22:02 | INFO    | DAX: 3h behind, fetching 2 D
+2026-02-24 15:22:02 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 15:22:04 | INFO    | DAX: Added 2 new rows from IB (total: 4542, last: 2026-02-24 14:00:00)
+2026-02-24 15:22:04 | INFO    | Config: 15 V2 features, 4h prediction
+2026-02-24 15:22:04 | INFO    | 
+--- Generating signals & executing ---
+2026-02-24 15:22:04 | INFO    | DAX: Loaded 4542 rows from data/indices/dax_hourly_data.csv
+2026-02-24 15:22:04 | INFO    | DAX @ 2026-02-19 16:00:00 | Signal: BUY (80.6%) | Price: 25,016.56 | Models: RF (1/1 buy) | Features: 15
+2026-02-24 15:22:04 | INFO    | 
+Processing DAX: signal=BUY, confidence=80.6%, price=25,016.56
+2026-02-24 15:22:04 | INFO    | DAX: Already LONG. Holding.
+2026-02-24 15:22:04 | INFO    | 
+--- Cycle Summary ---
+2026-02-24 15:22:04 | INFO    |   DAX   : HOLD_LONG
+2026-02-24 15:22:04 | INFO    | 
+--- Open Positions ---
+2026-02-24 15:22:04 | INFO    |   DAX   : LONG 1x @ 25,032.40 (stop: 24,531.75)
+2026-02-24 15:22:04 | INFO    | 
+  Net Liquidation: 1,044,131.53
+2026-02-24 15:22:04 | INFO    | Dashboard data exported to output/dashboards/ib_live_data.json
+2026-02-24 15:22:04 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 15:22:04 | INFO    | Last candle: 2026-02-24 14:00:00 — polling for next bar...
+2026-02-24 15:22:05 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:24:09 | INFO    | Waiting for new candle... (2min, last: 2026-02-24 14:00:00)
+2026-02-24 15:24:09 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:26:13 | INFO    | Waiting for new candle... (4min, last: 2026-02-24 14:00:00)
+2026-02-24 15:26:13 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:28:17 | INFO    | Waiting for new candle... (6min, last: 2026-02-24 14:00:00)
+2026-02-24 15:28:18 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:30:22 | INFO    | Waiting for new candle... (8min, last: 2026-02-24 14:00:00)
+2026-02-24 15:30:22 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:32:27 | INFO    | Waiting for new candle... (10min, last: 2026-02-24 14:00:00)
+2026-02-24 15:32:27 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:34:32 | INFO    | Waiting for new candle... (12min, last: 2026-02-24 14:00:00)
+2026-02-24 15:34:32 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:36:36 | INFO    | Waiting for new candle... (14min, last: 2026-02-24 14:00:00)
+2026-02-24 15:36:37 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:38:41 | INFO    | Waiting for new candle... (16min, last: 2026-02-24 14:00:00)
+2026-02-24 15:38:41 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:40:46 | INFO    | Waiting for new candle... (18min, last: 2026-02-24 14:00:00)
+2026-02-24 15:40:47 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:42:52 | INFO    | Waiting for new candle... (20min, last: 2026-02-24 14:00:00)
+2026-02-24 15:42:52 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:45:01 | INFO    | Waiting for new candle... (22min, last: 2026-02-24 14:00:00)
+2026-02-24 15:45:01 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:47:06 | INFO    | Waiting for new candle... (24min, last: 2026-02-24 14:00:00)
+2026-02-24 15:47:06 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:49:11 | INFO    | Waiting for new candle... (26min, last: 2026-02-24 14:00:00)
+2026-02-24 15:49:11 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:51:15 | INFO    | Waiting for new candle... (28min, last: 2026-02-24 14:00:00)
+2026-02-24 15:51:16 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:53:20 | INFO    | Waiting for new candle... (30min, last: 2026-02-24 14:00:00)
+2026-02-24 15:53:20 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:55:25 | INFO    | Waiting for new candle... (32min, last: 2026-02-24 14:00:00)
+2026-02-24 15:55:25 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:57:30 | INFO    | Waiting for new candle... (34min, last: 2026-02-24 14:00:00)
+2026-02-24 15:57:30 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 15:59:35 | INFO    | Waiting for new candle... (36min, last: 2026-02-24 14:00:00)
+2026-02-24 15:59:35 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:01:39 | INFO    | Waiting for new candle... (38min, last: 2026-02-24 14:00:00)
+2026-02-24 16:01:40 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:03:44 | INFO    | Waiting for new candle... (40min, last: 2026-02-24 14:00:00)
+2026-02-24 16:03:45 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:05:49 | INFO    | Waiting for new candle... (42min, last: 2026-02-24 14:00:00)
+2026-02-24 16:05:49 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:07:54 | INFO    | Waiting for new candle... (44min, last: 2026-02-24 14:00:00)
+2026-02-24 16:07:54 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:09:59 | INFO    | Waiting for new candle... (46min, last: 2026-02-24 14:00:00)
+2026-02-24 16:09:59 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:12:04 | INFO    | Waiting for new candle... (48min, last: 2026-02-24 14:00:00)
+2026-02-24 16:12:04 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:14:09 | INFO    | Waiting for new candle... (50min, last: 2026-02-24 14:00:00)
+2026-02-24 16:14:09 | INFO    | Latest IB bar: 2026-02-24 14:00:00 (our last: 2026-02-24 14:00:00)
+2026-02-24 16:15:01 | INFO    | New candle detected: 2026-02-24 15:00:00
+2026-02-24 16:15:01 | INFO    | ============================================================
+2026-02-24 16:15:01 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 16:15:01 | INFO    |   Time: 2026-02-24 16:15:01
+2026-02-24 16:15:01 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 16:15:01 | INFO    | ============================================================
+2026-02-24 16:15:01 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 16:15:01 | INFO    | DAX: 2h behind, fetching 2 D
+2026-02-24 16:15:01 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 16:15:01 | INFO    | DAX: Added 1 new rows from IB (total: 4543, last: 2026-02-24 15:00:00)
+2026-02-24 16:15:01 | INFO    | Config: 15 V2 features, 4h prediction
+2026-02-24 16:15:01 | INFO    | 
+--- Generating signals & executing ---
+2026-02-24 16:15:01 | INFO    | DAX: Loaded 4543 rows from data/indices/dax_hourly_data.csv
+2026-02-24 16:15:02 | INFO    | DAX @ 2026-02-19 16:00:00 | Signal: BUY (80.6%) | Price: 25,016.56 | Models: RF (1/1 buy) | Features: 15
+2026-02-24 16:15:02 | INFO    | 
+Processing DAX: signal=BUY, confidence=80.6%, price=25,016.56
+2026-02-24 16:15:02 | INFO    | DAX: Already LONG. Holding.
+2026-02-24 16:15:02 | INFO    | 
+--- Cycle Summary ---
+2026-02-24 16:15:02 | INFO    |   DAX   : HOLD_LONG
+2026-02-24 16:15:02 | INFO    | 
+--- Open Positions ---
+2026-02-24 16:15:02 | INFO    |   DAX   : LONG 1x @ 25,032.40 (stop: 24,531.75)
+2026-02-24 16:15:02 | INFO    | 
+  Net Liquidation: 1,045,982.86
+2026-02-24 16:15:02 | INFO    | Dashboard data exported to output/dashboards/ib_live_data.json
+2026-02-24 16:15:02 | INFO    | 
+--- Waiting for next hourly candle from IB ---
+2026-02-24 16:15:02 | INFO    | Last candle: 2026-02-24 15:00:00 — polling for next bar...
+2026-02-24 16:15:02 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:17:06 | INFO    | Waiting for new candle... (2min, last: 2026-02-24 15:00:00)
+2026-02-24 16:17:07 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:19:13 | INFO    | Waiting for new candle... (4min, last: 2026-02-24 15:00:00)
+2026-02-24 16:19:13 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:21:20 | INFO    | Waiting for new candle... (6min, last: 2026-02-24 15:00:00)
+2026-02-24 16:21:20 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:23:24 | INFO    | Waiting for new candle... (8min, last: 2026-02-24 15:00:00)
+2026-02-24 16:23:24 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:25:30 | INFO    | Waiting for new candle... (10min, last: 2026-02-24 15:00:00)
+2026-02-24 16:25:30 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:27:35 | INFO    | Waiting for new candle... (12min, last: 2026-02-24 15:00:00)
+2026-02-24 16:27:35 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:29:40 | INFO    | Waiting for new candle... (14min, last: 2026-02-24 15:00:00)
+2026-02-24 16:29:40 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:31:47 | INFO    | Waiting for new candle... (16min, last: 2026-02-24 15:00:00)
+2026-02-24 16:31:47 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:33:54 | INFO    | Waiting for new candle... (18min, last: 2026-02-24 15:00:00)
+2026-02-24 16:33:54 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:35:59 | INFO    | Waiting for new candle... (20min, last: 2026-02-24 15:00:00)
+2026-02-24 16:36:00 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:38:04 | INFO    | Waiting for new candle... (22min, last: 2026-02-24 15:00:00)
+2026-02-24 16:38:04 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:40:09 | INFO    | Waiting for new candle... (24min, last: 2026-02-24 15:00:00)
+2026-02-24 16:40:09 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:42:14 | INFO    | Waiting for new candle... (26min, last: 2026-02-24 15:00:00)
+2026-02-24 16:42:14 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:44:19 | INFO    | Waiting for new candle... (28min, last: 2026-02-24 15:00:00)
+2026-02-24 16:44:19 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:46:24 | INFO    | Waiting for new candle... (30min, last: 2026-02-24 15:00:00)
+2026-02-24 16:46:24 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:48:28 | INFO    | Waiting for new candle... (32min, last: 2026-02-24 15:00:00)
+2026-02-24 16:48:28 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:50:33 | INFO    | Waiting for new candle... (34min, last: 2026-02-24 15:00:00)
+2026-02-24 16:50:33 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:52:38 | INFO    | Waiting for new candle... (36min, last: 2026-02-24 15:00:00)
+2026-02-24 16:52:39 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:54:43 | INFO    | Waiting for new candle... (38min, last: 2026-02-24 15:00:00)
+2026-02-24 16:54:43 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:56:47 | INFO    | Waiting for new candle... (40min, last: 2026-02-24 15:00:00)
+2026-02-24 16:56:48 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 16:58:52 | INFO    | Waiting for new candle... (42min, last: 2026-02-24 15:00:00)
+2026-02-24 16:58:53 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:00:57 | INFO    | Waiting for new candle... (44min, last: 2026-02-24 15:00:00)
+2026-02-24 17:00:57 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:03:02 | INFO    | Waiting for new candle... (46min, last: 2026-02-24 15:00:00)
+2026-02-24 17:03:02 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:05:07 | INFO    | Waiting for new candle... (48min, last: 2026-02-24 15:00:00)
+2026-02-24 17:05:07 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:07:12 | INFO    | Waiting for new candle... (50min, last: 2026-02-24 15:00:00)
+2026-02-24 17:07:12 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:09:17 | INFO    | Waiting for new candle... (52min, last: 2026-02-24 15:00:00)
+2026-02-24 17:09:17 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:11:22 | INFO    | Waiting for new candle... (54min, last: 2026-02-24 15:00:00)
+2026-02-24 17:11:22 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:13:26 | INFO    | Waiting for new candle... (56min, last: 2026-02-24 15:00:00)
+2026-02-24 17:13:27 | INFO    | Latest IB bar: 2026-02-24 15:00:00 (our last: 2026-02-24 15:00:00)
+2026-02-24 17:15:00 | INFO    | New candle detected: 2026-02-24 16:00:00
+2026-02-24 17:15:00 | INFO    | ============================================================
+2026-02-24 17:15:00 | INFO    |   DAX HOURLY TRADING CYCLE
+2026-02-24 17:15:00 | INFO    |   Time: 2026-02-24 17:15:00
+2026-02-24 17:15:00 | INFO    |   Budget: 10,000 EUR | Margin: 5.0%
+2026-02-24 17:15:00 | INFO    | ============================================================
+2026-02-24 17:15:00 | INFO    | 
+--- Updating DAX data from IB ---
+2026-02-24 17:15:00 | INFO    | DAX: 2h behind, fetching 2 D
+2026-02-24 17:15:00 | INFO    | DAX: Requesting historical data from IB (2 D)...
+2026-02-24 17:15:00 | INFO    | DAX: Added 1 new rows from IB (total: 4544, last: 2026-02-24 16:00:00)
+2026-02-24 17:15:00 | INFO    | Config: 15 V2 features, 4h prediction
+2026-02-24 17:15:00 | INFO    | 
+--- Generating signals & executing ---
+2026-02-24 17:15:00 | INFO    | DAX: Loaded 4544 rows from data/indices/dax_hourly_data.csv
+2026-02-24 17:15:01 | INFO    | DAX @ 2026-02-19 16:00:00 | Signal: BUY (80.6%) | Price: 25,016.56 | Models: RF (1/1 buy) | Features: 15
+2026-02-24 17:15:01 | INFO    | 
+Processing DAX: signal=BUY, confidence=80.6%, price=25,016.56
+2026-02-24 17:15:01 | INFO    | DAX: Already LONG. Holding.
+2026-02-24 17:15:01 | INFO    | 
+--- Cycle Summary ---
+2026-02-24 17:15:01 | INFO    |   DAX   : HOLD_LONG
+2026-02-24 17:15:01 | INFO    | 
+--- Open Positions ---
+2026-02-24 17:15:01 | INFO    |   DAX   : LONG 1x @ 25,032.40 (stop: 24,531.75)
+2026-02-24 17:15:01 | INFO    | 
+  Net Liquidation: 1,046,914.21
+2026-02-24 17:15:01 | INFO    | Dashboard data exported to output/dashboards/ib_live_data.json
+2026-02-24 17:15:01 | INFO    | Outside XETRA hours (post-market (UTC 16:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 17:25:01 | INFO    | Outside XETRA hours (post-market (UTC 16:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 17:35:01 | INFO    | Outside XETRA hours (post-market (UTC 16:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 17:45:01 | INFO    | Outside XETRA hours (post-market (UTC 16:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 17:55:01 | INFO    | Outside XETRA hours (post-market (UTC 16:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:05:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:15:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:25:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:35:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:45:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
+2026-02-24 18:55:01 | INFO    | Outside XETRA hours (post-market (UTC 17:00, closed 16:00)). Sleeping 10 min...
