@@ -306,37 +306,34 @@ Market data fetched directly from IB (`reqHistoricalData`), no yfinance during t
 | `download_macro_data.py` | 264 | Download macro/sentiment/cross-asset data (VIX, F&G, etc.) |
 | `detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 
-### Analysis & Testing Scripts
+### Archived Scripts (in `archive/`)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `crypto_correlation_analysis.py` | 449 | BTC vs ETH signal correlation & diversification analysis |
-| `crypto_strategy_test.py` | 438 | Backtest signal strategies & hold durations |
-| `crypto_horizon_test.py` | 233 | Test alternative horizons (2h, 3h, 6h, 8h, 12h) |
-| `crypto_trading_threshold_system.py` | 150+ | Backtest confidence thresholds (0–90%) |
-| `mock_strategy_optimizer.py` | 397 | Fast strategy + confidence combo optimizer |
-| `mock_crypto_trading_system.py` | ~2,000 | Phase 1 validation on synthetic data (holdout, CI, permutation, Calmar/Sharpe) |
-| `mock_crypto_trading_system_validation.py` | ~1,000 | Phase 2 validation (edge cases, convergence, integration) |
-| `mode_d_improvements.py` | 583 | Documentation of 10 alpha-scoring patches |
-| `apply_mode_d_improvements.py` | 573 | Auto-patcher to apply patches to production |
+| File | Purpose |
+|------|---------|
+| `crypto_correlation_analysis.py` | BTC vs ETH signal correlation & diversification analysis |
+| `crypto_strategy_test.py` | Backtest signal strategies & hold durations |
+| `crypto_horizon_test.py` | Test alternative horizons (2h, 3h, 6h, 8h, 12h) |
+| `crypto_trading_threshold_system.py` | Backtest confidence thresholds (0–90%) |
+| `mock_strategy_optimizer.py` | Fast strategy + confidence combo optimizer |
+| `mock_crypto_trading_system.py` | Phase 1 validation on synthetic data |
+| `mock_crypto_trading_system_validation.py` | Phase 2 validation (edge cases, convergence, integration) |
+| `mode_d_improvements.py` | Documentation of 10 alpha-scoring patches |
+| `apply_mode_d_improvements.py` | Auto-patcher to apply patches to production |
+| `setup_algo_trading.ps1` | Fresh install PowerShell script (Python, venv, GPU, deps) |
+| `migrate_folders.py` | One-time folder restructure (data/, charts/, models/, config/) |
 
 ### Version Archives
 
 | File | Version | Status |
 |------|---------|--------|
 | `crypto_trading_system.py` | V5 | Production |
-| `crypto_trading_system_v5.py` | V5 | Versioned backup |
-| `crypto_trading_system_v5.1.py` | V5.1 | Experimental — alpha scoring patches |
-| `crypto_trading_system_v5.2.py` | V5.2 | Experimental — extended enhancements |
-| `crypto_trading_system_v4.py` | V4 | Reference — Calmar/Sharpe scoring |
-| `crypto_trading_system_v3_old.py` | V3 | Archive — original production |
-
-### Setup & Migration
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `setup_algo_trading.ps1` | 228 | Fresh install PowerShell script (Python, venv, GPU, deps) |
-| `migrate_folders.py` | 112 | One-time folder restructure (data/, charts/, models/, config/) |
+| `crypto_trading_system_v5.4.py` | V5.4 | Experimental |
+| `crypto_trading_system_v5.3.py` | V5.3 | Experimental — thread/worker fixes |
+| `crypto_trading_system_v5.2.py` | V5.2 | Experimental — all 8 horizons + Mode G |
+| `archive/crypto_trading_system_v5.1.py` | V5.1 | Archived — alpha scoring patches |
+| `archive/crypto_trading_system_v5.py` | V5 | Archived — versioned backup |
+| `archive/crypto_trading_system_v4.py` | V4 | Archived — Calmar/Sharpe scoring |
+| `archive/crypto_trading_system_v3_old.py` | V3 | Archived — original production |
 
 ---
 
@@ -347,6 +344,9 @@ engine/
 │
 ├── ===== PYTHON FILES (root) =====
 ├── crypto_trading_system.py           # V5 PRODUCTION — Modes B/D/E/F
+├── crypto_trading_system_v5.2.py      # V5.2 experimental — all 8 horizons + Mode G
+├── crypto_trading_system_v5.3.py      # V5.3 experimental — thread/worker fixes
+├── crypto_trading_system_v5.4.py      # V5.4 experimental
 ├── crypto_revolut_trader.py           # Multi-asset Revolut X auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Machine-specific config
@@ -361,24 +361,25 @@ engine/
 ├── ib_test_connection.py              # IB Gateway diagnostic
 ├── download_macro_data.py             # Macro data downloader
 ├── detect_hardware.py                 # Hardware detection → config generation
-├── crypto_correlation_analysis.py     # BTC/ETH correlation analysis
-├── crypto_strategy_test.py            # Strategy backtester
-├── crypto_horizon_test.py             # Alternative horizon tester
-├── crypto_trading_threshold_system.py # Confidence threshold backtester
-├── mock_strategy_optimizer.py         # Fast strategy optimizer
-├── mock_crypto_trading_system.py      # Phase 1 mock validation
-├── mock_crypto_trading_system_validation.py  # Phase 2 mock validation
-├── mode_d_improvements.py             # Alpha-scoring patch documentation
-├── apply_mode_d_improvements.py       # Auto-patcher
-├── crypto_trading_system_v5.py        # V5 backup
-├── crypto_trading_system_v5.1.py      # V5.1 experimental
-├── crypto_trading_system_v5.2.py      # V5.2 experimental
-├── crypto_trading_system_v4.py        # V4 reference
-├── crypto_trading_system_v3_old.py    # V3 archive
-├── crypto_auto_trader.py              # Legacy BTC-only auto-trader (493 lines)
-├── migrate_folders.py                 # One-time folder migration
-├── setup_algo_trading.ps1             # Fresh install script
 ├── requirements.txt                   # Python dependencies
+│
+├── archive/                           # Archived / superseded files
+│   ├── crypto_trading_system_v5.py    # V5 backup
+│   ├── crypto_trading_system_v5.1.py  # V5.1 alpha scoring patches
+│   ├── crypto_trading_system_v4.py    # V4 reference (Calmar/Sharpe)
+│   ├── crypto_trading_system_v3_old.py# V3 original production
+│   ├── crypto_auto_trader.py          # Legacy BTC-only auto-trader
+│   ├── crypto_correlation_analysis.py # BTC/ETH correlation analysis
+│   ├── crypto_strategy_test.py        # Strategy backtester
+│   ├── crypto_horizon_test.py         # Alternative horizon tester
+│   ├── crypto_trading_threshold_system.py
+│   ├── mock_strategy_optimizer.py
+│   ├── mock_crypto_trading_system.py
+│   ├── mock_crypto_trading_system_validation.py
+│   ├── mode_d_improvements.py
+│   ├── apply_mode_d_improvements.py
+│   ├── migrate_folders.py
+│   └── setup_algo_trading.ps1
 │
 ├── data/
 │   ├── btc_hourly_data.csv            # BTC OHLCV (Binance via ccxt)
@@ -503,10 +504,12 @@ ib_insync            # Interactive Brokers API (optional, for IB trader)
 |-------|---------|--------|--------|----------|--------|-------|----------|--------|
 | BTC | 4h | RF+GB+LR | 100h | 80.2% | +125.0% | 1.804 | 125 (all) | V5 2y |
 | BTC | 8h | RF+GB | 150h | 84.7% | +319.4% | 3.550 | 15 (optimal) | V5 2y |
-| ETH | 4h | RF+LR | 100h | 78.3% | — | — | custom | V4 1y |
-| ETH | 8h | RF+LR | 100h | 75.0% | — | — | custom | V4 1y |
-| XRP | 4h | GB | 100h | 69.2% | — | — | custom | V4 1y |
-| XRP | 8h | RF+LR | 100h | 80.8% | — | — | custom | V4 1y |
+| ETH | 4h | RF+LGBM | 100h | 68.6% | +505% | 4.154 | custom | V5 2y |
+| ETH | 8h | GB | 48h | 79.3% | +616% | 5.681 | custom | V5 2y ⚠️ WARNING |
+| XRP | 4h | GB | 100h | 69.2% | — | — | custom | V4 1y — needs V5 run |
+| XRP | 8h | RF+LR | 100h | 80.8% | — | — | custom | V4 1y — needs V5 run |
+
+**⚠️ ETH 8h WARNING:** GB model outputs 100% confidence on every signal — overfit on 48h window. Do not increase ETH `max_position_usd` until `CalibratedClassifierCV` fix is applied.
 
 **BTC 8h Optimal Features (15):**
 `logret_120h, xa_dax_relstr5d, price_to_sma100h, logret_240h, xa_sp500_relstr5d, vol_ratio_12_48, hour_cos, volatility_48h, atr_pct_14h, xa_nasdaq_relstr5d, sma20_to_sma50h, hour_sin, logret_72h, spread_24h_4h, m_nasdaq_chg1d`
@@ -523,12 +526,13 @@ ib_insync            # Interactive Brokers API (optional, for IB trader)
 {
   "BTC": {
     "strategy": "either_agree",
-    "min_confidence": 75,
+    "min_confidence": 80,
     "symbol": "BTC-USD",
     "max_position_usd": 10000
   },
   "ETH": {
-    "strategy": "either",
+    "strategy": "8h_only",
+    "min_confidence": 60,
     "symbol": "ETH-USD",
     "max_position_usd": 1000
   }
@@ -570,10 +574,12 @@ MACRO_DIR = 'data/macro_data'
 | Version | File | Scoring | Key Changes |
 |---------|------|---------|-------------|
 | **V5** | `crypto_trading_system.py` | `acc × (1 + ret/100)` | Production. Mode F, confidence sweep, per-step timers, lightweight diagnostics |
-| **V5.2** | `crypto_trading_system_v5.2.py` | Experimental | Extended enhancements |
-| **V5.1** | `crypto_trading_system_v5.1.py` | Experimental | Alpha scoring patches integrated |
-| **V4** | `crypto_trading_system_v4.py` | `0.45×Calmar + 0.35×Sharpe + 0.20×Acc` | Bootstrap CI, Calmar/Sharpe, --permtest. Superseded — biased toward low-trade configs |
-| **V3** | `crypto_trading_system_v3_old.py` | Heuristic | Original production. Archived |
+| **V5.4** | `crypto_trading_system_v5.4.py` | Experimental | Latest experimental |
+| **V5.3** | `crypto_trading_system_v5.3.py` | Experimental | Feature analysis LGBM lightened, LOKY_MAX_CPU_COUNT capped, OMP/MKL/OpenBLAS thread limits |
+| **V5.2** | `crypto_trading_system_v5.2.py` | Experimental | All 8 horizons (1–8h) + Mode G (168h horizon pair test) |
+| **V5.1** | `archive/crypto_trading_system_v5.1.py` | Archived | Alpha scoring patches integrated |
+| **V4** | `archive/crypto_trading_system_v4.py` | `0.45×Calmar + 0.35×Sharpe + 0.20×Acc` | Bootstrap CI, Calmar/Sharpe, --permtest. Superseded — biased toward low-trade configs |
+| **V3** | `archive/crypto_trading_system_v3_old.py` | Heuristic | Original production. Archived |
 
 ### What V5 Adds Over V4
 
@@ -609,6 +615,7 @@ MACRO_DIR = 'data/macro_data'
 | **2026-03-09** | `5dfba30` | V4: live progress tracking for diagnostic/permutation/ablation |
 | **2026-03-10** | `23bc9f2` | **V5 Production** — acc×(1+ret/100) scoring, Mode F, BTC 2y: 80.2%/84.7% |
 | **2026-03-10** | `289c5d4` | Update trading system |
+| **2026-03-11** | `7b681c2` | **V5.3** — thread/worker fixes; V5.4 added; archive/ cleanup; ETH V5 2y results |
 
 ### Session History (Detailed)
 
@@ -660,17 +667,22 @@ ib_auto_trader.py  (DAX CFD)
 
 ## Pending Actions
 
-- [ ] Run V5 Mode D ETH 4,8h 2y on laptop
-- [ ] Run V5 Mode D XRP 4,8h 2y on laptop
-- [ ] Run Mode F for ETH and XRP after V5 runs
-- [ ] Update best models table once ETH/XRP 2y runs complete
+- [ ] **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 2y` on laptop, then Mode F
+- [ ] **ETH GB calibration** — add `CalibratedClassifierCV` to Mode D for GB model (ETH 8h overfit fix)
+- [ ] **V5.2 Mode D BTC** — all-8-horizons run hung on 1h diagnostic (worker deadlock). Needs root cause investigation before retry
+- [ ] **Mode G** — can only run after all 8 horizons complete for V5.2
+- [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
+- [ ] BTC V5.3 3h 3y run in progress
 - [x] V5 scoring (acc×(1+return/100))
 - [x] Mode F (strategy comparison + confidence sweep)
 - [x] Per-step timers in Mode D
 - [x] hardware_config diagnostic models lightened
 - [x] DIAG_WINDOWS reduced to [48,72,100,150,200]
 - [x] BTC V5 2y run — 4h: 80.2% +125%, 8h: 84.7% +319%
+- [x] ETH V5 2y run — 4h: RF+LGBM 68.6% +505%, 8h: GB 79.3% +616% (WARNING: overfit)
 - [x] V5 promoted to production, V3 archived
+- [x] Old/archived files moved to archive/
+- [x] V5.3 and V5.4 experimental versions added
 - [x] IB auto-trader for DAX + S&P 500 CFDs
 - [x] Broly 1.2 enhancement layer
 - [x] Revolut X multi-asset auto-trader with Telegram control
@@ -679,4 +691,4 @@ ib_auto_trader.py  (DAX CFD)
 
 ---
 
-*Last updated: March 11, 2026 — V5 production with IB integration documented. ~12,000+ lines of Python across 30 files.*
+*Last updated: March 11, 2026 — V5.3/V5.4 added, archive/ reorganised, ETH V5 2y results documented.*
