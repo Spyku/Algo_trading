@@ -2,11 +2,8 @@
 
 Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index CFDs** (DAX, S&P 500). Two independent pipelines:
 
-1. **Crypto Pipeline** — Hourly BUY/SELL/HOLD signals via dual-horizon (4h + 8h) ensemble ML with walk-forward validation. Executes on **Revolut X** via Ed25519-signed API.
-2. **Index CFD Pipeline** — Hourly signals via Broly 1.2 ML model. Executes on **Interactive Brokers** via ib_insync API.
-
-**Owner:** Alex, Lausanne, Switzerland (CET/CEST)
-**GitHub:** https://github.com/Spyku/Algo_trading
+1. **Crypto Pipeline** — Hourly BUY/SELL/HOLD signals via dual-horizon (4h + 8h) ensemble ML with walk-forward validation. Executes via exchange API.
+2. **Index CFD Pipeline** — Hourly signals via Broly 1.2 ML model. Executes via broker API.
 
 ---
 
@@ -20,8 +17,8 @@ Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index C
   - [Features](#features-125-total)
   - [Scoring Formula](#v5-scoring-formula)
   - [Strategies](#strategies)
-  - [Auto-Trader (Revolut X)](#revolut-x-auto-trader)
-- [Index CFD System (IB)](#index-cfd-system-interactive-brokers)
+  - [Auto-Trader](#crypto-auto-trader)
+- [Index CFD System](#index-cfd-system)
 - [All Files Reference](#all-files-reference)
 - [Folder Structure](#folder-structure)
 - [Hardware Setup](#hardware-setup)
@@ -36,8 +33,7 @@ Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index C
 
 ```bash
 # Activate venv (required before any python command)
-# Desktop: C:\algo_trading\venv\Scripts\activate.bat
-# Laptop:  C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
+# Run: venv\Scripts\activate.bat
 
 # === CRYPTO SIGNALS ===
 python crypto_trading_system.py 5              # Quick BTC (both horizons)
@@ -51,11 +47,11 @@ python crypto_trading_system.py F BTC          # Mode F — strategy comparison
 python crypto_revolut_trader.py --loop         # Live trading loop
 python crypto_revolut_trader.py --dry-run --loop  # Signals only, no trades
 python crypto_revolut_trader.py --status       # Show positions
-python crypto_revolut_trader.py --balance      # Revolut X balance
+python crypto_revolut_trader.py --balance      # Exchange balance
 
-# === INDEX CFD TRADER (IB) ===
+# === INDEX CFD TRADER ===
 python ib_auto_trader.py --loop                # DAX continuous trading
-python ib_auto_trader.py --status              # Show IB positions
+python ib_auto_trader.py --status              # Show positions
 python ib_auto_trader_test.py --loop           # S&P 500 overnight trading
 
 # === SETUP ===
@@ -83,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 │    └── Telegram notifications (HTML formatted)                      │
 │                                                                     │
 │  crypto_revolut_trader.py  (1,109 lines — multi-asset auto-trader) │
-│    ├── Ed25519-signed Revolut X API (buy/sell/balance)              │
+│    ├── Signed exchange API (buy/sell/balance)                       │
 │    ├── Per-asset strategies from trading_config.json                │
 │    ├── Position sync (detects manual trades on exchange)            │
 │    ├── Telegram commands (/stop /status /pause /resume /balance)    │
@@ -94,7 +90,7 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 │                                                                     │
 │  ib_auto_trader.py  (1,444 lines — DAX CFD trader)                 │
 │    ├── Broly 1.2 ML model with V2 features                         │
-│    ├── Interactive Brokers via ib_insync                             │
+│    ├── Broker API via ib_insync                                     │
 │    ├── Risk manager (daily loss limit, cooldown, stop-loss)         │
 │    └── Live HTML dashboard export                                   │
 │                                                                     │
@@ -108,7 +104,7 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key design principle:** The crypto and IB systems are **completely independent** — different models, different assets, different brokers, different configs. The only shared concept is the feature engineering approach.
+**Key design principle:** The crypto and index CFD systems are **completely independent** — different models, different assets, different brokers, different configs. The only shared concept is the feature engineering approach.
 
 ---
 
@@ -166,7 +162,7 @@ Train: [i-window : i]  →  Predict: row i  →  Step: i += 72h
 Min start = window + 50 (warm-up period)
 ```
 
-**Portfolio simulation:** Entry at `price × (1 + 0.0009)`, exit at `price × (1 - 0.0009)`. Tracks drawdown, win rate, trades, cumulative return.
+**Portfolio simulation:** Entry at `price × (1 + fee)`, exit at `price × (1 - fee)`. Tracks drawdown, win rate, trades, cumulative return.
 
 ### Features (125 total)
 
@@ -209,9 +205,9 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 | both_agree | +16.4% | 100% | 13 | 0.959 |
 | 4h_only | +15.1% | 88% | 16 | 0.948 |
 
-### Revolut X Auto-Trader
+### Crypto Auto-Trader
 
-**Authentication:** Ed25519 asymmetric signature (timestamp + method + path + body → base64 signature)
+**Authentication:** Asymmetric signature (timestamp + method + path + body → base64 signature)
 
 **Hourly loop:**
 1. **Startup:** Sync positions with exchange → Telegram notification → immediate scan
@@ -223,7 +219,7 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 
 **Position management:**
 - State machine: `cash ↔ invested` per asset
-- MIN_TRADE_USD = $300, MIN_POSITION_USD = $5 (dust threshold)
+- Configurable min trade size and dust threshold
 - Manual trade detection via exchange balance sync
 - PnL tracking with entry price, entry time, USD invested
 
@@ -238,22 +234,22 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 
 ---
 
-## Index CFD System (Interactive Brokers)
+## Index CFD System
 
 Completely independent from the crypto system. Uses Broly 1.2 ML model.
 
 ### Assets
 
-| Asset | File | IB Symbol | Trading Hours (UTC) |
-|-------|------|-----------|-------------------|
-| DAX | `ib_auto_trader.py` | IBDE40 | Mon–Fri 07:00–16:00 |
-| S&P 500 | `ib_auto_trader_test.py` | IBUS500 | Sun 23:00 – Fri 22:00 |
+| Asset | File | Trading Hours (UTC) |
+|-------|------|-------------------|
+| DAX | `ib_auto_trader.py` | Mon–Fri 07:00–16:00 |
+| S&P 500 | `ib_auto_trader_test.py` | Sun 23:00 – Fri 22:00 |
 
 ### Architecture
 
 | Class | Purpose |
 |-------|---------|
-| `IBConnection` | IB API wrapper (connect, positions, orders, market data) |
+| `IBConnection` | Broker API wrapper (connect, positions, orders, market data) |
 | `RiskManager` | Pre-trade validation (market hours, daily loss limit, max positions, cooldown) |
 | `TradeExecutor` | Signal → order execution (open/close positions, stop-loss management) |
 
@@ -261,21 +257,14 @@ Completely independent from the crypto system. Uses Broly 1.2 ML model.
 
 - **Daily loss limit:** 2,000 EUR — stop trading if breached
 - **Max positions:** 1 per asset
-- **Stop-loss:** 2% below entry (automatic IB stop order)
+- **Stop-loss:** 2% below entry (automatic stop order)
 - **Cooldown:** 2h lockout after stop-loss trigger
-- **Max margin budget:** 10,000 EUR
+- **Max margin budget:** configurable
 - **CFD margin:** 5%
-
-### Connection
-
-- **Host:** 127.0.0.1 (localhost)
-- **Port:** 4002 (paper) / 4001 (live)
-- **Client IDs:** 10 (DAX), 20 (S&P 500)
-- **Library:** `ib_insync`
 
 ### Data
 
-Market data fetched directly from IB (`reqHistoricalData`), no yfinance during trading. 44 base technical features (same set as crypto technical features). Stored in `data/indices/{asset}_hourly_data.csv`.
+Market data fetched directly from broker API, no yfinance during trading. 44 base technical features (same set as crypto technical features). Stored in `data/indices/{asset}_hourly_data.csv`.
 
 ---
 
@@ -286,23 +275,23 @@ Market data fetched directly from IB (`reqHistoricalData`), no yfinance during t
 | File | Lines | Purpose |
 |------|-------|---------|
 | `crypto_trading_system.py` | 3,519 | V5 Production — Modes B/D/E/F, all ML logic |
-| `crypto_revolut_trader.py` | 1,109 | Multi-asset Revolut X auto-trader |
+| `crypto_revolut_trader.py` | 1,109 | Multi-asset crypto auto-trader |
 | `crypto_live_trader.py` | 506 | Signal generation library (imported by trader) |
 | `hardware_config.py` | 42 | Machine-specific model configs, n_jobs, GPU |
-| `ib_auto_trader.py` | 1,444 | DAX CFD auto-trader (IB) |
-| `ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader (IB) |
+| `ib_auto_trader.py` | 1,444 | DAX CFD auto-trader |
+| `ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader |
 | `broly.py` | ~53KB | Enhancement layer: regime detection, graduated signals |
 
 ### Utility Scripts
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `buy_btc.py` | 94 | Manual BTC purchase via Revolut X ($100 market order) |
-| `check_balance.py` | 33 | Query Revolut X account balances |
-| `check_trades.py` | 86 | Inspect Revolut X trade history, fills, fees |
-| `debug_price.py` | 58 | Test 4 price fetch methods from Revolut X API |
+| `buy_btc.py` | 94 | Manual BTC purchase ($100 market order) |
+| `check_balance.py` | 33 | Query exchange account balances |
+| `check_trades.py` | 86 | Inspect trade history, fills, fees |
+| `debug_price.py` | 58 | Test price fetch methods from exchange API |
 | `revolut_x_test.py` | 114 | Comprehensive API endpoint connectivity test |
-| `ib_test_connection.py` | 160 | IB Gateway connection diagnostic |
+| `ib_test_connection.py` | 160 | Broker connection diagnostic |
 | `download_macro_data.py` | 264 | Download macro/sentiment/cross-asset data (VIX, F&G, etc.) |
 | `detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 
@@ -347,14 +336,14 @@ engine/
 ├── crypto_trading_system_v5.2.py      # V5.2 experimental — all 8 horizons + Mode G
 ├── crypto_trading_system_v5.3.py      # V5.3 experimental — thread/worker fixes
 ├── crypto_trading_system_v5.4.py      # V5.4 experimental
-├── crypto_revolut_trader.py           # Multi-asset Revolut X auto-trader
+├── crypto_revolut_trader.py           # Multi-asset crypto auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Machine-specific config
-├── ib_auto_trader.py                  # DAX CFD trader (Interactive Brokers)
+├── ib_auto_trader.py                  # DAX CFD trader
 ├── ib_auto_trader_test.py             # S&P 500 CFD overnight trader
 ├── broly.py                           # Enhancement layer (regime detection)
 ├── buy_btc.py                         # Manual BTC purchase
-├── check_balance.py                   # Revolut X balance query
+├── check_balance.py                   # Exchange balance query
 ├── check_trades.py                    # Trade history inspection
 ├── debug_price.py                     # API price fetch diagnostic
 ├── revolut_x_test.py                  # API connectivity test
@@ -418,8 +407,8 @@ engine/
 ├── config/
 │   ├── trading_config.json            # Per-asset strategy + max USD + min_confidence
 │   ├── telegram_config.json           # Bot token + chat_id
-│   ├── revolut_x_config.json          # Revolut X API key
-│   ├── private.pem                    # Ed25519 signing key
+│   ├── exchange_config.json            # Exchange API key
+│   ├── private.pem                    # Signing key
 │   ├── position_BTC.json              # BTC position state (cash/invested)
 │   ├── position_ETH.json              # ETH position state
 │   └── revolut_position.json          # Legacy position file
@@ -438,29 +427,11 @@ engine/
 
 ## Hardware Setup
 
-### Desktop (Primary — ~2x faster than laptop)
-```
-CPU:     Intel i7-14700KF (20P/28L cores, 26 workers for parallel jobs)
-GPU:     NVIDIA RTX 4080 16GB, CUDA 13.1
-RAM:     32 GB
-Path:    C:\algo_trading\engine
-Venv:    C:\algo_trading\venv
-```
+Run `python detect_hardware.py` to auto-detect CPU/GPU/RAM and generate `hardware_config.py`.
 
-### Laptop
-```
-CPU:     16 logical cores
-GPU:     NVIDIA RTX 3070 Ti Laptop
-Path:    C:\Users\Alex\algo_trading\engine
-Venv:    C:\Users\Alex\algo_trading\venv
-```
-
-### Shared Config
 ```
 OS:       Windows 11, Python 3.13+ venv (NOT conda)
 LGBM:     GPU-enabled (device='gpu'), configured per machine in hardware_config.py
-Broker:   Revolut X (0.09% taker fee) for crypto, Interactive Brokers for CFDs
-Timezone: Europe/Zurich (CET/CEST)
 ```
 
 ---
@@ -472,8 +443,8 @@ Timezone: Europe/Zurich (CET/CEST)
 powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 
 # Or manually:
-python -m venv C:\algo_trading\venv
-C:\algo_trading\venv\Scripts\activate.bat
+python -m venv venv
+venv\Scripts\activate.bat
 pip install -r requirements.txt
 python detect_hardware.py    # Generates hardware_config.py
 ```
@@ -489,9 +460,9 @@ joblib               # Parallel processing
 matplotlib           # Backtest chart PNGs
 ccxt>=4.0            # Binance API (crypto data)
 yfinance             # Yahoo Finance (macro + indices)
-pynacl               # Ed25519 signing (Revolut X auth)
+pynacl               # Asymmetric signing (exchange auth)
 cryptography         # PEM key loading
-ib_insync            # Interactive Brokers API (optional, for IB trader)
+ib_insync            # Broker API (optional, for CFD trader)
 ```
 
 ---
@@ -522,22 +493,7 @@ ib_insync            # Interactive Brokers API (optional, for IB trader)
 
 ### Trading Config (config/trading_config.json)
 
-```json
-{
-  "BTC": {
-    "strategy": "either_agree",
-    "min_confidence": 80,
-    "symbol": "BTC-USD",
-    "max_position_usd": 10000
-  },
-  "ETH": {
-    "strategy": "8h_only",
-    "min_confidence": 60,
-    "symbol": "ETH-USD",
-    "max_position_usd": 1000
-  }
-}
-```
+Per-asset strategy, min_confidence, symbol, and max_position_usd are configured in `config/trading_config.json`. See Mode F for auto-generation.
 
 ---
 
@@ -545,16 +501,16 @@ ib_insync            # Interactive Brokers API (optional, for IB trader)
 
 ```python
 # Crypto system
-TRADING_FEE = 0.0009                # 0.09% per trade (Revolut X taker fee)
+TRADING_FEE = 0.0009                # 0.09% per trade (exchange taker fee)
 MIN_CONFIDENCE = 75                 # Global fallback — overridden per asset by Mode F
 AVAILABLE_HORIZONS = [4, 8]
 REPLAY_HOURS = 200                  # Mode B signal replay window
 DIAG_STEP = 72                      # Walk-forward step size
 DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 5 windows × 15 combos = 75 configs
 
-# IB system
-MAX_MARGIN_BUDGET = 10000           # EUR
-DAILY_LOSS_LIMIT = 2000             # EUR
+# CFD system
+MAX_MARGIN_BUDGET = 10000           # configurable
+DAILY_LOSS_LIMIT = 2000             # configurable
 STOP_LOSS_PCT = 0.02                # 2%
 COOLDOWN_HOURS = 2                  # After stop-loss trigger
 SIGNAL_MIN_CONFIDENCE = 55          # %
@@ -604,7 +560,7 @@ MACRO_DIR = 'data/macro_data'
 | **2026-03-02** | — | Added macro features (VIX, DXY, S&P500). Created Modes A/B/C |
 | **2026-03-03** | — | Mode D (full feature analysis), Telegram live trader |
 | **2026-03-04** | `30d4688` | **v2.0** — Mode E, dual horizon (4h+8h), threshold system, derivative features |
-| **2026-03-07** | — | 8h horizon BTC 80.3%. "Both Agree" strategy. Revolut X trader |
+| **2026-03-07** | — | 8h horizon BTC 80.3%. "Both Agree" strategy. Crypto auto-trader |
 | **2026-03-08** | `bdf1d94` | Remove obsolete Modes A/C |
 | **2026-03-08** | `6288c4f` | Apply Mode D alpha improvements |
 | **2026-03-08** | `e64760f` | Mock tests for 4 improvements (holdout, bootstrap, permutation, Calmar/Sharpe) |
@@ -622,8 +578,8 @@ MACRO_DIR = 'data/macro_data'
 1. **Mar 2**: Added V2 macro features. Created crypto_trading_system.py with Modes A/B/C. BTC 4h: Set A 76.5% vs Set B 75.7%.
 2. **Mar 3**: Mode D (full feature analysis pipeline), Telegram live trader, README.
 3. **Mar 4**: Confidence threshold backtester, derivative features, live trader timing fix. Dual horizon (1h+4h → 4h+8h). Fixed critical run_loop bug. Mode E (iterative refinement). VVR feature, profit-weighted scoring.
-4. **Mar 7**: 8h horizon — BTC 8h 80.3%. "Both Agree" strategy: +97.2% alpha, 90% win rate. Revolut X trader built.
-5. **Mar 7-8**: ETH/XRP analysis. SOL removed (poor results). Per-asset strategies. Revolut X API fixes. 4-panel Plotly charts, signal table HTML. Weighted strategy tested & rejected.
+4. **Mar 7**: 8h horizon — BTC 8h 80.3%. "Both Agree" strategy: +97.2% alpha, 90% win rate. Crypto auto-trader built.
+5. **Mar 7-8**: ETH/XRP analysis. SOL removed (poor results). Per-asset strategies. Exchange API fixes. 4-panel Plotly charts, signal table HTML. Weighted strategy tested & rejected.
 6. **Mar 8**: V4 created — bootstrap CI, Calmar/Sharpe scoring, --permtest. Mock validation (Phase 1 + Phase 2) on synthetic data. hardware_config lightened. DIAG_WINDOWS reduced. BTC 4h V4: GB+LR w=200h 63% +48.7%.
 7. **Mar 9**: V5 created — scoring replaced with acc×(1+ret/100). Mode F + confidence sweep. Per-step timers. SSL fix. Trader bugfixes.
 8. **Mar 10**: V5 Mode D BTC 4,8h 2y complete. **4h: RF+GB+LR w=100h 80.2% +125%. 8h: RF+GB w=150h 84.7% +319%.** Mode F: either_agree + 75%. V5 promoted to production. V3 archived.
@@ -650,12 +606,12 @@ crypto_live_trader.py  (signal generation)
 crypto_revolut_trader.py  (auto-trader)
   ├── imports: crypto_live_trader.py  (signals, Telegram, data)
   ├── reads: config/trading_config.json  (strategy + min_confidence per asset)
-  ├── reads: config/revolut_x_config.json + config/private.pem
+  ├── reads: config/exchange_config.json + config/private.pem
   ├── reads/writes: config/position_*.json
-  └── sends: Revolut X API + Telegram
+  └── sends: Exchange API + Telegram
 
 ib_auto_trader.py  (DAX CFD)
-  ├── connects: Interactive Brokers (localhost:4002)
+  ├── connects: Broker API (localhost)
   ├── reads: data/setup_config.json + data/hourly_best_models.csv
   ├── reads/writes: data/indices/dax_hourly_data.csv
   ├── reads/writes: data/ib_trader_state.json
@@ -685,7 +641,7 @@ ib_auto_trader.py  (DAX CFD)
 - [x] V5.3 and V5.4 experimental versions added
 - [x] IB auto-trader for DAX + S&P 500 CFDs
 - [x] Broly 1.2 enhancement layer
-- [x] Revolut X multi-asset auto-trader with Telegram control
+- [x] Multi-asset crypto auto-trader with Telegram control
 - [x] Mock validation framework (Phase 1 + Phase 2)
 - [x] Crypto correlation analysis (BTC vs ETH)
 

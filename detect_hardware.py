@@ -1,7 +1,6 @@
 """
 detect_hardware.py -- Run AFTER activating the venv.
 Usage:
-    cd C:\\Users\\Alex\\algo_trading\\Algo_trading
     .\\venv\\Scripts\\Activate.ps1
     python detect_hardware.py
 """

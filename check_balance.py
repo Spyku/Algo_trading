@@ -1,10 +1,18 @@
-import base64, json, time, urllib.request
+import base64, json, time, sys, urllib.request
 from pathlib import Path
 from nacl.signing import SigningKey
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
-pk = serialization.load_pem_private_key(Path('private.pem').read_bytes(), password=None, backend=default_backend())
+CONFIG_FILE = 'config/revolut_x_config.json'
+PRIVATE_KEY_PATH = 'config/private.pem'
+
+if not Path(CONFIG_FILE).exists():
+    print(f"  ✗ {CONFIG_FILE} not found!"); sys.exit(1)
+with open(CONFIG_FILE) as f:
+    API_KEY = json.load(f)['api_key']
+
+pk = serialization.load_pem_private_key(Path(PRIVATE_KEY_PATH).read_bytes(), password=None, backend=default_backend())
 raw = pk.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
 sk = SigningKey(raw)
 
@@ -14,7 +22,7 @@ sig = base64.b64encode(sk.sign(f'{ts}GET{path}'.encode()).signature).decode()
 
 req = urllib.request.Request('https://revx.revolut.com/api/1.0/balances', headers={
     'Accept': 'application/json',
-    'X-Revx-Api-Key': 'REDACTED_API_KEY',
+    'X-Revx-Api-Key': API_KEY,
     'X-Revx-Timestamp': ts,
     'X-Revx-Signature': sig,
 })

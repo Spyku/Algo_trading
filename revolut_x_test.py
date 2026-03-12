@@ -12,8 +12,8 @@ try:
 except ImportError:
     print("pip install pynacl cryptography"); exit(1)
 
-API_KEY = "REDACTED_API_KEY"
-PRIVATE_KEY_PATH = "private.pem"
+CONFIG_FILE = "config/revolut_x_config.json"
+PRIVATE_KEY_PATH = "config/private.pem"
 BASE_URL = "https://revx.revolut.com/api/1.0"
 
 def load_private_key():
@@ -45,8 +45,14 @@ def main():
     print(f"  Base URL: {BASE_URL}")
     print("=" * 60)
 
+    if not Path(CONFIG_FILE).exists():
+        print(f"\n  ✗ {CONFIG_FILE} not found!"); return
     if not Path(PRIVATE_KEY_PATH).exists():
         print(f"\n  ✗ {PRIVATE_KEY_PATH} not found!"); return
+
+    import json as _json
+    with open(CONFIG_FILE) as f:
+        API_KEY = _json.load(f)['api_key']
 
     sk = load_private_key()
     print(f"  ✓ Key loaded\n")

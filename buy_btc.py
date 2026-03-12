@@ -4,10 +4,16 @@ from nacl.signing import SigningKey
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
-API_KEY = "REDACTED_API_KEY"
+CONFIG_FILE = 'config/revolut_x_config.json'
+PRIVATE_KEY_PATH = 'config/private.pem'
 BASE_URL = "https://revx.revolut.com/api/1.0"
 
-pk = serialization.load_pem_private_key(Path('private.pem').read_bytes(), password=None, backend=default_backend())
+if not Path(CONFIG_FILE).exists():
+    print(f"  ✗ {CONFIG_FILE} not found!"); sys.exit(1)
+with open(CONFIG_FILE) as f:
+    API_KEY = json.load(f)['api_key']
+
+pk = serialization.load_pem_private_key(Path(PRIVATE_KEY_PATH).read_bytes(), password=None, backend=default_backend())
 raw = pk.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
 sk = SigningKey(raw)
 

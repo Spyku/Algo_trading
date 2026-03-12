@@ -46,8 +46,11 @@ except ImportError:
 # ============================================================
 # CONFIG
 # ============================================================
-API_KEY = "REDACTED_API_KEY"
-PRIVATE_KEY_PATH = "private.pem"
+CONFIG_FILE = "config/revolut_x_config.json"
+PRIVATE_KEY_PATH = "config/private.pem"
+import json as _json
+with open(CONFIG_FILE) as _f:
+    API_KEY = _json.load(_f)['api_key']
 BASE_URL = "https://revx.revolut.com/api/1.0"
 
 MAX_POSITION_USD = 1200.0   # NEVER buy more than this

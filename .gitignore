@@ -24,6 +24,7 @@ revolut_position.json
 *.html
 .DS_Store
 Thumbs.db
+CLAUDE.md
 
 # Allow specific files
 !requirements.txt
