@@ -37,6 +37,7 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 # Force loky to inherit env vars on Windows
 os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count() or 4)
+os.environ['PYTHONWARNINGS'] = 'ignore'
 import warnings
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
@@ -3542,7 +3543,10 @@ def main():
         e_iterations = '2'
 
         print("=" * 60)
-        print(f"  CLI: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)} | {diag_years}y")
+        if mode == 'G':
+            print(f"  CLI: Mode G | {','.join(assets_list)} | All horizon pairs | {REPLAY_HOURS_G}h window")
+        else:
+            print(f"  CLI: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)} | {diag_years}y")
         print("=" * 60)
 
     else:

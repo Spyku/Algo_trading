@@ -771,8 +771,29 @@ def _handle_status_command():
 # ============================================================
 # MAIN LOOP
 # ============================================================
+def _reload_trading_config(trading_cfg):
+    """Hot-reload trading_config.json into existing dict. Returns True if anything changed."""
+    fresh = load_trading_config()
+    changed = False
+    for asset in list(fresh.keys()):
+        if asset not in trading_cfg:
+            trading_cfg[asset] = fresh[asset]
+            changed = True
+        else:
+            for key in fresh[asset]:
+                if trading_cfg[asset].get(key) != fresh[asset][key]:
+                    old_val = trading_cfg[asset].get(key)
+                    trading_cfg[asset][key] = fresh[asset][key]
+                    print(f"  CONFIG RELOAD: {asset}.{key}: {old_val} -> {fresh[asset][key]}")
+                    changed = True
+    return changed
+
+
 def run_all_once(trading_cfg, dry_run=False):
     """Sync positions, process all enabled assets."""
+    # Hot-reload trading config before each cycle
+    _reload_trading_config(trading_cfg)
+
     print(f"\n{'='*60}")
     mode = "DRY RUN" if dry_run else "LIVE"
     print(f"  [{mode}] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -816,7 +837,8 @@ def run_loop(trading_cfg, dry_run=False):
             pos = load_position(asset)
             auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
             print(f"  {asset}: {cfg['strategy']} | max=${cfg['max_position_usd']:,.0f} | {auto} | {pos['state'].upper()}")
-    print(f"  Min confidence: {MIN_CONFIDENCE}% (global default — overridden per asset by Mode F)")
+    conf_parts = [f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%" for a, c in trading_cfg.items() if c.get('enabled')]
+    print(f"  Min confidence: {', '.join(conf_parts)}")
     print(f"  Telegram: /stop /status /pause /resume /balance /sync")
     print(f"  Position sync: every 5 min (detects manual trades)")
     print(f"{'='*60}")
@@ -876,10 +898,17 @@ def run_loop(trading_cfg, dry_run=False):
 
                 remaining = wait_sec
                 last_sync = time.time()
+                config_reloaded = False
                 while remaining > 0:
                     sleep_chunk = min(30, remaining)
                     time.sleep(sleep_chunk)
                     remaining -= sleep_chunk
+
+                    # Reload trading config at :55 (5 min before next cycle)
+                    if not config_reloaded and datetime.now().minute >= 55:
+                        if _reload_trading_config(trading_cfg):
+                            print(f"  Config reloaded at :{datetime.now().minute:02d}")
+                        config_reloaded = True
 
                     # Sync positions every 5 minutes
                     if time.time() - last_sync >= 300:
