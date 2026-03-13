@@ -118,6 +118,35 @@ def _kill_orphan_workers():
     except Exception:
         pass  # non-critical — don't fail if cleanup fails
 
+
+# ── Resume / Checkpoint helpers ──────────────────────────────────────────────
+RESUME_DIR = f'{MODELS_DIR}/.resume_hourly'
+
+def _resume_path(asset, horizon, step):
+    return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
+
+def _save_checkpoint(asset, horizon, step, data):
+    """Save intermediate result so --resume can skip this step."""
+    os.makedirs(RESUME_DIR, exist_ok=True)
+    with open(_resume_path(asset, horizon, step), 'w') as f:
+        json.dump(data, f)
+
+def _load_checkpoint(asset, horizon, step):
+    """Load a checkpoint if it exists. Returns None otherwise."""
+    path = _resume_path(asset, horizon, step)
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+def _clear_checkpoints(asset, horizon):
+    """Remove all checkpoints for an (asset, horizon) after successful completion."""
+    for step in ('features', 'diagnostic'):
+        path = _resume_path(asset, horizon, step)
+        if os.path.exists(path):
+            os.remove(path)
+
+
 # Matplotlib (non-interactive backend for server/headless)
 import matplotlib
 matplotlib.use('Agg')
@@ -2611,7 +2640,7 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
     return p_value
 
 
-def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=False):
+def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=False, resume=False):
     """
     Complete pipeline from scratch:
     1. Build all ~124 features
@@ -2619,6 +2648,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     3. Run 75-config diagnostic with optimal features
     4. Save best models
     5. Generate signals + backtest charts
+
+    With --resume: skips steps that have saved checkpoints from a previous interrupted run.
     """
     t_mode_start = time.time()
 
@@ -2632,6 +2663,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     print("\n" + "=" * 60)
     print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
     print(f"  Starts from ALL features, finds optimal subset per asset")
+    if resume:
+        print(f"  RESUME MODE: will skip completed steps (checkpoints in {RESUME_DIR}/)")
     print("=" * 60)
 
     # Download fresh macro & sentiment data before anything else
@@ -2683,25 +2716,40 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             continue
 
         # Step 2: Feature analysis (5 tests -> optimal subset)
-        t0 = time.time()
-        optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
-        print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
+        feat_ckpt = _load_checkpoint(asset_name, horizon, 'features') if resume else None
+        if feat_ckpt:
+            optimal_features = feat_ckpt['features']
+            print(f"\n  RESUME: loaded {len(optimal_features)} optimal features from checkpoint")
+        else:
+            t0 = time.time()
+            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
+            print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
+            if optimal_features and len(optimal_features) >= 3:
+                _save_checkpoint(asset_name, horizon, 'features', {'features': optimal_features})
 
         if not optimal_features or len(optimal_features) < 3:
             print(f"  Feature analysis produced too few features ({len(optimal_features or [])}). Skipping.")
             continue
 
         # Step 3: Run diagnostic with optimal features
-        print(f"\n{'='*60}")
-        print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)  [{datetime.now().strftime('%H:%M:%S')}]")
-        print(f"{'='*60}")
+        diag_ckpt = _load_checkpoint(asset_name, horizon, 'diagnostic') if resume else None
+        if diag_ckpt:
+            best_config = diag_ckpt
+            print(f"\n  RESUME: loaded diagnostic result from checkpoint")
+            print(f"  {best_config['coin']} -> {best_config['best_combo']} | w={best_config['best_window']} | {best_config['accuracy']:.1f}%")
+        else:
+            print(f"\n{'='*60}")
+            print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)  [{datetime.now().strftime('%H:%M:%S')}]")
+            print(f"{'='*60}")
 
-        df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
-        print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
+            df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
+            print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
 
-        t0 = time.time()
-        best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, horizon=horizon)
-        print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
+            t0 = time.time()
+            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, horizon=horizon)
+            print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
+            if best_config:
+                _save_checkpoint(asset_name, horizon, 'diagnostic', best_config)
 
         if best_config:
             best_config['feature_set'] = 'D'
@@ -2718,6 +2766,10 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
                 print(f"  [Permutation test: {(time.time()-t0)/60:.1f} min]")
 
         print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
+
+        # Clear checkpoints after successful completion of this (asset, horizon)
+        if best_config:
+            _clear_checkpoints(asset_name, horizon)
 
     if not best_models:
         print("\nNo results. Aborting.")
@@ -3760,7 +3812,8 @@ def main():
     #   python crypto_trading_system.py D BTC 1y --permtest  (add permutation significance test, ~30min extra)
     # ================================================================
     cli_args    = [a for a in sys.argv[1:] if not a.startswith('--')]
-    flag_permtest = '--permtest' in sys.argv  # e.g. python crypto_trading_system.py D BTC 1y --permtest
+    flag_permtest = '--permtest' in sys.argv
+    flag_resume   = '--resume' in sys.argv
     if cli_args and cli_args[0].upper() in ('B', 'D', 'E', 'F', 'G', '5', '6', '7'):
         mode = cli_args[0].upper()
 
@@ -3917,7 +3970,7 @@ def main():
                 print(f"  RUNNING {h}h HORIZON")
                 print(f"{'#'*60}")
             if mode == 'D':
-                run_mode_d(assets_list, diag_years=diag_years, horizon=h, permtest=flag_permtest)
+                run_mode_d(assets_list, diag_years=diag_years, horizon=h, permtest=flag_permtest, resume=flag_resume)
             elif mode == 'E':
                 run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
             elif mode == 'F':

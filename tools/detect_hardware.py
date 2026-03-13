@@ -252,7 +252,7 @@ def main():
     print("\n" + "=" * 60)
     config_code = generate_config(cpu, gpu, ram, lgbm_gpu)
 
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hardware_config.py')
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'hardware_config.py')
     with open(config_path, 'w', encoding='utf-8') as f:
         f.write(config_code)
     print(f"  Config saved to: {config_path}")

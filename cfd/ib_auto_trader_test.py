@@ -24,6 +24,11 @@ Usage:
 import sys
 import os
 
+# Allow imports from parent directory (engine/) and use engine/ as working dir
+_ENGINE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+sys.path.insert(0, _ENGINE_DIR)
+os.chdir(_ENGINE_DIR)
+
 # Suppress warnings
 os.environ['PYTHONWARNINGS'] = 'ignore'
 import warnings

@@ -2,8 +2,11 @@
 revolut_x_test.py - Revolut X API Connection Test (v5)
 Base URL: https://revx.revolut.com/api/1.0
 """
-import base64, json, time, urllib.request, urllib.error
+import base64, json, time, os, urllib.request, urllib.error
 from pathlib import Path
+
+# Resolve paths relative to engine/ root
+os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 try:
     from nacl.signing import SigningKey

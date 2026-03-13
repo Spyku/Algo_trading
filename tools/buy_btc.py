@@ -1,5 +1,8 @@
-import base64, json, time, uuid, urllib.request, urllib.error, sys
+import base64, json, time, uuid, urllib.request, urllib.error, sys, os
 from pathlib import Path
+
+# Resolve paths relative to engine/ root
+os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from nacl.signing import SigningKey
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend

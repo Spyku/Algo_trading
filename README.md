@@ -58,12 +58,14 @@ python crypto_revolut_trader.py --status       # Show positions
 python crypto_revolut_trader.py --balance      # Exchange balance
 
 # === INDEX CFD TRADER ===
-python ib_auto_trader.py --loop                # DAX continuous trading
-python ib_auto_trader.py --status              # Show positions
-python ib_auto_trader_test.py --loop           # S&P 500 overnight trading
+python cfd/ib_auto_trader.py --loop            # DAX continuous trading
+python cfd/ib_auto_trader.py --status          # Show positions
+python cfd/ib_auto_trader_test.py --loop       # S&P 500 overnight trading
 
-# === SETUP ===
-powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
+# === UTILITIES ===
+python tools/check_balance.py                  # Exchange balance
+python tools/check_trades.py                   # Trade history
+python tools/detect_hardware.py                # Detect CPU/GPU → hardware_config.py
 ```
 
 ---
@@ -112,18 +114,18 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 │    └── Hourly loop with 5-min position sync                        │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
-│                     INDEX CFD PIPELINE                               │
+│                     INDEX CFD PIPELINE (cfd/)                        │
 │                                                                     │
-│  ib_auto_trader.py  (1,444 lines — DAX CFD trader)                 │
+│  cfd/ib_auto_trader.py  (1,444 lines — DAX CFD trader)             │
 │    ├── Broly 1.2 ML model with V2 features                         │
 │    ├── Broker API via ib_insync                                     │
 │    ├── Risk manager (daily loss limit, cooldown, stop-loss)         │
 │    └── Live HTML dashboard export                                   │
 │                                                                     │
-│  ib_auto_trader_test.py  (1,419 lines — S&P 500 CFD overnight)    │
+│  cfd/ib_auto_trader_test.py  (1,419 lines — S&P 500 CFD overnight)│
 │    └── Same architecture, different asset + trading hours            │
 │                                                                     │
-│  broly.py  (~53KB — enhancement layer)                              │
+│  cfd/broly.py  (~53KB — enhancement layer)                          │
 │    ├── Market regime detection (BULL/BEAR/SIDEWAYS)                 │
 │    ├── Graduated 5-tier signals (STRONG_BUY → STRONG_SELL)          │
 │    └── Discord + Telegram alerts                                    │
@@ -331,24 +333,24 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `crypto_live_trader.py` | 506 | Signal generation library (imported by trader) |
 | `crypto_trading_system_v15.py` | ~3,600 | V15 — 15-min candle system (Modes B/D/E/F/G) |
 | `crypto_trading_system_v30.py` | ~3,600 | V30 — 30-min candle system (Modes B/D/E/F/G) |
-| `hardware_config.py` | 42 | Machine-specific model configs, n_jobs, GPU |
-| `ib_auto_trader.py` | 1,444 | DAX CFD auto-trader |
-| `ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader |
-| `broly.py` | ~53KB | Enhancement layer: regime detection, graduated signals |
+| `hardware_config.py` | 42 | Auto-detects Desktop/Laptop, model configs, n_jobs, GPU |
+| `cfd/ib_auto_trader.py` | 1,444 | DAX CFD auto-trader |
+| `cfd/ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader |
+| `cfd/broly.py` | ~53KB | Enhancement layer: regime detection, graduated signals |
 
 ### Utility Scripts
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `buy_btc.py` | 94 | Manual BTC purchase ($100 market order) |
-| `check_balance.py` | 33 | Query exchange account balances |
-| `check_trades.py` | 86 | Inspect trade history, fills, fees |
-| `debug_price.py` | 58 | Test price fetch methods from exchange API |
-| `revolut_x_test.py` | 114 | Comprehensive API endpoint connectivity test |
-| `ib_test_connection.py` | 160 | Broker connection diagnostic |
+| `tools/buy_btc.py` | 94 | Manual BTC purchase ($100 market order) |
+| `tools/check_balance.py` | 33 | Query exchange account balances |
+| `tools/check_trades.py` | 86 | Inspect trade history, fills, fees |
+| `tools/debug_price.py` | 58 | Test price fetch methods from exchange API |
+| `tools/revolut_x_test.py` | 114 | Comprehensive API endpoint connectivity test |
+| `tools/ib_test_connection.py` | 160 | Broker connection diagnostic |
+| `tools/detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 | `download_macro_data.py` | ~350 | Download macro/sentiment/cross-asset + on-chain + derivatives data |
 | `testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements (Mode D BTC 4,8h 1y × 8 configs) |
-| `detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 
 ### Archived Scripts (in `archive/`)
 
@@ -396,20 +398,24 @@ engine/
 ├── crypto_trading_system_v30.py       # V30 — 30-min candles (30'–240' horizons)
 ├── crypto_revolut_trader.py           # Multi-asset crypto auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
-├── hardware_config.py                 # Machine-specific config
-├── ib_auto_trader.py                  # DAX CFD trader
-├── ib_auto_trader_test.py             # S&P 500 CFD overnight trader
-├── broly.py                           # Enhancement layer (regime detection)
-├── buy_btc.py                         # Manual BTC purchase
-├── check_balance.py                   # Exchange balance query
-├── check_trades.py                    # Trade history inspection
-├── debug_price.py                     # API price fetch diagnostic
-├── revolut_x_test.py                  # API connectivity test
-├── ib_test_connection.py              # IB Gateway diagnostic
+├── hardware_config.py                 # Auto-detects Desktop/Laptop config
 ├── download_macro_data.py             # Macro data downloader (macro + on-chain + derivatives)
 ├── testing_literature.py              # A/B test harness for V5.5 enhancements
-├── detect_hardware.py                 # Hardware detection → config generation
 ├── requirements.txt                   # Python dependencies
+│
+├── cfd/                               # Index CFD trading (separate pipeline)
+│   ├── ib_auto_trader.py              # DAX CFD trader (Broly 1.2)
+│   ├── ib_auto_trader_test.py         # S&P 500 CFD overnight trader
+│   └── broly.py                       # Enhancement layer (regime detection)
+│
+├── tools/                             # Utilities & diagnostics
+│   ├── buy_btc.py                     # Manual BTC purchase
+│   ├── check_balance.py               # Exchange balance query
+│   ├── check_trades.py                # Trade history inspection
+│   ├── debug_price.py                 # API price fetch diagnostic
+│   ├── revolut_x_test.py              # API connectivity test
+│   ├── ib_test_connection.py          # IB Gateway diagnostic
+│   └── detect_hardware.py             # Hardware detection → config generation
 │
 ├── archive/                           # Archived / superseded files
 │   ├── crypto_trading_system_v5.4.py  # V5.4 standalone copy
@@ -501,7 +507,7 @@ engine/
 
 ## Hardware Setup
 
-Run `python detect_hardware.py` to auto-detect CPU/GPU/RAM and generate `hardware_config.py`.
+Run `python tools/detect_hardware.py` to auto-detect CPU/GPU/RAM and generate `hardware_config.py`. The config auto-detects Desktop (26 workers) vs Laptop (14 workers) at import time.
 
 ```
 OS:       Windows 11, Python 3.13+ venv (NOT conda)
@@ -520,7 +526,7 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 python -m venv venv
 venv\Scripts\activate.bat
 pip install -r requirements.txt
-python detect_hardware.py    # Generates hardware_config.py
+python tools/detect_hardware.py    # Generates hardware_config.py
 ```
 
 ### Dependencies
@@ -702,7 +708,8 @@ crypto_revolut_trader.py  (auto-trader)
   ├── reads/writes: config/position_*.json
   └── sends: Exchange API + Telegram
 
-ib_auto_trader.py  (DAX CFD)
+cfd/ib_auto_trader.py  (DAX CFD)
+  ├── imports: hardware_config.py (via sys.path to engine/)
   ├── connects: Broker API (localhost)
   ├── reads: data/setup_config.json + data/hourly_best_models.csv
   ├── reads/writes: data/indices/dax_hourly_data.csv
@@ -740,4 +747,4 @@ ib_auto_trader.py  (DAX CFD)
 
 ---
 
-*Last updated: March 13, 2026 — V5.5 with 7 literature enhancements (on-chain, derivatives, triple-barrier, slippage, extended diag, GB calibration, purged embargo) + A/B test harness. Default period changed to 1y. Production is V5.4.*
+*Last updated: March 13, 2026 — Reorganized: CFD files to cfd/, utilities to tools/. V15/V30 sub-hourly systems. hardware_config auto-detects Desktop/Laptop. V5.5 with 7 literature enhancements + A/B test harness. Production is V5.4.*

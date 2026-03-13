@@ -116,9 +116,11 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 | `testing_literature.py` | Test harness | A/B tests each V5.5 enhancement (Mode D BTC 4,8h 1y) |
 | `crypto_revolut_trader.py` | Live | Multi-asset live trader |
 | `crypto_live_trader.py` | Live | Signal generation core — NOT run directly |
-| `hardware_config.py` | Active | Machine-specific config |
-| `crypto_trading_system_v4.py` | Reference | Calmar/Sharpe scoring (superseded) |
-| `crypto_trading_system_v3_old.py` | Archive | Original production |
+| `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
+| `crypto_trading_system_v15.py` | V15 | 15-min candles, horizons 15'–120', 1y max |
+| `crypto_trading_system_v30.py` | V30 | 30-min candles, horizons 30'–240', 1y max |
+| `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
+| `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
 
 ---
 

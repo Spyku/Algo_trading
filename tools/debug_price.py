@@ -1,4 +1,7 @@
 """Quick debug: test all price fetch methods"""
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
 import urllib.request, urllib.error, json
 
 BASE = 'https://revx.revolut.com/api/1.0'
