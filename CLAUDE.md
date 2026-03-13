@@ -36,9 +36,9 @@ python crypto_trading_system.py 7              # Quick XRP
 
 # Full pipeline
 python crypto_trading_system.py B BTC 4,8h     # Mode B — signals from saved models
-python crypto_trading_system.py D BTC 4,8h 2y  # Mode D — full pipeline (~90 min/horizon)
+python crypto_trading_system.py D BTC 4,8h 1y  # Mode D — full pipeline (~90 min/horizon)
 python crypto_trading_system.py F BTC 4,8h     # Mode F — strategy comparison (400h window)
-python crypto_trading_system_v5.2.py D BTC 1,2,3,4,5,6,7,8h 2y  # V5.2 all horizons
+python crypto_trading_system_v5.2.py D BTC 1,2,3,4,5,6,7,8h 1y  # V5.2 all horizons
 python crypto_trading_system_v5.2.py G BTC     # V5.2 Mode G — horizon pair test (168h)
 
 # Auto-trader
@@ -112,7 +112,8 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 | File | Status | Notes |
 |------|--------|-------|
 | `crypto_trading_system.py` | V5 Production | DO NOT break — live trader imports from it |
-| `crypto_trading_system_v5.2.py` | V5.2 Experimental | All 8 horizons (1-8h) + Mode G |
+| `crypto_trading_system_v5.5.py` | V5.5 Experimental | 7 literature enhancements behind ENHANCEMENTS flags |
+| `testing_literature.py` | Test harness | A/B tests each V5.5 enhancement (Mode D BTC 4,8h 1y) |
 | `crypto_revolut_trader.py` | Live | Multi-asset live trader |
 | `crypto_live_trader.py` | Live | Signal generation core — NOT run directly |
 | `hardware_config.py` | Active | Machine-specific config |
@@ -137,28 +138,31 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 ## Current Best Models
 
-| Asset | Horizon | Models | Window | Accuracy | Return | Score | Status |
-|-------|---------|--------|--------|----------|--------|-------|--------|
-| BTC | 4h | RF+GB+LR | 100h | 80.2% | +125% | 1.804 | V5 2y |
-| BTC | 8h | RF+GB | 150h | 84.7% | +319% | 3.550 | V5 2y |
-| ETH | 4h | RF+LGBM | 100h | 68.6% | +505% | 4.154 | V5 2y |
-| ETH | 8h | GB | 48h | 79.3% | +616% | 5.681 | V5 2y WARNING |
-| XRP | 4h | GB | 100h | 69.2% | — | — | V4 1y only — needs V5 run |
-| XRP | 8h | RF+LR | 100h | 80.8% | — | — | V4 1y only — needs V5 run |
+| Asset | Horizon | Models | Window | Accuracy | Features | Status |
+|-------|---------|--------|--------|----------|----------|--------|
+| BTC | 4h | RF+GB+LR | 100h | 80.2% | 31 | V5 2y |
+| BTC | 8h | RF+GB | 150h | 84.7% | 20 | V5 2y |
+| ETH | 4h | RF | 100h | 71.7% | 57 | V5 2y |
+| ETH | 8h | RF+GB | 100h | 76.7% | 78 | V5 2y |
+| XRP | 4h | RF+GB+LGBM | 100h | 71.7% | — | V5 |
+| XRP | 8h | RF | 100h | 82.5% | — | V5 |
+| DOGE | 4h | RF+LR | 72h | 78.1% | 30 | V5 |
+| DOGE | 8h | LR | 100h | 74.0% | 79 | V5 WARNING |
 
-**WARNING — ETH 8h GB outputs 100% confidence on every signal** — overfit on 48h window.
-Fix: add `CalibratedClassifierCV` wrapper in Mode D for GB models. Do not increase ETH `max_position_usd` until fixed.
+**WARNING — DOGE 8h LR outputs 99-100% confidence on most signals.** Needs `CalibratedClassifierCV`. Do not enable DOGE for live trading until fixed.
 
 ## Current Trading Config
 
 ```json
 {
-  "BTC": { "strategy": "either_agree", "min_confidence": 80, "symbol": "BTC-USD", "max_position_usd": 10000 },
-  "ETH": { "strategy": "8h_only",      "min_confidence": 60, "symbol": "ETH-USD", "max_position_usd": 1000 }
+  "BTC": { "strategy": "either_agree", "min_confidence": 66, "max_position_usd": 6000, "enabled": true },
+  "ETH": { "strategy": "either_agree", "min_confidence": 75, "max_position_usd": 6000, "enabled": true },
+  "XRP": { "strategy": "either_agree", "min_confidence": 75, "max_position_usd": 0, "enabled": false },
+  "DOGE": { "strategy": "8h_only", "min_confidence": 90, "max_position_usd": 0, "enabled": false }
 }
 ```
 
-**BTC is live trading. ETH is configured but not recommended until GB calibration is fixed.**
+**BTC + ETH live trading at $6k each. XRP disabled (no improvement to portfolio). DOGE disabled (calibration issue).**
 
 ---
 
@@ -175,8 +179,9 @@ Fix: add `CalibratedClassifierCV` wrapper in Mode D for GB models. Do not increa
 
 ## Pending Work
 
-1. **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 2y` on laptop, then Mode F
-2. **ETH GB calibration** — add `CalibratedClassifierCV` to Mode D for GB model
-3. **V5.2 Mode D BTC** — all-8-horizons run hung on 1h diagnostic (worker deadlock suspected). Needs root cause investigation before retry.
-4. **Mode G** — can only run after all 8 horizons complete for V5.2
+1. **V5.5 A/B tests** — `python testing_literature.py` running: 8 configs × BTC 4,8h 1y. Results in `testing_literature.csv`
+2. **V5.5 promotion** — review A/B results, promote winning enhancements to production
+3. **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
+4. **DOGE calibration** — add `CalibratedClassifierCV` (now available as `gb_calibration` flag in V5.5)
 5. **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
+6. **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test

@@ -126,7 +126,7 @@ def load_best_config(asset_name, horizon=None):
 # ============================================================
 # GENERATE SINGLE SIGNAL
 # ============================================================
-def generate_live_signal(asset_name, config, df_raw=None):
+def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     model_names = config['models'].split('+')
     window = config['best_window']
     fs = config.get('feature_set', 'A')
@@ -149,7 +149,7 @@ def generate_live_signal(asset_name, config, df_raw=None):
         if df_raw is None:
             return None
 
-    df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+    df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose)
     feature_cols = [f for f in feature_list if f in all_cols]
     if not feature_cols:
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]

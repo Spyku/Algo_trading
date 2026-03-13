@@ -18,7 +18,7 @@ Modes:
 
 CLI Usage:
   python crypto_trading_system_v5.5.py D ETH 1,2,3,4,5,6,7,8h 1y  # all 8 horizons
-  python crypto_trading_system_v5.5.py D BTC 4,8h 2y               # standard
+  python crypto_trading_system_v5.5.py D BTC 4,8h 1y               # standard
   python crypto_trading_system_v5.5.py F BTC 4,8h                  # strategy optimizer
   python crypto_trading_system_v5.5.py F BTC                       # defaults to 4,8h
   python crypto_trading_system_v5.5.py G BTC                       # pair test (168h)
@@ -79,7 +79,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from itertools import combinations
 from sklearn.preprocessing import StandardScaler
-from joblib import Parallel, delayed
+from sklearn.utils.parallel import Parallel, delayed
 from hardware_config import (
     MACHINE, N_JOBS_PARALLEL, LGBM_DEVICE,
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,
@@ -171,12 +171,34 @@ AVAILABLE_HORIZONS = [1, 2, 3, 4, 5, 6, 7, 8]  # V5.5: all horizons
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
-TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+# ============================================================
+# ENHANCEMENT FLAGS — toggle on/off to A/B test each improvement
+# Run Mode D once per toggle, compare accuracy/return/score
+# ============================================================
+ENHANCEMENTS = {
+    'on_chain_features':    False,  # 29 on-chain features from CoinMetrics/BGeometrics
+    'derivatives_features': False,  # Funding rate + open interest from Binance (hourly!)
+    'triple_barrier_label': False,  # Volatility-adaptive profit target + stop loss + time expiry
+    'slippage_model':       False,  # Add 0.02% slippage on top of exchange fee
+    'extended_diag_step':   False,  # DIAG_STEP 96h instead of 72h
+    'gb_calibration':       False,  # CalibratedClassifierCV for GB/LGBM models
+    'purged_embargo':       False,  # Drop last h training rows to prevent label leakage
+}
+
+# Override from environment variables (for testing harness)
+for _key in ENHANCEMENTS:
+    _env_val = os.environ.get(f'ENH_{_key.upper()}')
+    if _env_val is not None:
+        ENHANCEMENTS[_key] = _env_val.lower() in ('1', 'true', 'yes')
+
+TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee
+SLIPPAGE = 0.0002          # 0.02% estimated slippage for BTC
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE if ENHANCEMENTS['slippage_model'] else TRADING_FEE_BASE
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
 REPLAY_HOURS_G = 168   # Mode G pair test — last week only
-DIAG_STEP = 72
+DIAG_STEP = 96 if ENHANCEMENTS['extended_diag_step'] else 72
 DIAG_WINDOWS       = [48, 72, 100, 150, 200]   # horizons 5-8h
 DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]    # horizons 1-4h (shorter windows suit short horizons)
 
@@ -392,10 +414,50 @@ def load_data(asset_name):
     return df
 
 
+def _triple_barrier_labels(close, high, low, horizon, vol_window=20, pt_mult=1.0, sl_mult=1.0):
+    """
+    Triple barrier labeling (Lopez de Prado).
+    For each bar, look ahead up to `horizon` bars:
+      - If high hits profit target first  -> label = 1
+      - If low hits stop loss first       -> label = 0
+      - If neither hit (time expiry)      -> label = 1 if close[t+horizon] > close[t] else 0
+    Barriers are volatility-adaptive: target = close * (1 + pt_mult * vol).
+    """
+    returns = pd.Series(close).pct_change()
+    vol = returns.rolling(vol_window, min_periods=10).std().values
+
+    labels = np.full(len(close), np.nan)
+
+    for i in range(len(close) - horizon):
+        entry = close[i]
+        v = vol[i]
+        if np.isnan(v) or v < 1e-10:
+            continue
+
+        upper = entry * (1 + pt_mult * v)
+        lower = entry * (1 - sl_mult * v)
+
+        hit = False
+        for j in range(i + 1, i + horizon + 1):
+            if high[j] >= upper:
+                labels[i] = 1
+                hit = True
+                break
+            if low[j] <= lower:
+                labels[i] = 0
+                hit = True
+                break
+
+        if not hit:
+            labels[i] = 1.0 if close[i + horizon] > entry else 0.0
+
+    return labels
+
+
 # ============================================================
 # HOURLY FEATURE ENGINEERING (ALL 36 technical features)
 # ============================================================
-def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
+def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df = df_hourly.copy()
 
     for period in [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 120, 240]:
@@ -484,9 +546,15 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
     # Jerk (third derivative) -- change in acceleration
     df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
-    future_return = df['close'].shift(-horizon) / df['close'] - 1
-    rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
-    df['label'] = (future_return > rolling_median).astype(int)
+    if ENHANCEMENTS.get('triple_barrier_label', False):
+        df['label'] = _triple_barrier_labels(
+            df['close'].values, df['high'].values, df['low'].values,
+            horizon=horizon, vol_window=20, pt_mult=1.0, sl_mult=1.0
+        )
+    else:
+        future_return = df['close'].shift(-horizon) / df['close'] - 1
+        rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
+        df['label'] = (future_return > rolling_median).astype(int)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
@@ -510,14 +578,12 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON):
 
     nan_counts = df[feature_cols + ['label']].isna().sum()
     nan_cols = nan_counts[nan_counts > 0]
-    if len(nan_cols) > 0:
+    if verbose and len(nan_cols) > 0:
         print(f"    Rows before dropna: {len(df)}")
-        nan_summary = {k: v for k, v in dict(nan_cols).items() if v > 0}
-        top_nan = sorted(nan_summary.items(), key=lambda x: -x[1])[:5]
-        print(f"    Top NaN columns: {dict(top_nan)}")
 
     df = df.dropna().reset_index(drop=True)
-    print(f"    Rows after dropna: {len(df)}")
+    if verbose:
+        print(f"    Rows after dropna: {len(df)}")
     return df, feature_cols
 
 
@@ -612,8 +678,93 @@ def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     return features
 
 
-def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON):
-    df, base_cols = build_hourly_features(df_hourly, horizon=horizon)
+def _compute_onchain_features(oc_df, prefix='oc_'):
+    """Compute on-chain features from daily BTC blockchain metrics."""
+    features = pd.DataFrame(index=oc_df.index)
+
+    # Standard features for each numeric column (zscore, changes, volatility)
+    standard_cols = ['active_addresses', 'hashrate', 'tx_count', 'fees_btc']
+    for col in standard_cols:
+        if col not in oc_df.columns:
+            continue
+        s = oc_df[col].astype(float)
+        tag = f"{prefix}{col}"
+        roll_mean = s.rolling(50, min_periods=10).mean()
+        roll_std = s.rolling(50, min_periods=10).std()
+        features[f'{tag}_zscore'] = (s - roll_mean) / (roll_std + 1e-10)
+        for w in [1, 5, 10]:
+            features[f'{tag}_chg{w}d'] = s.pct_change(w) * 100
+        features[f'{tag}_vol5d'] = s.pct_change().rolling(5, min_periods=3).std() * 100
+
+    # MVRV — raw value + regime indicators
+    if 'mvrv' in oc_df.columns:
+        mvrv = oc_df['mvrv'].astype(float)
+        features[f'{prefix}mvrv'] = mvrv
+        roll_mean = mvrv.rolling(50, min_periods=10).mean()
+        roll_std = mvrv.rolling(50, min_periods=10).std()
+        features[f'{prefix}mvrv_zscore'] = (mvrv - roll_mean) / (roll_std + 1e-10)
+        features[f'{prefix}mvrv_overvalued'] = (mvrv > 3.0).astype(float)
+        features[f'{prefix}mvrv_undervalued'] = (mvrv < 1.0).astype(float)
+
+    # Exchange netflow — directional + smoothed
+    if 'exchange_netflow' in oc_df.columns:
+        nf = oc_df['exchange_netflow'].astype(float)
+        features[f'{prefix}netflow'] = nf
+        features[f'{prefix}netflow_5d'] = nf.rolling(5, min_periods=2).mean()
+        roll_mean = nf.rolling(50, min_periods=10).mean()
+        roll_std = nf.rolling(50, min_periods=10).std()
+        features[f'{prefix}netflow_zscore'] = (nf - roll_mean) / (roll_std + 1e-10)
+        # Large inflow spike = bearish signal
+        features[f'{prefix}netflow_spike_in'] = (nf > roll_mean + 2 * roll_std).astype(float)
+        # Large outflow = bullish accumulation
+        features[f'{prefix}netflow_spike_out'] = (nf < roll_mean - 2 * roll_std).astype(float)
+
+    # SOPR — profit/loss indicator
+    if 'sopr' in oc_df.columns:
+        sopr = oc_df['sopr'].astype(float)
+        features[f'{prefix}sopr'] = sopr
+        features[f'{prefix}sopr_above1'] = (sopr > 1.0).astype(float)
+        features[f'{prefix}sopr_chg1d'] = sopr.diff(1)
+        features[f'{prefix}sopr_ma5d'] = sopr.rolling(5, min_periods=2).mean()
+
+    return features
+
+
+def _compute_derivatives_features(deriv_df, prefix='dv_'):
+    """Compute derivatives features from hourly funding rate + open interest data."""
+    features = pd.DataFrame(index=deriv_df.index)
+
+    # Funding rate
+    if 'funding_rate' in deriv_df.columns:
+        fr = deriv_df['funding_rate'].astype(float)
+        features[f'{prefix}funding_rate'] = fr
+        features[f'{prefix}funding_rate_ma8h'] = fr.rolling(8, min_periods=2).mean()
+        features[f'{prefix}funding_rate_ma24h'] = fr.rolling(24, min_periods=4).mean()
+        roll_mean = fr.rolling(168, min_periods=24).mean()  # 1-week rolling
+        roll_std = fr.rolling(168, min_periods=24).std()
+        features[f'{prefix}funding_zscore'] = (fr - roll_mean) / (roll_std + 1e-10)
+        # Extreme funding = overleveraged → reversal signal
+        features[f'{prefix}funding_extreme_pos'] = (fr > 0.001).astype(float)   # >0.1% = very bullish leverage
+        features[f'{prefix}funding_extreme_neg'] = (fr < -0.001).astype(float)  # <-0.1% = very bearish leverage
+
+    # Open interest
+    if 'open_interest_usd' in deriv_df.columns:
+        oi = deriv_df['open_interest_usd'].astype(float)
+        features[f'{prefix}oi_usd'] = oi
+        features[f'{prefix}oi_chg1h'] = oi.pct_change(1) * 100
+        features[f'{prefix}oi_chg4h'] = oi.pct_change(4) * 100
+        features[f'{prefix}oi_chg24h'] = oi.pct_change(24) * 100
+        roll_mean = oi.rolling(168, min_periods=24).mean()
+        roll_std = oi.rolling(168, min_periods=24).std()
+        features[f'{prefix}oi_zscore'] = (oi - roll_mean) / (roll_std + 1e-10)
+        # OI spike = big position buildup
+        features[f'{prefix}oi_spike'] = (oi > roll_mean + 2 * roll_std).astype(float)
+
+    return features
+
+
+def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True):
+    df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose)
     all_cols = list(base_cols)
     added = 0
 
@@ -659,6 +810,33 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON):
             all_cols.extend(new_cols)
             added += len(new_cols)
 
+    # On-chain data (BTC only — metrics are Bitcoin-specific)
+    if asset_name == 'BTC' and ENHANCEMENTS.get('on_chain_features', False):
+        oc_df = _load_macro_csv('onchain_btc.csv')
+        if oc_df is not None:
+            oc_feats = _compute_onchain_features(oc_df, prefix='oc_')
+            if len(oc_feats.columns) > 0:
+                oc_feats['_merge_date'] = oc_feats.index.normalize()
+                df = df.merge(oc_feats, on='_merge_date', how='left')
+                new_cols = [c for c in oc_feats.columns if c != '_merge_date']
+                all_cols.extend(new_cols)
+                added += len(new_cols)
+
+    # Derivatives data (BTC only — hourly funding rate + open interest)
+    if asset_name == 'BTC' and ENHANCEMENTS.get('derivatives_features', False):
+        deriv_df = _load_macro_csv('derivatives_btc.csv')
+        if deriv_df is not None:
+            dv_feats = _compute_derivatives_features(deriv_df, prefix='dv_')
+            if len(dv_feats.columns) > 0:
+                # Hourly data — merge by datetime directly (not by date)
+                dv_feats['_merge_dt'] = dv_feats.index
+                df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+                df = df.merge(dv_feats, on='_merge_dt', how='left')
+                df = df.drop(columns=['_merge_dt'], errors='ignore')
+                new_cols = [c for c in dv_feats.columns if c != '_merge_dt']
+                all_cols.extend(new_cols)
+                added += len(new_cols)
+
     df = df.drop(columns=['_merge_date'], errors='ignore')
     if '_merge_date' in all_cols:
         all_cols.remove('_merge_date')
@@ -668,13 +846,23 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON):
     if macro_cols:
         df[macro_cols] = df[macro_cols].ffill()
 
-    print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+    if verbose:
+        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset/on-chain = {len(all_cols)} total")
     return df, all_cols
 
 
 # ============================================================
 # MODELS
 # ============================================================
+def _maybe_calibrate(model, name):
+    """Wrap GB/LGBM with CalibratedClassifierCV if enhancement is enabled."""
+    if not ENHANCEMENTS.get('gb_calibration', False):
+        return model
+    if name in ('GB', 'LGBM'):
+        from sklearn.calibration import CalibratedClassifierCV
+        return CalibratedClassifierCV(model, method='isotonic', cv=3)
+    return model
+
 ALL_MODELS = get_all_models()
 
 
@@ -697,7 +885,7 @@ def _classify_feature(feat):
         return 'BASE'
 
 
-def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, horizon=PREDICTION_HORIZON):
     """Fast walk-forward test with LGBM only.
     Returns (accuracy, alpha, n_tests).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
@@ -720,7 +908,10 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     start_px = float(df_features.iloc[min_start]['close'])
 
     for i in range(min_start, n, step):
-        train    = df_features.iloc[max(0, i - window):i]
+        train_end = i - horizon if ENHANCEMENTS.get('purged_embargo', False) else i
+        if train_end <= max(0, i - window):
+            continue
+        train    = df_features.iloc[max(0, i - window):train_end]
         test_row = df_features.iloc[i:i+1]
         X_train  = train[feature_cols]
         y_train  = train['label'].values
@@ -780,7 +971,7 @@ def _test_lgbm_importance(df_features, feature_cols):
     """Train LGBM and extract feature importance."""
     from lightgbm import LGBMClassifier
 
-    print("\n  [1/5] LGBM Feature Importance (gain-based)")
+    print(f"\n  [1/5] LGBM Feature Importance (gain-based)  [{datetime.now().strftime('%H:%M:%S')}]")
     n = len(df_features)
     train = df_features.iloc[:int(n * 0.7)]
     X = train[feature_cols]
@@ -827,7 +1018,7 @@ def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_al
 
 def _test_permutation_importance(df_features, feature_cols):
     """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
-    print("\n  [2/5] Permutation Importance (parallel)")
+    print(f"\n  [2/5] Permutation Importance (parallel)  [{datetime.now().strftime('%H:%M:%S')}]")
     baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols)
     print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
 
@@ -862,7 +1053,7 @@ def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baselin
 
 def _test_ablation(df_features, feature_cols):
     """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
-    print("\n  [3/5] Ablation Test (parallel, drop one at a time)")
+    print(f"\n  [3/5] Ablation Test (parallel, drop one at a time)  [{datetime.now().strftime('%H:%M:%S')}]")
     baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols)
     print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
 
@@ -903,7 +1094,7 @@ def _reduced_one_set(df_features, ranked, n_feat):
 
 def _test_reduced_sets(df_features, feature_cols, importance_df):
     """Test accuracy with top-N features. Parallelized."""
-    print("\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)")
+    print(f"\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)  [{datetime.now().strftime('%H:%M:%S')}]")
     ranked = importance_df['feature'].tolist()
 
     test_sizes = [5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50]
@@ -938,7 +1129,7 @@ def _test_reduced_sets(df_features, feature_cols, importance_df):
 
 def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
     """Score features across all tests, return optimal list."""
-    print("\n  [5/5] Scoring & Selection")
+    print(f"\n  [5/5] Scoring & Selection  [{datetime.now().strftime('%H:%M:%S')}]")
     scores = {f: 0 for f in feature_cols}
 
     # LGBM importance
@@ -1179,7 +1370,10 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
         train_start = max(0, i - window_size)
-        train = df_features.iloc[train_start:i]
+        train_end = i - horizon if ENHANCEMENTS.get('purged_embargo', False) else i
+        if train_end <= train_start:
+            continue
+        train = df_features.iloc[train_start:train_end]
         X_train = train[feature_cols]
         y_train = train['label'].values
         X_test = df_features.iloc[i:i+1][feature_cols]
@@ -1198,7 +1392,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
 
         for model_name in model_names:
             try:
-                model = ALL_MODELS[model_name]()
+                model = _maybe_calibrate(ALL_MODELS[model_name](), model_name)
                 model.fit(X_train_s, y_train)
                 pred = model.predict(X_test_s)[0]
                 proba = model.predict_proba(X_test_s)[0]
@@ -1490,8 +1684,11 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        X_train = features_np[train_start:i]
-        y_train = labels_np[train_start:i]
+        train_end = i - pred_horizon if ENHANCEMENTS.get('purged_embargo', False) else i
+        if train_end <= train_start:
+            continue
+        X_train = features_np[train_start:train_end]
+        y_train = labels_np[train_start:train_end]
         X_test  = features_np[i:i+1]
         y_true  = labels_np[i]
         if len(np.unique(y_train)) < 2:
@@ -1507,6 +1704,9 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
         for model_name in combo:
             try:
                 model = model_factories[model_name]()
+                if ENHANCEMENTS.get('gb_calibration', False) and model_name in ('GB', 'LGBM'):
+                    from sklearn.calibration import CalibratedClassifierCV
+                    model = CalibratedClassifierCV(model, method='isotonic', cv=3)
                 model.fit(X_train_s, y_train)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
@@ -1625,7 +1825,8 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PRED
     with _suppress_stderr():
         all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
             delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
+                pred_horizon=horizon
             )
             for combo, window in all_configs
         )
@@ -2421,6 +2622,10 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     """
     t_mode_start = time.time()
 
+    # Set global so _quick_score and other functions use correct horizon
+    global PREDICTION_HORIZON
+    PREDICTION_HORIZON = horizon
+
     # Kill any orphaned loky workers from previous interrupted runs
     _kill_orphan_workers()
 
@@ -2488,7 +2693,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
 
         # Step 3: Run diagnostic with optimal features
         print(f"\n{'='*60}")
-        print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)")
+        print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)  [{datetime.now().strftime('%H:%M:%S')}]")
         print(f"{'='*60}")
 
         df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
@@ -3279,7 +3484,7 @@ def run_horizon_pair_comparison(assets_list):
 
         if len(available_horizons) < 2:
             print(f"  Need at least 2 horizons saved. Found: {available_horizons}")
-            print(f"  Run: python crypto_trading_system_v5.5.py D {asset} 1,2,3,4,5,6,7,8h 2y")
+            print(f"  Run: python crypto_trading_system_v5.5.py D {asset} 1,2,3,4,5,6,7,8h 1y")
             continue
 
         print(f"  Available horizons: {available_horizons}")
@@ -3550,7 +3755,7 @@ def main():
     # Examples:
     #   python crypto_trading_system.py B BTC 8h
     #   python crypto_trading_system.py D BTC,ETH 4h 1y
-    #   python crypto_trading_system.py D BTC 8h 2y
+    #   python crypto_trading_system.py D BTC 8h 1y
     #   python crypto_trading_system.py B              (all assets, 4h default)
     #   python crypto_trading_system.py D BTC 1y --permtest  (add permutation significance test, ~30min extra)
     # ================================================================
@@ -3579,7 +3784,7 @@ def main():
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
 
-        # Parse years (default: 1y for Mode D, 2y otherwise)
+        # Parse years (default: 1y)
         diag_years = 1
         for a in cli_args:
             if a.lower().endswith('y') and a[:-1].isdigit():

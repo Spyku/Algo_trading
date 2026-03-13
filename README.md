@@ -3,7 +3,8 @@
 Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index CFDs** (DAX, S&P 500). Two independent pipelines:
 
 1. **Crypto Pipeline** — Hourly BUY/SELL/HOLD signals via dual-horizon (4h + 8h) ensemble ML with walk-forward validation. Executes via exchange API.
-2. **Index CFD Pipeline** — Hourly signals via Broly 1.2 ML model. Executes via broker API.
+2. **Sub-Hourly Crypto (V15/V30)** — 15-min and 30-min candle variants for higher trade frequency. Same ML pipeline, separate data/models/configs.
+3. **Index CFD Pipeline** — Hourly signals via Broly 1.2 ML model. Executes via broker API.
 
 ---
 
@@ -18,6 +19,7 @@ Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index C
   - [Scoring Formula](#v5-scoring-formula)
   - [Strategies](#strategies)
   - [Auto-Trader](#crypto-auto-trader)
+- [Sub-Hourly Crypto (V15/V30)](#sub-hourly-crypto-systems-v15--v30)
 - [Index CFD System](#index-cfd-system)
 - [All Files Reference](#all-files-reference)
 - [Folder Structure](#folder-structure)
@@ -40,8 +42,14 @@ python crypto_trading_system.py 5              # Quick BTC (both horizons)
 python crypto_trading_system.py 6              # Quick ETH
 python crypto_trading_system.py 7              # Quick XRP
 python crypto_trading_system.py B BTC 4,8h     # Mode B — signals from saved models
-python crypto_trading_system.py D BTC 4,8h 2y  # Mode D — full pipeline (~90 min/horizon)
+python crypto_trading_system.py D BTC 4,8h 1y  # Mode D — full pipeline (~90 min/horizon)
 python crypto_trading_system.py F BTC          # Mode F — strategy comparison
+
+# === CRYPTO SUB-HOURLY (V15 / V30) ===
+python crypto_trading_system_v15.py D BTC 4,8h 1y   # 15-min candles (h4=60', h8=120')
+python crypto_trading_system_v30.py D BTC 4,8h 1y   # 30-min candles (h4=2h, h8=4h)
+python crypto_trading_system_v15.py F BTC 4,8h       # Strategy optimizer (15-min)
+python crypto_trading_system_v30.py F BTC 4,8h       # Strategy optimizer (30-min)
 
 # === CRYPTO AUTO-TRADER ===
 python crypto_revolut_trader.py --loop         # Live trading loop
@@ -66,12 +74,30 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        CRYPTO PIPELINE                              │
 │                                                                     │
-│  crypto_trading_system.py  (V5 — 3,519 lines)                      │
+│  crypto_trading_system.py  (V5.4 Production — 3,519 lines)          │
 │    ├── Modes B/D/E/F + shortcuts 5/6/7                              │
 │    ├── 125 features (44 technical + 81 macro/sentiment/cross-asset) │
 │    ├── 4 ML models × 15 combinations × 5 windows                   │
 │    ├── Walk-forward validation (no future leakage)                  │
 │    └── hardware_config.py (machine-specific GPU/CPU settings)       │
+│                                                                     │
+│  crypto_trading_system_v5.5.py  (V5.5 Experimental)                 │
+│    ├── 7 ENHANCEMENTS flags (toggle on/off, env var override)       │
+│    ├── +29 on-chain features (CoinMetrics + BGeometrics)            │
+│    ├── +12 derivatives features (Binance funding rate + OI)         │
+│    ├── Triple-barrier labeling, slippage model, GB calibration      │
+│    ├── Purged walk-forward embargo (label leakage fix)              │
+│    └── testing_literature.py (A/B test harness)                     │
+│                                                                     │
+│  crypto_trading_system_v15.py  (V15 — 15-min candles)               │
+│    ├── Horizons 1-8 = 15'–120' (more trades, shorter horizons)     │
+│    ├── Separate data/models/config (*_15m_*)                        │
+│    └── Max 1 year rolling data, ~35K rows/year                     │
+│                                                                     │
+│  crypto_trading_system_v30.py  (V30 — 30-min candles)               │
+│    ├── Horizons 1-8 = 30'–240' (2× hourly frequency)              │
+│    ├── Separate data/models/config (*_30m_*)                        │
+│    └── Max 1 year rolling data, ~17.5K rows/year                   │
 │                                                                     │
 │  crypto_live_trader.py  (506 lines — signal generation library)     │
 │    ├── Imports models/features from crypto_trading_system.py        │
@@ -108,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
 
 ---
 
-## Crypto Trading System (V5)
+## Crypto Trading System (V5.4 Production)
 
 ### Core Concepts
 
@@ -234,6 +260,32 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 
 ---
 
+## Sub-Hourly Crypto Systems (V15 / V30)
+
+The hourly system produces good signals but few trades. V15 and V30 use shorter candles for higher trade frequency while keeping the same ML pipeline.
+
+| System | Candle | Horizons (candles 1-8) | Data/year | File |
+|--------|--------|----------------------|-----------|------|
+| **V15** | 15 min | 15', 30', 45', 60', 75', 90', 105', 120' | ~35K rows | `crypto_trading_system_v15.py` |
+| **V30** | 30 min | 30', 60', 90', 120', 150', 180', 210', 240' | ~17.5K rows | `crypto_trading_system_v30.py` |
+
+**Key differences from hourly system:**
+- All rolling/shift/diff periods scaled via `_hours_to_rows()` (e.g., RSI 14h = 56 candles on V15)
+- Extra features: `logret_1c..4c` (candle-scale returns), `minute_sin/cos` (intra-hour timing)
+- Data capped to 1 rolling year (Binance 15m/30m)
+- Crypto assets only (BTC, ETH, XRP, DOGE) — no yfinance indices
+- Separate output files: `data/*_15m_data.csv`, `models/crypto_15m_best_models.csv`, `config/trading_config_15m.json`, `charts/*_15m_backtest.png`
+
+**Usage:**
+```bash
+python crypto_trading_system_v15.py D BTC 4,8h 1y   # horizon 4 = 60min, 8 = 120min
+python crypto_trading_system_v30.py D BTC 4,8h 1y   # horizon 4 = 2h, 8 = 4h
+python crypto_trading_system_v15.py F BTC 4,8h       # strategy optimizer
+python crypto_trading_system_v15.py G BTC             # horizon pair test
+```
+
+---
+
 ## Index CFD System
 
 Completely independent from the crypto system. Uses Broly 1.2 ML model.
@@ -274,9 +326,11 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `crypto_trading_system.py` | 3,519 | V5 Production — Modes B/D/E/F, all ML logic |
+| `crypto_trading_system.py` | 3,519 | V5.4 Production — Modes B/D/E/F, all ML logic |
 | `crypto_revolut_trader.py` | 1,109 | Multi-asset crypto auto-trader |
 | `crypto_live_trader.py` | 506 | Signal generation library (imported by trader) |
+| `crypto_trading_system_v15.py` | ~3,600 | V15 — 15-min candle system (Modes B/D/E/F/G) |
+| `crypto_trading_system_v30.py` | ~3,600 | V30 — 30-min candle system (Modes B/D/E/F/G) |
 | `hardware_config.py` | 42 | Machine-specific model configs, n_jobs, GPU |
 | `ib_auto_trader.py` | 1,444 | DAX CFD auto-trader |
 | `ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader |
@@ -292,7 +346,8 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `debug_price.py` | 58 | Test price fetch methods from exchange API |
 | `revolut_x_test.py` | 114 | Comprehensive API endpoint connectivity test |
 | `ib_test_connection.py` | 160 | Broker connection diagnostic |
-| `download_macro_data.py` | 264 | Download macro/sentiment/cross-asset data (VIX, F&G, etc.) |
+| `download_macro_data.py` | ~350 | Download macro/sentiment/cross-asset + on-chain + derivatives data |
+| `testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements (Mode D BTC 4,8h 1y × 8 configs) |
 | `detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 
 ### Archived Scripts (in `archive/`)
@@ -315,10 +370,13 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Version | Status |
 |------|---------|--------|
-| `crypto_trading_system.py` | V5 | Production |
-| `crypto_trading_system_v5.4.py` | V5.4 | Experimental |
-| `crypto_trading_system_v5.3.py` | V5.3 | Experimental — thread/worker fixes |
-| `crypto_trading_system_v5.2.py` | V5.2 | Experimental — all 8 horizons + Mode G |
+| `crypto_trading_system.py` | V5.4 | Production — phase-specific BLAS, loky pool reset, orphan cleanup |
+| `crypto_trading_system_v5.5.py` | V5.5 | Experimental — 7 literature enhancements (A/B testable via ENHANCEMENTS flags) |
+| `crypto_trading_system_v15.py` | V15 | Sub-hourly — 15-min candles, horizons 15'–120', 1y max |
+| `crypto_trading_system_v30.py` | V30 | Sub-hourly — 30-min candles, horizons 30'–240', 1y max |
+| `archive/crypto_trading_system_v5.4.py` | V5.4 | Archived — same as production (standalone copy) |
+| `archive/crypto_trading_system_v5.3.py` | V5.3 | Archived — thread/worker fixes |
+| `archive/crypto_trading_system_v5.2.py` | V5.2 | Archived — all 8 horizons + Mode G (no BLAS fixes) |
 | `archive/crypto_trading_system_v5.1.py` | V5.1 | Archived — alpha scoring patches |
 | `archive/crypto_trading_system_v5.py` | V5 | Archived — versioned backup |
 | `archive/crypto_trading_system_v4.py` | V4 | Archived — Calmar/Sharpe scoring |
@@ -332,10 +390,10 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 engine/
 │
 ├── ===== PYTHON FILES (root) =====
-├── crypto_trading_system.py           # V5 PRODUCTION — Modes B/D/E/F
-├── crypto_trading_system_v5.2.py      # V5.2 experimental — all 8 horizons + Mode G
-├── crypto_trading_system_v5.3.py      # V5.3 experimental — thread/worker fixes
-├── crypto_trading_system_v5.4.py      # V5.4 experimental
+├── crypto_trading_system.py           # V5.4 PRODUCTION — Modes B/D/E/F
+├── crypto_trading_system_v5.5.py      # V5.5 experimental — all 8 horizons + Mode G + 2-phase Mode F
+├── crypto_trading_system_v15.py       # V15 — 15-min candles (15'–120' horizons)
+├── crypto_trading_system_v30.py       # V30 — 30-min candles (30'–240' horizons)
 ├── crypto_revolut_trader.py           # Multi-asset crypto auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Machine-specific config
@@ -348,13 +406,17 @@ engine/
 ├── debug_price.py                     # API price fetch diagnostic
 ├── revolut_x_test.py                  # API connectivity test
 ├── ib_test_connection.py              # IB Gateway diagnostic
-├── download_macro_data.py             # Macro data downloader
+├── download_macro_data.py             # Macro data downloader (macro + on-chain + derivatives)
+├── testing_literature.py              # A/B test harness for V5.5 enhancements
 ├── detect_hardware.py                 # Hardware detection → config generation
 ├── requirements.txt                   # Python dependencies
 │
 ├── archive/                           # Archived / superseded files
-│   ├── crypto_trading_system_v5.py    # V5 backup
+│   ├── crypto_trading_system_v5.4.py  # V5.4 standalone copy
+│   ├── crypto_trading_system_v5.3.py  # V5.3 thread/worker fixes
+│   ├── crypto_trading_system_v5.2.py  # V5.2 all 8 horizons + Mode G
 │   ├── crypto_trading_system_v5.1.py  # V5.1 alpha scoring patches
+│   ├── crypto_trading_system_v5.py    # V5 backup
 │   ├── crypto_trading_system_v4.py    # V4 reference (Calmar/Sharpe)
 │   ├── crypto_trading_system_v3_old.py# V3 original production
 │   ├── crypto_auto_trader.py          # Legacy BTC-only auto-trader
@@ -375,6 +437,10 @@ engine/
 │   ├── eth_hourly_data.csv            # ETH OHLCV
 │   ├── xrp_hourly_data.csv            # XRP OHLCV
 │   ├── doge_hourly_data.csv           # DOGE OHLCV
+│   ├── btc_15m_data.csv              # BTC 15-min OHLCV (V15)
+│   ├── eth_15m_data.csv              # ETH 15-min OHLCV (V15)
+│   ├── btc_30m_data.csv              # BTC 30-min OHLCV (V30)
+│   ├── eth_30m_data.csv              # ETH 30-min OHLCV (V30)
 │   ├── hourly_best_models.csv         # IB system best models
 │   ├── setup_config.json              # IB system setup config
 │   ├── ib_trader_state.json           # DAX position state
@@ -390,13 +456,19 @@ engine/
 │       ├── fear_greed.csv             # Crypto Fear & Greed Index
 │       ├── cross_asset.csv            # BTC, ETH, Nasdaq, S&P, DAX daily prices
 │       ├── macro_hourly.csv           # Daily macro forward-filled to hourly
+│       ├── onchain_btc.csv            # On-chain: active addresses, hash rate, MVRV, SOPR, etc.
+│       ├── derivatives_btc.csv        # Derivatives: funding rate + open interest (hourly)
 │       └── download_macro_data.py     # Downloader script
 │
 ├── models/
 │   ├── crypto_hourly_best_models.csv  # CENTRAL CONFIG: best model per (asset, horizon)
+│   ├── crypto_15m_best_models.csv    # V15 best models
+│   ├── crypto_30m_best_models.csv    # V30 best models
 │   ├── crypto_feature_analysis_*.csv  # Feature scores per asset
 │   ├── crypto_feature_set_comparison.csv
-│   └── crypto_hourly_chart_data.json  # Signal export for charting
+│   ├── crypto_hourly_chart_data.json  # Signal export for charting
+│   ├── crypto_15m_chart_data.json    # V15 chart data
+│   └── crypto_30m_chart_data.json    # V30 chart data
 │
 ├── charts/
 │   ├── {ASSET}_backtest.png           # Matplotlib 3-panel backtest chart
@@ -406,6 +478,8 @@ engine/
 │
 ├── config/
 │   ├── trading_config.json            # Per-asset strategy + max USD + min_confidence
+│   ├── trading_config_15m.json       # V15 trading config (written by V15 Mode F)
+│   ├── trading_config_30m.json       # V30 trading config (written by V30 Mode F)
 │   ├── telegram_config.json           # Bot token + chat_id
 │   ├── exchange_config.json            # Exchange API key
 │   ├── private.pem                    # Signing key
@@ -529,10 +603,12 @@ MACRO_DIR = 'data/macro_data'
 
 | Version | File | Scoring | Key Changes |
 |---------|------|---------|-------------|
-| **V5** | `crypto_trading_system.py` | `acc × (1 + ret/100)` | Production. Mode F, confidence sweep, per-step timers, lightweight diagnostics |
-| **V5.4** | `crypto_trading_system_v5.4.py` | Experimental | Latest experimental |
-| **V5.3** | `crypto_trading_system_v5.3.py` | Experimental | Feature analysis LGBM lightened, LOKY_MAX_CPU_COUNT capped, OMP/MKL/OpenBLAS thread limits |
-| **V5.2** | `crypto_trading_system_v5.2.py` | Experimental | All 8 horizons (1–8h) + Mode G (168h horizon pair test) |
+| **V5.4** | `crypto_trading_system.py` | `acc × (1 + ret/100)` | **Production.** Phase-specific BLAS threading, loky pool reset, orphan cleanup, Mode F |
+| **V5.5** | `crypto_trading_system_v5.5.py` | `acc × (1 + ret/100)` | Experimental. 7 literature enhancements behind ENHANCEMENTS flags (on-chain, derivatives, triple-barrier, slippage, extended diag, GB calibration, purged embargo). A/B testable via `testing_literature.py` |
+| **V15** | `crypto_trading_system_v15.py` | `acc × (1 + ret/100)` | Sub-hourly. 15-min candles, 8 horizons (15'–120'), 1y max, separate data/models/config |
+| **V30** | `crypto_trading_system_v30.py` | `acc × (1 + ret/100)` | Sub-hourly. 30-min candles, 8 horizons (30'–240'), 1y max, separate data/models/config |
+| **V5.3** | `archive/crypto_trading_system_v5.3.py` | Archived | LGBM lightened, LOKY_MAX_CPU_COUNT capped, OMP/MKL/OpenBLAS thread limits |
+| **V5.2** | `archive/crypto_trading_system_v5.2.py` | Archived | All 8 horizons + Mode G (no BLAS fixes) |
 | **V5.1** | `archive/crypto_trading_system_v5.1.py` | Archived | Alpha scoring patches integrated |
 | **V4** | `archive/crypto_trading_system_v4.py` | `0.45×Calmar + 0.35×Sharpe + 0.20×Acc` | Bootstrap CI, Calmar/Sharpe, --permtest. Superseded — biased toward low-trade configs |
 | **V3** | `archive/crypto_trading_system_v3_old.py` | Heuristic | Original production. Archived |
@@ -589,13 +665,29 @@ MACRO_DIR = 'data/macro_data'
 ## File Dependencies
 
 ```
-crypto_trading_system.py  (V5 — production)
+crypto_trading_system.py  (V5.4 — production)
   ├── imports: hardware_config.py
   ├── reads: data/macro_data/*.csv
   ├── reads/writes: data/{asset}_hourly_data.csv
   ├── reads/writes: models/crypto_hourly_best_models.csv
   ├── reads/writes: config/trading_config.json  (Mode F)
   └── writes: charts/*.html, charts/*.png, models/*.json
+
+crypto_trading_system_v15.py  (V15 — 15-min candles)
+  ├── imports: hardware_config.py
+  ├── reads: data/macro_data/*.csv
+  ├── reads/writes: data/{asset}_15m_data.csv
+  ├── reads/writes: models/crypto_15m_best_models.csv
+  ├── reads/writes: config/trading_config_15m.json  (Mode F)
+  └── writes: charts/*_15m_*.html, charts/*_15m_backtest.png
+
+crypto_trading_system_v30.py  (V30 — 30-min candles)
+  ├── imports: hardware_config.py
+  ├── reads: data/macro_data/*.csv
+  ├── reads/writes: data/{asset}_30m_data.csv
+  ├── reads/writes: models/crypto_30m_best_models.csv
+  ├── reads/writes: config/trading_config_30m.json  (Mode F)
+  └── writes: charts/*_30m_*.html, charts/*_30m_backtest.png
 
 crypto_live_trader.py  (signal generation)
   ├── imports: crypto_trading_system.py  (ASSETS, features, models, download/load/build)
@@ -623,12 +715,13 @@ ib_auto_trader.py  (DAX CFD)
 
 ## Pending Actions
 
-- [ ] **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 2y` on laptop, then Mode F
-- [ ] **ETH GB calibration** — add `CalibratedClassifierCV` to Mode D for GB model (ETH 8h overfit fix)
-- [ ] **V5.2 Mode D BTC** — all-8-horizons run hung on 1h diagnostic (worker deadlock). Needs root cause investigation before retry
-- [ ] **Mode G** — can only run after all 8 horizons complete for V5.2
+- [ ] **V5.5 A/B tests** — `python testing_literature.py` — 8 configs × BTC 4,8h 1y, results in testing_literature.csv
+- [ ] **V5.5 promotion** — review A/B results, promote winning enhancements to production
+- [ ] **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
+- [ ] **ETH GB calibration** — `CalibratedClassifierCV` now in V5.5 as `gb_calibration` enhancement flag
+- [ ] **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h 1y` to validate 15-min pipeline
+- [ ] **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h 1y` to validate 30-min pipeline
 - [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
-- [ ] BTC V5.3 3h 3y run in progress
 - [x] V5 scoring (acc×(1+return/100))
 - [x] Mode F (strategy comparison + confidence sweep)
 - [x] Per-step timers in Mode D
@@ -647,4 +740,4 @@ ib_auto_trader.py  (DAX CFD)
 
 ---
 
-*Last updated: March 11, 2026 — V5.3/V5.4 added, archive/ reorganised, ETH V5 2y results documented.*
+*Last updated: March 13, 2026 — V5.5 with 7 literature enhancements (on-chain, derivatives, triple-barrier, slippage, extended diag, GB calibration, purged embargo) + A/B test harness. Default period changed to 1y. Production is V5.4.*
