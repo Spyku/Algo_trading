@@ -82,6 +82,16 @@ from hardware_config import (
 # Cap loky worker pool to configured parallelism (not raw CPU count)
 os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
 
+# Lower process priority so the live trader always gets CPU first
+try:
+    import ctypes
+    ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+except Exception:
+    try:
+        os.nice(10)
+    except Exception:
+        pass
+
 
 def _kill_orphan_workers():
     """Kill any orphaned python/loky workers from previous interrupted runs.
@@ -208,7 +218,9 @@ AVAILABLE_HORIZONS = [1, 2, 3, 4, 5, 6, 7, 8]  # 1-8 candles = 30'-240'
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
-TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS   = _hours_to_rows(200)    # 800 candles
 REPLAY_HOURS_F = _hours_to_rows(400)    # 1600 candles — Mode F longer window

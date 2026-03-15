@@ -86,6 +86,17 @@ from hardware_config import (
 # Cap loky worker pool to configured parallelism (not raw CPU count)
 os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
 
+# Lower process priority so the live trader always gets CPU first
+# BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+try:
+    import ctypes
+    ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+except Exception:
+    try:
+        os.nice(10)  # Unix fallback
+    except Exception:
+        pass
+
 
 def _kill_orphan_workers():
     """Kill any orphaned python/loky workers from previous interrupted runs.
@@ -119,7 +130,7 @@ def _kill_orphan_workers():
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
-RESUME_DIR = f'{MODELS_DIR}/.resume_hourly'
+RESUME_DIR = 'models/.resume_hourly'
 
 def _resume_path(asset, horizon, step):
     return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
@@ -199,7 +210,9 @@ AVAILABLE_HORIZONS = [4, 8]       # 4h and 8h models
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
-TRADING_FEE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
@@ -489,6 +502,31 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df['vvr_12h'] = df['vvr_12h'].fillna(1.0)
     df['vvr_12h'] = df['vvr_12h'].clip(0, 20)  # cap outliers
 
+    # ---- Garman-Klass volatility (1980): uses OHLC, 7.4x more efficient than close-to-close ----
+    log_hl = np.log(df['high'] / df['low'])
+    log_co = np.log(df['close'] / df['open'])
+    gk_single = 0.5 * log_hl**2 - (2 * np.log(2) - 1) * log_co**2
+    df['gk_volatility_14h'] = gk_single.rolling(14).mean().apply(np.sqrt)
+    df['gk_volatility_48h'] = gk_single.rolling(48).mean().apply(np.sqrt)
+
+    # ---- ADX — trend strength (Wilder 1978) ----
+    _tr = pd.DataFrame({
+        'hl': df['high'] - df['low'],
+        'hc': abs(df['high'] - df['close'].shift(1)),
+        'lc': abs(df['low'] - df['close'].shift(1))
+    }).max(axis=1)
+    plus_dm = (df['high'] - df['high'].shift(1)).clip(lower=0)
+    minus_dm = (df['low'].shift(1) - df['low']).clip(lower=0)
+    plus_dm = plus_dm.where(plus_dm > minus_dm, 0)
+    minus_dm = minus_dm.where(minus_dm > plus_dm, 0)
+    atr_14 = _tr.rolling(14).mean()
+    plus_di = 100 * (plus_dm.rolling(14).mean() / (atr_14 + 1e-10))
+    minus_di = 100 * (minus_dm.rolling(14).mean() / (atr_14 + 1e-10))
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    df['adx_14h'] = dx.rolling(14).mean()
+    df['plus_di_14h'] = plus_di
+    df['minus_di_14h'] = minus_di
+
     hour = df['datetime'].dt.hour
     df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
@@ -525,6 +563,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         'atr_pct_14h', 'intraday_range',
         'volatility_12h', 'volatility_48h', 'vol_ratio_12_48',
         'volume_ratio_h', 'vvr_12h',
+        'gk_volatility_14h', 'gk_volatility_48h',
+        'adx_14h', 'plus_di_14h', 'minus_di_14h',
         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
         'price_velocity_1h', 'price_velocity_4h',
         'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
@@ -3488,7 +3528,7 @@ def main():
     cli_args    = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_permtest = '--permtest' in sys.argv  # e.g. python crypto_trading_system.py D BTC 1y --permtest
     flag_resume   = '--resume' in sys.argv    # e.g. python crypto_trading_system.py D BTC 4,8h 1y --resume
-    if cli_args and cli_args[0].upper() in ('B', 'D', 'E', 'F', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'E', 'F', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -3505,8 +3545,8 @@ def main():
         else:
             assets_list = list(ASSETS.keys())
 
-        # Parse horizon (default: 4,8h for Mode B, 4h for others)
-        horizons = [4, 8] if mode == 'B' else [4]
+        # Parse horizon (default: 4,8h for Mode B and DF, 4h for others)
+        horizons = [4, 8] if mode in ('B', 'DF') else [4]
         for a in cli_args:
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
@@ -3628,15 +3668,17 @@ def main():
                 print(f"\n{'#'*60}")
                 print(f"  RUNNING {h}h HORIZON")
                 print(f"{'#'*60}")
-            if mode == 'D':
+            if mode in ('D', 'DF'):
                 run_mode_d(assets_list, diag_years=diag_years, horizon=h, permtest=flag_permtest, resume=flag_resume)
             elif mode == 'E':
                 run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
             elif mode == 'F':
                 pass  # handled below
 
-        # After Mode D with both horizons: run strategy comparison
-        if mode == 'D' and len(horizons) == 2:
+        # Run strategy comparison (Mode F) after diagnostics
+        if mode == 'DF':
+            run_strategy_comparison(assets_list, horizons)
+        elif mode == 'D' and len(horizons) == 2:
             run_strategy_comparison(assets_list, horizons)
         elif mode == 'F':
             run_strategy_comparison(assets_list, horizons)

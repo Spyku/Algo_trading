@@ -452,6 +452,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
         sig_strs.append(f"{h}h={s['signal']}({s['confidence']:.0f}%)" if s else f"{h}h=N/A")
     print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.0f}%) [{reason}] | pos={position['state']}")
 
+    # Log signal for /chart command
+    _log_signal(asset, price, sigs_by_horizon, action, confidence)
+
     # Keep backward compat: expose sig_4h, sig_8h for Telegram message
     sig_4h = sigs_by_horizon.get(4)
     sig_8h = sigs_by_horizon.get(8)
@@ -850,6 +853,8 @@ def _handle_help_command():
         "/status — Positions, prices, RSI, P&L\n"
         "/balance — Exchange balances\n"
         "/config — Show current config\n"
+        "/conf — Same as /config\n"
+        "/chart BTC — 24h price chart with signals\n"
         "/setup — Interactive config editor\n"
         "/auto BTC on — Enable auto-trade\n"
         "/auto BTC off — Disable auto-trade\n"
@@ -858,6 +863,219 @@ def _handle_help_command():
         "/resume — Resume trading\n"
         "/stop — Stop the trader"
     )
+
+# ---- Signal logging for /chart ----
+SIGNAL_LOG_DIR = 'config'
+SIGNAL_LOG_FILE = os.path.join(SIGNAL_LOG_DIR, 'signal_log.csv')
+
+def _log_signal(asset, price, sigs_by_horizon, action, confidence):
+    """Append one row per signal to signal_log.csv for chart rendering."""
+    import csv
+    fieldnames = ['timestamp', 'asset', 'price', 'action', 'confidence',
+                  'sig_4h', 'conf_4h', 'sig_8h', 'conf_8h']
+    file_exists = os.path.exists(SIGNAL_LOG_FILE) and os.path.getsize(SIGNAL_LOG_FILE) > 0
+    try:
+        sig4 = sigs_by_horizon.get(4)
+        sig8 = sigs_by_horizon.get(8)
+        with open(SIGNAL_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'asset': asset,
+                'price': f'{price:.2f}',
+                'action': action,
+                'confidence': f'{confidence:.1f}',
+                'sig_4h': sig4['signal'] if sig4 else '',
+                'conf_4h': f"{sig4['confidence']:.1f}" if sig4 else '',
+                'sig_8h': sig8['signal'] if sig8 else '',
+                'conf_8h': f"{sig8['confidence']:.1f}" if sig8 else '',
+            })
+    except Exception as e:
+        print(f"  [!] Signal log error: {e}")
+
+
+def send_telegram_photo(photo_path, caption=''):
+    """Send a photo to Telegram."""
+    token = TELEGRAM_CONFIG.get('token', '')
+    chat_id = TELEGRAM_CONFIG.get('chat_id', '')
+    if not token or not chat_id:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    try:
+        import io
+        boundary = '----PythonBoundary'
+        body = io.BytesIO()
+
+        # chat_id field
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{chat_id}\r\n'.encode())
+
+        # caption field
+        if caption:
+            body.write(f'--{boundary}\r\n'.encode())
+            body.write(f'Content-Disposition: form-data; name="caption"\r\n\r\n{caption}\r\n'.encode())
+
+        # photo file
+        with open(photo_path, 'rb') as img:
+            img_data = img.read()
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(f'Content-Disposition: form-data; name="photo"; filename="chart.png"\r\n'.encode())
+        body.write(f'Content-Type: image/png\r\n\r\n'.encode())
+        body.write(img_data)
+        body.write(f'\r\n--{boundary}--\r\n'.encode())
+
+        req = urllib.request.Request(
+            url, data=body.getvalue(),
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        )
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_ctx) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('ok'):
+                print("  ✓ Telegram photo sent")
+                return True
+            print(f"  [!] Telegram photo error: {result}")
+    except Exception as e:
+        print(f"  [!] Telegram photo error: {e}")
+    return False
+
+
+def _handle_chart_command(msg, trading_cfg):
+    """Generate and send a 24h chart with price + model predictions."""
+    parts = msg.split()
+    asset = parts[1].upper() if len(parts) >= 2 else 'BTC'
+    if asset not in trading_cfg:
+        send_telegram(f"Unknown asset: {asset}. Use: {', '.join(trading_cfg.keys())}")
+        return
+
+    # Load price data (last 24h)
+    try:
+        df_raw = load_data(asset)
+        if df_raw is None:
+            send_telegram(f"No data for {asset}")
+            return
+    except Exception as e:
+        send_telegram(f"Error loading {asset} data: {e}")
+        return
+
+    df_price = df_raw.tail(24).copy()
+    if len(df_price) < 2:
+        send_telegram(f"Not enough data for {asset}")
+        return
+
+    # Load signal log
+    signals = []
+    if os.path.exists(SIGNAL_LOG_FILE):
+        try:
+            import csv
+            with open(SIGNAL_LOG_FILE, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
+                for row in reader:
+                    if row['asset'] == asset and row['timestamp'] >= cutoff:
+                        signals.append(row)
+        except Exception:
+            pass
+
+    # Generate chart
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # Price line
+        times = pd.to_datetime(df_price['datetime'])
+        prices = df_price['close'].values
+        ax.plot(times, prices, color='#2196F3', linewidth=1.5, label=f'{asset} Price')
+        ax.fill_between(times, prices.min() * 0.999, prices, alpha=0.1, color='#2196F3')
+
+        # Overlay signals
+        for sig in signals:
+            try:
+                sig_time = pd.to_datetime(sig['timestamp'])
+                sig_price = float(sig['price'])
+                action = sig['action']
+
+                # Check if prediction was correct by comparing with next available price
+                future_prices = df_price[pd.to_datetime(df_price['datetime']) > sig_time]['close']
+                if len(future_prices) >= 4:
+                    future_price = future_prices.iloc[3]  # ~4h later
+                    if action == 'BUY':
+                        correct = future_price > sig_price
+                    elif action == 'SELL':
+                        correct = future_price < sig_price
+                    else:
+                        correct = None  # HOLD — no right/wrong
+                else:
+                    correct = None  # not enough future data yet
+
+                if action == 'BUY':
+                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    marker = '^'
+                    label_txt = f"BUY {sig.get('conf_4h', '')}%/{sig.get('conf_8h', '')}%"
+                elif action == 'SELL':
+                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    marker = 'v'
+                    label_txt = f"SELL"
+                else:
+                    continue  # skip HOLD signals on chart
+
+                ax.scatter(sig_time, sig_price, color=color, marker=marker,
+                          s=120, zorder=5, edgecolors='black', linewidth=0.5)
+
+                # Annotate
+                offset_y = (prices.max() - prices.min()) * 0.03
+                if action == 'BUY':
+                    ax.annotate(label_txt, (sig_time, sig_price - offset_y),
+                               fontsize=7, ha='center', va='top', color=color)
+                else:
+                    ax.annotate(label_txt, (sig_time, sig_price + offset_y),
+                               fontsize=7, ha='center', va='bottom', color=color)
+            except Exception:
+                continue
+
+        # Formatting
+        ax.set_title(f'{asset}/USD — Last 24h', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Price (USD)', fontsize=11)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, alpha=0.3)
+
+        # Legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='#4CAF50',
+                   markersize=10, label='BUY (correct)'),
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='#FF5722',
+                   markersize=10, label='BUY (wrong)'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor='#4CAF50',
+                   markersize=10, label='SELL (correct)'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor='#FF5722',
+                   markersize=10, label='SELL (wrong)'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFC107',
+                   markersize=10, label='Pending'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper left', fontsize=8)
+
+        plt.tight_layout()
+        chart_path = os.path.join('charts', f'{asset}_telegram_24h.png')
+        os.makedirs('charts', exist_ok=True)
+        fig.savefig(chart_path, dpi=120)
+        plt.close(fig)
+
+        # Send
+        caption = f"{asset}/USD 24h — Green=correct, Red=wrong, Yellow=pending"
+        send_telegram_photo(chart_path, caption=caption)
+        print(f"  Chart sent for {asset}")
+
+    except Exception as e:
+        send_telegram(f"Chart error: {e}")
+        print(f"  [!] Chart error: {e}")
+
 
 # ---- Interactive setup wizard ----
 _setup_state = {'active': False}
@@ -1077,8 +1295,10 @@ def _telegram_command_loop(trading_cfg):
                 elif cmd == '/sync':
                     sync_positions(trading_cfg, notify=True)
                     send_telegram("🔄 <b>Synced</b>")
-                elif cmd == '/config':
+                elif cmd in ('/config', '/conf'):
                     _handle_config_command()
+                elif cmd.startswith('/chart'):
+                    _handle_chart_command(msg, trading_cfg)
                 elif cmd.startswith('/auto'):
                     _handle_auto_command(msg, trading_cfg)
                 elif cmd == '/setup':

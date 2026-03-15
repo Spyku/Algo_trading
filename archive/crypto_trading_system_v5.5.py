@@ -120,6 +120,8 @@ def _kill_orphan_workers():
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
+if 'MODELS_DIR' not in dir():
+    MODELS_DIR = 'models'
 RESUME_DIR = f'{MODELS_DIR}/.resume_hourly'
 
 def _resume_path(asset, horizon, step):

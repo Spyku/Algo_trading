@@ -8,3 +8,7 @@ ccxt>=4.0
 yfinance
 pynacl
 cryptography
+# V6 literature enhancements
+PyWavelets
+xgboost
+# fracdiff, hmmlearn removed — manual implementations in V6 (no C build / Python 3.14 support)

@@ -12,17 +12,37 @@ Automated ML trading system for crypto (BTC, ETH, XRP). Generates hourly BUY/SEL
 
 ## Machine Setup
 
-| Machine | Engine Path | Venv |
-|---------|-------------|------|
-| Desktop (primary) | `G:\engine\` (Google Drive synced) | `C:\algo_trading\venv\Scripts\activate.bat` |
-| Laptop | `C:\Users\Alex\algo_trading\engine\` | `C:\Users\Alex\algo_trading\venv\Scripts\activate.bat` |
+**One shared engine folder** synced via Google Drive — both machines use the same code, data, and models. Only the venv is local per machine.
+
+| Machine | Engine Path | Venv | Python |
+|---------|-------------|------|--------|
+| Desktop (primary) | `G:\engine\` (Google Drive synced) | `C:\algo_trading\venv\` | `C:\algo_trading\venv\Scripts\python.exe` |
+| Laptop | `G:\Autres ordinateurs\My laptop\engine\` (Google Drive synced) | `C:\Users\Alex\algo_trading\venv\` | `C:\Users\Alex\algo_trading\venv\Scripts\python.exe` |
 
 - **Desktop:** i7-14700KF, RTX 4080, 32GB — used for long Mode D runs
 - **Laptop:** 16 cores, RTX 3070 Ti
 - **GitHub:** https://github.com/Spyku/Algo_trading
 - **Push:** `git_push.bat` from `G:\engine\`
-- **OS:** Windows 11, Python 3.13+ venv (NOT conda)
+- **OS:** Windows 11, Python 3.14 venv (NOT conda)
 - **GPU:** LGBM uses GPU (`device='gpu'`), configured in `hardware_config.py`
+
+### Install / Venv Setup
+
+Each machine needs its own venv with all dependencies. The engine folder is shared but venvs are local.
+
+```bash
+# Desktop
+C:\algo_trading\venv\Scripts\activate.bat
+pip install -r G:\engine\requirements.txt
+
+# Laptop
+C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
+pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
+```
+
+**Always use the venv Python** — never system Python. When running from Claude Code, use the full venv path:
+- Desktop: `"C:/algo_trading/venv/Scripts/python.exe"`
+- Laptop: `"C:/Users/Alex/algo_trading/venv/Scripts/python.exe"`
 
 ---
 
@@ -48,7 +68,7 @@ python crypto_revolut_trader.py --status          # Show positions
 python crypto_revolut_trader.py --balance         # Revolut X balance
 ```
 
-**Telegram commands while trader is running:** `/stop` `/status` `/pause` `/resume` `/balance` `/sync`
+**Telegram commands while trader is running:** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/chart BTC`
 
 ---
 
@@ -95,7 +115,9 @@ config/telegram_config.json            <- Telegram bot token
 ## Key Constants
 
 ```python
-TRADING_FEE = 0.0009        # 0.09% Revolut X taker fee (0% maker) — applied on BUY and SELL
+TRADING_FEE_BASE = 0.0009   # 0.09% Revolut X taker fee (0% maker)
+SLIPPAGE = 0.0002           # 0.02% estimated slippage (market impact, spread)
+TRADING_FEE = 0.0011        # total cost per trade (fee + slippage) — applied on BUY and SELL
 MIN_CONFIDENCE = 75         # global fallback only — overridden per asset by Mode F
 REPLAY_HOURS = 200          # Modes B, D signal replay
 REPLAY_HOURS_F = 400        # Mode F — longer window for more trades in strategy selection
@@ -111,10 +133,12 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system.py` | V5 Production | DO NOT break — live trader imports from it |
-| `crypto_trading_system_v5.5.py` | V5.5 Experimental | 7 literature enhancements behind ENHANCEMENTS flags |
-| `testing_literature.py` | Test harness | A/B tests each V5.5 enhancement (Mode D BTC 4,8h 1y) |
-| `crypto_revolut_trader.py` | Live | Multi-asset live trader |
+| `crypto_trading_system.py` | V5 Production | DO NOT break — live trader imports from it. Includes DF mode + slippage model. |
+| `crypto_trading_system_v6.py` | V6 Experimental | 12 literature enhancements behind `ENHANCEMENTS` flags (env var override). NOT production. |
+| `testing_literature.py` | Test harness | A/B tests each V5.5 enhancement (Mode D BTC 4,8h 1y) — COMPLETE |
+| `testing_literature_v2.py` | Test harness | A/B tests 12 V6 enhancements (Mode D BTC 4,8h 1y) |
+| `testing_feature_stability.py` | Test harness | Feature stability test across BTC+ETH × 4h+8h |
+| `crypto_revolut_trader.py` | Live | Multi-asset live trader + `/conf` `/chart` commands |
 | `crypto_live_trader.py` | Live | Signal generation core — NOT run directly |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `crypto_trading_system_v15.py` | V15 | 15-min candles, horizons 15'–120', 1y max |
@@ -181,9 +205,18 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 ## Pending Work
 
-1. **V5.5 A/B tests** — `python testing_literature.py` running: 8 configs × BTC 4,8h 1y. Results in `testing_literature.csv`
-2. **V5.5 promotion** — review A/B results, promote winning enhancements to production
-3. **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
-4. **DOGE calibration** — add `CalibratedClassifierCV` (now available as `gb_calibration` flag in V5.5)
-5. **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
-6. **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test
+1. **V6 A/B tests** — `python testing_literature_v2.py`: 12 new literature enhancements + baseline, Mode D BTC 4,8h 1y. Results in `testing_literature_v2.csv`
+2. **Re-run Mode DF for BTC** — `python crypto_trading_system.py DF BTC 4,8h 1y` (best_models CSV contaminated from V5.5 tests)
+3. **Re-run Mode F for ETH** — `python crypto_trading_system.py F ETH 4,8h` to recalibrate confidence with slippage model
+4. **Feature stability test** — `python testing_feature_stability.py`: BTC+ETH × 4h+8h
+5. **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
+6. **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
+7. **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test
+
+### Completed
+- **V5.5 A/B tests** — DONE. Only slippage_model won → promoted to production. V5.5 archived.
+- **V5.5 promotion** — slippage model (TRADING_FEE 0.0009 → 0.0011) applied to V5, V15, V30
+- **DF combined mode** — `python crypto_trading_system.py DF BTC,ETH 4,8h 1y` runs Mode D then F
+- **Telegram /conf + /chart** — added to crypto_revolut_trader.py
+- **V6 created** — 12 literature enhancements (wavelet, fracdiff, GMM regime, XGBoost, sample weighting, entropy filter, tri-state labels, stacking, dynamic feature select, meta-labeling, adversarial validation, Kelly sizing)
+- **Process priority** — Mode D/F runs at BELOW_NORMAL priority on Windows so trader always gets CPU

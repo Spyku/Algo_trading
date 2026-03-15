@@ -83,13 +83,13 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 │    ├── Walk-forward validation (no future leakage)                  │
 │    └── hardware_config.py (machine-specific GPU/CPU settings)       │
 │                                                                     │
-│  crypto_trading_system_v5.5.py  (V5.5 Experimental)                 │
-│    ├── 7 ENHANCEMENTS flags (toggle on/off, env var override)       │
-│    ├── +29 on-chain features (CoinMetrics + BGeometrics)            │
-│    ├── +12 derivatives features (Binance funding rate + OI)         │
-│    ├── Triple-barrier labeling, slippage model, GB calibration      │
-│    ├── Purged walk-forward embargo (label leakage fix)              │
-│    └── testing_literature.py (A/B test harness)                     │
+│  crypto_trading_system_v6.py  (V6 Experimental)                     │
+│    ├── 12 ENHANCEMENTS flags (toggle on/off, env var override)      │
+│    ├── Wavelet denoising, fractional diff, GMM regime detection     │
+│    ├── XGBoost, sample weighting, entropy filter, tri-state labels  │
+│    ├── Stacking ensemble, dynamic feature select, meta-labeling     │
+│    ├── Adversarial validation, Kelly sizing                         │
+│    └── testing_literature_v2.py (A/B test harness)                  │
 │                                                                     │
 │  crypto_trading_system_v15.py  (V15 — 15-min candles)               │
 │    ├── Horizons 1-8 = 15'–120' (more trades, shorter horizons)     │
@@ -243,7 +243,7 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 3. **Every 5 min:** Position sync (detects manual trades on exchange)
 4. **Every 30 sec:** Poll Telegram for commands
 
-**Telegram commands:** `/stop` `/status` `/pause` `/resume` `/balance` `/sync`
+**Telegram commands:** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/chart BTC`
 
 **Position management:**
 - State machine: `cash ↔ invested` per asset
@@ -350,7 +350,9 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `tools/ib_test_connection.py` | 160 | Broker connection diagnostic |
 | `tools/detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 | `download_macro_data.py` | ~350 | Download macro/sentiment/cross-asset + on-chain + derivatives data |
-| `testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements (Mode D BTC 4,8h 1y × 8 configs) |
+| `testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements — COMPLETE, slippage_model promoted |
+| `testing_literature_v2.py` | ~335 | A/B test harness for V6 (12 literature enhancements) — Mode D BTC 4,8h 1y |
+| `testing_feature_stability.py` | ~300 | Feature stability test — cross-references KEEP/DROP across BTC+ETH × 4h+8h |
 
 ### Archived Scripts (in `archive/`)
 
@@ -372,8 +374,9 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Version | Status |
 |------|---------|--------|
-| `crypto_trading_system.py` | V5.4 | Production — phase-specific BLAS, loky pool reset, orphan cleanup |
-| `crypto_trading_system_v5.5.py` | V5.5 | Experimental — 7 literature enhancements (A/B testable via ENHANCEMENTS flags) |
+| `crypto_trading_system.py` | V5.4+ | Production — phase-specific BLAS, loky pool reset, orphan cleanup, slippage model, DF mode |
+| `crypto_trading_system_v6.py` | V6 | Experimental — 12 literature enhancements behind ENHANCEMENTS flags (env var override) |
+| `archive/crypto_trading_system_v5.5.py` | V5.5 | Archived — 7 literature enhancements tested, only slippage_model promoted |
 | `crypto_trading_system_v15.py` | V15 | Sub-hourly — 15-min candles, horizons 15'–120', 1y max |
 | `crypto_trading_system_v30.py` | V30 | Sub-hourly — 30-min candles, horizons 30'–240', 1y max |
 | `archive/crypto_trading_system_v5.4.py` | V5.4 | Archived — same as production (standalone copy) |
@@ -393,14 +396,17 @@ engine/
 │
 ├── ===== PYTHON FILES (root) =====
 ├── crypto_trading_system.py           # V5.4 PRODUCTION — Modes B/D/E/F
-├── crypto_trading_system_v5.5.py      # V5.5 experimental — all 8 horizons + Mode G + 2-phase Mode F
+├── # (V5.5 archived — slippage_model promoted to production)
 ├── crypto_trading_system_v15.py       # V15 — 15-min candles (15'–120' horizons)
 ├── crypto_trading_system_v30.py       # V30 — 30-min candles (30'–240' horizons)
 ├── crypto_revolut_trader.py           # Multi-asset crypto auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Auto-detects Desktop/Laptop config
 ├── download_macro_data.py             # Macro data downloader (macro + on-chain + derivatives)
-├── testing_literature.py              # A/B test harness for V5.5 enhancements
+├── crypto_trading_system_v6.py        # V6 — 12 literature enhancements (experimental)
+├── testing_literature.py              # A/B test harness for V5.5 enhancements (COMPLETE)
+├── testing_literature_v2.py           # A/B test harness for V6 (12 enhancements)
+├── testing_feature_stability.py      # Feature stability test (BTC+ETH × 4h+8h)
 ├── requirements.txt                   # Python dependencies
 │
 ├── cfd/                               # Index CFD trading (separate pipeline)
@@ -419,6 +425,7 @@ engine/
 │
 ├── archive/                           # Archived / superseded files
 │   ├── crypto_trading_system_v5.4.py  # V5.4 standalone copy
+│   ├── crypto_trading_system_v5.5.py  # V5.5 literature enhancements (tested, slippage promoted)
 │   ├── crypto_trading_system_v5.3.py  # V5.3 thread/worker fixes
 │   ├── crypto_trading_system_v5.2.py  # V5.2 all 8 horizons + Mode G
 │   ├── crypto_trading_system_v5.1.py  # V5.1 alpha scoring patches
@@ -507,10 +514,15 @@ engine/
 
 ## Hardware Setup
 
-Run `python tools/detect_hardware.py` to auto-detect CPU/GPU/RAM and generate `hardware_config.py`. The config auto-detects Desktop (26 workers) vs Laptop (14 workers) at import time.
+**One shared engine folder** synced via Google Drive — both machines run the same code. Only the venv is local per machine. `hardware_config.py` auto-detects Desktop (26 workers) vs Laptop (14 workers) at import time via `os.cpu_count()`.
+
+| Machine | Engine Path | Venv | CPU | GPU |
+|---------|-------------|------|-----|-----|
+| Desktop | `G:\engine\` | `C:\algo_trading\venv\` | i7-14700KF (28 cores) | RTX 4080 |
+| Laptop | `G:\Autres ordinateurs\My laptop\engine\` | `C:\Users\Alex\algo_trading\venv\` | 16 cores | RTX 3070 Ti |
 
 ```
-OS:       Windows 11, Python 3.13+ venv (NOT conda)
+OS:       Windows 11, Python 3.14 venv (NOT conda)
 LGBM:     GPU-enabled (device='gpu'), configured per machine in hardware_config.py
 ```
 
@@ -518,23 +530,34 @@ LGBM:     GPU-enabled (device='gpu'), configured per machine in hardware_config.
 
 ## Installation
 
-```powershell
-# Run the setup script (creates venv, installs deps, detects GPU)
-powershell -ExecutionPolicy Bypass -File setup_algo_trading.ps1
+**Each machine needs its own venv** — the engine folder is shared via Google Drive but venvs are local.
 
-# Or manually:
-python -m venv venv
-venv\Scripts\activate.bat
-pip install -r requirements.txt
+```powershell
+# === DESKTOP ===
+python -m venv C:\algo_trading\venv
+C:\algo_trading\venv\Scripts\activate.bat
+pip install -r G:\engine\requirements.txt
 python tools/detect_hardware.py    # Generates hardware_config.py
+
+# === LAPTOP ===
+python -m venv C:\Users\Alex\algo_trading\venv
+C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
+pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
+python tools/detect_hardware.py
+```
+
+**Verify all deps are in the venv** (run after activating venv):
+```bash
+python -c "import pandas, numpy, sklearn, lightgbm, ccxt, yfinance, pywt, xgboost; print('All OK')"
 ```
 
 ### Dependencies
 
 ```
+# Core
 pandas>=2.0          # DataFrames, time series
 numpy>=1.24          # Numerical computing
-scikit-learn>=1.3    # RF, GB, LR models
+scikit-learn>=1.3    # RF, GB, LR, GaussianMixture models
 lightgbm>=4.0        # GPU-accelerated gradient boosting
 joblib               # Parallel processing
 matplotlib           # Backtest chart PNGs
@@ -543,6 +566,11 @@ yfinance             # Yahoo Finance (macro + indices)
 pynacl               # Asymmetric signing (exchange auth)
 cryptography         # PEM key loading
 ib_insync            # Broker API (optional, for CFD trader)
+
+# V6 literature enhancements
+PyWavelets           # Wavelet denoising (DWT)
+xgboost              # XGBoost model (added to model pool)
+# fracdiff & hmmlearn: manual implementations in V6 (no C build / Python 3.14 support)
 ```
 
 ---
@@ -581,7 +609,9 @@ Per-asset strategy, min_confidence, symbol, and max_position_usd are configured 
 
 ```python
 # Crypto system
-TRADING_FEE = 0.0009                # 0.09% per trade (exchange taker fee)
+TRADING_FEE_BASE = 0.0009           # 0.09% exchange taker fee
+SLIPPAGE = 0.0002                   # 0.02% estimated slippage
+TRADING_FEE = 0.0011                # total cost per trade (fee + slippage)
 MIN_CONFIDENCE = 75                 # Global fallback — overridden per asset by Mode F
 AVAILABLE_HORIZONS = [4, 8]
 REPLAY_HOURS = 200                  # Mode B signal replay window
@@ -722,10 +752,12 @@ cfd/ib_auto_trader.py  (DAX CFD)
 
 ## Pending Actions
 
-- [ ] **V5.5 A/B tests** — `python testing_literature.py` — 8 configs × BTC 4,8h 1y, results in testing_literature.csv
-- [ ] **V5.5 promotion** — review A/B results, promote winning enhancements to production
+- [x] **V5.5 A/B tests** — COMPLETE. 8 configs × BTC 4,8h 1y. Only slippage_model won → promoted. V5.5 archived.
+- [ ] **V6 A/B tests** — `python testing_literature_v2.py` — 12 new enhancements (baseline + 12) × BTC 4,8h 1y
+- [ ] **Re-run Mode DF for BTC** — `python crypto_trading_system.py DF BTC 4,8h 1y` — best_models CSV contaminated from V5.5 tests
+- [ ] **Re-run Mode F for ETH** — `python crypto_trading_system.py F ETH 4,8h` — recalibrate confidence with slippage model
+- [ ] **Feature stability test** — `python testing_feature_stability.py` — BTC+ETH × 4h+8h, find always-dropped features
 - [ ] **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
-- [ ] **ETH GB calibration** — `CalibratedClassifierCV` now in V5.5 as `gb_calibration` enhancement flag
 - [ ] **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h 1y` to validate 15-min pipeline
 - [ ] **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h 1y` to validate 30-min pipeline
 - [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
@@ -747,4 +779,4 @@ cfd/ib_auto_trader.py  (DAX CFD)
 
 ---
 
-*Last updated: March 13, 2026 — Reorganized: CFD files to cfd/, utilities to tools/. V15/V30 sub-hourly systems. hardware_config auto-detects Desktop/Laptop. V5.5 with 7 literature enhancements + A/B test harness. Production is V5.4.*
+*Last updated: March 15, 2026 — V6 created (12 literature enhancements). DF combined mode added. /conf + /chart Telegram commands. Dual-machine install docs. fracdiff+hmmlearn replaced with manual implementations (Python 3.14 compat).*
