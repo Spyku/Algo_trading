@@ -55,6 +55,7 @@ from crypto_trading_system import (
     ASSETS, FEATURE_SET_A, FEATURE_SET_B,
     PREDICTION_HORIZON, ALL_MODELS,
     download_asset, load_data, build_all_features,
+    get_decay_weights,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -121,6 +122,8 @@ def load_best_config(asset_name, horizon=None):
         'best_combo': row['best_combo'], 'best_window': int(row['best_window']),
         'accuracy': row['accuracy'], 'feature_set': row.get('feature_set', 'A'),
         'horizon': int(row.get('horizon', 4)), 'optimal_features': str(opt),
+        'training_period': str(row['training_period']) if 'training_period' in row and pd.notna(row['training_period']) else '',
+        'gamma': float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0,
     }
 
 # ============================================================
@@ -132,6 +135,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     fs = config.get('feature_set', 'A')
     horizon = config.get('horizon', 4)
     opt_features = config.get('optimal_features', '')
+    gamma = config.get('gamma', 1.0)
 
     if fs in ('D', 'E2', 'E3') and opt_features and opt_features.strip() and opt_features.strip() != 'nan':
         feature_list = [f.strip() for f in opt_features.split(',') if f.strip() and f.strip() != 'nan']
@@ -174,11 +178,12 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
     X_test_s = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
 
+    sw = get_decay_weights(len(y_train), gamma)
     votes, probas = [], []
     for model_name in model_names:
         try:
             model = ALL_MODELS[model_name]()
-            model.fit(X_train_s, y_train)
+            model.fit(X_train_s, y_train, sample_weight=sw)
             votes.append(model.predict(X_test_s)[0])
             probas.append(model.predict_proba(X_test_s)[0][1])
         except Exception:

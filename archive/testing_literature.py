@@ -1,30 +1,25 @@
 """
-testing_literature_v2.py — A/B test 12 literature enhancements (V6)
+testing_literature.py — A/B test each V5.5 enhancement individually
 ====================================================================
 Runs Mode D (BTC, 4h + 8h, 1y) for:
-  0. Baseline           (all enhancements OFF)
-  1. wavelet_denoising   — Denoise close price via DWT
-  2. fractional_diff     — Fractionally differentiated price features
-  3. hmm_regime          — Hidden Markov Model regime detection
-  4. xgboost_model       — Add XGBoost to model pool
-  5. sample_weighting    — Time-decay + uniqueness sample weights
-  6. entropy_filter      — Shannon entropy signal filtering
-  7. tri_state_labels    — 3-class labeling (BUY/SELL/NO-ACTION)
-  8. stacking_ensemble   — Stacking meta-learner on model probabilities
-  9. dynamic_feature_select — MI-based feature selection per step
- 10. meta_labeling       — Second model filters primary signals
- 11. adversarial_validation — Drop distribution-shift features per step
- 12. kelly_sizing         — Fractional Kelly position sizing in backtest
+  0. Baseline          (all enhancements OFF)
+  1. on_chain_features
+  2. derivatives_features
+  3. triple_barrier_label
+  4. slippage_model
+  5. extended_diag_step
+  6. gb_calibration
+  7. purged_embargo
 
 Each test toggles ONE enhancement ON while keeping all others OFF.
-Results are appended to testing_literature_v2.csv (never overwritten).
-Per-run logs saved to testing_literature_v2_logs/.
+Results are appended to testing_literature.csv (never overwritten).
+Full logs are saved per-run to testing_literature_logs/ folder.
 
 Usage:
-  python testing_literature_v2.py              # Run all 13 tests
-  python testing_literature_v2.py 0            # Run only baseline
-  python testing_literature_v2.py 3 5          # Run only tests 3 and 5
-  python testing_literature_v2.py --resume     # Skip already-completed tests
+  python testing_literature.py              # Run all 8 tests
+  python testing_literature.py 0            # Run only baseline
+  python testing_literature.py 3 5          # Run only tests 3 and 5
+  python testing_literature.py --resume     # Skip already-completed tests (checks CSV)
 """
 
 import subprocess
@@ -38,46 +33,36 @@ from datetime import datetime
 # Configuration
 # ============================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-V6_SCRIPT = os.path.join(SCRIPT_DIR, 'crypto_trading_system_v6.py')
-PYTHON_EXE = sys.executable
-CSV_PATH = os.path.join(SCRIPT_DIR, 'testing_literature_v2.csv')
-LOG_DIR = os.path.join(SCRIPT_DIR, 'testing_literature_v2_logs')
-MODELS_CSV = os.path.join(SCRIPT_DIR, 'models', 'crypto_hourly_best_models_test.csv')  # Test CSV — never touch production
+V55_SCRIPT = os.path.join(SCRIPT_DIR, 'crypto_trading_system_v5.5.py')
+PYTHON_EXE = sys.executable  # Same Python that launched this script
+CSV_PATH = os.path.join(SCRIPT_DIR, 'testing_literature.csv')
+LOG_DIR = os.path.join(SCRIPT_DIR, 'testing_literature_logs')
+MODELS_CSV = os.path.join(SCRIPT_DIR, 'models', 'crypto_hourly_best_models.csv')
 HORIZONS = [4, 8]
 DIAG_YEARS = 1
 ASSET = 'BTC'
 
-# Enhancement keys in V6
+# Enhancement keys in the order they appear in V5.5
 ENHANCEMENT_KEYS = [
-    'wavelet_denoising',
-    'fractional_diff',
-    'hmm_regime',
-    'xgboost_model',
-    'sample_weighting',
-    'entropy_filter',
-    'tri_state_labels',
-    'stacking_ensemble',
-    'dynamic_feature_select',
-    'meta_labeling',
-    'adversarial_validation',
-    'kelly_sizing',
+    'on_chain_features',
+    'derivatives_features',
+    'triple_barrier_label',
+    'slippage_model',
+    'extended_diag_step',
+    'gb_calibration',
+    'purged_embargo',
 ]
 
 # Test definitions: (test_name, dict of enhancements to enable)
 TESTS = [
-    ('baseline',                {}),
-    ('wavelet_denoising',       {'wavelet_denoising': True}),
-    ('fractional_diff',         {'fractional_diff': True}),
-    ('hmm_regime',              {'hmm_regime': True}),
-    ('xgboost_model',           {'xgboost_model': True}),
-    ('sample_weighting',        {'sample_weighting': True}),
-    ('entropy_filter',          {'entropy_filter': True}),
-    ('tri_state_labels',        {'tri_state_labels': True}),
-    ('stacking_ensemble',       {'stacking_ensemble': True}),
-    ('dynamic_feature_select',  {'dynamic_feature_select': True}),
-    ('meta_labeling',           {'meta_labeling': True}),
-    ('adversarial_validation',  {'adversarial_validation': True}),
-    ('kelly_sizing',            {'kelly_sizing': True}),
+    ('baseline',              {}),
+    ('on_chain_features',     {'on_chain_features': True}),
+    ('derivatives_features',  {'derivatives_features': True}),
+    ('triple_barrier_label',  {'triple_barrier_label': True}),
+    ('slippage_model',        {'slippage_model': True}),
+    ('extended_diag_step',    {'extended_diag_step': True}),
+    ('gb_calibration',        {'gb_calibration': True}),
+    ('purged_embargo',        {'purged_embargo': True}),
 ]
 
 
@@ -85,13 +70,13 @@ TESTS = [
 # Helpers
 # ============================================================
 def build_env(enabled_enhancements):
-    """Build environment variables for a test run."""
+    """Build environment variables for a test run.
+    All enhancements start OFF; only the ones in enabled_enhancements are set to '1'."""
     env = os.environ.copy()
     for key in ENHANCEMENT_KEYS:
         env[f'ENH_{key.upper()}'] = '1' if enabled_enhancements.get(key, False) else '0'
+    # Force unbuffered stdout so output streams in real time
     env['PYTHONUNBUFFERED'] = '1'
-    # Redirect V6 model output to test CSV — prevents production contamination
-    env['MODELS_CSV_OVERRIDE'] = MODELS_CSV
     return env
 
 
@@ -114,7 +99,7 @@ def read_best_model(horizon):
 
 
 def append_result(test_name, horizon, result, enabled_enhancements, elapsed_min):
-    """Append one result row to CSV. Never overwrites."""
+    """Append one result row to testing_literature.csv. Never overwrites."""
     fieldnames = [
         'timestamp', 'test_name', 'test_idx', 'horizon', 'coin',
         'best_combo', 'best_window', 'accuracy', 'return_pct',
@@ -127,6 +112,7 @@ def append_result(test_name, horizon, result, enabled_enhancements, elapsed_min)
         if not file_exists:
             writer.writeheader()
 
+        # Which enhancements are ON for this test
         enh_on = ','.join(k for k, v in enabled_enhancements.items() if v) or 'none'
         test_idx = next((i for i, (name, _) in enumerate(TESTS) if name == test_name), -1)
 
@@ -166,8 +152,8 @@ def get_completed_tests():
 
 
 def run_mode_d(test_name, horizon, env, log_file):
-    """Run V6 Mode D as a subprocess for one horizon."""
-    cmd = [PYTHON_EXE, V6_SCRIPT, 'D', ASSET, f'{horizon}h', f'{DIAG_YEARS}y']
+    """Run V5.5 Mode D as a subprocess for one horizon. Stream output to both console and log."""
+    cmd = [PYTHON_EXE, V55_SCRIPT, 'D', ASSET, f'{horizon}h', f'{DIAG_YEARS}y']
     print(f"\n  $ {' '.join(cmd)}")
     print(f"  ENV: {' '.join(f'{k}={v}' for k, v in sorted(env.items()) if k.startswith('ENH_'))}")
 
@@ -178,6 +164,7 @@ def run_mode_d(test_name, horizon, env, log_file):
         cwd=SCRIPT_DIR,
     )
 
+    # Stream output line by line to both console and log file
     for line in process.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
@@ -205,11 +192,13 @@ def main():
             if 0 <= idx < len(TESTS):
                 requested.append(idx)
 
+    # If specific tests requested, only run those
     if requested:
         tests_to_run = [(i, TESTS[i]) for i in requested]
     else:
         tests_to_run = list(enumerate(TESTS))
 
+    # If resume mode, skip already-completed tests
     if resume_mode:
         completed = get_completed_tests()
         tests_to_run = [
@@ -224,7 +213,7 @@ def main():
     total_runs = total_tests * len(HORIZONS)
 
     print("=" * 80)
-    print(f"  TESTING LITERATURE V2 — 12 Literature Enhancements")
+    print(f"  TESTING LITERATURE — A/B Enhancement Tests")
     print(f"  Asset: {ASSET} | Horizons: {','.join(str(h)+'h' for h in HORIZONS)} | Period: {DIAG_YEARS}y")
     print(f"  Tests to run: {total_tests} configs x {len(HORIZONS)} horizons = {total_runs} Mode D runs")
     print(f"  Results: {CSV_PATH}")
@@ -249,6 +238,7 @@ def main():
         env = build_env(enabled_enhancements)
 
         for horizon in HORIZONS:
+            # Skip if already completed in resume mode
             if resume_mode:
                 completed = get_completed_tests()
                 if (test_name, horizon) in completed:
@@ -258,7 +248,10 @@ def main():
             run_count += 1
             print(f"\n  --- Run {run_count}/{total_runs}: {test_name} | {horizon}h ---")
 
+            # One log file per (test, horizon) — avoids Google Drive large-file OSError
             log_path = os.path.join(LOG_DIR, f'test_{test_idx}_{test_name}_{horizon}h.log')
+
+            # Record CSV mtime before run to detect stale reads
             csv_mtime_before = os.path.getmtime(MODELS_CSV) if os.path.exists(MODELS_CSV) else 0
 
             t0 = time.time()
@@ -269,6 +262,7 @@ def main():
                 log_file.write(f"{'='*80}\n\n")
 
                 returncode = run_mode_d(test_name, horizon, env, log_file)
+
                 elapsed = (time.time() - t0) / 60
                 log_file.write(f"\nElapsed: {elapsed:.1f} min\n")
 
@@ -277,6 +271,7 @@ def main():
                 append_result(test_name, horizon, None, enabled_enhancements, elapsed)
                 continue
 
+            # Read result from best_models CSV — verify it was actually updated
             csv_mtime_after = os.path.getmtime(MODELS_CSV) if os.path.exists(MODELS_CSV) else 0
             if csv_mtime_after <= csv_mtime_before:
                 print(f"\n  WARNING: best_models CSV was NOT updated — Mode D produced no result")
@@ -305,11 +300,12 @@ def main():
     print(f"  Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'=' * 80}")
 
+    # Print summary table
     print_summary()
 
 
 def print_summary():
-    """Print a comparison table from testing_literature_v2.csv."""
+    """Print a comparison table from testing_literature.csv."""
     if not os.path.exists(CSV_PATH):
         return
 

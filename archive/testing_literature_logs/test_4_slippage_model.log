@@ -1,0 +1,20 @@
+
+================================================================================
+TEST 4: slippage_model | Enhancements: slippage_model
+Started: 2026-03-14 00:05:54
+================================================================================
+
+Traceback (most recent call last):
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_v5.5.py", line 123, in <module>
+    RESUME_DIR = f'{MODELS_DIR}/.resume_hourly'
+                    ^^^^^^^^^^
+NameError: name 'MODELS_DIR' is not defined
+
+ERROR: exit code 1
+Traceback (most recent call last):
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_v5.5.py", line 123, in <module>
+    RESUME_DIR = f'{MODELS_DIR}/.resume_hourly'
+                    ^^^^^^^^^^
+NameError: name 'MODELS_DIR' is not defined
+
+ERROR: exit code 1

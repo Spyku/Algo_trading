@@ -350,7 +350,7 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `tools/ib_test_connection.py` | 160 | Broker connection diagnostic |
 | `tools/detect_hardware.py` | 276 | Auto-detect CPU/GPU/RAM → generate hardware_config.py |
 | `download_macro_data.py` | ~350 | Download macro/sentiment/cross-asset + on-chain + derivatives data |
-| `testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements — COMPLETE, slippage_model promoted |
+| `archive/testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements — COMPLETE, archived. Results in `archive/testing_literature.csv` |
 | `testing_literature_v2.py` | ~335 | A/B test harness for V6 (12 literature enhancements) — Mode D BTC 4,8h 1y |
 | `testing_feature_stability.py` | ~300 | Feature stability test — cross-references KEEP/DROP across BTC+ETH × 4h+8h |
 
@@ -369,6 +369,10 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `apply_mode_d_improvements.py` | Auto-patcher to apply patches to production |
 | `setup_algo_trading.ps1` | Fresh install PowerShell script (Python, venv, GPU, deps) |
 | `migrate_folders.py` | One-time folder restructure (data/, charts/, models/, config/) |
+| `testing_literature.py` | V5.5 A/B test harness — COMPLETE. Results: only slippage_model won |
+| `testing_literature.csv` | V5.5 A/B test results (8 tests × BTC 4h+8h 1y) |
+| `testing_literature_logs/` | V5.5 test run logs |
+| `crypto_trading_system_v5.6.py` | V5.6 — 20 literature features tested. Only ADX+GK useful → promoted to V5 |
 
 ### Version Archives
 
@@ -404,7 +408,7 @@ engine/
 ├── hardware_config.py                 # Auto-detects Desktop/Laptop config
 ├── download_macro_data.py             # Macro data downloader (macro + on-chain + derivatives)
 ├── crypto_trading_system_v6.py        # V6 — 12 literature enhancements (experimental)
-├── testing_literature.py              # A/B test harness for V5.5 enhancements (COMPLETE)
+├── # testing_literature.py → archived (V5.5 A/B tests COMPLETE)
 ├── testing_literature_v2.py           # A/B test harness for V6 (12 enhancements)
 ├── testing_feature_stability.py      # Feature stability test (BTC+ETH × 4h+8h)
 ├── requirements.txt                   # Python dependencies
@@ -750,17 +754,68 @@ cfd/ib_auto_trader.py  (DAX CFD)
 
 ---
 
+## Enhancement Testing History
+
+### V5.5 Enhancements (testing_literature.py) — COMPLETE, archived
+
+Tested 7 V5.5 enhancements individually via Mode D BTC 4h+8h 1y. Baseline: 4h 80.0% +57.2%, 8h 78.3% +74.0%.
+
+| Enhancement | 4h Acc | 4h Return | 8h Acc | 8h Return | Verdict |
+|-------------|--------|-----------|--------|-----------|---------|
+| **slippage_model** | 77.5% | +57.1% | 79.2% | +98.4% | **WINNER — promoted to production** |
+| extended_diag_step | 67.8% | +73.7% | 85.6% | +65.9% | Best 8h accuracy, fewer trades |
+| on_chain_features | 70.0% | +60.6% | 73.3% | +106.1% | High return but accuracy drops |
+| gb_calibration | 78.3% | +53.9% | 75.8% | +78.8% | Neutral |
+| triple_barrier_label | 63.9% | +29.2% | 65.0% | +22.5% | Worse |
+| purged_embargo | 62.8% | +12.1% | 58.7% | +17.9% | Much worse |
+| derivatives_features | 85.7% | +6.8% | 83.3% | +12.1% | Only 2 trades, meaningless |
+
+### V5.6 Feature Additions — COMPLETE, archived
+
+Tested 20 new OHLCV-derived features (Garman-Klass vol, ADX, Parkinson vol, Rogers-Satchell, Hurst exponent, MFI, realized skewness/kurtosis, etc.). Only **ADX** (adx_14h, plus_di_14h, minus_di_14h) and **Garman-Klass volatility** (gk_volatility_14h, gk_volatility_48h) proved useful → added directly to V5 production. Production now has 49 base technical features (was 44).
+
+### V6 Enhancements (testing_literature_v2.py) — IN PROGRESS
+
+Testing 12 V6 literature enhancements individually via Mode D BTC 4h+8h 1y:
+
+| # | Enhancement | Description | Status |
+|---|-------------|-------------|--------|
+| 0 | baseline | All enhancements OFF | 4h done, 8h running |
+| 1 | wavelet_denoising | Denoise close price via DWT | pending |
+| 2 | fractional_diff | Fractionally differentiated price features | pending |
+| 3 | hmm_regime | Hidden Markov Model regime detection | pending |
+| 4 | xgboost_model | Add XGBoost to model pool | pending |
+| 5 | sample_weighting | Time-decay + uniqueness sample weights | pending |
+| 6 | entropy_filter | Shannon entropy signal filtering | pending |
+| 7 | tri_state_labels | 3-class labeling (BUY/SELL/NO-ACTION) | pending |
+| 8 | stacking_ensemble | Stacking meta-learner on model probabilities | pending |
+| 9 | dynamic_feature_select | MI-based feature selection per step | pending |
+| 10 | meta_labeling | Second model filters primary signals | pending |
+| 11 | adversarial_validation | Drop distribution-shift features per step | pending |
+| 12 | kelly_sizing | Fractional Kelly position sizing in backtest | pending |
+
+---
+
 ## Pending Actions
 
-- [x] **V5.5 A/B tests** — COMPLETE. 8 configs × BTC 4,8h 1y. Only slippage_model won → promoted. V5.5 archived.
-- [ ] **V6 A/B tests** — `python testing_literature_v2.py` — 12 new enhancements (baseline + 12) × BTC 4,8h 1y
-- [ ] **Re-run Mode DF for BTC** — `python crypto_trading_system.py DF BTC 4,8h 1y` — best_models CSV contaminated from V5.5 tests
-- [ ] **Re-run Mode F for ETH** — `python crypto_trading_system.py F ETH 4,8h` — recalibrate confidence with slippage model
-- [ ] **Feature stability test** — `python testing_feature_stability.py` — BTC+ETH × 4h+8h, find always-dropped features
-- [ ] **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
-- [ ] **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h 1y` to validate 15-min pipeline
-- [ ] **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h 1y` to validate 30-min pipeline
-- [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
+- [x] **V5.5 A/B tests** — COMPLETE, archived. Only slippage_model won → promoted. See [Enhancement Testing History](#enhancement-testing-history).
+- [x] **V5.6 feature tests** — COMPLETE, archived. Only ADX + Garman-Klass useful → added to production (49 base features).
+
+### Desktop TODO
+- [ ] **V6 A/B tests** — `python testing_literature_v2.py --resume` — RUNNING. Laptop hangs (loky deadlock), must run on desktop.
+
+### Laptop TODO (can run in parallel)
+- [ ] **XRP V5** — `python crypto_trading_system.py D XRP 4,8h 1y` then `F XRP 4,8h`
+- [ ] **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h 1y`
+- [ ] **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h 1y`
+
+### Either machine
+- [ ] **Feature stability test** — `python testing_feature_stability.py` — BTC+ETH × 4h+8h
+- [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly
+- [x] **Re-run Mode DF for BTC** — DONE (2026-03-15). Fresh models in best_models.csv.
+- [x] **Re-run Mode F for ETH** — DONE (2026-03-15). ETH: `8h_only`, min_confidence=85%.
+- [x] **Restart crypto_revolut_trader** — DONE (2026-03-15). 5-min hot-reload for config+models+positions.
+- [x] **Laptop venv install** — DONE. PyWavelets + xgboost installed.
 - [x] V5 scoring (acc×(1+return/100))
 - [x] Mode F (strategy comparison + confidence sweep)
 - [x] Per-step timers in Mode D

@@ -1,0 +1,136 @@
+================================================================================
+TEST 4: xgboost_model 8h | Enhancements: xgboost_model
+Started: 2026-03-15 15:42:03
+================================================================================
+
+  [V6] XGBoost added to model pool
+============================================================
+  CLI: Mode D | BTC | 8h | 1y
+============================================================
+
+============================================================
+  MODE D: FULL PIPELINE -- 8h HORIZON
+  Starts from ALL features, finds optimal subset per asset
+============================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-15
+    VIX        (^VIX)... 1052 days
+    DXY        (DX=F)... 1057 days
+    SP500      (^GSPC)... 1052 days
+    NASDAQ     (^IXIC)... 1052 days
+    GOLD       (GC=F)... 1054 days
+    US10Y      (^TNX)... 1052 days
+    EURUSD     (EURUSD=X)... 1090 days
+    USDJPY     (JPY=X)... 1090 days
+    OIL        (CL=F)... 1054 days
+
+  Saved: data/macro_data\macro_daily.csv (1091 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-13
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2961 rows)
+  Date range: 2018-02-01 to 2026-03-15
+  Current: 15 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36745 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1534 days
+    ETH_USD    (ETH-USD)... 1534 days
+    NASDAQ     (^IXIC)... 1052 days
+    SP500      (^GSPC)... 1052 days
+    DAX        (^GDAXI)... 1070 days
+
+  Saved: data/macro_data\cross_asset.csv (1534 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1534 days, 8 columns
+    BGeometrics: SOPR... 1534 days
+
+  Saved: data/macro_data\onchain_btc.csv (1534 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-14
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4604 records -> 36825 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (36831 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-15 14:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   138,405 bytes
+    derivatives_btc.csv             1,199,747 bytes
+    fear_greed.csv                     68,962 bytes
+    macro_daily.csv                   184,149 bytes
+    macro_hourly.csv                6,531,095 bytes
+    onchain_btc.csv                   213,306 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.2 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating BTC from 2026-03-15 14:00:00...
+    BTC: already up to date (75051 candles)
+  [Data update: 0.1 min]
+
+============================================================
+  FULL PIPELINE: BTC (8h horizon)
+============================================================
+
+  Building all features (horizon=8h)...
+    Rows before dropna: 75051
+    Rows after dropna: 74811
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  [Feature build: 0.0 min]
+  Trimmed: 74,811 -> 8,760 rows (last 1y)
+  Clean data: 8,760 rows, 130 features
+
+============================================================
+  FEATURE ANALYSIS: BTC (130 features)
+============================================================
+
+  [1/5] LGBM Feature Importance (gain-based)  [15:42:24]
+    logret_120h                      4.2% [      BASE] ########
+    xa_sp500_relstr5d                4.1% [CROSS-ASSET] ########
+    xa_dax_relstr5d                  3.7% [CROSS-ASSET] #######
+    logret_240h                      3.5% [      BASE] ######
+    price_to_sma100h                 3.1% [      BASE] ######
+    logret_72h                       2.9% [      BASE] #####
+    xa_nasdaq_relstr5d               2.7% [CROSS-ASSET] #####
+    gk_volatility_48h                2.5% [      BASE] ####
+    hour_cos                         2.2% [      BASE] ####
+    spread_24h_4h                    2.2% [      BASE] ####
+    m_sp500_chg1d                    2.1% [     MACRO] ####
+    sma20_to_sma50h                  2.0% [      BASE] ####
+    m_nasdaq_chg1d                   2.0% [     MACRO] ####
+    price_accel_12h                  1.9% [      BASE] ###
+    vol_ratio_12_48                  1.9% [      BASE] ###
+    hour_sin                         1.9% [      BASE] ###
+    volatility_48h                   1.9% [      BASE] ###
+    volatility_12h                   1.8% [      BASE] ###
+    m_vix_chg1d                      1.7% [     MACRO] ###
+    m_oil_chg1d                      1.6% [     MACRO] ###
+    ... 94 features below 1% importance
+
+  [2/5] Permutation Importance (parallel)  [15:42:25]
+    Baseline: 79.1% acc | +60.1% alpha (n=115)
+    Testing 130 features (26 workers)...

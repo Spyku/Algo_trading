@@ -145,6 +145,7 @@ def run_mode_d(asset, horizon, log_file):
 
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    env['MODELS_CSV_OVERRIDE'] = os.path.join(SCRIPT_DIR, 'models', 'crypto_hourly_best_models_stability_test.csv')
 
     process = subprocess.Popen(
         cmd, env=env,

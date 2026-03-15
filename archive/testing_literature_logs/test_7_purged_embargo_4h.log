@@ -1,0 +1,605 @@
+================================================================================
+TEST 7: purged_embargo 4h | Enhancements: purged_embargo
+Started: 2026-03-14 12:52:45
+================================================================================
+
+============================================================
+  CLI: Mode D | BTC | 4h | 1y
+============================================================
+
+============================================================
+  MODE D: FULL PIPELINE -- 4h HORIZON
+  Starts from ALL features, finds optimal subset per asset
+============================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-14
+    VIX        (^VIX)... 1052 days
+    DXY        (DX=F)... 1057 days
+    SP500      (^GSPC)... 1052 days
+    NASDAQ     (^IXIC)... 1052 days
+    GOLD       (GC=F)... 1054 days
+    US10Y      (^TNX)... 1052 days
+    EURUSD     (EURUSD=X)... 1090 days
+    USDJPY     (JPY=X)... 1090 days
+    OIL        (CL=F)... 1054 days
+
+  Saved: data/macro_data\macro_daily.csv (1091 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-13
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2960 rows)
+  Date range: 2018-02-01 to 2026-03-14
+  Current: 16 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36745 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1533 days
+    ETH_USD    (ETH-USD)... 1533 days
+    NASDAQ     (^IXIC)... 1052 days
+    SP500      (^GSPC)... 1052 days
+    DAX        (^GDAXI)... 1070 days
+
+  Saved: data/macro_data\cross_asset.csv (1533 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1533 days, 8 columns
+    BGeometrics: SOPR... 1533 days
+
+  Saved: data/macro_data\onchain_btc.csv (1533 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-13
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4601 records -> 36801 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (36804 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-14 11:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   138,321 bytes
+    derivatives_btc.csv             1,198,826 bytes
+    fear_greed.csv                     68,934 bytes
+    macro_daily.csv                   184,149 bytes
+    macro_hourly.csv                6,531,095 bytes
+    onchain_btc.csv                   213,169 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.2 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating BTC from 2026-03-14 11:00:00...
+    BTC: already up to date (75024 candles)
+  [Data update: 0.1 min]
+
+============================================================
+  FULL PIPELINE: BTC (4h horizon)
+============================================================
+
+  Building all features (horizon=4h)...
+    Rows before dropna: 75024
+    Rows after dropna: 74784
+    All features: 44 base + 81 macro/sentiment/cross-asset/on-chain = 125 total
+  [Feature build: 0.0 min]
+  Trimmed: 74,784 -> 8,760 rows (last 1y)
+  Clean data: 8,760 rows, 125 features
+
+============================================================
+  FEATURE ANALYSIS: BTC (125 features)
+============================================================
+
+  [1/5] LGBM Feature Importance (gain-based)  [12:53:05]
+    xa_dax_relstr5d                  4.2% [CROSS-ASSET] ########
+    logret_120h                      3.7% [      BASE] #######
+    logret_240h                      3.7% [      BASE] #######
+    xa_sp500_relstr5d                3.7% [CROSS-ASSET] #######
+    hour_cos                         3.5% [      BASE] ######
+    xa_nasdaq_relstr5d               2.9% [CROSS-ASSET] #####
+    logret_72h                       2.8% [      BASE] #####
+    m_sp500_chg1d                    2.3% [     MACRO] ####
+    vol_ratio_12_48                  2.3% [      BASE] ####
+    price_to_sma100h                 2.1% [      BASE] ####
+    price_accel_12h                  2.0% [      BASE] ####
+    spread_120h_8h                   2.0% [      BASE] ####
+    bb_position_20h                  2.0% [      BASE] ###
+    price_accel_4h                   2.0% [      BASE] ###
+    rsi_14h                          1.9% [      BASE] ###
+    spread_48h_4h                    1.8% [      BASE] ###
+    volume_ratio_h                   1.7% [      BASE] ###
+    xa_eth_usd_relstr5d              1.7% [CROSS-ASSET] ###
+    atr_pct_14h                      1.7% [      BASE] ###
+    spread_24h_4h                    1.6% [      BASE] ###
+    ... 86 features below 1% importance
+
+  [2/5] Permutation Importance (parallel)  [12:53:06]
+    Baseline: 42.6% acc | +7.2% alpha (n=115)
+    Testing 125 features (26 workers)...
+    Done in 5.7 min
+    logret_1h                      acc_drop:  +0.9%  alpha_drop:  +14.8%
+    logret_2h                      acc_drop:  -0.9%  alpha_drop:  +11.8%
+    logret_3h                      acc_drop:  -0.9%  alpha_drop:  +22.1%
+    logret_4h                      acc_drop:  -6.1%  alpha_drop:  +20.0%
+    logret_6h                      acc_drop:  +1.7%  alpha_drop:  +17.2%
+    logret_8h                      acc_drop:  -3.5%  alpha_drop:  +17.7%
+    logret_12h                     acc_drop:  -1.7%  alpha_drop:  +16.4%
+    logret_24h                     acc_drop:  +0.0%  alpha_drop:  +18.8%
+    logret_48h                     acc_drop:  -0.9%  alpha_drop:   +8.0%
+    logret_72h                     acc_drop:  -1.7%  alpha_drop:  +14.7%
+    logret_120h                    acc_drop:  -0.9%  alpha_drop:  +11.6%
+    logret_240h                    acc_drop:  -3.5%  alpha_drop:  +14.1%
+    spread_24h_4h                  acc_drop:  +0.9%  alpha_drop:  +22.1%
+    spread_48h_4h                  acc_drop:  -3.5%  alpha_drop:   +6.6%
+    spread_120h_8h                 acc_drop:  +1.7%  alpha_drop:  +13.7%
+    spread_240h_24h                acc_drop:  -1.7%  alpha_drop:  +13.3%
+    spread_48h_12h                 acc_drop:  -1.7%  alpha_drop:  +13.3%
+    spread_120h_12h                acc_drop:  +0.0%  alpha_drop:  +22.8%
+    price_to_sma20h                acc_drop:  +3.5%  alpha_drop:  +11.5%
+    price_to_sma50h                acc_drop:  -1.7%  alpha_drop:  +17.2%
+    price_to_sma100h               acc_drop:  +0.0%  alpha_drop:  +19.3%
+    sma20_to_sma50h                acc_drop:  -6.1%  alpha_drop:   +4.3%
+    rsi_14h                        acc_drop:  -2.6%  alpha_drop:   +3.9%
+    stoch_k_14h                    acc_drop:  -0.9%  alpha_drop:  +18.0%
+    bb_position_20h                acc_drop:  -0.9%  alpha_drop:  +11.9%
+    zscore_50h                     acc_drop:  -3.5%  alpha_drop:   +2.8%
+    atr_pct_14h                    acc_drop:  +0.0%  alpha_drop:  +27.7%
+    intraday_range                 acc_drop:  -3.5%  alpha_drop:   -0.1%
+    volatility_12h                 acc_drop:  +1.7%  alpha_drop:  +21.6%
+    volatility_48h                 acc_drop:  -6.1%  alpha_drop:   +3.7%
+    vol_ratio_12_48                acc_drop:  -0.9%  alpha_drop:  +11.5%
+    volume_ratio_h                 acc_drop:  +0.9%  alpha_drop:   +8.5%
+    vvr_12h                        acc_drop:  -0.9%  alpha_drop:   -1.5%
+    hour_sin                       acc_drop:  -2.6%  alpha_drop:  -10.2%
+    hour_cos                       acc_drop:  -0.9%  alpha_drop:  +17.3%
+    dow_sin                        acc_drop:  -1.7%  alpha_drop:   +8.3%
+    dow_cos                        acc_drop:  +1.7%  alpha_drop:  +14.1%
+    price_velocity_1h              acc_drop:  -4.3%  alpha_drop:  +12.9%
+    price_velocity_4h              acc_drop:  -4.3%  alpha_drop:   +5.4%
+    price_accel_1h                 acc_drop:  -3.5%  alpha_drop:   -1.8%
+    price_accel_4h                 acc_drop:  -2.6%  alpha_drop:   +8.2%
+    price_accel_12h                acc_drop:  -3.5%  alpha_drop:   -5.1%
+    price_accel_24h                acc_drop:  -0.9%  alpha_drop:   +9.2%
+    price_jerk_1h                  acc_drop:  -4.3%  alpha_drop:   -7.3%
+    m_vix_zscore                   acc_drop:  +1.7%  alpha_drop:  +17.8%
+    m_vix_chg1d                    acc_drop:  -3.5%  alpha_drop:  +14.5%
+    m_vix_chg5d                    acc_drop:  +0.9%  alpha_drop:  +13.6%
+    m_vix_chg10d                   acc_drop:  -4.3%  alpha_drop:  +16.7%
+    m_vix_vol5d                    acc_drop:  -4.3%  alpha_drop:  -10.8%
+    m_vix_vol20d                   acc_drop:  +0.9%  alpha_drop:   +4.6%
+    m_dxy_zscore                   acc_drop:  -1.7%  alpha_drop:   +7.8%
+    m_dxy_chg1d                    acc_drop:  +1.7%  alpha_drop:  +18.3%
+    m_dxy_chg5d                    acc_drop:  -1.7%  alpha_drop:  +12.7%
+    m_dxy_chg10d                   acc_drop:  -1.7%  alpha_drop:  +14.7%
+    m_dxy_vol5d                    acc_drop:  -1.7%  alpha_drop:  +19.6%
+    m_dxy_vol20d                   acc_drop:  -0.9%  alpha_drop:  +13.7%
+    m_sp500_zscore                 acc_drop:  -5.2%  alpha_drop:  -14.1%
+    m_sp500_chg1d                  acc_drop:  -4.3%  alpha_drop:  +15.1%
+    m_sp500_chg5d                  acc_drop:  -1.7%  alpha_drop:   -4.4%
+    m_sp500_chg10d                 acc_drop:  -3.5%  alpha_drop:   +9.4%
+    m_sp500_vol5d                  acc_drop:  -2.6%  alpha_drop:  -16.0%
+    m_sp500_vol20d                 acc_drop:  -2.6%  alpha_drop:  +24.2%
+    m_nasdaq_zscore                acc_drop:  -4.3%  alpha_drop:   +3.2%
+    m_nasdaq_chg1d                 acc_drop:  -1.7%  alpha_drop:   +5.4%
+    m_nasdaq_chg5d                 acc_drop:  +0.0%  alpha_drop:  +11.3%
+    m_nasdaq_chg10d                acc_drop:  +0.0%  alpha_drop:  +16.3%
+    m_nasdaq_vol5d                 acc_drop:  +0.0%  alpha_drop:  +18.5%
+    m_nasdaq_vol20d                acc_drop:  -1.7%  alpha_drop:  +19.3%
+    m_gold_zscore                  acc_drop:  -4.3%  alpha_drop:   +7.5%
+    m_gold_chg1d                   acc_drop:  -0.9%  alpha_drop:  +24.0%
+    m_gold_chg5d                   acc_drop:  -0.9%  alpha_drop:   +8.8%
+    m_gold_chg10d                  acc_drop:  -0.9%  alpha_drop:  +20.0%
+    m_gold_vol5d                   acc_drop:  -3.5%  alpha_drop:   +7.4%
+    m_gold_vol20d                  acc_drop:  -1.7%  alpha_drop:  +17.5%
+    m_us10y_zscore                 acc_drop:  -2.6%  alpha_drop:   +6.9%
+    m_us10y_chg1d                  acc_drop:  -5.2%  alpha_drop:   +2.1%
+    m_us10y_chg5d                  acc_drop:  -3.5%  alpha_drop:   -2.1%
+    m_us10y_chg10d                 acc_drop:  -0.9%  alpha_drop:   +2.4%
+    m_us10y_vol5d                  acc_drop:  -3.5%  alpha_drop:   -1.4%
+    m_us10y_vol20d                 acc_drop:  -5.2%  alpha_drop:   -9.4%
+    m_eurusd_zscore                acc_drop:  +1.7%  alpha_drop:  +15.8%
+    m_eurusd_chg1d                 acc_drop:  +0.0%  alpha_drop:  +19.9%
+    m_eurusd_chg5d                 acc_drop:  -0.9%  alpha_drop:  +17.1%
+    m_eurusd_chg10d                acc_drop:  +0.0%  alpha_drop:   +2.5%
+    m_eurusd_vol5d                 acc_drop:  -3.5%  alpha_drop:   +6.9%
+    m_eurusd_vol20d                acc_drop:  -3.5%  alpha_drop:   +3.7%
+    m_usdjpy_zscore                acc_drop:  -0.9%  alpha_drop:   -5.7%
+    m_usdjpy_chg1d                 acc_drop:  -5.2%  alpha_drop:  +12.8%
+    m_usdjpy_chg5d                 acc_drop:  +0.9%  alpha_drop:  +13.7%
+    m_usdjpy_chg10d                acc_drop:  +2.6%  alpha_drop:  +19.9%
+    m_usdjpy_vol5d                 acc_drop:  -1.7%  alpha_drop:   +6.5%
+    m_usdjpy_vol20d                acc_drop:  -1.7%  alpha_drop:   +3.6%
+    m_oil_zscore                   acc_drop:  -1.7%  alpha_drop:   -3.6%
+    m_oil_chg1d                    acc_drop:  -2.6%  alpha_drop:   +1.0%
+    m_oil_chg5d                    acc_drop:  +1.7%  alpha_drop:  +23.1%
+    m_oil_chg10d                   acc_drop:  -1.7%  alpha_drop:  +11.8%
+    m_oil_vol5d                    acc_drop:  -0.9%  alpha_drop:  +19.9%
+    m_oil_vol20d                   acc_drop:  -3.5%  alpha_drop:   +5.4%
+    vix_low                        acc_drop:  -2.6%  alpha_drop:   -6.9%
+    vix_normal                     acc_drop:  +0.0%  alpha_drop:   -3.9%
+    vix_high                       acc_drop:  -2.6%  alpha_drop:   -0.2%
+    vix_extreme                    acc_drop:  -0.9%  alpha_drop:   -1.5%
+    vix_rising_5d                  acc_drop:  -0.9%  alpha_drop:   +0.3%
+    vix_spike                      acc_drop:  -1.7%  alpha_drop:   -3.7%
+    fg_value                       acc_drop:  +0.0%  alpha_drop:   +1.7%
+    fg_zscore                      acc_drop:  -3.5%  alpha_drop:   -3.3%
+    fg_chg1d                       acc_drop:  -0.9%  alpha_drop:  +17.4%
+    fg_chg5d                       acc_drop:  +0.9%  alpha_drop:   -0.5%
+    fg_chg10d                      acc_drop:  -3.5%  alpha_drop:   +4.8%
+    fg_ma5d                        acc_drop:  -6.1%  alpha_drop:   -3.0%
+    fg_ma20d                       acc_drop:  -1.7%  alpha_drop:   -1.4%
+    fg_extreme_fear                acc_drop:  -1.7%  alpha_drop:   -2.7%
+    fg_extreme_greed               acc_drop:  -0.9%  alpha_drop:   -1.5%
+    xa_eth_usd_corr10d             acc_drop:  -0.9%  alpha_drop:  +11.1%
+    xa_eth_usd_corr30d             acc_drop:  -3.5%  alpha_drop:   +8.4%
+    xa_eth_usd_relstr5d            acc_drop:  +0.9%  alpha_drop:  +10.9%
+    xa_nasdaq_corr10d              acc_drop:  +0.9%  alpha_drop:  +18.6%
+    xa_nasdaq_corr30d              acc_drop:  -1.7%  alpha_drop:  +12.5%
+    xa_nasdaq_relstr5d             acc_drop:  +0.0%  alpha_drop:  +14.8%
+    xa_sp500_corr10d               acc_drop:  -1.7%  alpha_drop:  +10.4%
+    xa_sp500_corr30d               acc_drop:  +2.6%  alpha_drop:  +27.2%
+    xa_sp500_relstr5d              acc_drop:  -1.7%  alpha_drop:   +2.4%
+    xa_dax_corr10d                 acc_drop:  -4.3%  alpha_drop:   +4.0%
+    xa_dax_corr30d                 acc_drop:  -0.9%  alpha_drop:  +15.1%
+    xa_dax_relstr5d                acc_drop:  -0.9%  alpha_drop:   +6.7%
+
+  [3/5] Ablation Test (parallel, drop one at a time)  [12:59:14]
+    Baseline (125 features): 41.7% acc | +5.7% alpha
+    Testing 125 features (26 workers)...
+    Done in 5.6 min
+    Drop logret_1h                      ->  43.5% ( +1.7%)  alpha_chg:   -8.6%
+    Drop logret_2h                      ->  46.1% ( +4.3%)  alpha_chg:   +6.3% ** IMPROVES
+    Drop logret_3h                      ->  39.1% ( -2.6%)  alpha_chg:  -19.7%
+    Drop logret_4h                      ->  43.5% ( +1.7%)  alpha_chg:   +3.7% ** IMPROVES
+    Drop logret_6h                      ->  41.7% ( +0.0%)  alpha_chg:   -7.5%
+    Drop logret_8h                      ->  47.8% ( +6.1%)  alpha_chg:   +3.3% ** IMPROVES
+    Drop logret_12h                     ->  46.1% ( +4.3%)  alpha_chg:   -8.5% ** IMPROVES
+    Drop logret_24h                     ->  41.7% ( +0.0%)  alpha_chg:  -16.0%
+    Drop logret_48h                     ->  46.1% ( +4.3%)  alpha_chg:  -11.2% ** IMPROVES
+    Drop logret_72h                     ->  44.3% ( +2.6%)  alpha_chg:   +9.8% ** IMPROVES
+    Drop logret_120h                    ->  45.2% ( +3.5%)  alpha_chg:   -4.5% ** IMPROVES
+    Drop logret_240h                    ->  43.5% ( +1.7%)  alpha_chg:   -2.3% ** IMPROVES
+    Drop spread_24h_4h                  ->  42.6% ( +0.9%)  alpha_chg:   -3.7%
+    Drop spread_48h_4h                  ->  46.1% ( +4.3%)  alpha_chg:  -12.0% ** IMPROVES
+    Drop spread_120h_8h                 ->  40.0% ( -1.7%)  alpha_chg:   -8.8%
+    Drop spread_240h_24h                ->  43.5% ( +1.7%)  alpha_chg:   -0.9% ** IMPROVES
+    Drop spread_48h_12h                 ->  45.2% ( +3.5%)  alpha_chg:  -13.8% ** IMPROVES
+    Drop spread_120h_12h                ->  42.6% ( +0.9%)  alpha_chg:   -4.3%
+    Drop price_to_sma20h                ->  49.6% ( +7.8%)  alpha_chg:   +6.8% ** IMPROVES
+    Drop price_to_sma50h                ->  47.0% ( +5.2%)  alpha_chg:   -5.0% ** IMPROVES
+    Drop price_to_sma100h               ->  43.5% ( +1.7%)  alpha_chg:   -5.6%
+    Drop sma20_to_sma50h                ->  47.0% ( +5.2%)  alpha_chg:   -3.1% ** IMPROVES
+    Drop rsi_14h                        ->  42.6% ( +0.9%)  alpha_chg:  -12.3%
+    Drop stoch_k_14h                    ->  43.5% ( +1.7%)  alpha_chg:  -11.6%
+    Drop bb_position_20h                ->  45.2% ( +3.5%)  alpha_chg:   +5.1% ** IMPROVES
+    Drop zscore_50h                     ->  42.6% ( +0.9%)  alpha_chg:   -7.6%
+    Drop atr_pct_14h                    ->  43.5% ( +1.7%)  alpha_chg:  -10.5%
+    Drop intraday_range                 ->  45.2% ( +3.5%)  alpha_chg:   -5.5% ** IMPROVES
+    Drop volatility_12h                 ->  40.9% ( -0.9%)  alpha_chg:  -12.8%
+    Drop volatility_48h                 ->  47.8% ( +6.1%)  alpha_chg:   -9.2% ** IMPROVES
+    Drop vol_ratio_12_48                ->  44.3% ( +2.6%)  alpha_chg:   -9.5% ** IMPROVES
+    Drop volume_ratio_h                 ->  44.3% ( +2.6%)  alpha_chg:   -0.2% ** IMPROVES
+    Drop vvr_12h                        ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop hour_sin                       ->  42.6% ( +0.9%)  alpha_chg:   -8.8%
+    Drop hour_cos                       ->  41.7% ( +0.0%)  alpha_chg:   -8.2%
+    Drop dow_sin                        ->  45.2% ( +3.5%)  alpha_chg:   +4.9% ** IMPROVES
+    Drop dow_cos                        ->  45.2% ( +3.5%)  alpha_chg:   +7.1% ** IMPROVES
+    Drop price_velocity_1h              ->  43.5% ( +1.7%)  alpha_chg:  -10.7%
+    Drop price_velocity_4h              ->  43.5% ( +1.7%)  alpha_chg:   +6.3% ** IMPROVES
+    Drop price_accel_1h                 ->  46.1% ( +4.3%)  alpha_chg:  +13.4% ** IMPROVES
+    Drop price_accel_4h                 ->  43.5% ( +1.7%)  alpha_chg:   -7.2%
+    Drop price_accel_12h                ->  43.5% ( +1.7%)  alpha_chg:   -5.9%
+    Drop price_accel_24h                ->  45.2% ( +3.5%)  alpha_chg:  -12.8% ** IMPROVES
+    Drop price_jerk_1h                  ->  45.2% ( +3.5%)  alpha_chg:  -16.4% ** IMPROVES
+    Drop m_vix_zscore                   ->  44.3% ( +2.6%)  alpha_chg:   -9.3% ** IMPROVES
+    Drop m_vix_chg1d                    ->  41.7% ( +0.0%)  alpha_chg:   +3.9% ** IMPROVES
+    Drop m_vix_chg5d                    ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_vix_chg10d                   ->  44.3% ( +2.6%)  alpha_chg:   +1.1% ** IMPROVES
+    Drop m_vix_vol5d                    ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_vix_vol20d                   ->  43.5% ( +1.7%)  alpha_chg:  -11.1%
+    Drop m_dxy_zscore                   ->  42.6% ( +0.9%)  alpha_chg:   +1.5% ** IMPROVES
+    Drop m_dxy_chg1d                    ->  42.6% ( +0.9%)  alpha_chg:   +4.2% ** IMPROVES
+    Drop m_dxy_chg5d                    ->  42.6% ( +0.9%)  alpha_chg:   +1.5% ** IMPROVES
+    Drop m_dxy_chg10d                   ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_dxy_vol5d                    ->  44.3% ( +2.6%)  alpha_chg:   +9.2% ** IMPROVES
+    Drop m_dxy_vol20d                   ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_sp500_zscore                 ->  42.6% ( +0.9%)  alpha_chg:  -11.8%
+    Drop m_sp500_chg1d                  ->  41.7% ( +0.0%)  alpha_chg:  -19.0%
+    Drop m_sp500_chg5d                  ->  44.3% ( +2.6%)  alpha_chg:   +1.1% ** IMPROVES
+    Drop m_sp500_chg10d                 ->  44.3% ( +2.6%)  alpha_chg:   +1.1% ** IMPROVES
+    Drop m_sp500_vol5d                  ->  44.3% ( +2.6%)  alpha_chg:   +9.2% ** IMPROVES
+    Drop m_sp500_vol20d                 ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_nasdaq_zscore                ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_nasdaq_chg1d                 ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_nasdaq_chg5d                 ->  44.3% ( +2.6%)  alpha_chg:   +1.1% ** IMPROVES
+    Drop m_nasdaq_chg10d                ->  44.3% ( +2.6%)  alpha_chg:   +5.4% ** IMPROVES
+    Drop m_nasdaq_vol5d                 ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_nasdaq_vol20d                ->  42.6% ( +0.9%)  alpha_chg:   +0.4% ** IMPROVES
+    Drop m_gold_zscore                  ->  44.3% ( +2.6%)  alpha_chg:   +7.9% ** IMPROVES
+    Drop m_gold_chg1d                   ->  46.1% ( +4.3%)  alpha_chg:  +16.8% ** IMPROVES
+    Drop m_gold_chg5d                   ->  43.5% ( +1.7%)  alpha_chg:   +0.9% ** IMPROVES
+    Drop m_gold_chg10d                  ->  45.2% ( +3.5%)  alpha_chg:   +2.4% ** IMPROVES
+    Drop m_gold_vol5d                   ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_gold_vol20d                  ->  44.3% ( +2.6%)  alpha_chg:   +0.4% ** IMPROVES
+    Drop m_us10y_zscore                 ->  43.5% ( +1.7%)  alpha_chg:  -10.3%
+    Drop m_us10y_chg1d                  ->  43.5% ( +1.7%)  alpha_chg:  +12.1% ** IMPROVES
+    Drop m_us10y_chg5d                  ->  44.3% ( +2.6%)  alpha_chg:   +4.2% ** IMPROVES
+    Drop m_us10y_chg10d                 ->  44.3% ( +2.6%)  alpha_chg:   -7.3% ** IMPROVES
+    Drop m_us10y_vol5d                  ->  43.5% ( +1.7%)  alpha_chg:   +2.8% ** IMPROVES
+    Drop m_us10y_vol20d                 ->  46.1% ( +4.3%)  alpha_chg:   +8.1% ** IMPROVES
+    Drop m_eurusd_zscore                ->  45.2% ( +3.5%)  alpha_chg:   +5.6% ** IMPROVES
+    Drop m_eurusd_chg1d                 ->  44.3% ( +2.6%)  alpha_chg:   -8.2% ** IMPROVES
+    Drop m_eurusd_chg5d                 ->  42.6% ( +0.9%)  alpha_chg:   -4.4%
+    Drop m_eurusd_chg10d                ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_eurusd_vol5d                 ->  44.3% ( +2.6%)  alpha_chg:   +9.5% ** IMPROVES
+    Drop m_eurusd_vol20d                ->  45.2% ( +3.5%)  alpha_chg:   +4.7% ** IMPROVES
+    Drop m_usdjpy_zscore                ->  43.5% ( +1.7%)  alpha_chg:   +2.6% ** IMPROVES
+    Drop m_usdjpy_chg1d                 ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop m_usdjpy_chg5d                 ->  42.6% ( +0.9%)  alpha_chg:  -12.9%
+    Drop m_usdjpy_chg10d                ->  42.6% ( +0.9%)  alpha_chg:   -3.3%
+    Drop m_usdjpy_vol5d                 ->  45.2% ( +3.5%)  alpha_chg:   +5.0% ** IMPROVES
+    Drop m_usdjpy_vol20d                ->  42.6% ( +0.9%)  alpha_chg:   -8.9%
+    Drop m_oil_zscore                   ->  41.7% ( +0.0%)  alpha_chg:   -9.7%
+    Drop m_oil_chg1d                    ->  42.6% ( +0.9%)  alpha_chg:   +6.4% ** IMPROVES
+    Drop m_oil_chg5d                    ->  42.6% ( +0.9%)  alpha_chg:   +1.8% ** IMPROVES
+    Drop m_oil_chg10d                   ->  42.6% ( +0.9%)  alpha_chg:   -7.2%
+    Drop m_oil_vol5d                    ->  44.3% ( +2.6%)  alpha_chg:   +4.2% ** IMPROVES
+    Drop m_oil_vol20d                   ->  42.6% ( +0.9%)  alpha_chg:  -17.1%
+    Drop vix_low                        ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop vix_normal                     ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop vix_high                       ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop vix_extreme                    ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop vix_rising_5d                  ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop vix_spike                      ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop fg_value                       ->  45.2% ( +3.5%)  alpha_chg:   +9.4% ** IMPROVES
+    Drop fg_zscore                      ->  45.2% ( +3.5%)  alpha_chg:   -8.1% ** IMPROVES
+    Drop fg_chg1d                       ->  41.7% ( +0.0%)  alpha_chg:  -10.5%
+    Drop fg_chg5d                       ->  41.7% ( +0.0%)  alpha_chg:  -15.3%
+    Drop fg_chg10d                      ->  43.5% ( +1.7%)  alpha_chg:   -6.1%
+    Drop fg_ma5d                        ->  42.6% ( +0.9%)  alpha_chg:   -6.5%
+    Drop fg_ma20d                       ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop fg_extreme_fear                ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop fg_extreme_greed               ->  43.5% ( +1.7%)  alpha_chg:   +3.0% ** IMPROVES
+    Drop xa_eth_usd_corr10d             ->  44.3% ( +2.6%)  alpha_chg:   +9.1% ** IMPROVES
+    Drop xa_eth_usd_corr30d             ->  44.3% ( +2.6%)  alpha_chg:   -9.9% ** IMPROVES
+    Drop xa_eth_usd_relstr5d            ->  47.0% ( +5.2%)  alpha_chg:  +14.0% ** IMPROVES
+    Drop xa_nasdaq_corr10d              ->  41.7% ( +0.0%)  alpha_chg:   +2.6% ** IMPROVES
+    Drop xa_nasdaq_corr30d              ->  43.5% ( +1.7%)  alpha_chg:   +2.7% ** IMPROVES
+    Drop xa_nasdaq_relstr5d             ->  47.0% ( +5.2%)  alpha_chg:   +2.7% ** IMPROVES
+    Drop xa_sp500_corr10d               ->  42.6% ( +0.9%)  alpha_chg:   +0.4% ** IMPROVES
+    Drop xa_sp500_corr30d               ->  43.5% ( +1.7%)  alpha_chg:   +5.2% ** IMPROVES
+    Drop xa_sp500_relstr5d              ->  42.6% ( +0.9%)  alpha_chg:  -15.4%
+    Drop xa_dax_corr10d                 ->  42.6% ( +0.9%)  alpha_chg:  -12.2%
+    Drop xa_dax_corr30d                 ->  45.2% ( +3.5%)  alpha_chg:   +8.0% ** IMPROVES
+    Drop xa_dax_relstr5d                ->  44.3% ( +2.6%)  alpha_chg:   +6.7% ** IMPROVES
+
+  [4/5] Reduced Feature Sets (parallel, top-N by importance)  [13:05:18]
+    Testing 12 set sizes (12 workers)...
+    Done in 0.5 min
+    Top   5 features:  53.0% acc |   +6.0% alpha | score=56.2  ##########################
+    Top   8 features:  51.3% acc |  +37.5% alpha | score=70.6  #########################
+    Top  10 features:  52.2% acc |  +36.2% alpha | score=71.1  ##########################
+    Top  12 features:  53.9% acc |  +51.2% alpha | score=81.5  ##########################
+    Top  15 features:  49.6% acc |  +25.2% alpha | score=62.1  ########################
+    Top  18 features:  55.7% acc |  +48.9% alpha | score=82.9  ###########################
+    Top  20 features:  52.2% acc |  +23.6% alpha | score=64.5  ##########################
+    Top  25 features:  52.2% acc |   +8.3% alpha | score=56.5  ##########################
+    Top  30 features:  51.3% acc |   -8.0% alpha | score=51.3  #########################
+    Top  40 features:  47.8% acc |  -14.3% alpha | score=47.8  #######################
+    Top  50 features:  45.2% acc |   -8.2% alpha | score=45.2  ######################
+    Top 125 features:  42.6% acc |   +7.2% alpha | score=45.7  #####################
+
+    OPTIMAL: Top 18 -> 55.7% acc | +48.9% alpha | score=82.9
+
+  [5/5] Scoring & Selection  [13:05:49]
+    KEEP:  18 features (score >= 1)
+    MAYBE: 21 features (score -1 to 0)
+    DROP:  86 features (score < -1)
+      + spread_120h_8h (score: 7) [BASE]
+      + volatility_12h (score: 6) [BASE]
+      + logret_6h (score: 4) [BASE]
+      + m_sp500_chg1d (score: 4) [MACRO]
+      + hour_cos (score: 4) [BASE]
+      + xa_nasdaq_corr10d (score: 4) [CROSS-ASSET]
+      + logret_3h (score: 3) [BASE]
+      + fg_chg1d (score: 3) [SENTIMENT]
+      + spread_24h_4h (score: 2) [BASE]
+      + fg_chg5d (score: 2) [SENTIMENT]
+      + vol_ratio_12_48 (score: 1) [BASE]
+      + logret_24h (score: 1) [BASE]
+      + price_to_sma100h (score: 1) [BASE]
+      + m_vix_zscore (score: 1) [MACRO]
+      + volume_ratio_h (score: 1) [BASE]
+      + logret_1h (score: 1) [BASE]
+      + m_vix_chg1d (score: 1) [MACRO]
+      + m_usdjpy_chg5d (score: 1) [MACRO]
+
+  Feature analysis completed in 12.7 minutes
+
+  KEEP only       ( 18 feat): 49.6% acc | -17.3% alpha | score=49.6
+  KEEP + MAYBE    ( 39 feat): 49.6% acc | -1.1% alpha | score=49.6
+  >>> Using KEEP only (18 features)
+  Scored optimal  ( 18 feat): 49.6% acc | -17.3% alpha | score=49.6
+  Top-18 by LGBM ( 18 feat): 55.7% acc | +48.9% alpha | score=82.9
+  >>> Switching to Top-18 (score +33.3)
+
+  OPTIMAL FEATURES (18):
+    xa_dax_relstr5d [CROSS-ASSET]
+    logret_120h [BASE]
+    logret_240h [BASE]
+    xa_sp500_relstr5d [CROSS-ASSET]
+    hour_cos [BASE]
+    xa_nasdaq_relstr5d [CROSS-ASSET]
+    logret_72h [BASE]
+    m_sp500_chg1d [MACRO]
+    vol_ratio_12_48 [BASE]
+    price_to_sma100h [BASE]
+    price_accel_12h [BASE]
+    spread_120h_8h [BASE]
+    bb_position_20h [BASE]
+    price_accel_4h [BASE]
+    rsi_14h [BASE]
+    spread_48h_4h [BASE]
+    volume_ratio_h [BASE]
+    xa_eth_usd_relstr5d [CROSS-ASSET]
+  [Feature analysis total: 13.9 min]
+
+============================================================
+  DIAGNOSTIC: BTC (18 optimal features)  [13:07:00]
+============================================================
+  8,760 rows, 18 features
+  [BLAS limits removed, worker pool reset for diagnostic]
+  75 configs, ALL parallel (26 workers, step=72)...
+  Running... (no output until complete)
+  Diagnostic completed in 5.6 minutes
+    w=  24h | RF                   | acc= 52.9% ret= -20.7% win=  40% score=0.529 (n=121)  <-- BEST
+    w=  24h | GB                   | acc= 52.9% ret= -20.5% win=  41% score=0.529 (n=121)  <-- BEST
+    w=  24h | LR                   | acc= 47.9% ret= -24.3% win=  42% score=0.479 (n=121)
+    w=  24h | LGBM                 | acc= 55.4% ret= +16.4% win=  66% score=0.644 (n=121)  <-- BEST
+    w=  24h | RF+GB                | acc= 53.7% ret= -19.5% win=  43% score=0.537 (n=121)
+    w=  24h | RF+LR                | acc= 50.4% ret= -25.4% win=  40% score=0.504 (n=121)
+    w=  24h | RF+LGBM              | acc= 52.1% ret= +10.2% win=  60% score=0.574 (n=121)
+    w=  24h | GB+LR                | acc= 51.2% ret= -21.2% win=  45% score=0.512 (n=121)
+    w=  24h | GB+LGBM              | acc= 53.7% ret=  +8.0% win=  57% score=0.580 (n=121)
+    w=  24h | LR+LGBM              | acc= 49.6% ret= +13.6% win=  58% score=0.563 (n=121)
+    w=  24h | RF+GB+LR             | acc= 51.2% ret= -29.3% win=  38% score=0.512 (n=121)
+    w=  24h | RF+GB+LGBM           | acc= 52.1% ret= -25.6% win=  48% score=0.521 (n=121)
+    w=  24h | RF+LR+LGBM           | acc= 54.5% ret= -24.4% win=  39% score=0.545 (n=121)
+    w=  24h | GB+LR+LGBM           | acc= 52.1% ret= -24.9% win=  47% score=0.521 (n=121)
+    w=  24h | RF+GB+LR+LGBM        | acc= 52.1% ret= -23.6% win=  43% score=0.521 (n=121)
+    w=  48h | RF                   | acc= 63.6% ret=  -1.0% win=  54% score=0.636 (n=121)
+    w=  48h | GB                   | acc= 57.0% ret=  +4.6% win=  53% score=0.597 (n=121)
+    w=  48h | LR                   | acc= 62.0% ret=  -0.3% win=  62% score=0.620 (n=121)
+    w=  48h | LGBM                 | acc= 55.4% ret= -14.7% win=  53% score=0.554 (n=121)
+    w=  48h | RF+GB                | acc= 60.3% ret=  +0.1% win=  57% score=0.604 (n=121)
+    w=  48h | RF+LR                | acc= 62.8% ret=  +7.3% win=  60% score=0.674 (n=121)  <-- BEST
+    w=  48h | RF+LGBM              | acc= 57.0% ret= -14.0% win=  52% score=0.570 (n=121)
+    w=  48h | GB+LR                | acc= 61.2% ret= +14.8% win=  59% score=0.702 (n=121)  <-- BEST
+    w=  48h | GB+LGBM              | acc= 55.4% ret=  -4.7% win=  53% score=0.554 (n=121)
+    w=  48h | LR+LGBM              | acc= 53.7% ret= -13.4% win=  56% score=0.537 (n=121)
+    w=  48h | RF+GB+LR             | acc= 65.3% ret=  -3.7% win=  50% score=0.653 (n=121)
+    w=  48h | RF+GB+LGBM           | acc= 63.6% ret=  -5.9% win=  53% score=0.636 (n=121)
+    w=  48h | RF+LR+LGBM           | acc= 62.8% ret= +12.1% win=  63% score=0.704 (n=121)  <-- BEST
+    w=  48h | GB+LR+LGBM           | acc= 61.2% ret=  +3.9% win=  60% score=0.635 (n=121)
+    w=  48h | RF+GB+LR+LGBM        | acc= 62.8% ret=  +5.4% win=  57% score=0.662 (n=121)
+    w=  72h | RF                   | acc= 47.5% ret= -30.4% win=  41% score=0.475 (n=120)
+    w=  72h | GB                   | acc= 42.5% ret= -42.4% win=  43% score=0.425 (n=120)
+    w=  72h | LR                   | acc= 49.2% ret=  -8.3% win=  56% score=0.492 (n=120)
+    w=  72h | LGBM                 | acc= 48.3% ret= -24.6% win=  50% score=0.483 (n=120)
+    w=  72h | RF+GB                | acc= 45.8% ret= -40.6% win=  41% score=0.458 (n=120)
+    w=  72h | RF+LR                | acc= 49.2% ret=  -2.2% win=  56% score=0.492 (n=120)
+    w=  72h | RF+LGBM              | acc= 45.8% ret= -38.6% win=  43% score=0.458 (n=120)
+    w=  72h | GB+LR                | acc= 48.3% ret= -20.3% win=  50% score=0.483 (n=120)
+    w=  72h | GB+LGBM              | acc= 44.2% ret= -40.1% win=  46% score=0.442 (n=120)
+    w=  72h | LR+LGBM              | acc= 49.2% ret= -11.4% win=  55% score=0.492 (n=120)
+    w=  72h | RF+GB+LR             | acc= 43.3% ret= -36.1% win=  45% score=0.433 (n=120)
+    w=  72h | RF+GB+LGBM           | acc= 42.5% ret= -38.8% win=  45% score=0.425 (n=120)
+    w=  72h | RF+LR+LGBM           | acc= 44.2% ret= -26.1% win=  50% score=0.442 (n=120)
+    w=  72h | GB+LR+LGBM           | acc= 41.7% ret= -40.0% win=  41% score=0.417 (n=120)
+    w=  72h | RF+GB+LR+LGBM        | acc= 44.2% ret= -42.0% win=  39% score=0.442 (n=120)
+    w= 100h | RF                   | acc= 45.0% ret= -15.6% win=  55% score=0.450 (n=120)
+    w= 100h | GB                   | acc= 49.2% ret=  +4.1% win=  70% score=0.512 (n=120)
+    w= 100h | LR                   | acc= 43.3% ret= -19.9% win=  59% score=0.433 (n=120)
+    w= 100h | LGBM                 | acc= 50.8% ret= -15.2% win=  59% score=0.508 (n=120)
+    w= 100h | RF+GB                | acc= 43.3% ret=  -2.5% win=  68% score=0.433 (n=120)
+    w= 100h | RF+LR                | acc= 40.8% ret= -18.2% win=  57% score=0.408 (n=120)
+    w= 100h | RF+LGBM              | acc= 47.5% ret=  -6.7% win=  61% score=0.475 (n=120)
+    w= 100h | GB+LR                | acc= 40.0% ret=  -6.4% win=  69% score=0.400 (n=120)
+    w= 100h | GB+LGBM              | acc= 45.0% ret=  -0.8% win=  67% score=0.450 (n=120)
+    w= 100h | LR+LGBM              | acc= 44.2% ret= -14.5% win=  60% score=0.442 (n=120)
+    w= 100h | RF+GB+LR             | acc= 47.5% ret= -12.6% win=  64% score=0.475 (n=120)
+    w= 100h | RF+GB+LGBM           | acc= 47.5% ret=  -3.3% win=  67% score=0.475 (n=120)
+    w= 100h | RF+LR+LGBM           | acc= 49.2% ret= -16.4% win=  54% score=0.492 (n=120)
+    w= 100h | GB+LR+LGBM           | acc= 49.2% ret=  -6.5% win=  63% score=0.492 (n=120)
+    w= 100h | RF+GB+LR+LGBM        | acc= 46.7% ret=  -6.1% win=  62% score=0.467 (n=120)
+    w= 150h | RF                   | acc= 51.3% ret= -12.3% win=  55% score=0.513 (n=119)
+    w= 150h | GB                   | acc= 53.8% ret= -29.3% win=  52% score=0.538 (n=119)
+    w= 150h | LR                   | acc= 56.3% ret= -33.0% win=  47% score=0.563 (n=119)
+    w= 150h | LGBM                 | acc= 50.4% ret= -23.7% win=  52% score=0.504 (n=119)
+    w= 150h | RF+GB                | acc= 51.3% ret= -14.6% win=  58% score=0.513 (n=119)
+    w= 150h | RF+LR                | acc= 55.5% ret=  -8.0% win=  58% score=0.555 (n=119)
+    w= 150h | RF+LGBM              | acc= 48.7% ret= -15.8% win=  58% score=0.487 (n=119)
+    w= 150h | GB+LR                | acc= 56.3% ret= -21.4% win=  53% score=0.563 (n=119)
+    w= 150h | GB+LGBM              | acc= 49.6% ret= -28.2% win=  55% score=0.496 (n=119)
+    w= 150h | LR+LGBM              | acc= 52.1% ret= -18.4% win=  50% score=0.521 (n=119)
+    w= 150h | RF+GB+LR             | acc= 53.8% ret= -26.8% win=  48% score=0.538 (n=119)
+    w= 150h | RF+GB+LGBM           | acc= 52.1% ret= -28.8% win=  56% score=0.521 (n=119)
+    w= 150h | RF+LR+LGBM           | acc= 53.8% ret= -22.6% win=  49% score=0.538 (n=119)
+    w= 150h | GB+LR+LGBM           | acc= 55.5% ret= -31.1% win=  50% score=0.555 (n=119)
+    w= 150h | RF+GB+LR+LGBM        | acc= 52.1% ret= -26.1% win=  56% score=0.521 (n=119)
+
+  ============================================================================
+  |    BEST MODEL for BTC                                                   |
+  ============================================================================
+  |    Models:   RF+LR+LGBM                                                  |
+  |    Window:   48h                                                         |
+  |    Accuracy: 62.8%                                                       |
+  |    Return:   +12.1% (after 0.09% fees)                                   |
+  |    Win Rate: 63% (35 trades)                                             |
+  |    Score:    0.7038  (acc x (1 + return/100))                            |
+  ----------------------------------------------------------------------------
+  |    Rank Combo                 Window  Acc    Return   Score     |
+  ----------------------------------------------------------------------------
+  |    1    RF+LR+LGBM               48h   62.8%   +12.1%  0.704 <-- |
+  |    2    GB+LR                    48h   61.2%   +14.8%  0.702     |
+  |    3    RF+LR                    48h   62.8%    +7.3%  0.674     |
+  |    4    RF+GB+LR+LGBM            48h   62.8%    +5.4%  0.662     |
+  |    5    RF+GB+LR                 48h   65.3%    -3.7%  0.653     |
+  ============================================================================
+
+  >>> USE: models=RF+LR+LGBM, window=48h
+  >>> Score = acc x (1 + return/100)
+
+  [Diagnostic: 5.6 min]
+  [BTC total: 19.6 min]
+
+============================================================
+  BEST MODELS SAVED -- 4h HORIZON
+============================================================
+  BTC    -> RF+LR+LGBM           | w=  48h | 62.8% | 18 features | 4h
+============================================================
+
+============================================================
+  GENERATING SIGNALS & BACKTEST CHARTS
+============================================================
+
+  Generating 4h-ahead signals for BTC (models=RF+LR+LGBM, window=48h, replay=200h, custom (18 features))...
+    Rows before dropna: 75025
+    Rows after dropna: 74785
+    All features: 44 base + 81 macro/sentiment/cross-asset/on-chain = 125 total
+    [50] 2026-03-08 06:00: HOLD (30%) | price=$67,161.52
+    [100] 2026-03-10 08:00: HOLD (48%) | price=$70,465.08
+    [150] 2026-03-12 10:00: BUY (83%) | price=$70,043.48
+    [200] 2026-03-14 12:00: BUY (52%) | price=$70,761.85
+  Generated 200 hourly signals for BTC
+  Chart saved: charts/BTC_backtest.png
+
+  >> BTC (4h): BUY (52%) | price=$70,761.85
+
+Chart data saved to models/crypto_hourly_chart_data.json
+  [Signal generation: 1.3 min]
+
+============================================================
+  MODE D COMPLETE (full pipeline) -- 21.2 min total
+============================================================
+
+Done!
+
+Elapsed: 21.2 min

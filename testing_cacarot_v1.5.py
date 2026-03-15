@@ -1,32 +1,17 @@
 """
-Crypto Hourly Trading System — V5.4 Production
+TESTING: Cacarot V1.5 — Expanded Feature Set
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
-125 features -> walk-forward ML -> BUY/SELL/HOLD signals.
+Tests 32 previously-excluded features with temporal decay.
+Hypothesis: decay makes short-term features useful again.
 
-V5.4 (production):
-  - Orphan worker cleanup at Mode D/E start (prevents CPU drain from killed runs)
-  - Phase-specific BLAS thread limits with loky pool reset:
-    Feature analysis: OMP=1 globally (LGBM-only, prevents thread explosion).
-    Before diagnostic: kill loky pool, remove OMP=1, spawn fresh workers.
-    Diagnostic workers get full BLAS parallelism (RF/GB/LR ~20% faster).
-    After diagnostic: restore OMP=1 + kill pool again for next horizon.
-  - Lighter LGBM for feature analysis (n_est=100, depth=4)
-  - LOKY_MAX_CPU_COUNT capped at N_JOBS_PARALLEL
+Compares FEATURE_SET_C (all 49 base features) vs production (18 in Set A).
+Results saved to models/testing_cacarot_v1.5_results.csv
 
-Modes:
-  B. Quick run (saved models)    D. Full pipeline (feature analysis -> diagnostic)
-  E. Iterative refinement        5/6/7. Quick BTC/ETH/XRP
+Usage:
+  python testing_cacarot_v1.5.py D BTC 4,8h
+  python testing_cacarot_v1.5.py D ETH 4,8h
 
-CLI Usage (skip all menus):
-  python crypto_trading_system.py B BTC 4,8h
-  python crypto_trading_system.py D ETH 8h 1y
-  python crypto_trading_system.py D BTC,ETH 4,8h 1y
-
-Outputs:
-  charts/{ASSET}_backtest.png
-  models/crypto_hourly_best_models.csv
-  models/crypto_hourly_chart_data.json
+Based on V1.5 Cacarot TEST production.
 """
 
 import sys
@@ -87,12 +72,13 @@ from hardware_config import (
 os.environ['LOKY_MAX_CPU_COUNT'] = str(N_JOBS_PARALLEL)
 
 # Lower process priority so the live trader always gets CPU first
+# BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 try:
     import ctypes
     ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
 except Exception:
     try:
-        os.nice(10)
+        os.nice(10)  # Unix fallback
     except Exception:
         pass
 
@@ -187,7 +173,46 @@ FEATURE_SET_B = [
     'vix_spike',
 ]
 
-ACTIVE_FEATURE_SET = 'A'
+# V1.5 TEST: All 49 base technical features — previously excluded ones may
+# become useful with temporal decay weighting recent data more heavily
+FEATURE_SET_C = [
+    # Logreturns (all 12)
+    'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
+    'logret_8h', 'logret_12h', 'logret_24h', 'logret_48h', 'logret_72h',
+    'logret_120h', 'logret_240h',
+    # Spread ratios (6)
+    'spread_24h_4h', 'spread_48h_4h', 'spread_120h_8h',
+    'spread_240h_24h', 'spread_48h_12h', 'spread_120h_12h',
+    # Price-to-SMA (3) + SMA ratio (1)
+    'price_to_sma20h', 'price_to_sma50h', 'price_to_sma100h', 'sma20_to_sma50h',
+    # Oscillators (4)
+    'rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
+    # Volatility (6)
+    'atr_pct_14h', 'intraday_range', 'volatility_12h', 'volatility_48h',
+    'vol_ratio_12_48', 'vvr_12h',
+    # Garman-Klass (2)
+    'gk_volatility_14h', 'gk_volatility_48h',
+    # Volume (1)
+    'volume_ratio_h',
+    # Trend/DMI (3)
+    'adx_14h', 'plus_di_14h', 'minus_di_14h',
+    # Time (4)
+    'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
+    # Derivatives (6)
+    'price_velocity_1h', 'price_velocity_4h',
+    'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
+    'price_jerk_1h',
+    # V1.5 TEST: 15 rejected V5.6 features
+    'parkinson_vol_14h', 'rogers_satchell_vol_14h',
+    'hurst_168h', 'mfi_14h',
+    'realized_skew_48h', 'realized_skew_168h',
+    'realized_kurt_48h', 'realized_kurt_168h',
+    'amihud_14h', 'obv_roc_20h',
+    'close_position', 'body_ratio', 'close_pos_12h', 'body_ratio_12h',
+    'cci_20h',
+]
+
+ACTIVE_FEATURE_SET = 'C'
 
 
 # ============================================================
@@ -206,30 +231,6 @@ ASSETS = {
 PREDICTION_HORIZON = 4            # default horizon (legacy)
 AVAILABLE_HORIZONS = [4, 8]       # 4h and 8h models
 
-# ============================================================
-# V6 ENHANCEMENTS — each toggleable for A/B testing
-# ============================================================
-ENHANCEMENTS = {
-    'wavelet_denoising':      False,  # Denoise close price via DWT before computing features
-    'fractional_diff':        False,  # Add fractionally differentiated price features (d≈0.35)
-    'hmm_regime':             False,  # Add Hidden Markov Model regime state as feature
-    'xgboost_model':          False,  # Add XGBoost to model pool (31 combos instead of 15)
-    'sample_weighting':       False,  # Time-decay + label-uniqueness sample weights
-    'entropy_filter':         False,  # Filter low-conviction signals via Shannon entropy
-    'tri_state_labels':       False,  # 3-class labels: BUY / SELL / NO-ACTION
-    'stacking_ensemble':      False,  # Stacking meta-learner instead of majority voting
-    'dynamic_feature_select': False,  # Mutual-information feature selection per walk-forward step
-    'meta_labeling':          False,  # Second model predicts if primary signal is correct
-    'adversarial_validation': False,  # Drop features causing train/test distribution shift
-    'kelly_sizing':           False,  # Fractional Kelly position sizing in backtest
-}
-
-# Override from environment variables (for testing harness)
-for _key in ENHANCEMENTS:
-    _env_val = os.environ.get(f'ENH_{_key.upper()}')
-    if _env_val is not None:
-        ENHANCEMENTS[_key] = _env_val.lower() in ('1', 'true', 'yes')
-
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
@@ -241,18 +242,32 @@ REPLAY_HOURS = 200
 REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
 DIAG_STEP = 72
 DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 300/500 removed: slow and rarely win
+DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
+
+
+def get_decay_weights(n_samples, gamma):
+    """Exponential decay: newest sample=1, oldest=gamma^(n-1).
+    Returns None when gamma >= 1.0 (no decay, zero overhead)."""
+    if gamma is None or gamma >= 1.0:
+        return None
+    ages = np.arange(n_samples - 1, -1, -1)
+    return gamma ** ages
 
 
 # ============================================================
 # FEATURE SET HELPERS
 # ============================================================
 def _get_active_features():
+    if ACTIVE_FEATURE_SET == 'C':
+        return list(FEATURE_SET_C)
     if ACTIVE_FEATURE_SET == 'B':
         return list(FEATURE_SET_B)
     return list(FEATURE_SET_A)
 
 
 def _get_set_label():
+    if ACTIVE_FEATURE_SET == 'C':
+        return f"Set C (ALL 49 base technical, {len(FEATURE_SET_C)} features)"
     if ACTIVE_FEATURE_SET == 'B':
         return f"Set B (KEEP 14 consensus, {len(FEATURE_SET_B)} features)"
     return f"Set A (Top 18 LGBM importance, {len(FEATURE_SET_A)} features)"
@@ -460,45 +475,6 @@ def load_data(asset_name):
 def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df = df_hourly.copy()
 
-    # --- V6: Wavelet denoising ---
-    if ENHANCEMENTS.get('wavelet_denoising'):
-        try:
-            import pywt
-            close_arr = df['close'].values.astype(float)
-            coeffs = pywt.wavedec(close_arr, 'db4', level=3)
-            # Zero out the two highest frequency detail coefficients
-            coeffs[-1] = np.zeros_like(coeffs[-1])
-            coeffs[-2] = np.zeros_like(coeffs[-2])
-            denoised = pywt.waverec(coeffs, 'db4')[:len(close_arr)]
-            df['close'] = denoised
-            if verbose:
-                print("    [V6] Wavelet denoising applied to close price")
-        except ImportError:
-            print("    [V6] WARNING: pywt not installed — pip install PyWavelets")
-
-    # --- V6: Fractional differentiation features ---
-    if ENHANCEMENTS.get('fractional_diff'):
-        try:
-            def _fracdiff(series, d=0.35, window=100):
-                """Fractional differentiation via expanding-window binomial weights."""
-                weights = [1.0]
-                for k in range(1, window):
-                    weights.append(-weights[-1] * (d - k + 1) / k)
-                weights = np.array(weights[::-1])
-                result = np.full(len(series), np.nan)
-                for t in range(window, len(series)):
-                    result[t] = np.dot(weights, series[t - window + 1:t + 1])
-                return result
-
-            df['fracdiff_close'] = _fracdiff(df['close'].values, d=0.35)
-            df['fracdiff_volume'] = _fracdiff(df['volume'].values, d=0.35)
-            df['fracdiff_close'] = df['fracdiff_close'].ffill().bfill()
-            df['fracdiff_volume'] = df['fracdiff_volume'].ffill().bfill()
-            if verbose:
-                print("    [V6] Fractional differentiation features added (d=0.35)")
-        except Exception as e:
-            print(f"    [V6] WARNING: Fractional diff failed: {e}")
-
     for period in [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 120, 240]:
         df[f'logret_{period}h'] = np.log(df['close'] / df['close'].shift(period))
 
@@ -610,22 +586,84 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     # Jerk (third derivative) -- change in acceleration
     df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
+    # ---- V1.5 TEST: REJECTED V5.6 FEATURES (re-test with decay) ----
+    # Parkinson (1980): high-low range volatility, 5.2x more efficient
+    park_single = np.log(df['high'] / df['low'])**2 / (4 * np.log(2))
+    df['parkinson_vol_14h'] = park_single.rolling(14).mean().apply(np.sqrt)
+
+    # Rogers-Satchell (1991): works with non-zero drift (trending markets)
+    log_hc = np.log(df['high'] / df['close'])
+    log_ho = np.log(df['high'] / df['open'])
+    log_lc = np.log(df['low'] / df['close'])
+    log_lo = np.log(df['low'] / df['open'])
+    rs_single = log_hc * log_ho + log_lc * log_lo
+    df['rogers_satchell_vol_14h'] = rs_single.rolling(14).mean().apply(np.sqrt)
+
+    # Hurst exponent (regime detection) — rolling R/S over 168h
+    _hurst_input = df['logret_1h'] if 'logret_1h' in df.columns else df['close'].pct_change()
+    _hurst_vals = _hurst_input.values
+    _hurst_result = np.full(len(_hurst_vals), np.nan)
+    _hurst_window = 168
+    for _hi in range(_hurst_window, len(_hurst_vals)):
+        seg = _hurst_vals[_hi - _hurst_window:_hi]
+        if np.isnan(seg).any():
+            continue
+        mean_seg = np.mean(seg)
+        devs = np.cumsum(seg - mean_seg)
+        r = np.max(devs) - np.min(devs)
+        s = np.std(seg, ddof=1)
+        if s > 1e-10 and r > 0:
+            _hurst_result[_hi] = np.log(r / s) / np.log(_hurst_window)
+    df['hurst_168h'] = _hurst_result
+    df['hurst_168h'] = df['hurst_168h'].ffill()
+
+    # MFI — Money Flow Index (volume-weighted RSI)
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    raw_money_flow = typical_price * df['volume']
+    tp_diff = typical_price.diff()
+    pos_flow = raw_money_flow.where(tp_diff > 0, 0).rolling(14).sum()
+    neg_flow = raw_money_flow.where(tp_diff < 0, 0).rolling(14).sum()
+    mf_ratio = pos_flow / (neg_flow + 1e-10)
+    df['mfi_14h'] = 100 - (100 / (1 + mf_ratio))
+
+    # Realized skewness & kurtosis
+    _ret_1h = df['close'].pct_change()
+    for w in [48, 168]:
+        r_mean = _ret_1h.rolling(w).mean()
+        r_std = _ret_1h.rolling(w).std()
+        standardized = (_ret_1h - r_mean) / (r_std + 1e-10)
+        df[f'realized_skew_{w}h'] = standardized.pow(3).rolling(w).mean()
+        df[f'realized_kurt_{w}h'] = standardized.pow(4).rolling(w).mean() - 3
+
+    # Amihud illiquidity
+    dollar_volume = df['volume'] * df['close']
+    df['amihud_14h'] = (abs(_ret_1h) / (dollar_volume + 1e-10)).rolling(14).mean()
+    df['amihud_14h'] = np.log1p(df['amihud_14h'] * 1e6)
+
+    # OBV rate of change
+    obv_sign = np.sign(df['close'].diff())
+    obv = (df['volume'] * obv_sign).cumsum()
+    obv_sma = obv.rolling(20).mean()
+    df['obv_roc_20h'] = (obv - obv_sma) / (obv_sma.abs() + 1e-10)
+
+    # Candle microstructure
+    candle_range = df['high'] - df['low']
+    candle_range_safe = candle_range.replace(0, np.nan)
+    df['close_position'] = (df['close'] - df['low']) / candle_range_safe
+    df['close_position'] = df['close_position'].fillna(0.5)
+    df['body_ratio'] = abs(df['close'] - df['open']) / candle_range_safe
+    df['body_ratio'] = df['body_ratio'].fillna(0.0)
+    df['close_pos_12h'] = df['close_position'].rolling(12).mean()
+    df['body_ratio_12h'] = df['body_ratio'].rolling(12).mean()
+
+    # CCI — Commodity Channel Index
+    tp_20 = typical_price.rolling(20).mean()
+    tp_mad = typical_price.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    df['cci_20h'] = (typical_price - tp_20) / (0.015 * tp_mad + 1e-10)
+
     future_return = df['close'].shift(-horizon) / df['close'] - 1
     rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
-
-    # --- V6: Tri-state labels ---
-    if ENHANCEMENTS.get('tri_state_labels'):
-        rolling_std = future_return.rolling(200, min_periods=50).std().shift(horizon)
-        threshold = 0.3 * rolling_std.fillna(0.01)
-        df['label'] = 1  # NO-ACTION (class 1)
-        df.loc[future_return > rolling_median + threshold, 'label'] = 2  # BUY
-        df.loc[future_return < rolling_median - threshold, 'label'] = 0  # SELL
-        df['label'] = df['label'].astype(int)
-        if verbose:
-            counts = df['label'].value_counts().sort_index()
-            print(f"    [V6] Tri-state labels: SELL={counts.get(0,0)} HOLD={counts.get(1,0)} BUY={counts.get(2,0)}")
-    else:
-        df['label'] = (future_return > rolling_median).astype(int)
+    df['label'] = (future_return > rolling_median).astype(int)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
@@ -644,11 +682,15 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         'price_velocity_1h', 'price_velocity_4h',
         'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
         'price_jerk_1h',
+        # V1.5 TEST: 15 rejected V5.6 features (re-test with decay)
+        'parkinson_vol_14h', 'rogers_satchell_vol_14h',
+        'hurst_168h', 'mfi_14h',
+        'realized_skew_48h', 'realized_skew_168h',
+        'realized_kurt_48h', 'realized_kurt_168h',
+        'amihud_14h', 'obv_roc_20h',
+        'close_position', 'body_ratio', 'close_pos_12h', 'body_ratio_12h',
+        'cci_20h',
     ]
-
-    # --- V6: Add fractional diff features to feature list ---
-    if ENHANCEMENTS.get('fractional_diff') and 'fracdiff_close' in df.columns:
-        feature_cols.extend(['fracdiff_close', 'fracdiff_volume'])
 
     keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label']
     df = df[keep_cols].copy()
@@ -669,11 +711,25 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 # ============================================================
 MACRO_DIR = 'data/macro_data'
 DATA_DIR = 'data'
-CHARTS_DIR = 'charts'
+CHARTS_DIR = 'charts/v1.5_test'
 MODELS_DIR = 'models'
-# Allow test harnesses to redirect model output to a separate CSV (prevents production contamination)
-MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 CONFIG_DIR = 'config'
+# Test harnesses set this env var to redirect model output away from production CSV
+MODELS_CSV_OVERRIDE = f'{MODELS_DIR}/testing_cacarot_v1.5_results.csv'
+
+
+def _get_models_csv_path():
+    """Return the models CSV path — respects MODELS_CSV_OVERRIDE for test isolation."""
+    return MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+
+
+def _backup_models_csv():
+    """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
+    src = f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
+        import shutil
+        bak = f'{MODELS_DIR}/crypto_hourly_best_models_backup.csv'
+        shutil.copy2(src, bak)
 _macro_cache = {}
 
 
@@ -813,28 +869,6 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     if macro_cols:
         df[macro_cols] = df[macro_cols].ffill()
 
-    # --- V6: HMM regime detection (GMM proxy — no C build needed) ---
-    if ENHANCEMENTS.get('hmm_regime'):
-        try:
-            from sklearn.mixture import GaussianMixture
-            ret = df['close'].pct_change().fillna(0).values
-            vol = pd.Series(ret).rolling(24).std().fillna(0.01).values
-            X_hmm = np.column_stack([ret[24:], vol[24:]])
-            gmm = GaussianMixture(n_components=3, covariance_type='full', n_init=3, random_state=42)
-            gmm.fit(X_hmm)
-            states = np.full(len(df), 0)
-            states[24:] = gmm.predict(X_hmm)
-            df['hmm_regime'] = states
-            # One-hot encode regime states
-            for s in range(3):
-                df[f'hmm_regime_{s}'] = (df['hmm_regime'] == s).astype(int)
-            all_cols.extend(['hmm_regime_0', 'hmm_regime_1', 'hmm_regime_2'])
-            added += 3
-            if verbose:
-                print(f"    [V6] GMM regime detection: 3 states added as features")
-        except Exception as e:
-            print(f"    [V6] WARNING: Regime detection failed: {e}")
-
     if verbose:
         print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
     return df, all_cols
@@ -844,19 +878,6 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
 # MODELS
 # ============================================================
 ALL_MODELS = get_all_models()
-
-# --- V6: Add XGBoost to model pool ---
-if ENHANCEMENTS.get('xgboost_model'):
-    try:
-        import xgboost as xgb
-        ALL_MODELS['XGB'] = lambda: xgb.XGBClassifier(
-            n_estimators=300, max_depth=4, learning_rate=0.05,
-            use_label_encoder=False, eval_metric='logloss',
-            random_state=42, verbosity=0, n_jobs=1,
-        )
-        print("  [V6] XGBoost added to model pool")
-    except ImportError:
-        print("  [V6] WARNING: xgboost not installed — pip install xgboost")
 
 
 # ============================================================
@@ -878,7 +899,7 @@ def _classify_feature(feat):
         return 'BASE'
 
 
-def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Fast walk-forward test with LGBM only.
     Returns (accuracy, alpha, n_tests).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
@@ -923,7 +944,8 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
             class_weight='balanced', verbose=-1, random_state=42,
             device=lgbm_device
         )
-        model.fit(X_train_s, y_train)
+        sw = get_decay_weights(len(y_train), gamma)
+        model.fit(X_train_s, y_train, sample_weight=sw)
         pred = model.predict(X_test_s)[0]
 
         if pred == y_true:
@@ -951,13 +973,13 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     return accuracy, alpha, total
 
 
-def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Backward-compatible wrapper -- returns (accuracy, n_tests). Used by Mode E."""
-    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device)
+    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device, gamma=gamma)
     return acc, n
 
 
-def _test_lgbm_importance(df_features, feature_cols):
+def _test_lgbm_importance(df_features, feature_cols, gamma=1.0):
     """Train LGBM and extract feature importance."""
     from lightgbm import LGBMClassifier
 
@@ -975,7 +997,8 @@ def _test_lgbm_importance(df_features, feature_cols):
         class_weight='balanced', verbose=-1, random_state=42,
         device=LGBM_DEVICE
     )
-    model.fit(X_s, y)
+    sw = get_decay_weights(len(y), gamma)
+    model.fit(X_s, y, sample_weight=sw)
 
     importance = pd.DataFrame({
         'feature': feature_cols,
@@ -994,7 +1017,7 @@ def _test_lgbm_importance(df_features, feature_cols):
     return importance
 
 
-def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
+def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
     """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
@@ -1002,14 +1025,14 @@ def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_al
     warnings.simplefilter('ignore')
     df_shuffled = df_features.copy()
     df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu')
+    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu', gamma=gamma)
     return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha
 
 
-def _test_permutation_importance(df_features, feature_cols):
+def _test_permutation_importance(df_features, feature_cols, gamma=1.0):
     """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
     print(f"\n  [2/5] Permutation Importance (parallel)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols)
+    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols, gamma=gamma)
     print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -1017,7 +1040,7 @@ def _test_permutation_importance(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         perm_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -1030,21 +1053,21 @@ def _test_permutation_importance(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
 
 
-def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
+def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
     """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     reduced = [f for f in feature_cols if f != feat]
-    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu')
+    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu', gamma=gamma)
     return feat, acc, acc - baseline_acc, alpha - baseline_alpha
 
 
-def _test_ablation(df_features, feature_cols):
+def _test_ablation(df_features, feature_cols, gamma=1.0):
     """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
     print(f"\n  [3/5] Ablation Test (parallel, drop one at a time)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols)
+    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols, gamma=gamma)
     print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -1052,7 +1075,7 @@ def _test_ablation(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -1070,19 +1093,19 @@ def _test_ablation(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
-def _reduced_one_set(df_features, ranked, n_feat):
+def _reduced_one_set(df_features, ranked, n_feat, gamma=1.0):
     """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     top_n = ranked[:n_feat]
-    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu')
+    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu', gamma=gamma)
     combined = acc * (1 + max(alpha, 0) / 100)
     return n_feat, acc, alpha, combined
 
 
-def _test_reduced_sets(df_features, feature_cols, importance_df):
+def _test_reduced_sets(df_features, feature_cols, importance_df, gamma=1.0):
     """Test accuracy with top-N features. Parallelized."""
     print(f"\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)  [{datetime.now().strftime('%H:%M:%S')}]")
     ranked = importance_df['feature'].tolist()
@@ -1096,7 +1119,7 @@ def _test_reduced_sets(df_features, feature_cols, importance_df):
     t0 = time.time()
     with _suppress_stderr():
         reduced_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_reduced_one_set)(df_features, ranked, n_feat)
+            delayed(_reduced_one_set)(df_features, ranked, n_feat, gamma=gamma)
             for n_feat in test_sizes
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -1193,7 +1216,7 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
     return score_df, keep, maybe, drop
 
 
-def run_feature_analysis(asset_name, df_features, all_feature_cols):
+def run_feature_analysis(asset_name, df_features, all_feature_cols, gamma=1.0):
     """
     Run full 5-test feature analysis on one asset.
     Returns the optimal feature list.
@@ -1205,16 +1228,16 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     t0 = time.time()
 
     # 1. LGBM importance
-    importance_df = _test_lgbm_importance(df_features, all_feature_cols)
+    importance_df = _test_lgbm_importance(df_features, all_feature_cols, gamma=gamma)
 
     # 2. Permutation importance
-    permutation_df = _test_permutation_importance(df_features, all_feature_cols)
+    permutation_df = _test_permutation_importance(df_features, all_feature_cols, gamma=gamma)
 
     # 3. Ablation
-    ablation_df = _test_ablation(df_features, all_feature_cols)
+    ablation_df = _test_ablation(df_features, all_feature_cols, gamma=gamma)
 
     # 4. Reduced sets
-    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df)
+    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df, gamma=gamma)
 
     # 5. Score and select
     score_df, keep, maybe, drop = _score_features(
@@ -1228,8 +1251,8 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
 
     # Quick test: KEEP only vs KEEP + MAYBE -- use combined_score = acc x (1 + alpha/100)
     if maybe:
-        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep)
-        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe)
+        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep, gamma=gamma)
+        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe, gamma=gamma)
         score_keep = acc_keep * (1 + max(alpha_keep, 0) / 100)
         score_all  = acc_all  * (1 + max(alpha_all,  0) / 100)
         print(f"\n  KEEP only       ({len(keep):3d} feat): {acc_keep:.1f}% acc | "
@@ -1254,7 +1277,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
         ranked         = importance_df['feature'].tolist()
         top_n_features = ranked[:best_n]
 
-        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features)
+        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features, gamma=gamma)
         opt_score = opt_acc * (1 + max(opt_alpha, 0) / 100)
         print(f"  Scored optimal  ({len(optimal_features):3d} feat): {opt_acc:.1f}% acc | "
               f"{opt_alpha:+.1f}% alpha | score={opt_score:.1f}")
@@ -1338,12 +1361,13 @@ def _print_bootstrap_ci(signals, label=''):
 
 
 def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS,
-                     feature_override=None, horizon=PREDICTION_HORIZON):
+                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0):
     warnings.filterwarnings('ignore')
     set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
+    gamma_str = f", gamma={gamma}" if gamma < 1.0 else ""
     print(f"\n  Generating {horizon}h-ahead signals for {asset_name} "
           f"(models={'+'.join(model_names)}, window={window_size}h, "
-          f"replay={replay_hours}h, {set_label})...")
+          f"replay={replay_hours}h, {set_label}{gamma_str})...")
 
     df_raw = load_data(asset_name)
     if df_raw is None:
@@ -1375,6 +1399,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols, index=X_train.index)
         X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=feature_cols, index=X_test.index)
 
+        sw = get_decay_weights(len(y_train), gamma)
         votes = []
         probas = []
 
@@ -1383,7 +1408,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     model = ALL_MODELS[model_name]()
-                    model.fit(X_train_s, y_train)
+                    model.fit(X_train_s, y_train, sample_weight=sw)
                     pred = model.predict(X_test_s)[0]
                     proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
@@ -1649,50 +1674,28 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
 # ============================================================
 # DIAGNOSTIC (CPU parallel)
 # ============================================================
-def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4):
+def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4, gamma=1.0):
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
-
-    # Read enhancement flags from env vars (safe for joblib workers)
-    _enh = {}
-    for _k in ['sample_weighting', 'entropy_filter', 'tri_state_labels', 'stacking_ensemble',
-                'dynamic_feature_select', 'meta_labeling', 'adversarial_validation', 'kelly_sizing']:
-        _ev = os.environ.get(f'ENH_{_k.upper()}')
-        _enh[_k] = _ev is not None and _ev.lower() in ('1', 'true', 'yes')
-
     min_start = window + 50
     if n < min_start + 50:
         return None
     correct = 0
     total = 0
 
-    # Portfolio simulation
-    portfolio = 1.0
+    # Portfolio simulation: all-in when BUY, all-out when SELL
+    portfolio = 1.0       # normalized starting capital
     in_position = False
     entry_price = 0
     trades = 0
     wins = 0
     peak = 1.0
     max_dd = 0.0
-    total_gain = 0.0
-    total_loss = 0.0
-    trade_returns = []
-
-    # V6: Stacking — accumulate OOF predictions for meta-learner
-    if _enh['stacking_ensemble']:
-        from sklearn.linear_model import LogisticRegression as _LR
-        oof_X = []  # list of [proba_model1, proba_model2, ...]
-        oof_y = []  # true labels
-        meta_ready = False
-
-    # V6: Meta-labeling — accumulate primary predictions and outcomes
-    if _enh['meta_labeling']:
-        from sklearn.ensemble import RandomForestClassifier as _MetaRF
-        meta_X_hist = []
-        meta_y_hist = []
-        meta_model_ready = False
+    total_gain = 0.0      # sum of winning trade returns
+    total_loss = 0.0      # sum of losing trade returns
+    trade_returns = []    # kept for potential future use
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
@@ -1704,215 +1707,50 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
             continue
         if np.isnan(X_train).any() or np.isnan(X_test).any():
             continue
-
-        # V6: Dynamic feature selection (mutual information)
-        feature_mask = None
-        if _enh['dynamic_feature_select']:
-            try:
-                from sklearn.feature_selection import mutual_info_classif
-                mi = mutual_info_classif(X_train, y_train, random_state=42, discrete_features=False)
-                median_mi = np.median(mi)
-                feature_mask = mi > median_mi
-                if feature_mask.sum() < 5:
-                    feature_mask = None  # too few features, skip
-                else:
-                    X_train = X_train[:, feature_mask]
-                    X_test = X_test[:, feature_mask]
-            except Exception:
-                feature_mask = None
-
-        # V6: Adversarial validation — drop features causing distribution shift
-        if _enh['adversarial_validation'] and X_train.shape[0] > 20:
-            try:
-                from sklearn.ensemble import RandomForestClassifier as _AdvRF
-                X_comb = np.vstack([X_train, X_test])
-                y_comb = np.array([0]*len(X_train) + [1]*len(X_test))
-                adv = _AdvRF(n_estimators=30, max_depth=2, random_state=42, n_jobs=1)
-                adv.fit(X_comb, y_comb)
-                adv_score = adv.score(X_comb, y_comb)
-                if adv_score > 0.6:
-                    imp = adv.feature_importances_
-                    keep = imp < np.percentile(imp, 85)
-                    if keep.sum() >= 5:
-                        X_train = X_train[:, keep]
-                        X_test = X_test[:, keep]
-            except Exception:
-                pass
-
         mean = X_train.mean(axis=0)
         std  = X_train.std(axis=0)
         std[std == 0] = 1.0
         X_train_s = (X_train - mean) / std
         X_test_s  = (X_test - mean) / std
-
-        # V6: Sample weighting (time decay + label uniqueness)
-        sample_weight = None
-        if _enh['sample_weighting']:
-            n_train = len(y_train)
-            time_weights = np.linspace(0.5, 1.0, n_train)
-            # Approximate uniqueness: labels use `horizon` future hours, consecutive overlap
-            overlap = max(1, pred_horizon)
-            uniqueness = np.ones(n_train)
-            for j in range(n_train):
-                concurrent = min(overlap, n_train - j)
-                uniqueness[j] = 1.0 / max(concurrent, 1)
-            sample_weight = time_weights * uniqueness
-            sample_weight = sample_weight / sample_weight.mean()  # normalize to mean=1
-
-        # Train models and collect votes + probas
+        sw = get_decay_weights(len(y_train), gamma)
         votes = []
-        probas = []
         for model_name in combo:
             try:
                 model = model_factories[model_name]()
-                if sample_weight is not None:
-                    model.fit(X_train_s, y_train, sample_weight=sample_weight)
-                else:
-                    model.fit(X_train_s, y_train)
+                model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
-                proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
-                probas.append(proba[1] if len(proba) > 1 else proba[0])
             except Exception:
                 continue
         if not votes:
             continue
+        ensemble_pred = 1 if sum(votes) > len(votes) / 2 else 0
+        if ensemble_pred == y_true:
+            correct += 1
+        total += 1
 
-        # V6: Stacking ensemble — use meta-learner instead of majority vote
-        if _enh['stacking_ensemble'] and meta_ready and len(probas) == len(combo):
-            try:
-                meta_input = np.array(probas).reshape(1, -1)
-                ensemble_pred = meta_model.predict(meta_input)[0]
-            except Exception:
-                ensemble_pred = 1 if sum(votes) > len(votes) / 2 else 0
-        elif _enh['tri_state_labels']:
-            # For tri-state: BUY=2, HOLD=1, SELL=0
-            vote_counts = {}
-            for v in votes:
-                vote_counts[v] = vote_counts.get(v, 0) + 1
-            ensemble_pred = max(vote_counts, key=vote_counts.get)
-        else:
-            ensemble_pred = 1 if sum(votes) > len(votes) / 2 else 0
-
-        # V6: Stacking — accumulate OOF data and train meta-learner when enough data
-        if _enh['stacking_ensemble'] and len(probas) == len(combo):
-            oof_X.append(probas)
-            oof_y.append(y_true)
-            if len(oof_X) >= 10 and not meta_ready:
-                try:
-                    meta_model = _LR(max_iter=500, random_state=42)
-                    meta_model.fit(np.array(oof_X), np.array(oof_y))
-                    meta_ready = True
-                except Exception:
-                    pass
-            elif meta_ready and len(oof_X) % 5 == 0:
-                try:
-                    meta_model.fit(np.array(oof_X), np.array(oof_y))
-                except Exception:
-                    pass
-
-        # V6: Entropy filter — skip low-conviction signals
-        if _enh['entropy_filter'] and len(probas) >= 2:
-            p_arr = np.array(probas)
-            # Binary entropy per model, then average
-            eps = 1e-10
-            entropies = -(p_arr * np.log(p_arr + eps) + (1 - p_arr) * np.log(1 - p_arr + eps))
-            avg_entropy = entropies.mean()
-            if avg_entropy > 0.65:
-                # High disagreement — treat as HOLD (don't count as correct/incorrect, don't trade)
-                continue
-
-        # V6: Meta-labeling — secondary model filters primary signal
-        if _enh['meta_labeling']:
-            avg_proba = np.mean(probas)
-            proba_std = np.std(probas) if len(probas) > 1 else 0
-            meta_features = [avg_proba, proba_std, len(combo)]
-            meta_X_hist.append(meta_features)
-            primary_correct = 1 if ensemble_pred == y_true else 0
-            meta_y_hist.append(primary_correct)
-            if len(meta_X_hist) >= 15 and not meta_model_ready:
-                try:
-                    _meta_rf = _MetaRF(n_estimators=50, max_depth=3, random_state=42, n_jobs=1)
-                    _meta_rf.fit(np.array(meta_X_hist), np.array(meta_y_hist))
-                    meta_model_ready = True
-                except Exception:
-                    pass
-            if meta_model_ready:
-                try:
-                    meta_pred = _meta_rf.predict_proba(np.array(meta_features).reshape(1, -1))[0]
-                    if meta_pred[1] < 0.4:  # meta-model says primary is likely wrong
-                        continue  # skip this signal
-                    if len(meta_X_hist) % 5 == 0:
-                        _meta_rf.fit(np.array(meta_X_hist), np.array(meta_y_hist))
-                except Exception:
-                    pass
-
-        # Accuracy tracking
-        if _enh['tri_state_labels']:
-            # For tri-state: correct if predicted class matches
-            if ensemble_pred == y_true:
-                correct += 1
-            total += 1
-            # Portfolio: BUY=2, SELL=0, HOLD=1
-            price = closes_np[i]
-            if ensemble_pred == 2 and not in_position:
-                in_position = True
-                entry_price = price * (1 + TRADING_FEE)
-            elif ensemble_pred == 0 and in_position:
-                sell_price = price * (1 - TRADING_FEE)
-                trade_return = (sell_price - entry_price) / entry_price
-                portfolio *= (1 + trade_return)
-                trades += 1
-                if trade_return > 0:
-                    wins += 1
-                    total_gain += trade_return
-                else:
-                    total_loss += trade_return
-                trade_returns.append(trade_return)
-                in_position = False
-        else:
-            if ensemble_pred == y_true:
-                correct += 1
-            total += 1
-
-            # Portfolio logic
-            price = closes_np[i]
-
-            # V6: Kelly sizing — scale position by Kelly fraction
-            if _enh['kelly_sizing'] and trades >= 5:
-                win_rate_so_far = wins / trades
-                avg_w = (total_gain / wins) if wins > 0 else 0.01
-                avg_l = abs(total_loss / (trades - wins)) if (trades - wins) > 0 else 0.01
-                kelly_f = win_rate_so_far - (1 - win_rate_so_far) / (avg_w / max(avg_l, 0.001))
-                position_frac = max(0.1, min(kelly_f * 0.5, 1.0))  # half-Kelly, floor 10%
+        # Portfolio logic
+        price = closes_np[i]
+        if ensemble_pred == 1 and not in_position:
+            # BUY -- pay fee
+            in_position = True
+            entry_price = price * (1 + TRADING_FEE)  # effective entry = price + fee
+        elif ensemble_pred == 0 and in_position:
+            # SELL -- pay fee
+            sell_price = price * (1 - TRADING_FEE)  # effective exit = price - fee
+            trade_return = (sell_price - entry_price) / entry_price
+            portfolio *= (1 + trade_return)
+            trades += 1
+            if trade_return > 0:
+                wins += 1
+                total_gain += trade_return
             else:
-                position_frac = 1.0
-
-            if ensemble_pred == 1 and not in_position:
-                in_position = True
-                entry_price = price * (1 + TRADING_FEE)
-                entry_frac = position_frac  # remember position size
-            elif ensemble_pred == 0 and in_position:
-                sell_price = price * (1 - TRADING_FEE)
-                trade_return = (sell_price - entry_price) / entry_price
-                if _enh['kelly_sizing']:
-                    portfolio *= (1 + trade_return * entry_frac)
-                else:
-                    portfolio *= (1 + trade_return)
-                trades += 1
-                if trade_return > 0:
-                    wins += 1
-                    total_gain += trade_return
-                else:
-                    total_loss += trade_return
-                trade_returns.append(trade_return)
-                in_position = False
+                total_loss += trade_return
+            trade_returns.append(trade_return)
+            in_position = False
 
         # Max drawdown tracking
-        if in_position:
-            current_val = portfolio * (closes_np[i] / entry_price)
-        else:
-            current_val = portfolio
+        current_val = portfolio * (price / entry_price) if in_position else portfolio
         if current_val > peak:
             peak = current_val
         dd = (peak - current_val) / peak
@@ -1953,7 +1791,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 DIAG_MODELS = get_diagnostic_models()
 
 
-def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
+def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
     """Run diagnostic and return best config + all results.
     Kills the loky worker pool and removes BLAS limits before running,
     so RF/GB/LR get full BLAS parallelism in fresh workers."""
@@ -1994,7 +1832,8 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols):
     with _suppress_stderr():
         all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
             delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
+                gamma=gamma
             )
             for combo, window in all_configs
         )
@@ -2532,13 +2371,12 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
     print("  MODE B: QUICK HOURLY RUN (saved best models)")
     print("=" * 60)
 
-    _csv = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
-    if not os.path.exists(_csv):
-        print(f"\nERROR: {_csv} not found!")
+    if not os.path.exists(_get_models_csv_path()):
+        print("\nERROR: crypto_hourly_best_models.csv not found!")
         print("Please run Mode D first to find best models.")
         return
 
-    df_best = pd.read_csv(_csv)
+    df_best = pd.read_csv(_get_models_csv_path())
     if 'horizon' not in df_best.columns:
         df_best['horizon'] = 4  # legacy = 4h
 
@@ -2599,6 +2437,8 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
             else:
                 feature_override = list(FEATURE_SET_A)
 
+            row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
+
             model_info = {
                 'best_combo': row['best_combo'],
                 'best_window': window,
@@ -2609,7 +2449,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
             }
 
             signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                       feature_override=feature_override, horizon=h)
+                                       feature_override=feature_override, horizon=h, gamma=row_gamma)
             signals = simulate_portfolio(signals)
             _print_bootstrap_ci(signals, label=f"{asset_name} {h}h")
 
@@ -2658,9 +2498,10 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
                 else:
                     feature_override = list(FEATURE_SET_A)
 
+                row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
                 print(f"  Generating {h}h signals (720h) for {asset_name}...")
                 sigs = generate_signals(asset_name, model_names, window, 720,
-                                        feature_override=feature_override, horizon=h)
+                                        feature_override=feature_override, horizon=h, gamma=row_gamma)
                 sigs = simulate_portfolio(sigs)
                 if h == 4:
                     signals_4h = sigs
@@ -2780,15 +2621,16 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
     return p_value
 
 
-def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=False, resume=False, training_period=None):
+def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=False):
     """
     Complete pipeline from scratch:
-    1. Build all ~124 features
+    1. Build all ~124 features (uses ALL available data, decay handles recency)
     2. Run 5-test feature analysis to find optimal subset
     3. Run 75-config diagnostic with optimal features
     4. Save best models
     5. Generate signals + backtest charts
 
+    Gamma (decay) is read per asset+horizon from CSV. Defaults to 1.0 (no decay).
     With --resume: skips steps that have saved checkpoints from a previous interrupted run.
     """
     t_mode_start = time.time()
@@ -2797,8 +2639,9 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     _kill_orphan_workers()
 
     print("\n" + "=" * 60)
-    print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON")
+    print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON (V1.5 Cacarot TEST)")
     print(f"  Starts from ALL features, finds optimal subset per asset")
+    print(f"  Uses ALL available data — decay weighting handles recency")
     if resume:
         print(f"  RESUME MODE: will skip completed steps (checkpoints in {RESUME_DIR}/)")
     print("=" * 60)
@@ -2819,29 +2662,35 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     update_all_data(assets_list)
     print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
 
-    diag_hours = diag_years * 365 * 24
     best_models = []
 
     for asset_name in assets_list:
         t_asset = time.time()
+
+        # Read gamma from CSV for this asset+horizon (default 1.0 if not set)
+        existing_config = _load_mode_d_config(asset_name, horizon)
+        gamma = existing_config.get('gamma', 1.0) if existing_config else 1.0
+
         print(f"\n{'='*60}")
-        print(f"  FULL PIPELINE: {asset_name} ({horizon}h horizon)")
+        print(f"  FULL PIPELINE: {asset_name} ({horizon}h horizon, gamma={gamma})")
         print(f"{'='*60}")
 
         df_raw = load_data(asset_name)
         if df_raw is None:
             continue
 
-        # Step 1: Build ALL features
+        # Step 1: Build ALL features, cap at 6 months
+        # Decay handles recency: gamma=0.999 → 6mo data at 1% weight, gamma=0.995 → 1mo at ~0%
+        MAX_DIAG_HOURS = 6 * 30 * 24  # 4,320 hours
         print(f"\n  Building all features (horizon={horizon}h)...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
-        if total_rows > diag_hours:
-            df_full = df_full.tail(diag_hours).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+        if total_rows > MAX_DIAG_HOURS:
+            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo, decay handles recency)")
 
         # Drop NaN for analysis
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
@@ -2858,7 +2707,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             print(f"\n  RESUME: loaded {len(optimal_features)} optimal features from checkpoint")
         else:
             t0 = time.time()
-            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
+            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols, gamma=gamma)
             print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
             if optimal_features and len(optimal_features) >= 3:
                 _save_checkpoint(asset_name, horizon, 'features', {'features': optimal_features})
@@ -2882,7 +2731,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
 
             t0 = time.time()
-            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features)
+            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, gamma=gamma)
             print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
             if best_config:
                 _save_checkpoint(asset_name, horizon, 'diagnostic', best_config)
@@ -2892,7 +2741,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             best_config['n_features'] = len(optimal_features)
             best_config['optimal_features'] = ','.join(optimal_features)
             best_config['horizon'] = horizon
-            best_config['training_period'] = training_period or f'{diag_years}y'
+            best_config['gamma'] = gamma
             best_models.append(best_config)
 
             # -- Improvement 3: Permutation test (only if --permtest flag passed) --
@@ -2913,8 +2762,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         return
 
     # Save best models (merge with existing horizons)
-    # MODELS_CSV_OVERRIDE redirects output to a test CSV, preventing production contamination
-    csv_path = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
     df_best = pd.DataFrame(best_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -2925,7 +2774,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             df_existing = df_existing[~mask]
         df_best = pd.concat([df_existing, df_best], ignore_index=True)
     df_best.to_csv(csv_path, index=False)
-    df_best.to_csv(f'{MODELS_DIR}/crypto_hourly_best_models_mode_d.csv', index=False)
+    if not MODELS_CSV_OVERRIDE:
+        df_best.to_csv(f'{MODELS_DIR}/crypto_hourly_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
     print(f"  BEST MODELS SAVED -- {horizon}h HORIZON")
@@ -2947,9 +2797,10 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         model_names = config['models'].split('+')
         window = config['best_window']
         feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon)
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
         all_signals[asset_name] = signals
@@ -2975,7 +2826,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
 # ============================================================
 def _load_mode_d_config(asset_name, horizon):
     """Load the Mode D (or previous E) result for a given asset/horizon."""
-    csv_path = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         return None
     df = pd.read_csv(csv_path)
@@ -2996,10 +2847,11 @@ def _load_mode_d_config(asset_name, horizon):
         'optimal_features': str(row.get('optimal_features', '')),
         'horizon': int(row.get('horizon', 4)),
         'training_period': str(row.get('training_period', '')),
+        'gamma': float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0,
     }
 
 
-def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
+def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
     """
     Iteration 2: Refine features + finer window grid.
     1. Leave-one-out: drop each feature, keep only those that help
@@ -3016,13 +2868,13 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
 
     # --- Step 1: Leave-One-Out Refinement ---
     print(f"\n  [ITER2 1/3] Leave-One-Out Refinement (finer step=24)...")
-    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24)
+    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24, gamma=gamma)
     print(f"    Baseline: {baseline_acc:.1f}% ({len(prev_features)} features)")
 
     features_to_drop = []
     for feat in prev_features:
         reduced = [f for f in prev_features if f != feat]
-        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24)
+        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24, gamma=gamma)
         change = acc - baseline_acc
         if change > 0.3:
             features_to_drop.append(feat)
@@ -3032,7 +2884,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
 
     refined_features = [f for f in prev_features if f not in features_to_drop]
     if features_to_drop:
-        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
         print(f"\n    Removed {len(features_to_drop)}: {', '.join(features_to_drop)}")
         print(f"    {len(prev_features)} -> {len(refined_features)} features | {baseline_acc:.1f}% -> {new_acc:.1f}%")
         if new_acc < baseline_acc - 0.5:
@@ -3044,7 +2896,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     # --- Step 2: Add-Back Test ---
     print(f"\n  [ITER2 2/3] Add-Back Test (try adding dropped features)...")
     dropped_features = [f for f in all_cols if f not in refined_features]
-    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
     added = []
 
     # Only test features that were in the top 50% by LGBM importance (speed optimization)
@@ -3055,7 +2907,8 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     X = df_clean[all_cols].tail(5000)
     y = df_clean['label'].tail(5000)
     if len(np.unique(y)) >= 2:
-        model_imp.fit(X, y)
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
         imp = pd.Series(model_imp.feature_importances_, index=all_cols)
         imp = imp.sort_values(ascending=False)
         candidates = [f for f in imp.index[:len(all_cols)//2] if f not in refined_features]
@@ -3068,7 +2921,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
         test_df = df_features.dropna(subset=test_set + ['label'])
         if len(test_df) < 500:
             continue
-        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
         if acc > current_acc + 0.5:
             delta = acc - current_acc
             added.append(feat)
@@ -3124,7 +2977,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     return best_config, refined_features
 
 
-def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
+def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
     """
     Iteration 3: Ultra-fine tuning.
     1. Very fine window grid (_40h, step=10h) around winner
@@ -3151,13 +3004,14 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     if len(np.unique(y)) < 2:
         top5 = prev_features[:5]
     else:
-        model_imp.fit(X, y)
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
         imp = pd.Series(model_imp.feature_importances_, index=prev_features).sort_values(ascending=False)
         top5 = list(imp.index[:5])
     print(f"    Top 5: {top5}")
 
     # Test interactions (product of pairs)
-    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24)
+    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24, gamma=gamma)
     interaction_features = []
     tested_features = list(prev_features)
 
@@ -3171,7 +3025,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
             test_df = df_features.dropna(subset=test_set + ['label'])
             if len(test_df) < 500:
                 continue
-            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
             if acc > current_acc + 0.3:
                 interaction_features.append(int_name)
                 tested_features.append(int_name)
@@ -3226,11 +3080,12 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     return best_config, refined_features
 
 
-def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations='2'):
+def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
     """
     Mode E: Iterative refinement of Mode D results.
     iteration='2'  -> run 2nd pass only
     iteration='23' -> run 2nd + 3rd pass
+    Gamma read per asset+horizon from CSV.
     """
     do_iter3 = '3' in iterations
 
@@ -3253,20 +3108,21 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"  WARNING: Macro data update failed: {e}")
 
     update_all_data(assets_list)
-    diag_hours = diag_years * 365 * 24
     final_models = []
 
     for asset_name in assets_list:
-        print(f"\n{'='*60}")
-        print(f"  REFINING: {asset_name} ({horizon}h)")
-        print(f"{'='*60}")
-
         # Load previous Mode D (or E) result
         prev_config = _load_mode_d_config(asset_name, horizon)
         if prev_config is None:
             print(f"  ERROR: No existing model for {asset_name} {horizon}h.")
             print(f"  Run Mode D first!")
             continue
+
+        gamma = prev_config.get('gamma', 1.0)
+
+        print(f"\n{'='*60}")
+        print(f"  REFINING: {asset_name} ({horizon}h, gamma={gamma})")
+        print(f"{'='*60}")
 
         prev_features = prev_config['optimal_features']
         if not prev_features or prev_features == 'nan':
@@ -3277,7 +3133,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
               f"{prev_config['accuracy']:.1f}% | {len(prev_features.split(','))} features")
 
-        # Build features
+        # Build features, cap at 1 year (decay handles recency)
         df_raw = load_data(asset_name)
         if df_raw is None:
             continue
@@ -3285,10 +3141,10 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"\n  Building all features (horizon={horizon}h)...")
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
 
-        total_rows = len(df_full)
-        if total_rows > diag_hours:
-            df_full = df_full.tail(diag_hours).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+        MAX_E_HOURS = 6 * 30 * 24  # 4,320 hours
+        if len(df_full) > MAX_E_HOURS:
+            print(f"  Capped: {len(df_full):,} -> {MAX_E_HOURS:,} rows (last 6mo)")
+            df_full = df_full.tail(MAX_E_HOURS).reset_index(drop=True)
 
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows")
@@ -3303,7 +3159,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"{'='*60}")
 
         iter2_config, iter2_features = _run_iteration_2(
-            asset_name, df_clean, prev_config, all_cols, horizon)
+            asset_name, df_clean, prev_config, all_cols, horizon, gamma=gamma)
 
         if iter2_config is None:
             print("  Iteration 2 failed. Keeping previous config.")
@@ -3317,7 +3173,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
             print(f"{'='*60}")
 
             iter3_config, iter3_features = _run_iteration_3(
-                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon)
+                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon, gamma=gamma)
 
             if iter3_config and iter3_config['accuracy'] > iter2_config['accuracy']:
                 final_config = iter3_config
@@ -3329,6 +3185,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         else:
             final_config = iter2_config
 
+        final_config['gamma'] = gamma
         final_models.append(final_config)
 
         # Summary
@@ -3349,7 +3206,8 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         return
 
     # Save (merge with existing)
-    csv_path = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
     df_best = pd.DataFrame(final_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -3380,9 +3238,10 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         model_names = config['models'].split('+')
         window = config['best_window']
         feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon)
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
         all_signals[asset_name] = signals
@@ -3414,7 +3273,7 @@ def run_strategy_comparison(assets_list, horizons=None):
     Scores with acc x (1 + return/100). Updates trading_config.json with best strategy.
     Requires Mode D to have been run first for both 4h and 8h.
     """
-    csv_path = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         print("  ERROR: No saved models found. Run Mode D first.")
         return
@@ -3456,17 +3315,19 @@ def run_strategy_comparison(assets_list, horizons=None):
             if has_4h:
                 row4 = cfg4.iloc[0]
                 feats4 = row4['optimal_features'].split(',') if pd.notna(row4.get('optimal_features', '')) else None
+                gamma4 = float(row4.get('gamma', 1.0)) if pd.notna(row4.get('gamma', 1.0)) else 1.0
                 signals_4h = generate_signals(asset, row4['models'].split('+'),
                                               int(row4['best_window']), REPLAY_HOURS_F,
-                                              feature_override=feats4, horizon=4)
+                                              feature_override=feats4, horizon=4, gamma=gamma4)
                 signals_4h = simulate_portfolio(signals_4h)
 
             if has_8h:
                 row8 = cfg8.iloc[0]
                 feats8 = row8['optimal_features'].split(',') if pd.notna(row8.get('optimal_features', '')) else None
+                gamma8 = float(row8.get('gamma', 1.0)) if pd.notna(row8.get('gamma', 1.0)) else 1.0
                 signals_8h = generate_signals(asset, row8['models'].split('+'),
                                               int(row8['best_window']), REPLAY_HOURS_F,
-                                              feature_override=feats8, horizon=8)
+                                              feature_override=feats8, horizon=8, gamma=gamma8)
                 signals_8h = simulate_portfolio(signals_8h)
 
         # Build merged timeline
@@ -3646,6 +3507,48 @@ def run_strategy_comparison(assets_list, horizons=None):
 
         print(f"\n  >>> BEST THRESHOLD for {asset}: {best_conf}%")
 
+        # Generate chart for best strategy + threshold
+        chart_signals = []
+        for dt in all_times:
+            s4 = sig4_map.get(dt)
+            s8 = sig8_map.get(dt)
+            price = (s4 or s8)['close']
+            sig4_s = s4['signal'] if s4 else 'HOLD'
+            conf4_s = s4['confidence'] if s4 else 50
+            sig8_s = s8['signal'] if s8 else 'HOLD'
+            conf8_s = s8['confidence'] if s8 else 50
+
+            if best_strat == 'both_agree':
+                if sig4_s == 'SELL' or sig8_s == 'SELL':
+                    signal = 'SELL'
+                elif sig4_s == 'BUY' and sig8_s == 'BUY' and conf4_s >= best_conf and conf8_s >= best_conf:
+                    signal = 'BUY'
+                else:
+                    signal = 'HOLD'
+            elif best_strat == 'either_agree':
+                if sig4_s == 'SELL' or sig8_s == 'SELL':
+                    signal = 'SELL'
+                elif (sig4_s == 'BUY' and conf4_s >= best_conf) or (sig8_s == 'BUY' and conf8_s >= best_conf):
+                    signal = 'BUY'
+                else:
+                    signal = 'HOLD'
+            elif best_strat == '4h_only':
+                signal = sig4_s if conf4_s >= best_conf or sig4_s == 'SELL' else 'HOLD'
+            else:
+                signal = sig8_s if conf8_s >= best_conf or sig8_s == 'SELL' else 'HOLD'
+
+            best_conf_val = max(conf4_s, conf8_s)
+            rsi_val = (s4 or s8).get('rsi', 50)
+            chart_signals.append({
+                'datetime': dt, 'close': price, 'signal': signal,
+                'confidence': best_conf_val, 'rsi': rsi_val,
+            })
+
+        chart_signals = simulate_portfolio(chart_signals)
+        model_info = {'best_combo': f'{best_strat}@{best_conf}%', 'best_window': 'F',
+                       'accuracy': base_acc * 100, 'gamma': cfg4.iloc[0].get('gamma', 1.0) if has_4h else cfg8.iloc[0].get('gamma', 1.0)}
+        generate_backtest_chart(asset, chart_signals, model_info=model_info)
+
         # Update trading config with both strategy and threshold
         if asset not in trading_config:
             trading_config[asset] = {}
@@ -3672,7 +3575,7 @@ def _run_quick_asset(asset):
     print(f"  Quick {asset}: Mode B, 4h+8h")
     print("=" * 60)
 
-    csv_path = MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_hourly_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         print("  ERROR: No models found!")
         return
@@ -3758,9 +3661,10 @@ def _run_quick_asset(asset):
         else:
             feature_override = list(FEATURE_SET_A)
 
+        row_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
         print(f"  Generating {h}h signals (720h)...")
         sigs = generate_signals(asset, model_names, window, 720,
-                                feature_override=feature_override, horizon=h)
+                                feature_override=feature_override, horizon=h, gamma=row_gamma)
         sigs = simulate_portfolio(sigs)
         if h == 4:
             signals_4h = sigs
@@ -3824,18 +3728,19 @@ def main():
     has_macro = os.path.exists(MACRO_DIR)
 
     # ================================================================
-    # CLI SHORTCUT: python crypto_trading_system.py D BTC 8h 1y
-    # Supports: MODE [ASSETS] [HORIZON] [YEARS]
+    # CLI SHORTCUT: python crypto_trading_system.py D BTC 8h
+    # Supports: MODE [ASSETS] [HORIZON]
     # Examples:
     #   python crypto_trading_system.py B BTC 8h
-    #   python crypto_trading_system.py D BTC,ETH 4h 1y
-    #   python crypto_trading_system.py D BTC 8h 1y
+    #   python crypto_trading_system.py D BTC,ETH 4,8h
+    #   python crypto_trading_system.py D BTC 8h
     #   python crypto_trading_system.py B              (all assets, 4h default)
-    #   python crypto_trading_system.py D BTC 1y --permtest  (add permutation significance test, ~30min extra)
+    #   python crypto_trading_system.py D BTC --permtest
+    # Training period removed — decay weighting handles recency (V1.5 Cacarot TEST)
     # ================================================================
     cli_args    = [a for a in sys.argv[1:] if not a.startswith('--')]
-    flag_permtest = '--permtest' in sys.argv  # e.g. python crypto_trading_system.py D BTC 1y --permtest
-    flag_resume   = '--resume' in sys.argv    # e.g. python crypto_trading_system.py D BTC 4,8h 1y --resume
+    flag_permtest = '--permtest' in sys.argv
+    flag_resume   = '--resume' in sys.argv
     if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'E', 'F', '5', '6', '7'):
         mode = cli_args[0].upper()
 
@@ -3846,7 +3751,7 @@ def main():
             return
 
         # Parse assets (default: all)
-        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y'):
+        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y') and not cli_args[1].endswith('m'):
             assets_list = [a.strip().upper() for a in cli_args[1].split(',') if a.strip().upper() in ASSETS]
             if not assets_list:
                 assets_list = list(ASSETS.keys())
@@ -3859,22 +3764,16 @@ def main():
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
 
-        # Parse years (default: 1y)
-        diag_years = 1
-        for a in cli_args:
-            if a.lower().endswith('y') and a[:-1].isdigit():
-                diag_years = int(a[:-1])
-
         e_iterations = '2'
 
         print("=" * 60)
-        print(f"  CLI: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)} | {diag_years}y")
+        print(f"  CLI: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)} | gamma from CSV")
         print("=" * 60)
 
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- V5")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- V1.5 Cacarot TEST")
         print("  Crypto: BTC, ETH, XRP, DOGE")
         print("  Indices: SMI, DAX, CAC40")
         print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
@@ -3952,20 +3851,9 @@ def main():
             horizons = [4]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        diag_years = 1
         if mode in ('D', 'E'):
-            print("\nDiagnostic data range:")
-            print("  1. Last 1 year   (recommended -- recent market behaviour)")
-            print("  2. Last 2 years  (cross-regime test)")
-            print("  3. Last 4 years  (slowest)")
-            range_choice = input("Enter choice (1-3) [1]: ").strip()
-            if range_choice == '2':
-                diag_years = 2
-            elif range_choice == '3':
-                diag_years = 4
-            else:
-                diag_years = 1
-            print(f"Diagnostic range: last {diag_years} year{'s' if diag_years > 1 else ''}")
+            print("\n  [V1.5 Cacarot TEST] Uses ALL available data — decay weighting handles recency")
+            print("  Gamma is read per asset+horizon from CSV")
 
     # Mode B doesn't loop per horizon -- it handles all horizons in one call
     if mode == 'B':
@@ -3977,9 +3865,9 @@ def main():
                 print(f"  RUNNING {h}h HORIZON")
                 print(f"{'#'*60}")
             if mode in ('D', 'DF'):
-                run_mode_d(assets_list, diag_years=diag_years, horizon=h, permtest=flag_permtest, resume=flag_resume, training_period=f'{diag_years}y')
+                run_mode_d(assets_list, horizon=h, permtest=flag_permtest, resume=flag_resume)
             elif mode == 'E':
-                run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
+                run_mode_e(assets_list, horizon=h, iterations=e_iterations)
             elif mode == 'F':
                 pass  # handled below
 

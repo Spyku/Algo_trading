@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-Automated ML trading system for crypto (BTC, ETH, XRP). Generates hourly BUY/SELL/HOLD signals using dual-horizon (4h + 8h) ensemble ML models with walk-forward validation. Executes trades on Revolut X via Ed25519-signed API.
+Automated ML trading system for crypto (BTC, ETH, XRP). Generates hourly BUY/SELL/HOLD signals using dual-horizon (4h + 8h) ensemble ML models with walk-forward validation and temporal decay sample weighting. Executes trades on Revolut X via Ed25519-signed API.
 
 **Owner:** Alex, Lausanne, Switzerland (CET/CEST timezone)
 
@@ -56,10 +56,9 @@ python crypto_trading_system.py 7              # Quick XRP
 
 # Full pipeline
 python crypto_trading_system.py B BTC 4,8h     # Mode B — signals from saved models
-python crypto_trading_system.py D BTC 4,8h 1y  # Mode D — full pipeline (~90 min/horizon)
-python crypto_trading_system.py F BTC 4,8h     # Mode F — strategy comparison (400h window)
-python crypto_trading_system_v5.2.py D BTC 1,2,3,4,5,6,7,8h 1y  # V5.2 all horizons
-python crypto_trading_system_v5.2.py G BTC     # V5.2 Mode G — horizon pair test (168h)
+python crypto_trading_system.py D BTC 4,8h     # Mode D — full pipeline (6mo data cap)
+python crypto_trading_system.py F BTC 4,8h     # Mode F — strategy comparison (400h window, generates chart)
+python crypto_trading_system.py DF BTC,ETH 4,8h  # Mode DF — D then F in one command
 
 # Auto-trader
 python crypto_revolut_trader.py --loop            # Live trading loop
@@ -77,7 +76,7 @@ python crypto_revolut_trader.py --balance         # Revolut X balance
 ### Production File Chain
 
 ```
-crypto_trading_system.py  (V5 production — Modes B/D/E/F)
+crypto_trading_system.py  (V5 Cacarot production — Modes B/D/E/F/DF)
   └── hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
 
 crypto_revolut_trader.py  (auto-trader — reads trading_config.json)
@@ -89,11 +88,13 @@ crypto_revolut_trader.py  (auto-trader — reads trading_config.json)
 
 - **Dual horizons:** 4h and 8h — completely independent models per horizon (different features, window, combo). Never mix them.
 - **No model persistence:** System retrains from scratch every prediction. No .pkl files. Intentional design.
+- **Temporal decay (Cacarot):** Exponential sample weighting `w_i = gamma^(age_in_hours)`. Per-model gamma stored in best_models.csv. Newest sample weight=1, oldest=gamma^(n-1). gamma=0.995 → half-life ~6 days, gamma=0.999 → ~29 days. gamma >= 1.0 disables decay (zero overhead).
+- **6-month data cap:** Mode D and E cap training data at 4,320 hours (6 months). Not configurable — hardcoded as `MAX_DIAG_HOURS`.
 - **Labels:** Relative to 168h rolling median return, not absolute price direction. `label = 1` means return > median.
 - **Walk-forward validation:** Train on last `window` hours → predict next candle → step forward 72h. No future leakage.
-- **Scoring (V5):** `accuracy × (1 + max(cum_return, 0) / 100)` — rewards being right AND making money.
+- **Scoring (V5):** `accuracy × (1 + max(cum_return, 0) / 100)` — rewards being right AND making money. Judge by return, not accuracy.
 - **Models:** RF, GB, LR, LGBM — all 15 combinations tested (solo + pairs + triples + quad).
-- **Features:** 44 technical + 81 macro/sentiment/cross-asset = 125 total.
+- **Features:** 49 technical + 81 macro/sentiment/cross-asset = 130 total.
 
 ### Data Flow
 
@@ -119,9 +120,9 @@ TRADING_FEE_BASE = 0.0009   # 0.09% Revolut X taker fee (0% maker)
 SLIPPAGE = 0.0002           # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = 0.0011        # total cost per trade (fee + slippage) — applied on BUY and SELL
 MIN_CONFIDENCE = 75         # global fallback only — overridden per asset by Mode F
+MAX_DIAG_HOURS = 4320       # 6 months data cap for Mode D and E
 REPLAY_HOURS = 200          # Modes B, D signal replay
 REPLAY_HOURS_F = 400        # Mode F — longer window for more trades in strategy selection
-REPLAY_HOURS_G = 168        # Mode G — last week only
 DIAG_STEP = 72
 DIAG_WINDOWS = [48, 72, 100, 150, 200]       # horizons 5-8h
 DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
@@ -133,10 +134,11 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system.py` | V5 Production | DO NOT break — live trader imports from it. Includes DF mode + slippage model. |
+| `crypto_trading_system.py` | V5 Cacarot Production | DO NOT break — live trader imports from it. Includes DF mode, slippage model, temporal decay (gamma), 6mo data cap. |
 | `crypto_trading_system_v6.py` | V6 Experimental | 12 literature enhancements behind `ENHANCEMENTS` flags (env var override). NOT production. |
-| `testing_literature.py` | Test harness | A/B tests each V5.5 enhancement (Mode D BTC 4,8h 1y) — COMPLETE |
+| `archive/testing_literature.py` | Test harness | A/B tests V5.5 enhancements — COMPLETE, archived. Results in `archive/testing_literature.csv` |
 | `testing_literature_v2.py` | Test harness | A/B tests 12 V6 enhancements (Mode D BTC 4,8h 1y) |
+| `testing_cacarot_v1.5.py` | Test harness | Tests 15 V5.6-rejected features WITH decay. Isolated output: `models/testing_cacarot_v1.5_results.csv`, `charts/v1.5_test/` |
 | `testing_feature_stability.py` | Test harness | Feature stability test across BTC+ETH × 4h+8h |
 | `crypto_revolut_trader.py` | Live | Multi-asset live trader + `/conf` `/chart` commands |
 | `crypto_live_trader.py` | Live | Signal generation core — NOT run directly |
@@ -164,16 +166,16 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 ## Current Best Models
 
-| Asset | Horizon | Models | Window | Accuracy | Features | Status |
-|-------|---------|--------|--------|----------|----------|--------|
-| BTC | 4h | RF+GB+LR | 100h | 80.2% | 31 | V5 2y |
-| BTC | 8h | RF+GB | 150h | 84.7% | 20 | V5 2y |
-| ETH | 4h | RF | 100h | 71.7% | 57 | V5 2y |
-| ETH | 8h | RF+GB | 100h | 76.7% | 78 | V5 2y |
-| XRP | 4h | RF+GB+LGBM | 100h | 71.7% | — | V5 |
-| XRP | 8h | RF | 100h | 82.5% | — | V5 |
-| DOGE | 4h | RF+LR | 72h | 78.1% | 30 | V5 |
-| DOGE | 8h | LR | 100h | 74.0% | 79 | V5 WARNING |
+| Asset | Horizon | Models | Window | Accuracy | Return | Features | Gamma | Status |
+|-------|---------|--------|--------|----------|--------|----------|-------|--------|
+| BTC | 4h | RF+LGBM | 48h | 71.2% | +43.1% | 20 | 0.995 | Cacarot 6mo |
+| BTC | 8h | LGBM | 200h | 80.7% | +27.1% | 111 | 0.996 | Cacarot 6mo |
+| ETH | 4h | RF+LR | 48h | 83.1% | +18.1% | 40 | 0.999 | Cacarot 6mo |
+| ETH | 8h | RF | 200h | 91.2% | +35.6% | 90 | 0.995 | Cacarot 6mo |
+| XRP | 4h | RF+GB+LGBM | 100h | 71.7% | +202.3% | 15 | 1.0 | V5 2y |
+| XRP | 8h | RF | 100h | 82.5% | +139.2% | 50 | 1.0 | V5 2y |
+| DOGE | 4h | RF+LR | 72h | 78.1% | — | 30 | 1.0 | V5 2y |
+| DOGE | 8h | LR | 100h | 74.0% | — | 79 | 1.0 | V5 2y WARNING |
 
 **WARNING — DOGE 8h LR outputs 99-100% confidence on most signals.** Needs `CalibratedClassifierCV`. Do not enable DOGE for live trading until fixed.
 
@@ -181,14 +183,14 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 ```json
 {
-  "BTC": { "strategy": "either_agree", "min_confidence": 66, "max_position_usd": 6000, "enabled": true },
-  "ETH": { "strategy": "either_agree", "min_confidence": 75, "max_position_usd": 6000, "enabled": true },
+  "BTC": { "strategy": "either_agree", "min_confidence": 90, "max_position_usd": 6000, "enabled": true },
+  "ETH": { "strategy": "4h_only", "min_confidence": 60, "max_position_usd": 6000, "enabled": true },
   "XRP": { "strategy": "either_agree", "min_confidence": 75, "max_position_usd": 0, "enabled": false },
   "DOGE": { "strategy": "8h_only", "min_confidence": 90, "max_position_usd": 0, "enabled": false }
 }
 ```
 
-**BTC + ETH live trading at $6k each. XRP disabled (no improvement to portfolio). DOGE disabled (calibration issue).**
+**BTC + ETH live trading at $6k each (Cacarot configs from Mode F 2026-03-16). XRP disabled. DOGE disabled (calibration issue).**
 
 ---
 
@@ -205,16 +207,38 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]  # horizons 1-4h
 
 ## Pending Work
 
-1. **V6 A/B tests** — `python testing_literature_v2.py`: 12 new literature enhancements + baseline, Mode D BTC 4,8h 1y. Results in `testing_literature_v2.csv`
-2. **Re-run Mode DF for BTC** — `python crypto_trading_system.py DF BTC 4,8h 1y` (best_models CSV contaminated from V5.5 tests)
-3. **Re-run Mode F for ETH** — `python crypto_trading_system.py F ETH 4,8h` to recalibrate confidence with slippage model
-4. **Feature stability test** — `python testing_feature_stability.py`: BTC+ETH × 4h+8h
-5. **XRP V5** — run `python crypto_trading_system.py D XRP 4,8h 1y` on laptop, then Mode F
-6. **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly to refresh strategy
-7. **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test
+### Desktop TODO
+1. **V6 A/B tests** — `python testing_literature_v2.py --resume` — RUNNING. Laptop hangs on 8h diagnostic (loky deadlock with 14 workers), must run on desktop.
+
+### Laptop TODO (can run in parallel)
+2. **V1.5 feature test** — `python testing_cacarot_v1.5.py D BTC 4,8h` then F — tests 15 V5.6-rejected features with decay
+3. **XRP Cacarot** — `python crypto_trading_system.py D XRP 4,8h` then Mode F
+4. **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h`
+5. **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h`
+
+### Either machine
+6. **Feature stability test** — `python testing_feature_stability.py`
+7. **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly
+8. **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test
+9. **Restart live trader** — pick up new BTC (either_agree @90%) and ETH (4h_only @60%) configs
 
 ### Completed
-- **V5.5 A/B tests** — DONE. Only slippage_model won → promoted to production. V5.5 archived.
+- **Cacarot release** — DONE (2026-03-16). Temporal decay (gamma per asset+horizon), 6mo data cap, Mode F charts.
+- **BTC Cacarot Mode DF** — DONE (2026-03-16). BTC: `either_agree` @90%, return +42.1%.
+- **ETH Cacarot Mode DF** — DONE (2026-03-16). ETH: `4h_only` @60%, return +62.8%.
+- **Re-run Mode DF for BTC** — DONE (2026-03-15). Fresh models in best_models.csv.
+- **Re-run Mode F for ETH** — DONE (2026-03-15). ETH: `8h_only`, min_confidence=85%.
+- **Restart crypto_revolut_trader** — DONE (2026-03-15). Running with fresh models + 5-min hot-reload for config+models+positions.
+- **Laptop venv install** — DONE. PyWavelets + xgboost installed.
+- **V5.5 A/B tests (testing_literature.py)** — DONE, archived. 8 tests × BTC 4h+8h 1y. Results:
+  - **slippage_model** — WINNER: 8h return +98.4% vs baseline +74.0%, consistent improvement → promoted to production
+  - **extended_diag_step** — 8h accuracy 85.6% (best) but fewer trades (22 vs 32)
+  - **on_chain_features** — 8h return +106.1% but accuracy dropped 5 points (73.3% vs 78.3%)
+  - **gb_calibration** — neutral, slight regression
+  - **triple_barrier_label** — worse on all metrics (63.9%/65.0% accuracy)
+  - **purged_embargo** — much worse (58.7%/62.8% accuracy)
+  - **derivatives_features** — only 2 trades, meaningless
+  - Baseline: 4h 80.0% +57.2%, 8h 78.3% +74.0%
 - **V5.5 promotion** — slippage model (TRADING_FEE 0.0009 → 0.0011) applied to V5, V15, V30
 - **DF combined mode** — `python crypto_trading_system.py DF BTC,ETH 4,8h 1y` runs Mode D then F
 - **Telegram /conf + /chart** — added to crypto_revolut_trader.py

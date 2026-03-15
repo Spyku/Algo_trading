@@ -554,11 +554,23 @@ def process_asset(asset, trading_cfg, dry_run=False):
         position['usd_invested'] = 0
         save_position(asset, position)
 
+    # Get gamma from the primary horizon model
+    gamma_val = ''
+    for h in [8, 4]:  # prefer 8h config
+        cfg = load_best_config(asset, horizon=h)
+        if cfg:
+            g = cfg.get('gamma', 1.0)
+            if g and g < 1.0:
+                gamma_val = str(g)
+            break
+
     return {
         'asset': asset, 'action': action, 'confidence': confidence,
         'reason': reason, 'price': price, 'executed': executed,
         'pnl_msg': pnl_msg, 'sig_4h': sig_4h, 'sig_8h': sig_8h,
         'position': position, 'strategy': strategy,
+        'min_confidence': trading_cfg.get('min_confidence', MIN_CONFIDENCE),
+        'gamma': gamma_val,
     }
 
 
@@ -629,7 +641,11 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
         # Header with price + RSI + auto status
         price_str = f"${price:,.2f}" if price >= 100 else f"${price:,.4f}"
         auto_icon = "🔵" if position.get('auto_trade') else "🔴"
-        lines.append(f"{auto_icon} <b>{asset}</b> {price_str} | RSI:{rsi:.0f} | [{strategy}]")
+        gamma_str = r.get('gamma', '')
+        gamma_suffix = f"|γ{gamma_str}" if gamma_str else ""
+        mc = r.get('min_confidence', '')
+        conf_str = f" | conf:{mc}%" if mc else ""
+        lines.append(f"{auto_icon} <b>{asset}</b> {price_str} | RSI:{rsi:.0f} | [{strategy}{gamma_suffix}]{conf_str}")
 
         # Last 4 prices
         if last_prices:
@@ -1347,6 +1363,21 @@ def _reload_trading_config(trading_cfg):
     return changed
 
 
+def _get_models_fingerprint(trading_cfg):
+    """Build fingerprint of best_models CSV for all enabled assets. Returns dict {(asset,h): summary}."""
+    fp = {}
+    for asset, cfg in trading_cfg.items():
+        if not cfg.get('enabled'):
+            continue
+        for h in [4, 8]:
+            model_cfg = load_best_config(asset, horizon=h)
+            if model_cfg:
+                fp[(asset, h)] = f"{model_cfg['best_combo']}|w{model_cfg['best_window']}|{model_cfg['accuracy']:.2f}|{model_cfg.get('feature_set','A')}|γ{model_cfg.get('gamma',1.0)}"
+            else:
+                fp[(asset, h)] = None
+    return fp
+
+
 def run_all_once(trading_cfg, dry_run=False):
     """Sync positions, process all enabled assets."""
     # Hot-reload trading config before each cycle
@@ -1424,7 +1455,7 @@ def run_loop(trading_cfg, dry_run=False):
     conf_parts = [f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%" for a, c in trading_cfg.items() if c.get('enabled')]
     print(f"  Min confidence: {', '.join(conf_parts)}")
     print(f"  Telegram: /help /status /config /setup /balance /auto /sync /pause /resume /stop")
-    print(f"  Position sync: every 5 min (detects manual trades)")
+    print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
     _flush_old_updates()
@@ -1468,7 +1499,7 @@ def run_loop(trading_cfg, dry_run=False):
 
                 remaining = wait_sec
                 last_sync = time.time()
-                config_reloaded = False
+                last_models_fp = _get_models_fingerprint(trading_cfg)
                 while remaining > 0 and not _stop_event.is_set():
                     sleep_chunk = min(30, remaining)
                     _stop_event.wait(sleep_chunk)  # interruptible sleep
@@ -1480,19 +1511,55 @@ def run_loop(trading_cfg, dry_run=False):
                         _reload_trading_config(trading_cfg)
                         print("  Config changed via /setup — re-running signals")
                         run_all_once(trading_cfg, dry_run=dry_run)
+                        last_models_fp = _get_models_fingerprint(trading_cfg)
 
-                    # Reload trading config at :55 (5 min before next cycle)
-                    if not config_reloaded and datetime.now().minute >= 55:
-                        if _reload_trading_config(trading_cfg):
-                            print(f"  Config reloaded at :{datetime.now().minute:02d}")
-                        config_reloaded = True
-
-                    # Sync positions every 5 minutes
+                    # Every 5 minutes: sync positions + check config + check models
                     if time.time() - last_sync >= 300:
                         try:
+                            # Position sync
                             changes = sync_positions(trading_cfg, notify=True)
                             if changes:
                                 print(f"  Position sync: {len(changes)} changes")
+
+                            # Hot-reload trading config
+                            if _reload_trading_config(trading_cfg):
+                                print(f"  Config reloaded at :{datetime.now().minute:02d}")
+
+                            # Check if best_models CSV changed
+                            new_fp = _get_models_fingerprint(trading_cfg)
+                            if new_fp != last_models_fp:
+                                # Log what changed and check for regressions
+                                has_regression = False
+                                for key in set(list(new_fp.keys()) + list(last_models_fp.keys())):
+                                    old_v = last_models_fp.get(key)
+                                    new_v = new_fp.get(key)
+                                    if old_v != new_v:
+                                        asset, h = key
+                                        if old_v is None:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — NEW: {new_v}")
+                                        elif new_v is None:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — REMOVED")
+                                            has_regression = True
+                                        else:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — {old_v} -> {new_v}")
+                                            # Reject if accuracy dropped (test contamination protection)
+                                            try:
+                                                old_acc = float(old_v.split('|')[2])
+                                                new_acc = float(new_v.split('|')[2])
+                                                if new_acc < old_acc - 1.0:
+                                                    print(f"  ⚠ {asset} {h}h accuracy DROPPED {old_acc:.1f}% -> {new_acc:.1f}% — IGNORING")
+                                                    has_regression = True
+                                            except (IndexError, ValueError):
+                                                pass
+                                if has_regression:
+                                    print("  Model change IGNORED — accuracy regression (possible test contamination)")
+                                else:
+                                    last_models_fp = new_fp
+                                    print("  Models improved — re-running signals")
+                                    send_telegram("🔄 <b>Models updated</b> — re-running signals")
+                                    run_all_once(trading_cfg, dry_run=dry_run)
+                                    last_models_fp = _get_models_fingerprint(trading_cfg)
+
                             last_sync = time.time()
                         except Exception as e:
                             print(f"  Sync error: {e}")
