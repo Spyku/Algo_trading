@@ -51,7 +51,7 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 import warnings
 warnings.filterwarnings('ignore')
 
-from crypto_trading_system import (
+from crypto_trading_system_casca import (
     ASSETS, FEATURE_SET_A, FEATURE_SET_B,
     PREDICTION_HORIZON, ALL_MODELS,
     download_asset, load_data, build_all_features,
@@ -102,7 +102,7 @@ def send_telegram(message, parse_mode='HTML'):
 # LOAD MODEL CONFIG
 # ============================================================
 def load_best_config(asset_name, horizon=None):
-    csv_path = 'models/crypto_hourly_best_models.csv'
+    csv_path = 'models/crypto_casca_best_models.csv'
     if not os.path.exists(csv_path):
         return None
     df = pd.read_csv(csv_path)
@@ -482,7 +482,7 @@ def main():
             setup_telegram()
             return
 
-    if not os.path.exists('models/crypto_hourly_best_models.csv'):
+    if not os.path.exists('models/crypto_casca_best_models.csv'):
         print("\n  ERROR: No models found!")
         return
 

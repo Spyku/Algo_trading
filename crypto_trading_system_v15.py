@@ -1,5 +1,5 @@
 """
-Crypto 15-Min ML Trading System — V15
+Crypto 15-Min ML Trading System — V15 Cacarot
 ============================================================
 Based on V5.5. Uses 15-minute candles from Binance.
 Horizons 1-8 = 15', 30', 45', 60', 75', 90', 105', 120'.
@@ -125,7 +125,9 @@ def _kill_orphan_workers():
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
-RESUME_DIR = f'{MODELS_DIR}/.resume_15m'
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(_BASE_DIR, 'models')
+RESUME_DIR = os.path.join(MODELS_DIR, '.resume_15m')
 
 def _resume_path(asset, horizon, step):
     return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
@@ -228,6 +230,17 @@ REPLAY_HOURS_G = _hours_to_rows(168)    # 672 candles — Mode G last week
 DIAG_STEP      = _hours_to_rows(24)     # 96 candles (15-min needs shorter step)
 DIAG_WINDOWS       = [_hours_to_rows(h) for h in [12, 24, 36, 48, 72]]   # horizons s5-s8
 DIAG_WINDOWS_SHORT = [_hours_to_rows(h) for h in [8, 12, 24, 36, 48]]    # horizons s1-s4
+
+DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
+
+
+def get_decay_weights(n_samples, gamma):
+    """Exponential decay: newest sample=1, oldest=gamma^(n-1).
+    Returns None when gamma >= 1.0 (no decay, zero overhead)."""
+    if gamma is None or gamma >= 1.0:
+        return None
+    ages = np.arange(n_samples - 1, -1, -1)
+    return gamma ** ages
 
 
 # ============================================================
@@ -508,11 +521,11 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 # ============================================================
 # V2: MACRO & SENTIMENT FEATURES
 # ============================================================
-MACRO_DIR = 'data/macro_data'
-DATA_DIR = 'data'
-CHARTS_DIR = 'charts'
-MODELS_DIR = 'models'
-CONFIG_DIR = 'config'
+MACRO_DIR = os.path.join(_BASE_DIR, 'data', 'macro_data')
+DATA_DIR = os.path.join(_BASE_DIR, 'data')
+CHARTS_DIR = os.path.join(_BASE_DIR, 'charts')
+# MODELS_DIR already defined above (needed by RESUME_DIR before this point)
+CONFIG_DIR = os.path.join(_BASE_DIR, 'config')
 _macro_cache = {}
 
 
@@ -682,7 +695,7 @@ def _classify_feature(feat):
         return 'BASE'
 
 
-def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Fast walk-forward test with LGBM only.
     Returns (accuracy, alpha, n_tests).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
@@ -727,7 +740,8 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
             class_weight='balanced', verbose=-1, random_state=42,
             device=lgbm_device
         )
-        model.fit(X_train_s, y_train)
+        sw = get_decay_weights(len(y_train), gamma)
+        model.fit(X_train_s, y_train, sample_weight=sw)
         pred = model.predict(X_test_s)[0]
 
         if pred == y_true:
@@ -755,13 +769,13 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     return accuracy, alpha, total
 
 
-def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None):
+def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Backward-compatible wrapper -- returns (accuracy, n_tests). Used by Mode E."""
-    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device)
+    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device, gamma=gamma)
     return acc, n
 
 
-def _test_lgbm_importance(df_features, feature_cols):
+def _test_lgbm_importance(df_features, feature_cols, gamma=1.0):
     """Train LGBM and extract feature importance."""
     from lightgbm import LGBMClassifier
 
@@ -779,7 +793,8 @@ def _test_lgbm_importance(df_features, feature_cols):
         class_weight='balanced', verbose=-1, random_state=42,
         device=LGBM_DEVICE
     )
-    model.fit(X_s, y)
+    sw = get_decay_weights(len(y), gamma)
+    model.fit(X_s, y, sample_weight=sw)
 
     importance = pd.DataFrame({
         'feature': feature_cols,
@@ -798,7 +813,7 @@ def _test_lgbm_importance(df_features, feature_cols):
     return importance
 
 
-def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
+def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
     """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
@@ -806,14 +821,14 @@ def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_al
     warnings.simplefilter('ignore')
     df_shuffled = df_features.copy()
     df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu')
+    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu', gamma=gamma)
     return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha
 
 
-def _test_permutation_importance(df_features, feature_cols):
+def _test_permutation_importance(df_features, feature_cols, gamma=1.0):
     """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
     print(f"\n  [2/5] Permutation Importance (parallel)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols)
+    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols, gamma=gamma)
     print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -821,7 +836,7 @@ def _test_permutation_importance(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         perm_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -834,21 +849,21 @@ def _test_permutation_importance(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
 
 
-def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha):
+def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
     """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     reduced = [f for f in feature_cols if f != feat]
-    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu')
+    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu', gamma=gamma)
     return feat, acc, acc - baseline_acc, alpha - baseline_alpha
 
 
-def _test_ablation(df_features, feature_cols):
+def _test_ablation(df_features, feature_cols, gamma=1.0):
     """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
     print(f"\n  [3/5] Ablation Test (parallel, drop one at a time)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols)
+    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols, gamma=gamma)
     print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
@@ -856,7 +871,7 @@ def _test_ablation(df_features, feature_cols):
     t0 = time.time()
     with _suppress_stderr():
         ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha)
+            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -874,19 +889,19 @@ def _test_ablation(df_features, feature_cols):
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
-def _reduced_one_set(df_features, ranked, n_feat):
+def _reduced_one_set(df_features, ranked, n_feat, gamma=1.0):
     """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     top_n = ranked[:n_feat]
-    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu')
+    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu', gamma=gamma)
     combined = acc * (1 + max(alpha, 0) / 100)
     return n_feat, acc, alpha, combined
 
 
-def _test_reduced_sets(df_features, feature_cols, importance_df):
+def _test_reduced_sets(df_features, feature_cols, importance_df, gamma=1.0):
     """Test accuracy with top-N features. Parallelized."""
     print(f"\n  [4/5] Reduced Feature Sets (parallel, top-N by importance)  [{datetime.now().strftime('%H:%M:%S')}]")
     ranked = importance_df['feature'].tolist()
@@ -900,7 +915,7 @@ def _test_reduced_sets(df_features, feature_cols, importance_df):
     t0 = time.time()
     with _suppress_stderr():
         reduced_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_reduced_one_set)(df_features, ranked, n_feat)
+            delayed(_reduced_one_set)(df_features, ranked, n_feat, gamma=gamma)
             for n_feat in test_sizes
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
@@ -997,7 +1012,7 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
     return score_df, keep, maybe, drop
 
 
-def run_feature_analysis(asset_name, df_features, all_feature_cols):
+def run_feature_analysis(asset_name, df_features, all_feature_cols, gamma=1.0):
     """
     Run full 5-test feature analysis on one asset.
     Returns the optimal feature list.
@@ -1009,16 +1024,16 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
     t0 = time.time()
 
     # 1. LGBM importance
-    importance_df = _test_lgbm_importance(df_features, all_feature_cols)
+    importance_df = _test_lgbm_importance(df_features, all_feature_cols, gamma=gamma)
 
     # 2. Permutation importance
-    permutation_df = _test_permutation_importance(df_features, all_feature_cols)
+    permutation_df = _test_permutation_importance(df_features, all_feature_cols, gamma=gamma)
 
     # 3. Ablation
-    ablation_df = _test_ablation(df_features, all_feature_cols)
+    ablation_df = _test_ablation(df_features, all_feature_cols, gamma=gamma)
 
     # 4. Reduced sets
-    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df)
+    reduced_df = _test_reduced_sets(df_features, all_feature_cols, importance_df, gamma=gamma)
 
     # 5. Score and select
     score_df, keep, maybe, drop = _score_features(
@@ -1032,8 +1047,8 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
 
     # Quick test: KEEP only vs KEEP + MAYBE -- use combined_score = acc x (1 + alpha/100)
     if maybe:
-        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep)
-        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe)
+        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep, gamma=gamma)
+        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe, gamma=gamma)
         score_keep = acc_keep * (1 + max(alpha_keep, 0) / 100)
         score_all  = acc_all  * (1 + max(alpha_all,  0) / 100)
         print(f"\n  KEEP only       ({len(keep):3d} feat): {acc_keep:.1f}% acc | "
@@ -1058,7 +1073,7 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols):
         ranked         = importance_df['feature'].tolist()
         top_n_features = ranked[:best_n]
 
-        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features)
+        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features, gamma=gamma)
         opt_score = opt_acc * (1 + max(opt_alpha, 0) / 100)
         print(f"  Scored optimal  ({len(optimal_features):3d} feat): {opt_acc:.1f}% acc | "
               f"{opt_alpha:+.1f}% alpha | score={opt_score:.1f}")
@@ -1142,7 +1157,7 @@ def _print_bootstrap_ci(signals, label=''):
 
 
 def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS,
-                     feature_override=None, horizon=PREDICTION_HORIZON):
+                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0):
     set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
     print(f"\n  Generating {_horizon_label(horizon)}-ahead signals for {asset_name} "
           f"(models={'+'.join(model_names)}, window={window_size}, "
@@ -1180,11 +1195,12 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
 
         votes = []
         probas = []
+        sw = get_decay_weights(len(y_train), gamma)
 
         for model_name in model_names:
             try:
                 model = ALL_MODELS[model_name]()
-                model.fit(X_train_s, y_train)
+                model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
@@ -1450,7 +1466,7 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
 # ============================================================
 # DIAGNOSTIC (CPU parallel)
 # ============================================================
-def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4):
+def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, model_factories, pred_horizon=4, gamma=1.0):
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
@@ -1488,11 +1504,12 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
         std[std == 0] = 1.0
         X_train_s = (X_train - mean) / std
         X_test_s  = (X_test - mean) / std
+        sw = get_decay_weights(len(y_train), gamma)
         votes = []
         for model_name in combo:
             try:
                 model = model_factories[model_name]()
-                model.fit(X_train_s, y_train)
+                model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
             except Exception:
@@ -1566,7 +1583,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 DIAG_MODELS = get_diagnostic_models()
 
 
-def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PREDICTION_HORIZON):
+def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PREDICTION_HORIZON, gamma=1.0):
     """Run diagnostic and return best config + all results.
     Kills the loky worker pool and removes BLAS limits before running,
     so RF/GB/LR get full BLAS parallelism in fresh workers."""
@@ -1610,7 +1627,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PRED
     with _suppress_stderr():
         all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
             delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS
+                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS, gamma=gamma
             )
             for combo, window in all_configs
         )
@@ -2223,8 +2240,9 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
                 'n_features': int(row['n_features']) if 'n_features' in row.index and pd.notna(row.get('n_features')) else '',
             }
 
+            row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
             signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                       feature_override=feature_override, horizon=h)
+                                       feature_override=feature_override, horizon=h, gamma=row_gamma)
             signals = simulate_portfolio(signals)
             _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(h)}")
 
@@ -2273,9 +2291,10 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
                 else:
                     feature_override = list(FEATURE_SET_A)
 
+                html_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
                 print(f"  Generating {_horizon_label(h)} signals ({_hours_to_rows(720)} candles) for {asset_name}...")
                 sigs = generate_signals(asset_name, model_names, window, _hours_to_rows(720),
-                                        feature_override=feature_override, horizon=h)
+                                        feature_override=feature_override, horizon=h, gamma=html_gamma)
                 sigs = simulate_portfolio(sigs)
                 if h == 4:
                     signals_4h = sigs
@@ -2434,7 +2453,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
     update_all_data(assets_list)
     print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
 
-    diag_rows = _hours_to_rows(diag_years * 365 * 24)
+    MAX_DIAG_ROWS = 4320
     best_models = []
 
     for asset_name in assets_list:
@@ -2442,6 +2461,9 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         print(f"\n{'='*60}")
         print(f"  FULL PIPELINE: {asset_name} ({_horizon_label(horizon)} horizon)")
         print(f"{'='*60}")
+
+        existing_config = _load_mode_d_config(asset_name, horizon)
+        gamma = existing_config.get('gamma', 1.0) if existing_config else 1.0
 
         df_raw = load_data(asset_name)
         if df_raw is None:
@@ -2454,9 +2476,9 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
-        if total_rows > diag_rows:
-            df_full = df_full.tail(diag_rows).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+        if total_rows > MAX_DIAG_ROWS:
+            df_full = df_full.tail(MAX_DIAG_ROWS).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last ~45 days)")
 
         # Drop NaN for analysis
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
@@ -2473,7 +2495,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             print(f"\n  RESUME: loaded {len(optimal_features)} optimal features from checkpoint")
         else:
             t0 = time.time()
-            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols)
+            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols, gamma=gamma)
             print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
             if optimal_features and len(optimal_features) >= 3:
                 _save_checkpoint(asset_name, horizon, 'features', {'features': optimal_features})
@@ -2497,7 +2519,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
 
             t0 = time.time()
-            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, horizon=horizon)
+            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, horizon=horizon, gamma=gamma)
             print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
             if best_config:
                 _save_checkpoint(asset_name, horizon, 'diagnostic', best_config)
@@ -2507,6 +2529,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             best_config['n_features'] = len(optimal_features)
             best_config['optimal_features'] = ','.join(optimal_features)
             best_config['horizon'] = horizon
+            best_config['gamma'] = gamma
             best_models.append(best_config)
 
             # -- Improvement 3: Permutation test (only if --permtest flag passed) --
@@ -2560,9 +2583,10 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         model_names = config['models'].split('+')
         window = config['best_window']
         feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon)
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(horizon)}")
         all_signals[asset_name] = signals
@@ -2608,10 +2632,11 @@ def _load_mode_d_config(asset_name, horizon):
         'feature_set': row.get('feature_set', 'D'),
         'optimal_features': str(row.get('optimal_features', '')),
         'horizon': int(row.get('horizon', 4)),
+        'gamma': float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0,
     }
 
 
-def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
+def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
     """
     Iteration 2: Refine features + finer window grid.
     1. Leave-one-out: drop each feature, keep only those that help
@@ -2628,13 +2653,13 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
 
     # --- Step 1: Leave-One-Out Refinement ---
     print(f"\n  [ITER2 1/3] Leave-One-Out Refinement (finer step=24)...")
-    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24)
+    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24, gamma=gamma)
     print(f"    Baseline: {baseline_acc:.1f}% ({len(prev_features)} features)")
 
     features_to_drop = []
     for feat in prev_features:
         reduced = [f for f in prev_features if f != feat]
-        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24)
+        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24, gamma=gamma)
         change = acc - baseline_acc
         if change > 0.3:
             features_to_drop.append(feat)
@@ -2644,7 +2669,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
 
     refined_features = [f for f in prev_features if f not in features_to_drop]
     if features_to_drop:
-        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
         print(f"\n    Removed {len(features_to_drop)}: {', '.join(features_to_drop)}")
         print(f"    {len(prev_features)} -> {len(refined_features)} features | {baseline_acc:.1f}% -> {new_acc:.1f}%")
         if new_acc < baseline_acc - 0.5:
@@ -2656,7 +2681,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     # --- Step 2: Add-Back Test ---
     print(f"\n  [ITER2 2/3] Add-Back Test (try adding dropped features)...")
     dropped_features = [f for f in all_cols if f not in refined_features]
-    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24)
+    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
     added = []
 
     # Only test features that were in the top 50% by LGBM importance (speed optimization)
@@ -2667,7 +2692,8 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     X = df_clean[all_cols].tail(5000)
     y = df_clean['label'].tail(5000)
     if len(np.unique(y)) >= 2:
-        model_imp.fit(X, y)
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
         imp = pd.Series(model_imp.feature_importances_, index=all_cols)
         imp = imp.sort_values(ascending=False)
         candidates = [f for f in imp.index[:len(all_cols)//2] if f not in refined_features]
@@ -2680,7 +2706,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
         test_df = df_features.dropna(subset=test_set + ['label'])
         if len(test_df) < 500:
             continue
-        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
         if acc > current_acc + 0.5:
             delta = acc - current_acc
             added.append(feat)
@@ -2717,7 +2743,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
     print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step={DIAG_STEP}")
 
-    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features, horizon=horizon)
+    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features, horizon=horizon, gamma=gamma)
 
     DIAG_WINDOWS = orig_windows
     DIAG_WINDOWS_SHORT = orig_windows_short
@@ -2739,7 +2765,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon):
     return best_config, refined_features
 
 
-def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
+def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
     """
     Iteration 3: Ultra-fine tuning.
     1. Very fine window grid (_40h, step=10h) around winner
@@ -2766,13 +2792,14 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     if len(np.unique(y)) < 2:
         top5 = prev_features[:5]
     else:
-        model_imp.fit(X, y)
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
         imp = pd.Series(model_imp.feature_importances_, index=prev_features).sort_values(ascending=False)
         top5 = list(imp.index[:5])
     print(f"    Top 5: {top5}")
 
     # Test interactions (product of pairs)
-    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24)
+    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24, gamma=gamma)
     interaction_features = []
     tested_features = list(prev_features)
 
@@ -2786,7 +2813,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
             test_df = df_features.dropna(subset=test_set + ['label'])
             if len(test_df) < 500:
                 continue
-            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24)
+            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
             if acc > current_acc + 0.3:
                 interaction_features.append(int_name)
                 tested_features.append(int_name)
@@ -2824,7 +2851,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
     print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step={DIAG_STEP}")
 
-    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features, horizon=horizon)
+    best_config = run_diagnostic_for_asset(asset_name, df_diag, refined_features, horizon=horizon, gamma=gamma)
 
     DIAG_WINDOWS = orig_windows
     DIAG_WINDOWS_SHORT = orig_windows_short
@@ -2844,7 +2871,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon):
     return best_config, refined_features
 
 
-def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations='2'):
+def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
     """
     Mode E: Iterative refinement of Mode D results.
     iteration='2'  -> run 2nd pass only
@@ -2871,7 +2898,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"  WARNING: Macro data update failed: {e}")
 
     update_all_data(assets_list)
-    diag_rows = _hours_to_rows(diag_years * 365 * 24)
+    MAX_E_ROWS = 4320
     final_models = []
 
     for asset_name in assets_list:
@@ -2885,6 +2912,8 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
             print(f"  ERROR: No existing model for {asset_name} {_horizon_label(horizon)}.")
             print(f"  Run Mode D first!")
             continue
+
+        gamma = prev_config.get('gamma', 1.0)
 
         prev_features = prev_config['optimal_features']
         if not prev_features or prev_features == 'nan':
@@ -2904,9 +2933,9 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
 
         total_rows = len(df_full)
-        if total_rows > diag_rows:
-            df_full = df_full.tail(diag_rows).reset_index(drop=True)
-            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last {diag_years}y)")
+        if total_rows > MAX_E_ROWS:
+            df_full = df_full.tail(MAX_E_ROWS).reset_index(drop=True)
+            print(f"  Trimmed: {total_rows:,} -> {len(df_full):,} rows (last ~45 days)")
 
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows")
@@ -2921,7 +2950,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         print(f"{'='*60}")
 
         iter2_config, iter2_features = _run_iteration_2(
-            asset_name, df_clean, prev_config, all_cols, horizon)
+            asset_name, df_clean, prev_config, all_cols, horizon, gamma=gamma)
 
         if iter2_config is None:
             print("  Iteration 2 failed. Keeping previous config.")
@@ -2935,7 +2964,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
             print(f"{'='*60}")
 
             iter3_config, iter3_features = _run_iteration_3(
-                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon)
+                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon, gamma=gamma)
 
             if iter3_config and iter3_config['accuracy'] > iter2_config['accuracy']:
                 final_config = iter3_config
@@ -2947,6 +2976,7 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         else:
             final_config = iter2_config
 
+        final_config['gamma'] = gamma
         final_models.append(final_config)
 
         # Summary
@@ -2998,9 +3028,10 @@ def run_mode_e(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, iterations
         model_names = config['models'].split('+')
         window = config['best_window']
         feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon)
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(horizon)}")
         all_signals[asset_name] = signals
@@ -3135,19 +3166,21 @@ def run_strategy_comparison(assets_list, horizons=None):
         if has_4h:
             row4 = cfg4.iloc[0]
             feats4 = row4['optimal_features'].split(',') if pd.notna(row4.get('optimal_features', '')) else None
+            gamma4 = float(row4.get('gamma', 1.0)) if pd.notna(row4.get('gamma', 1.0)) else 1.0
             print(f"  Generating {_horizon_label(4)} signals ({REPLAY_HOURS_F} candle window)...")
             signals_4h = generate_signals(asset, row4['models'].split('+'),
                                           int(row4['best_window']), REPLAY_HOURS_F,
-                                          feature_override=feats4, horizon=4)
+                                          feature_override=feats4, horizon=4, gamma=gamma4)
             signals_4h = simulate_portfolio(signals_4h)
 
         if has_8h:
             row8 = cfg8.iloc[0]
             feats8 = row8['optimal_features'].split(',') if pd.notna(row8.get('optimal_features', '')) else None
+            gamma8 = float(row8.get('gamma', 1.0)) if pd.notna(row8.get('gamma', 1.0)) else 1.0
             print(f"  Generating {_horizon_label(8)} signals ({REPLAY_HOURS_F} candle window)...")
             signals_8h = generate_signals(asset, row8['models'].split('+'),
                                           int(row8['best_window']), REPLAY_HOURS_F,
-                                          feature_override=feats8, horizon=8)
+                                          feature_override=feats8, horizon=8, gamma=gamma8)
             signals_8h = simulate_portfolio(signals_8h)
 
         # Build merged timeline
@@ -3303,10 +3336,11 @@ def run_horizon_pair_comparison(assets_list):
                 continue
             r = row.iloc[0]
             feats = r['optimal_features'].split(',') if pd.notna(r.get('optimal_features', '')) else None
+            row_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
             try:
                 sigs = generate_signals(asset, r['models'].split('+'),
                                         int(r['best_window']), REPLAY_HOURS_G,
-                                        feature_override=feats, horizon=int(h))
+                                        feature_override=feats, horizon=int(h), gamma=row_gamma)
                 sigs = simulate_portfolio(sigs)
                 sigs_by_horizon[int(h)] = sigs
                 print(f"    {_horizon_label(h)}: {len(sigs)} signals | model={r['models']} w={r['best_window']} acc={r['accuracy']:.1f}%")
@@ -3487,9 +3521,10 @@ def _run_quick_asset(asset):
         else:
             feature_override = list(FEATURE_SET_A)
 
+        qa_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
         print(f"  Generating {_horizon_label(h)} signals ({_hours_to_rows(720)} candles)...")
         sigs = generate_signals(asset, model_names, window, _hours_to_rows(720),
-                                feature_override=feature_override, horizon=h)
+                                feature_override=feature_override, horizon=h, gamma=qa_gamma)
         sigs = simulate_portfolio(sigs)
         if h == 4:
             signals_4h = sigs
@@ -3560,7 +3595,7 @@ def main():
     cli_args    = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_permtest = '--permtest' in sys.argv
     flag_resume   = '--resume' in sys.argv
-    if cli_args and cli_args[0].upper() in ('B', 'D', 'E', 'F', 'G', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'E', 'F', 'G', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -3578,7 +3613,7 @@ def main():
             assets_list = list(ASSETS.keys())
 
         # Parse steps (default: 4,8s for Mode B and F, 4s for others)
-        horizons = [4, 8] if mode in ('B', 'F') else [4]
+        horizons = [4, 8] if mode in ('B', 'F', 'DF') else [4]
         for a in cli_args:
             if a.lower().endswith('s') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
@@ -3603,7 +3638,7 @@ def main():
     else:
 
         print("=" * 60)
-        print("  CRYPTO 15-MIN ML TRADING SYSTEM -- V15")
+        print("  CRYPTO 15-MIN ML TRADING SYSTEM -- V15 Cacarot")
         print("  Assets: BTC, ETH, XRP, DOGE")
         print(f"  Steps: {', '.join(_horizon_label(h) for h in AVAILABLE_HORIZONS)} (1 step = 15 min)")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
@@ -3627,7 +3662,7 @@ def main():
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('B', 'D', 'E', 'F', 'G'):
+        if mode not in ('B', 'D', 'DF', 'E', 'F', 'G'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
@@ -3697,12 +3732,15 @@ def main():
                 print(f"\n{'#'*60}")
                 print(f"  RUNNING STEP {_horizon_label(h)} ({h * CANDLE_MINUTES} min ahead)")
                 print(f"{'#'*60}")
-            if mode == 'D':
+            if mode in ('D', 'DF'):
                 run_mode_d(assets_list, diag_years=diag_years, horizon=h, permtest=flag_permtest, resume=flag_resume)
             elif mode == 'E':
-                run_mode_e(assets_list, diag_years=diag_years, horizon=h, iterations=e_iterations)
+                run_mode_e(assets_list, horizon=h, iterations=e_iterations)
             elif mode == 'F':
                 pass  # handled below
+
+        if mode == 'DF':
+            run_strategy_comparison(assets_list, horizons)
 
         # After Mode D with 2+ horizons: run strategy comparison
         if mode == 'D' and len(horizons) >= 2:

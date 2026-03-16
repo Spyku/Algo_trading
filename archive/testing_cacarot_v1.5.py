@@ -3285,7 +3285,7 @@ def run_strategy_comparison(assets_list, horizons=None):
     print("=" * 60)
 
     # Load trading config for updates
-    tcfg_path = f'{CONFIG_DIR}/trading_config.json'
+    tcfg_path = f'{CONFIG_DIR}/trading_config_v1.5_test.json'
     try:
         with open(tcfg_path) as f:
             trading_config = json.load(f)

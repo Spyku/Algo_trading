@@ -12,11 +12,11 @@ Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index C
 
 - [Quick Start](#quick-start)
 - [Architecture Overview](#architecture-overview)
-- [Crypto Trading System (V5)](#crypto-trading-system-v5)
+- [Crypto Trading System (CASCA)](#crypto-trading-system-casca-production)
   - [Modes of Operation](#modes-of-operation)
   - [ML Pipeline](#ml-pipeline)
   - [Features](#features-125-total)
-  - [Scoring Formula](#v5-scoring-formula)
+  - [Scoring Formulas](#scoring-formulas) (CASCA vs V5)
   - [Strategies](#strategies)
   - [Auto-Trader](#crypto-auto-trader)
 - [Sub-Hourly Crypto (V15/V30)](#sub-hourly-crypto-systems-v15--v30)
@@ -37,13 +37,13 @@ Automated ML-powered trading system for **crypto** (BTC, ETH, XRP) and **index C
 # Activate venv (required before any python command)
 # Run: venv\Scripts\activate.bat
 
-# === CRYPTO SIGNALS ===
-python crypto_trading_system.py 5              # Quick BTC (both horizons)
-python crypto_trading_system.py 6              # Quick ETH
-python crypto_trading_system.py 7              # Quick XRP
-python crypto_trading_system.py B BTC 4,8h     # Mode B — signals from saved models
-python crypto_trading_system.py D BTC 4,8h 1y  # Mode D — full pipeline (~90 min/horizon)
-python crypto_trading_system.py F BTC          # Mode F — strategy comparison
+# === CASCA (profit factor scoring — use this) ===
+python crypto_trading_system_casca.py D BTC 4,8h    # CASCA Mode D — full pipeline with PF scoring
+python crypto_trading_system_casca.py F BTC 4,8h    # CASCA Mode F — strategy comparison (by return)
+python crypto_trading_system_casca.py DF BTC,ETH 4,8h  # CASCA D then F
+
+python crypto_trading_system_casca.py A BTC 4,8h    # CASCA Mode A — gamma optimization (6 gammas × horizons)
+python crypto_trading_system_casca.py B BTC 4,8h    # CASCA Mode B — signals from saved models
 
 # === CRYPTO SUB-HOURLY (V15 / V30) ===
 python crypto_trading_system_v15.py D BTC 4,8h 1y   # 15-min candles (h4=60', h8=120')
@@ -76,9 +76,16 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        CRYPTO PIPELINE                              │
 │                                                                     │
-│  crypto_trading_system.py  (V5.4 Production — 3,519 lines)          │
-│    ├── Modes B/D/E/F + shortcuts 5/6/7                              │
-│    ├── 125 features (44 technical + 81 macro/sentiment/cross-asset) │
+│  crypto_trading_system_casca.py  (CASCA — Profit Factor Scoring)     │
+│    ├── Scoring: Profit Factor (gross_profit/|gross_loss|, cap 5.0)  │
+│    ├── Feature selection by PF (permutation, ablation, reduced sets)│
+│    ├── Mode F: strategies ranked by return, not accuracy             │
+│    ├── Output: models/crypto_casca_best_models.csv                   │
+│    └── Same pipeline as V5 — only scoring logic changed              │
+│                                                                     │
+│    ├── Mode A: gamma optimization (6 gammas × horizons)              │
+│    ├── Temporal decay (gamma per model) + 6-month data cap          │
+│    ├── 130 features (49 technical + 81 macro/sentiment/cross-asset) │
 │    ├── 4 ML models × 15 combinations × 5 windows                   │
 │    ├── Walk-forward validation (no future leakage)                  │
 │    └── hardware_config.py (machine-specific GPU/CPU settings)       │
@@ -91,18 +98,20 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 │    ├── Adversarial validation, Kelly sizing                         │
 │    └── testing_literature_v2.py (A/B test harness)                  │
 │                                                                     │
-│  crypto_trading_system_v15.py  (V15 — 15-min candles)               │
+│  crypto_trading_system_v15.py  (V15 Cacarot — 15-min candles)       │
 │    ├── Horizons 1-8 = 15'–120' (more trades, shorter horizons)     │
+│    ├── Temporal decay (gamma) + 4320-row data cap (~45 days)       │
 │    ├── Separate data/models/config (*_15m_*)                        │
 │    └── Max 1 year rolling data, ~35K rows/year                     │
 │                                                                     │
-│  crypto_trading_system_v30.py  (V30 — 30-min candles)               │
+│  crypto_trading_system_v30.py  (V30 Cacarot — 30-min candles)       │
 │    ├── Horizons 1-8 = 30'–240' (2× hourly frequency)              │
+│    ├── Temporal decay (gamma) + 4320-row data cap (~3 months)      │
 │    ├── Separate data/models/config (*_30m_*)                        │
 │    └── Max 1 year rolling data, ~17.5K rows/year                   │
 │                                                                     │
 │  crypto_live_trader.py  (506 lines — signal generation library)     │
-│    ├── Imports models/features from crypto_trading_system.py        │
+│    ├── Imports models/features from crypto_trading_system_casca.py   │
 │    ├── Trains on latest window → predicts next candle               │
 │    └── Telegram notifications (HTML formatted)                      │
 │                                                                     │
@@ -136,7 +145,7 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 
 ---
 
-## Crypto Trading System (V5.4 Production)
+## Crypto Trading System (CASCA Production)
 
 ### Core Concepts
 
@@ -144,6 +153,8 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 |---------|--------|
 | **Dual horizons** | 4h and 8h — completely independent models per horizon (different features, window, combo). Never mixed during training. |
 | **No model persistence** | System retrains from scratch every prediction. No .pkl files. Ensures fresh models with current market regime. |
+| **Temporal decay (Cacarot)** | Exponential sample weighting `w_i = gamma^(age)`. Per-model gamma stored in best_models.csv. Newest sample weight=1, oldest=gamma^(n-1). gamma >= 1.0 disables decay. |
+| **6-month data cap** | Mode D/E cap training data at 4,320 hours. Prevents ancient data from diluting recent patterns. |
 | **Labels** | Relative to 168h rolling median return, not absolute price direction. `label = 1` means return > median. Drift-robust. |
 | **Walk-forward** | Train on last `window` hours → predict next candle → step forward 72h. No future leakage. |
 | **Ensemble voting** | Majority vote across model combo (>50% BUY = BUY signal). Confidence = avg probability. |
@@ -152,6 +163,7 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 
 | Mode | Purpose | Time (desktop) | When to Run |
 |------|---------|----------------|-------------|
+| **A** | Gamma optimization — test 6 decay values (0.999–0.994) per horizon, ranked by PF | ~9h per horizon | After Mode D, to tune temporal decay |
 | **B** | Quick signals from saved models | ~2 min | Daily |
 | **D** | Full pipeline: 125 features → 5-test analysis → optimal subset → diagnostic grid search → signals | ~90 min per horizon | Quarterly or after market regime change |
 | **E** | Iterative refinement (leave-one-out, add-back, finer window grid) | ~1–4h | After Mode D |
@@ -165,14 +177,14 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 3. **Feature build** — Compute all 125 features (technical + macro + sentiment + cross-asset)
 4. **Feature analysis** — 5 parallel tests:
    - LGBM gain importance (top features by information gain)
-   - Permutation importance (shuffle-and-measure accuracy + alpha drop)
-   - Ablation (drop-one-at-a-time impact)
-   - Reduced sets (top-N feature subsets)
+   - Permutation importance (shuffle-and-measure impact — ranked by profit factor)
+   - Ablation (drop-one-at-a-time — ranked by PF change)
+   - Reduced sets (top-N feature subsets — ranked by PF)
    - Consensus scoring → keep/maybe/drop bins → optimal subset
-5. **Diagnostic** — Grid search: 15 model combos × 5 windows = 75 configs, parallel walk-forward evaluation (~16–18 min)
+5. **Diagnostic** — Grid search: 15 model combos × 5 windows = 75 configs, parallel walk-forward evaluation (~16–18 min). Ranked by Profit Factor.
 6. **Signal generation** — Generate signals with best config, bootstrap CI, portfolio simulation (~2 min)
 7. **Charts** — Matplotlib backtest PNG + Plotly interactive HTML (4-panel strategy charts + signal table)
-8. **Save** — Best model to `crypto_hourly_best_models.csv`, features to analysis CSV
+8. **Save** — Best model to `crypto_casca_best_models.csv`, features to analysis CSV
 
 ### ML Pipeline
 
@@ -201,17 +213,35 @@ Min start = window + 50 (warm-up period)
 | **Sentiment** | 25 | Fear & Greed Index (value, zscore, changes, MA, extreme flags) |
 | **Cross-asset** | 16 | BTC/ETH/DAX/Nasdaq/S&P500 rolling correlation (10/30d), relative strength (5d) |
 
-### V5 Scoring Formula
+### Scoring Formulas
+
+#### CASCA Scoring (current — `crypto_trading_system_casca.py`)
 
 ```python
-# Diagnostic and Mode F:
-combined_score = accuracy * (1 + max(cum_return, 0) / 100)
+# Model selection (diagnostic):
+if trades < 3:
+    combined_score = 0.0
+elif total_loss == 0:
+    combined_score = min(total_gain * 100, 5.0)
+else:
+    combined_score = min(total_gain / abs(total_loss), 5.0)  # Profit Factor
 
-# Feature analysis:
-combined = acc * (1 + max(alpha, 0) / 100)
+# Feature selection (permutation, ablation, reduced sets):
+# _quick_score() returns profit factor — features ranked by PF contribution
+
+# Mode F strategy + confidence sweep:
+score = cum_return  # strategies ranked by return directly
 ```
 
-Directly rewards being right AND making money. Replaced V4's `0.45×Calmar + 0.35×Sharpe + 0.20×Accuracy` which biased toward low-trade configs.
+Profit Factor directly measures profitability. PF > 1.0 = profitable, PF > 2.0 = strong. Cap at 5.0 prevents infinity when 0 losses. Min 3 trades filters noise.
+
+#### V5 Cacarot Scoring (old — `crypto_trading_system.py`)
+
+```python
+combined_score = accuracy * (1 + max(cum_return, 0) / 100)
+```
+
+**Known broken:** picks money-losing models because accuracy dominates and negative returns are clamped to zero. Example: V5 picked RF+GB+LR+LGBM w=96 (+14.2% return, 84% acc) over RF w=48 (+22.9% return, 73% acc). Replaced V4's `0.45×Calmar + 0.35×Sharpe + 0.20×Accuracy` which biased toward low-trade configs.
 
 ### Strategies
 
@@ -262,29 +292,63 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 
 ---
 
-## Sub-Hourly Crypto Systems (V15 / V30)
+## Sub-Hourly Crypto Systems (V15 / V30 Cacarot)
 
-The hourly system produces good signals but few trades. V15 and V30 use shorter candles for higher trade frequency while keeping the same ML pipeline.
+The hourly system produces good signals but few trades. V15 and V30 use shorter candles for higher trade frequency while keeping the same ML pipeline. Both now include the Cacarot upgrade (temporal decay + data cap).
 
-| System | Candle | Horizons (candles 1-8) | Data/year | File |
-|--------|--------|----------------------|-----------|------|
-| **V15** | 15 min | 15', 30', 45', 60', 75', 90', 105', 120' | ~35K rows | `crypto_trading_system_v15.py` |
-| **V30** | 30 min | 30', 60', 90', 120', 150', 180', 210', 240' | ~17.5K rows | `crypto_trading_system_v30.py` |
+| System | Candle | Horizons (candles 1-8) | Data cap | Decay half-life (γ=0.995) | File |
+|--------|--------|----------------------|----------|--------------------------|------|
+| **V15 Cacarot** | 15 min | 15'–120' | 4320 rows (~45 days) | ~1.4 days | `crypto_trading_system_v15.py` |
+| **V30 Cacarot** | 30 min | 30'–240' | 4320 rows (~3 months) | ~3 days | `crypto_trading_system_v30.py` |
 
 **Key differences from hourly system:**
 - All rolling/shift/diff periods scaled via `_hours_to_rows()` (e.g., RSI 14h = 56 candles on V15)
 - Extra features: `logret_1c..4c` (candle-scale returns), `minute_sin/cos` (intra-hour timing)
-- Data capped to 1 rolling year (Binance 15m/30m)
+- Data cap: 4,320 rows (same computational cost as V5's 6 months, but shorter wall-clock span due to faster candles)
+- Temporal decay: same `w_i = gamma^(age_in_candles)` — gamma stored per model in CSV
 - Crypto assets only (BTC, ETH, XRP, DOGE) — no yfinance indices
 - Separate output files: `data/*_15m_data.csv`, `models/crypto_15m_best_models.csv`, `config/trading_config_15m.json`, `charts/*_15m_backtest.png`
 
 **Usage:**
 ```bash
-python crypto_trading_system_v15.py D BTC 4,8h 1y   # horizon 4 = 60min, 8 = 120min
-python crypto_trading_system_v30.py D BTC 4,8h 1y   # horizon 4 = 2h, 8 = 4h
+python crypto_trading_system_v15.py D BTC 4,8h       # horizon 4 = 60min, 8 = 120min
+python crypto_trading_system_v30.py D BTC 4,8h       # horizon 4 = 2h, 8 = 4h
+python crypto_trading_system_v15.py DF BTC 4,8h      # Mode D then F in one command
 python crypto_trading_system_v15.py F BTC 4,8h       # strategy optimizer
 python crypto_trading_system_v15.py G BTC             # horizon pair test
 ```
+
+### Gamma Optimization (V15.1 / V30.1)
+
+Dedicated test harnesses to find the optimal decay rate for each sub-hourly system. Tests 7 gamma values (1.0, 0.999, 0.998, 0.997, 0.996, 0.995, 0.994) × 2 horizons (4, 8) = 14 full Mode D runs each.
+
+```bash
+python testing_v15.1.py              # V15 gamma optimization (14 tests)
+python testing_v15.1.py --resume     # Skip completed combos
+python testing_v30.1.py              # V30 gamma optimization (14 tests)
+python testing_v30.1.py --resume     # Skip completed combos
+```
+
+Results: `models/testing_v15.1_results.csv`, `models/testing_v30.1_results.csv`
+
+### Casca — Multi-Timeframe Fusion Test
+
+Combines V5 Cacarot (1h candles, 4h+8h horizons) and V15 (15-min candles, 60'+120' horizons) into a single decision engine. Tests 16 cross-timeframe strategies to see if fusion beats any single timeframe.
+
+**Strategy types:**
+- V5-only baselines (4): `v5_both_agree`, `v5_either_agree`, `v5_4h_only`, `v5_8h_only`
+- V15-only baselines (4): `v15_60m_only`, `v15_120m_only`, `v15_both_agree`, `v15_either_agree`
+- Cross-timeframe fusion (8): `all_4_agree`, `any_4_buy`, `majority_3of4`, `v5_8h_and_v15_120m`, `v5_8h_confirmed_v15`, `v15_fast_entry_v5_exit`, etc.
+
+**Two evaluation cadences:** hourly (V15 snapped to :00) and 15-min (V5 carried forward). Confidence sweep across [55–90%].
+
+```bash
+python testing_casca.py              # Hourly evaluation (default)
+python testing_casca.py --15min      # 15-min evaluation cadence
+python testing_casca.py ETH          # Test ETH
+```
+
+Results: `models/testing_casca_results.csv`
 
 ---
 
@@ -328,11 +392,11 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `crypto_trading_system.py` | 3,519 | V5.4 Production — Modes B/D/E/F, all ML logic |
+| `crypto_trading_system_casca.py` | ~3,900 | **CASCA Production** — Modes A/B/D/E/F/DF. Profit factor scoring. Mode A gamma optimization. Live trader imports from this. Output: `crypto_casca_best_models.csv` |
 | `crypto_revolut_trader.py` | 1,109 | Multi-asset crypto auto-trader |
 | `crypto_live_trader.py` | 506 | Signal generation library (imported by trader) |
-| `crypto_trading_system_v15.py` | ~3,600 | V15 — 15-min candle system (Modes B/D/E/F/G) |
-| `crypto_trading_system_v30.py` | ~3,600 | V30 — 30-min candle system (Modes B/D/E/F/G) |
+| `crypto_trading_system_v15.py` | ~3,600 | V15 Cacarot — 15-min candles, temporal decay, 4320-row cap (Modes B/D/E/F/G/DF) |
+| `crypto_trading_system_v30.py` | ~3,600 | V30 Cacarot — 30-min candles, temporal decay, 4320-row cap (Modes B/D/E/F/G/DF) |
 | `hardware_config.py` | 42 | Auto-detects Desktop/Laptop, model configs, n_jobs, GPU |
 | `cfd/ib_auto_trader.py` | 1,444 | DAX CFD auto-trader |
 | `cfd/ib_auto_trader_test.py` | 1,419 | S&P 500 CFD overnight trader |
@@ -352,6 +416,9 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `download_macro_data.py` | ~350 | Download macro/sentiment/cross-asset + on-chain + derivatives data |
 | `archive/testing_literature.py` | ~320 | A/B test harness for V5.5 enhancements — COMPLETE, archived. Results in `archive/testing_literature.csv` |
 | `testing_literature_v2.py` | ~335 | A/B test harness for V6 (12 literature enhancements) — Mode D BTC 4,8h 1y |
+| `testing_v15.1.py` | ~275 | V15 gamma optimization — 7 gammas × 2 horizons, isolated results |
+| `testing_v30.1.py` | ~275 | V30 gamma optimization — 7 gammas × 2 horizons, isolated results |
+| `testing_casca.py` | ~600 | Multi-timeframe fusion — V5 + V15 combined, 16 strategies, confidence sweep |
 | `testing_feature_stability.py` | ~300 | Feature stability test — cross-references KEEP/DROP across BTC+ETH × 4h+8h |
 
 ### Archived Scripts (in `archive/`)
@@ -378,11 +445,12 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Version | Status |
 |------|---------|--------|
-| `crypto_trading_system.py` | V5.4+ | Production — phase-specific BLAS, loky pool reset, orphan cleanup, slippage model, DF mode |
+| `crypto_trading_system_casca.py` | CASCA | **Production** — Profit Factor scoring. Modes A/B/D/E/F/DF. Mode A gamma optimization. Live trader imports from this. |
+| `archive/crypto_trading_system_v5_cacarot.py` | V5.4+ | Archived — old scoring (acc×ret). Superseded by CASCA. |
 | `crypto_trading_system_v6.py` | V6 | Experimental — 12 literature enhancements behind ENHANCEMENTS flags (env var override) |
 | `archive/crypto_trading_system_v5.5.py` | V5.5 | Archived — 7 literature enhancements tested, only slippage_model promoted |
-| `crypto_trading_system_v15.py` | V15 | Sub-hourly — 15-min candles, horizons 15'–120', 1y max |
-| `crypto_trading_system_v30.py` | V30 | Sub-hourly — 30-min candles, horizons 30'–240', 1y max |
+| `crypto_trading_system_v15.py` | V15 Cacarot | Sub-hourly — 15-min candles, temporal decay + 4320-row cap |
+| `crypto_trading_system_v30.py` | V30 Cacarot | Sub-hourly — 30-min candles, temporal decay + 4320-row cap |
 | `archive/crypto_trading_system_v5.4.py` | V5.4 | Archived — same as production (standalone copy) |
 | `archive/crypto_trading_system_v5.3.py` | V5.3 | Archived — thread/worker fixes |
 | `archive/crypto_trading_system_v5.2.py` | V5.2 | Archived — all 8 horizons + Mode G (no BLAS fixes) |
@@ -399,10 +467,9 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 engine/
 │
 ├── ===== PYTHON FILES (root) =====
-├── crypto_trading_system.py           # V5.4 PRODUCTION — Modes B/D/E/F
-├── # (V5.5 archived — slippage_model promoted to production)
-├── crypto_trading_system_v15.py       # V15 — 15-min candles (15'–120' horizons)
-├── crypto_trading_system_v30.py       # V30 — 30-min candles (30'–240' horizons)
+├── crypto_trading_system_casca.py     # CASCA Production — PF scoring, Modes A/B/D/E/F/DF (live trader imports)
+├── crypto_trading_system_v15.py       # V15 Cacarot — 15-min candles (temporal decay + 4320-row cap)
+├── crypto_trading_system_v30.py       # V30 Cacarot — 30-min candles (temporal decay + 4320-row cap)
 ├── crypto_revolut_trader.py           # Multi-asset crypto auto-trader
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Auto-detects Desktop/Laptop config
@@ -410,6 +477,9 @@ engine/
 ├── crypto_trading_system_v6.py        # V6 — 12 literature enhancements (experimental)
 ├── # testing_literature.py → archived (V5.5 A/B tests COMPLETE)
 ├── testing_literature_v2.py           # A/B test harness for V6 (12 enhancements)
+├── testing_v15.1.py                  # V15 gamma optimization (7 gammas × 2 horizons)
+├── testing_v30.1.py                  # V30 gamma optimization (7 gammas × 2 horizons)
+├── testing_casca.py                  # Multi-timeframe fusion test (V5 + V15, 16 strategies)
 ├── testing_feature_stability.py      # Feature stability test (BTC+ETH × 4h+8h)
 ├── requirements.txt                   # Python dependencies
 │
@@ -478,7 +548,8 @@ engine/
 │       └── download_macro_data.py     # Downloader script
 │
 ├── models/
-│   ├── crypto_hourly_best_models.csv  # CENTRAL CONFIG: best model per (asset, horizon)
+│   ├── crypto_hourly_best_models.csv  # V5 Cacarot: best model per (asset, horizon)
+│   ├── crypto_casca_best_models.csv   # CASCA: best model per (asset, horizon) — PF scored
 │   ├── crypto_15m_best_models.csv    # V15 best models
 │   ├── crypto_30m_best_models.csv    # V30 best models
 │   ├── crypto_feature_analysis_*.csv  # Feature scores per asset
@@ -643,19 +714,26 @@ MACRO_DIR = 'data/macro_data'
 
 | Version | File | Scoring | Key Changes |
 |---------|------|---------|-------------|
-| **V5.4** | `crypto_trading_system.py` | `acc × (1 + ret/100)` | **Production.** Phase-specific BLAS threading, loky pool reset, orphan cleanup, Mode F |
+| **CASCA** | `crypto_trading_system_casca.py` | Profit Factor | **Production.** PF model selection (cap 5.0, min 3 trades). Feature selection by PF. Mode A gamma optimization. Mode F by return. Live trader imports from this. |
+| **V5 Cacarot** | `archive/crypto_trading_system_v5_cacarot.py` | `acc × (1 + ret/100)` | **Archived.** Temporal decay, 6mo data cap, DF mode, slippage model. Superseded by CASCA. |
 | **V5.5** | `crypto_trading_system_v5.5.py` | `acc × (1 + ret/100)` | Experimental. 7 literature enhancements behind ENHANCEMENTS flags (on-chain, derivatives, triple-barrier, slippage, extended diag, GB calibration, purged embargo). A/B testable via `testing_literature.py` |
-| **V15** | `crypto_trading_system_v15.py` | `acc × (1 + ret/100)` | Sub-hourly. 15-min candles, 8 horizons (15'–120'), 1y max, separate data/models/config |
-| **V30** | `crypto_trading_system_v30.py` | `acc × (1 + ret/100)` | Sub-hourly. 30-min candles, 8 horizons (30'–240'), 1y max, separate data/models/config |
+| **V15 Cacarot** | `crypto_trading_system_v15.py` | `acc × (1 + ret/100)` | Sub-hourly. 15-min candles, 8 horizons (15'–120'), temporal decay, 4320-row cap |
+| **V30 Cacarot** | `crypto_trading_system_v30.py` | `acc × (1 + ret/100)` | Sub-hourly. 30-min candles, 8 horizons (30'–240'), temporal decay, 4320-row cap |
 | **V5.3** | `archive/crypto_trading_system_v5.3.py` | Archived | LGBM lightened, LOKY_MAX_CPU_COUNT capped, OMP/MKL/OpenBLAS thread limits |
 | **V5.2** | `archive/crypto_trading_system_v5.2.py` | Archived | All 8 horizons + Mode G (no BLAS fixes) |
 | **V5.1** | `archive/crypto_trading_system_v5.1.py` | Archived | Alpha scoring patches integrated |
 | **V4** | `archive/crypto_trading_system_v4.py` | `0.45×Calmar + 0.35×Sharpe + 0.20×Acc` | Bootstrap CI, Calmar/Sharpe, --permtest. Superseded — biased toward low-trade configs |
 | **V3** | `archive/crypto_trading_system_v3_old.py` | Heuristic | Original production. Archived |
 
+### What CASCA Adds Over V5
+
+1. **Profit Factor scoring** — `gross_profit / |gross_loss|` replaces `acc × (1 + ret/100)`. V5 picked money-losing models because accuracy dominated. CASCA picks models that actually make money.
+2. **Consistent scoring** — Profit factor used everywhere: diagnostic model ranking, feature selection (permutation, ablation, reduced sets), and Mode F strategies ranked by return.
+3. **Minimum trade filter** — Models with < 3 trades score 0 (too few to be meaningful).
+
 ### What V5 Adds Over V4
 
-1. **New scoring formula** — `accuracy × (1 + max(return, 0) / 100)` replaces Calmar/Sharpe. Directly rewards being right AND making money.
+1. **New scoring formula** — `accuracy × (1 + max(return, 0) / 100)` replaces Calmar/Sharpe. Better than V4 but still broken — superseded by CASCA.
 2. **Mode F** — Backtests all 4 strategies + confidence threshold sweep (60–90%). Auto-writes best config to `trading_config.json`.
 3. **Per-step timers** — Each Mode D pipeline stage prints elapsed time.
 4. **Lightweight diagnostics** — `get_diagnostic_models()` uses n_estimators=100 / RF n_jobs=1. Diagnostics run in ~16 min instead of 40–60 min.
@@ -705,33 +783,48 @@ MACRO_DIR = 'data/macro_data'
 ## File Dependencies
 
 ```
-crypto_trading_system.py  (V5.4 — production)
+crypto_trading_system_casca.py  (CASCA production — PF scoring, Modes A/B/D/E/F/DF)
   ├── imports: hardware_config.py
   ├── reads: data/macro_data/*.csv
   ├── reads/writes: data/{asset}_hourly_data.csv
-  ├── reads/writes: models/crypto_hourly_best_models.csv
+  ├── reads/writes: models/crypto_casca_best_models.csv
   ├── reads/writes: config/trading_config.json  (Mode F)
-  └── writes: charts/*.html, charts/*.png, models/*.json
+  ├── writes: charts/*.html, charts/*.png, models/*.json
+  └── writes: models/testing_casca_a_results.csv  (Mode A gamma results)
 
-crypto_trading_system_v15.py  (V15 — 15-min candles)
+
+crypto_trading_system_v15.py  (V15 Cacarot — 15-min candles)
   ├── imports: hardware_config.py
   ├── reads: data/macro_data/*.csv
   ├── reads/writes: data/{asset}_15m_data.csv
-  ├── reads/writes: models/crypto_15m_best_models.csv
+  ├── reads/writes: models/crypto_15m_best_models.csv  (includes gamma per model)
   ├── reads/writes: config/trading_config_15m.json  (Mode F)
   └── writes: charts/*_15m_*.html, charts/*_15m_backtest.png
 
-crypto_trading_system_v30.py  (V30 — 30-min candles)
+crypto_trading_system_v30.py  (V30 Cacarot — 30-min candles)
   ├── imports: hardware_config.py
   ├── reads: data/macro_data/*.csv
   ├── reads/writes: data/{asset}_30m_data.csv
-  ├── reads/writes: models/crypto_30m_best_models.csv
+  ├── reads/writes: models/crypto_30m_best_models.csv  (includes gamma per model)
   ├── reads/writes: config/trading_config_30m.json  (Mode F)
   └── writes: charts/*_30m_*.html, charts/*_30m_backtest.png
 
+testing_v15.1.py  (V15 gamma optimization)
+  ├── imports: crypto_trading_system_v15.py  (patches _load_mode_d_config)
+  └── writes: models/testing_v15.1_results.csv, charts/v15.1_test/
+
+testing_v30.1.py  (V30 gamma optimization)
+  ├── imports: crypto_trading_system_v30.py  (patches _load_mode_d_config)
+  └── writes: models/testing_v30.1_results.csv, charts/v30.1_test/
+
+testing_casca.py  (multi-timeframe fusion)
+  ├── imports: crypto_trading_system_casca.py  (CASCA signals)
+  ├── imports: crypto_trading_system_v15.py  (V15 signals)
+  └── writes: models/testing_casca_results.csv, charts/casca_test/
+
 crypto_live_trader.py  (signal generation)
-  ├── imports: crypto_trading_system.py  (ASSETS, features, models, download/load/build)
-  ├── reads: models/crypto_hourly_best_models.csv
+  ├── imports: crypto_trading_system_casca.py  (ASSETS, features, models, download/load/build)
+  ├── reads: models/crypto_casca_best_models.csv
   ├── reads: config/telegram_config.json
   └── sends: Telegram API
 
@@ -798,40 +891,61 @@ Testing 12 V6 literature enhancements individually via Mode D BTC 4h+8h 1y:
 
 ## Pending Actions
 
-- [x] **V5.5 A/B tests** — COMPLETE, archived. Only slippage_model won → promoted. See [Enhancement Testing History](#enhancement-testing-history).
-- [x] **V5.6 feature tests** — COMPLETE, archived. Only ADX + Garman-Klass useful → added to production (49 base features).
+### BIGGEST PRIORITY — CASCA Scoring Model
 
-### Desktop TODO
-- [ ] **V6 A/B tests** — `python testing_literature_v2.py --resume` — RUNNING. Laptop hangs (loky deadlock), must run on desktop.
+CASCA replaces V5's broken scoring (`acc × (1 + max(ret, 0) / 100)`) with Profit Factor. V5 picked money-losing models because accuracy dominated. CASCA fixes this across the entire pipeline.
 
-### Laptop TODO (can run in parallel)
-- [ ] **XRP V5** — `python crypto_trading_system.py D XRP 4,8h 1y` then `F XRP 4,8h`
-- [ ] **V15 first run** — `python crypto_trading_system_v15.py D BTC 4,8h 1y`
-- [ ] **V30 first run** — `python crypto_trading_system_v30.py D BTC 4,8h 1y`
+| # | Task | Command | Status |
+|---|------|---------|--------|
+| 1 | **CASCA BTC** | `python crypto_trading_system_casca.py D BTC 4,8h` | RUNNING |
+| 2 | **CASCA ETH** | `python crypto_trading_system_casca.py DF ETH 4,8h` | Next |
+| 3 | **Compare CASCA vs V5** | Side-by-side: models selected, return, win rate | After 1-2 |
+| 4 | **CASCA V15/V30** | Apply PF scoring to V15 and V30 (files not yet created) | After 3 |
 
-### Either machine
-- [ ] **Feature stability test** — `python testing_feature_stability.py` — BTC+ETH × 4h+8h
-- [ ] **Weekly F runs** — re-run `F BTC 4,8h` and `F ETH 4,8h` weekly
-- [x] **Re-run Mode DF for BTC** — DONE (2026-03-15). Fresh models in best_models.csv.
-- [x] **Re-run Mode F for ETH** — DONE (2026-03-15). ETH: `8h_only`, min_confidence=85%.
-- [x] **Restart crypto_revolut_trader** — DONE (2026-03-15). 5-min hot-reload for config+models+positions.
-- [x] **Laptop venv install** — DONE. PyWavelets + xgboost installed.
-- [x] V5 scoring (acc×(1+return/100))
-- [x] Mode F (strategy comparison + confidence sweep)
-- [x] Per-step timers in Mode D
-- [x] hardware_config diagnostic models lightened
-- [x] DIAG_WINDOWS reduced to [48,72,100,150,200]
+**Why CASCA matters (BTC s4 example, 2026-03-16):**
+- V5 picked: RF+GB+LR+LGBM w=96 — 84.1% acc, **+14.2% return**, 69% win rate
+- CASCA would pick: RF w=48 — 72.7% acc, **+22.9% return**, 82% win rate
+- V5 chose the wrong model because accuracy dominated scoring
+
+### After CASCA
+
+| # | Task | Command | Status |
+|---|------|---------|--------|
+| 5 | **V15.1 gamma results** | Re-rank by PF (no rerun needed) | V15.1 RUNNING ON DESKTOP |
+| 6 | **V30.1 gamma optimization** | `python testing_v30.1.py` | READY FOR LAPTOP |
+| 7 | **Production V15 with CASCA** | Pick winning gamma → CASCA V15 Mode D | After 4-5 |
+| 8 | **Multi-timeframe fusion** | V5 + V15 only, ranked by return | After 7 |
+| 9 | **Fee-aware labels** | `label = 1` when return > 2×TRADING_FEE (0.22%) | 2 tests only |
+| 10 | **Dynamic data cap** | `calc_data_cap(gamma)` formula | TODO |
+
+### Other TODO
+
+- [ ] **V6 A/B tests** — `python testing_literature_v2.py --resume` — RUNNING on desktop
+- [ ] **V1.5 feature test** — `python testing_cacarot_v1.5.py D BTC 4,8h`
+- [ ] **XRP CASCA** — `python crypto_trading_system_casca.py D XRP 4,8h` then Mode F
+- [ ] **Feature stability test** — `python testing_feature_stability.py`
+- [ ] **Weekly F runs** — re-run CASCA `F BTC 4,8h` and `F ETH 4,8h` weekly
+
+### Completed
+
+- [x] **CASCA scoring model** — DONE (2026-03-16). `crypto_trading_system_casca.py` — profit factor replaces acc×ret. Feature selection by PF. Isolated output: `models/crypto_casca_best_models.csv`.
+- [x] **V15 Mode D + Mode F** — DONE (2026-03-16). BTC s8: LGBM 88.1% acc. Mode F: `both_agree` @61%, +62.6% return.
+- [x] **V5+V15 fusion backtest** — DONE (2026-03-16). V15 override (+17.6%) beats V5 (+13.9%), V15 (+12.1%), B&H (+7.9%).
+- [x] **Bug fix: test harnesses overwriting production config** — DONE (2026-03-16).
+- [x] **Bug fix: MODELS_DIR forward reference in V15/V30** — DONE (2026-03-16).
+- [x] **V15/V30 Cacarot release** — DONE (2026-03-16). Temporal decay + 4320-row cap + DF mode.
+- [x] **Cacarot release (V5)** — DONE (2026-03-16). Temporal decay, 6mo data cap, Mode F charts.
+- [x] **BTC Cacarot Mode DF** — DONE (2026-03-16). BTC: `either_agree` @90%.
+- [x] **ETH Cacarot Mode DF** — DONE (2026-03-16). ETH: `4h_only` @60%.
+- [x] **Live trader restarted** — DONE (2026-03-16). BTC+ETH with Cacarot configs.
+- [x] **V5.5 A/B tests** — COMPLETE, archived. Only slippage_model won → promoted.
+- [x] **V5.6 feature tests** — COMPLETE, archived. Only ADX + Garman-Klass useful → added to production.
+- [x] V5 scoring, Mode F, DF mode, per-step timers, hardware_config lightened
 - [x] BTC V5 2y run — 4h: 80.2% +125%, 8h: 84.7% +319%
-- [x] ETH V5 2y run — 4h: RF+LGBM 68.6% +505%, 8h: GB 79.3% +616% (WARNING: overfit)
-- [x] V5 promoted to production, V3 archived
-- [x] Old/archived files moved to archive/
-- [x] V5.3 and V5.4 experimental versions added
-- [x] IB auto-trader for DAX + S&P 500 CFDs
-- [x] Broly 1.2 enhancement layer
+- [x] ETH V5 2y run — 4h: RF+LGBM 68.6% +505%, 8h: GB 79.3% +616%
+- [x] IB auto-trader for DAX + S&P 500 CFDs, Broly 1.2
 - [x] Multi-asset crypto auto-trader with Telegram control
-- [x] Mock validation framework (Phase 1 + Phase 2)
-- [x] Crypto correlation analysis (BTC vs ETH)
 
 ---
 
-*Last updated: March 15, 2026 — V6 created (12 literature enhancements). DF combined mode added. /conf + /chart Telegram commands. Dual-machine install docs. fracdiff+hmmlearn replaced with manual implementations (Python 3.14 compat).*
+*Last updated: March 16, 2026 — Cacarot release (V5 + V15 + V30): temporal decay, 6mo/4320-row data caps, DF mode. Gamma optimization tests (V15.1, V30.1). Casca multi-timeframe fusion test. V6 A/B tests running.*
