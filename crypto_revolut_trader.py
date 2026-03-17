@@ -1645,8 +1645,8 @@ def main():
     # Load or create trading config
     trading_cfg = load_trading_config()
 
-    if not os.path.exists('models/crypto_hourly_best_models.csv'):
-        print("\n  ERROR: No models found! Run crypto_trading_system.py Mode D first.")
+    if not os.path.exists('models/crypto_casca_best_models.csv'):
+        print("\n  ERROR: No models found! Run crypto_trading_system_casca.py Mode D first.")
         return
 
     # Interactive menu
