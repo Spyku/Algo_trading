@@ -1,0 +1,1768 @@
+"""
+Revolut X Multi-Asset Auto-Trader (Deku)
+==========================================
+Same as crypto_revolut_trader.py but uses Deku models (Optuna + XGBoost).
+Reads from crypto_deku_best_models.csv and trading_config_deku.json.
+
+Usage:
+  python crypto_revolut_deku.py                  # Interactive
+  python crypto_revolut_deku.py --loop           # Auto-loop all assets
+  python crypto_revolut_deku.py --dry-run --loop # Signals only
+  python crypto_revolut_deku.py --status         # All positions
+  python crypto_revolut_deku.py --balance        # Revolut X balance
+  python crypto_revolut_deku.py --setup-telegram
+  python crypto_revolut_deku.py --reset          # Reset all positions
+"""
+
+import os
+import sys
+import time
+import json
+import uuid
+import base64
+import ssl
+import urllib.request
+import urllib.error
+import pandas as pd
+import numpy as np
+import threading
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+os.environ['PYTHONWARNINGS'] = 'ignore'
+import warnings
+warnings.filterwarnings('ignore')
+
+_ssl_ctx = ssl._create_unverified_context()
+
+from crypto_live_trader_deku import (
+    load_best_config, generate_live_signal, compute_combined_signal,
+    send_telegram, wait_for_fresh_candle, setup_telegram,
+    download_asset, load_data, TELEGRAM_CONFIG, MIN_CONFIDENCE,
+    MODELS_CSV,
+)
+
+
+# ============================================================
+# TRADING CONFIG (per-asset strategies + max positions)
+# ============================================================
+TRADING_CONFIG_FILE = 'config/trading_config_deku.json'
+
+DEFAULT_TRADING_CONFIG = {
+    'BTC': {
+        'strategy': 'both_agree',   # BUY when 4h+8h agree
+        'max_position_usd': 0,
+        'symbol': 'BTC-USD',
+        'enabled': True,
+    },
+    'ETH': {
+        'strategy': 'either',       # BUY when either says BUY
+        'max_position_usd': 0,
+        'symbol': 'ETH-USD',
+        'enabled': True,
+    },
+}
+
+def load_trading_config():
+    defaults = json.loads(json.dumps(DEFAULT_TRADING_CONFIG))
+    if os.path.exists(TRADING_CONFIG_FILE):
+        with open(TRADING_CONFIG_FILE) as f:
+            file_cfg = json.load(f)
+        # Merge file config over defaults (Mode F only writes strategy + min_confidence)
+        for asset in file_cfg:
+            if asset not in defaults:
+                defaults[asset] = {'strategy': 'both_agree', 'max_position_usd': 0, 'symbol': f'{asset}-USD', 'enabled': True}
+            defaults[asset].update(file_cfg[asset])
+    return defaults
+
+def save_trading_config(cfg):
+    os.makedirs('config', exist_ok=True)
+    with open(TRADING_CONFIG_FILE, 'w') as f:
+        json.dump(cfg, f, indent=2)
+
+def save_trading_config(config):
+    os.makedirs('config', exist_ok=True)
+    with open(TRADING_CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+
+# ============================================================
+# REVOLUT X API
+# ============================================================
+REVX_CONFIG_FILE = 'config/revolut_x_config.json'
+REVX_BASE_URL = 'https://revx.revolut.com/api/1.0'
+PRIVATE_KEY_PATH = 'config/private.pem'
+
+def _load_revx_config():
+    # Env var takes precedence over JSON file
+    api_key = os.environ.get('REVX_API_KEY', '')
+    if api_key:
+        return {'api_key': api_key}
+    if not os.path.exists(REVX_CONFIG_FILE):
+        return {'api_key': ''}
+    with open(REVX_CONFIG_FILE) as f:
+        return json.load(f)
+
+def _load_signing_key():
+    from nacl.signing import SigningKey
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.backends import default_backend
+    # Try env var first (base64-encoded PEM)
+    pem_b64 = os.environ.get('REVX_PRIVATE_KEY_B64', '')
+    if pem_b64:
+        pem_data = base64.b64decode(pem_b64)
+    elif Path(PRIVATE_KEY_PATH).exists():
+        pem_data = Path(PRIVATE_KEY_PATH).read_bytes()
+    else:
+        return None
+    pk = serialization.load_pem_private_key(pem_data, password=None, backend=default_backend())
+    raw = pk.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    return SigningKey(raw)
+
+def revx_api(method, path, query='', body=None):
+    config = _load_revx_config()
+    sk = _load_signing_key()
+    if not sk or not config.get('api_key'):
+        return 0, {'error': 'API not configured'}
+    body_str = json.dumps(body, separators=(',', ':')) if body else ''
+    full_path = f"/api/1.0{path}"
+    ts = str(int(time.time() * 1000))
+    msg = f"{ts}{method}{full_path}{query}{body_str}".encode('utf-8')
+    sig = base64.b64encode(sk.sign(msg).signature).decode()
+    url = f"{REVX_BASE_URL}{path}"
+    if query:
+        url += f"?{query}"
+    headers = {
+        'Accept': 'application/json', 'Content-Type': 'application/json',
+        'X-Revx-Api-Key': config['api_key'],
+        'X-Revx-Timestamp': ts, 'X-Revx-Signature': sig,
+    }
+    data = body_str.encode('utf-8') if body_str else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except:
+            return e.code, {'error': str(e)}
+    except Exception as e:
+        return 0, {'error': str(e)}
+
+def get_balances():
+    status, data = revx_api('GET', '/balances')
+    if status == 200:
+        return {b['currency']: {'available': float(b['available']), 'total': float(b['total'])} for b in data}
+    return {}
+
+def get_asset_price(symbol):
+    """Get price from Revolut X. Handles actual API response formats."""
+    # Method 1: Public orderbook — response is {"data": {"asks": [{"p": "67582.90", ...}], "bids": [...]}}
+    try:
+        url = f"{REVX_BASE_URL}/public/order-book/{symbol}"
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
+            raw = json.loads(resp.read().decode())
+        data = raw.get('data', raw)
+        asks = data.get('asks', [])
+        bids = data.get('bids', [])
+        if asks and bids:
+            # Fields can be dicts with 'p' key or simple [price, qty] arrays
+            if isinstance(asks[0], dict):
+                ask = float(asks[0].get('p', 0))
+                bid = float(bids[0].get('p', 0))
+            else:
+                ask = float(asks[0][0])
+                bid = float(bids[0][0])
+            if ask > 0 and bid > 0:
+                return (ask + bid) / 2
+    except Exception:
+        pass
+
+    # Method 2: Authenticated tickers — can be list of dicts or list of strings
+    try:
+        status, raw = revx_api('GET', '/tickers')
+        if status == 200:
+            tickers = raw if isinstance(raw, list) else raw.get('data', raw) if isinstance(raw, dict) else []
+            for t in tickers:
+                if isinstance(t, dict) and t.get('symbol') == symbol:
+                    bid = float(t.get('bid', 0))
+                    ask = float(t.get('ask', 0))
+                    last = float(t.get('last_price', t.get('p', 0)))
+                    if bid > 0 and ask > 0:
+                        return (bid + ask) / 2
+                    if last > 0:
+                        return last
+    except Exception:
+        pass
+
+    # Method 3: Authenticated last trades — {"data": [{"p": "71191.32", ...}]}
+    try:
+        status, raw = revx_api('GET', f'/trades/private/{symbol}')
+        if status == 200:
+            trades = raw.get('data', raw) if isinstance(raw, dict) else raw
+            if trades and isinstance(trades, list) and isinstance(trades[0], dict):
+                return float(trades[0].get('p', 0))
+    except Exception:
+        pass
+
+    return 0
+
+def place_market_buy(symbol, quote_size_usd):
+    body = {
+        'client_order_id': str(uuid.uuid4()),
+        'symbol': symbol, 'side': 'BUY',
+        'order_configuration': {'market': {'quote_size': str(round(quote_size_usd, 2))}}
+    }
+    return revx_api('POST', '/orders', body=body)
+
+def place_market_sell(symbol, base_size):
+    body = {
+        'client_order_id': str(uuid.uuid4()),
+        'symbol': symbol, 'side': 'SELL',
+        'order_configuration': {'market': {'base_size': str(base_size)}}
+    }
+    return revx_api('POST', '/orders', body=body)
+
+
+# ============================================================
+# PER-ASSET POSITION STATE
+# ============================================================
+def _position_file(asset):
+    return f'config/position_{asset}.json'
+
+def load_position(asset):
+    path = _position_file(asset)
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {
+        'asset': asset, 'state': 'cash', 'entry_price': 0,
+        'entry_time': '', 'base_amount': 0, 'usd_invested': 0,
+        'trades': [], 'auto_trade': False,
+    }
+
+def save_position(asset, pos):
+    os.makedirs('config', exist_ok=True)
+    with open(_position_file(asset), 'w') as f:
+        json.dump(pos, f, indent=2)
+
+
+# ============================================================
+# SYNC POSITIONS FROM EXCHANGE
+# ============================================================
+MIN_POSITION_USD = 5    # Below this = treat as zero (dust)
+MIN_TRADE_USD = 300     # Minimum USD to execute a trade
+
+def sync_positions(trading_cfg, notify=True):
+    """
+    Check actual Revolut X balances and sync local position files.
+    - Always updates held amounts from exchange (every 5 min)
+    - Detects manual buys/sells (state mismatches)
+    - Notifies only on state changes (not on balance updates)
+    """
+    balances = get_balances()
+    if not balances:
+        return []
+
+    changes = []
+    for asset, cfg in trading_cfg.items():
+        if not cfg.get('enabled'):
+            continue
+
+        symbol = cfg.get('symbol', f'{asset}-USD')
+        pos = load_position(asset)
+
+        # Get actual holdings from exchange
+        actual_amount = balances.get(asset, {}).get('total', 0)
+        price = get_asset_price(symbol)
+        actual_usd = actual_amount * price if price > 0 else 0
+
+        local_state = pos['state']
+        updated = False
+
+        if actual_usd > MIN_POSITION_USD and local_state == 'cash':
+            # Detected manual BUY — update local state
+            pos['state'] = 'invested'
+            pos['base_amount'] = actual_amount
+            pos['entry_price'] = price  # approximate
+            pos['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)'
+            pos['usd_invested'] = actual_usd
+            pos['trades'].append({
+                'action': 'BUY', 'price': price,
+                'time': pos['entry_time'], 'usd': actual_usd,
+                'auto': False, 'synced': True,
+            })
+            updated = True
+            changes.append(f"🔄 {asset}: Detected MANUAL BUY — {actual_amount:.6f} {asset} (≈${actual_usd:,.2f})")
+            print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${price:,.2f}")
+
+        elif actual_usd <= MIN_POSITION_USD and local_state == 'invested':
+            # Detected manual SELL — update local state
+            pnl_pct = (price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
+            pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
+            pos['trades'].append({
+                'action': 'SELL', 'price': price,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)',
+                'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                'auto': False, 'synced': True,
+            })
+            pos['state'] = 'cash'
+            pos['entry_price'] = 0
+            pos['entry_time'] = ''
+            pos['base_amount'] = 0
+            pos['usd_invested'] = 0
+            updated = True
+            changes.append(f"🔄 {asset}: Detected MANUAL SELL (PnL: {pnl_pct:+.1f}%)")
+            print(f"  🔄 SYNC: {asset} manual SELL detected — PnL: {pnl_pct:+.1f}%")
+
+        elif local_state == 'invested' and actual_amount > 0:
+            # Always refresh actual held amount from exchange (silent)
+            pos['base_amount'] = actual_amount
+            updated = True
+
+        if updated:
+            save_position(asset, pos)
+
+    if changes and notify:
+        msg = "🔄 <b>Position Sync</b>\n\n" + "\n".join(changes)
+        send_telegram(msg)
+
+    return changes
+
+
+# ============================================================
+# STRATEGY: COMPUTE SIGNAL PER ASSET
+# ============================================================
+def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
+    """
+    Apply per-asset strategy using signals from any available horizons.
+    sigs_by_horizon: dict {1: sig_1h, 2: sig_2h, 4: sig_4h, 8: sig_8h} (any subset)
+    Returns (action, confidence, reason).
+
+    Strategies: both_agree, either_agree, 4h_only, 8h_only, 1h_only, 2h_only,
+                8h_and_1h, 8h_and_2h, any_agree
+    """
+    if not sigs_by_horizon or all(v is None for v in sigs_by_horizon.values()):
+        return 'HOLD', 50, 'no_signal'
+
+    def _s(h): return sigs_by_horizon.get(h, {}).get('signal', 'HOLD') if sigs_by_horizon.get(h) else 'HOLD'
+    def _c(h): return sigs_by_horizon.get(h, {}).get('confidence', 50) if sigs_by_horizon.get(h) else 50
+
+    # --- single horizon ---
+    if strategy in ('4h_only', '8h_only', '1h_only', '2h_only'):
+        h = int(strategy.split('h')[0])
+        s, c = _s(h), _c(h)
+        if s == 'SELL': return 'SELL', c, f'{h}h_sell'
+        if s == 'BUY' and c >= min_conf: return 'BUY', c, f'{h}h_buy'
+        return 'HOLD', c, 'low_conf' if s == 'BUY' else 'no_signal'
+
+    # --- multi horizon: determine relevant horizons ---
+    if strategy == 'both_agree':
+        horizons = [4, 8]
+    elif strategy == 'either_agree':
+        horizons = [4, 8]
+    elif strategy == '8h_and_1h':
+        horizons = [8, 1]
+    elif strategy == '8h_and_2h':
+        horizons = [8, 2]
+    elif strategy == 'any_agree':
+        horizons = [h for h in [1, 2, 4, 8] if sigs_by_horizon.get(h)]
+    else:
+        horizons = [4, 8]  # default fallback
+
+    available = [h for h in horizons if sigs_by_horizon.get(h)]
+    if not available:
+        return 'HOLD', 50, 'no_signal'
+
+    # SELL: any relevant horizon says SELL
+    selling = [h for h in available if _s(h) == 'SELL']
+    if selling:
+        reason = '+'.join(f'{h}h' for h in selling) + '_sell'
+        return 'SELL', max(_c(h) for h in selling), reason
+
+    # BUY logic
+    if strategy in ('both_agree', '8h_and_1h', '8h_and_2h'):
+        # AND: all available relevant horizons must BUY with conf >= min_conf
+        if all(_s(h) == 'BUY' and _c(h) >= min_conf for h in available):
+            reason = '+'.join(f'{h}h' for h in available) + '_buy'
+            return 'BUY', min(_c(h) for h in available), reason
+    elif strategy in ('either_agree', 'any_agree'):
+        for h in available:
+            if _s(h) == 'BUY' and _c(h) >= min_conf:
+                return 'BUY', _c(h), f'{h}h_buy'
+
+    # Check if any are low-conf BUY
+    if any(_s(h) == 'BUY' for h in available):
+        return 'HOLD', max(_c(h) for h in available), 'low_conf'
+
+    return 'HOLD', 50, 'no_signal'
+
+
+# ============================================================
+# PROCESS ONE ASSET
+# ============================================================
+def process_asset(asset, trading_cfg, dry_run=False):
+    """Generate signals and execute for one asset. Returns result dict."""
+    position = load_position(asset)
+    strategy = trading_cfg.get('strategy', 'both_agree')
+    symbol = trading_cfg.get('symbol', f'{asset}-USD')
+    max_usd = trading_cfg.get('max_position_usd', 0)
+
+    # Load configs for all available horizons
+    sigs_by_horizon = {}
+    any_config = False
+    for h in [1, 2, 4, 8]:
+        cfg = load_best_config(asset, horizon=h)
+        if cfg:
+            any_config = True
+            sigs_by_horizon[h] = cfg  # store config temporarily
+
+    if not any_config:
+        return None
+
+    # Download data once
+    try:
+        download_asset(asset, update_only=True)
+    except Exception:
+        pass
+
+    df_raw = load_data(asset)
+    if df_raw is None:
+        return None
+
+    # Generate live signals for each available horizon
+    first = True
+    for h in list(sigs_by_horizon.keys()):
+        cfg = sigs_by_horizon[h]
+        sig = generate_live_signal(asset, cfg, df_raw=df_raw, verbose=first)
+        sigs_by_horizon[h] = sig  # replace config with actual signal
+        first = False
+
+    # Apply asset-specific strategy
+    min_conf = trading_cfg.get('min_confidence', MIN_CONFIDENCE)
+    action, confidence, reason = compute_asset_signal(sigs_by_horizon, strategy, min_conf=min_conf)
+    any_sig = next((s for s in sigs_by_horizon.values() if s), None)
+    price = any_sig['close'] if any_sig else 0
+
+    # Reload position (sync may have updated it)
+    position = load_position(asset)
+
+    # Log - show all available horizons
+    sig_strs = []
+    for h in sorted(sigs_by_horizon.keys()):
+        s = sigs_by_horizon[h]
+        sig_strs.append(f"{h}h={s['signal']}({s['confidence']:.0f}%)" if s else f"{h}h=N/A")
+    print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.0f}%) [{reason}] | pos={position['state']}")
+
+    # Log signal for /chart command
+    _log_signal(asset, price, sigs_by_horizon, action, confidence)
+
+    # Keep backward compat: expose sig_4h, sig_8h for Telegram message
+    sig_4h = sigs_by_horizon.get(4)
+    sig_8h = sigs_by_horizon.get(8)
+
+    # Execute
+    executed = False
+    pnl_msg = ""
+
+    if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
+        if not dry_run and position.get('auto_trade'):
+            # Pre-trade balance check
+            balances = get_balances()
+            usd_avail = balances.get('USD', {}).get('available', 0)
+            print(f"    Pre-trade USD: ${usd_avail:,.2f}")
+
+            # Minimum $300 to trade, target full max, or all available if < max
+            if usd_avail < MIN_TRADE_USD:
+                send_telegram(f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum")
+            else:
+                buy_amount = min(max_usd, usd_avail)
+                if buy_amount < max_usd:
+                    print(f"    Partial buy: ${buy_amount:,.2f} of ${max_usd:,.2f} (limited by balance)")
+                status, data = place_market_buy(symbol, buy_amount)
+                if status in (200, 201):
+                    order = data.get('data', data)
+                    position['base_amount'] = float(order.get('filled_size', buy_amount / price))
+                    position['entry_price'] = float(order.get('average_fill_price', price))
+                    position['usd_invested'] = buy_amount
+                    executed = True
+
+                    # Post-trade verification
+                    time.sleep(2)
+                    post_bal = get_balances()
+                    crypto_held = post_bal.get(asset, {}).get('total', 0)
+                    usd_left = post_bal.get('USD', {}).get('available', 0)
+                    print(f"    Post-trade: {crypto_held:.6f} {asset} | ${usd_left:,.2f} USD")
+                else:
+                    send_telegram(f"⚠️ {asset} BUY failed: {status} {data}")
+
+        if not executed and not dry_run and not position.get('auto_trade'):
+            # Manual mode — just track
+            position['base_amount'] = max_usd / price
+            position['entry_price'] = price
+            position['usd_invested'] = max_usd
+
+        if executed or (not dry_run and not position.get('auto_trade')):
+            position['state'] = 'invested'
+            position['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+            if not executed:
+                position['usd_invested'] = max_usd
+            position['trades'].append({
+                'action': 'BUY', 'price': position['entry_price'],
+                'time': position['entry_time'], 'usd': position['usd_invested'],
+                'auto': executed,
+            })
+            save_position(asset, position)
+
+    elif action == 'SELL' and position['state'] == 'invested':
+        if not dry_run and position.get('auto_trade'):
+            # Get ACTUAL holdings from exchange — sell everything
+            balances = get_balances()
+            actual_held = balances.get(asset, {}).get('available', 0)
+            print(f"    Pre-trade: {actual_held:.6f} {asset} (selling ALL)")
+
+            if actual_held > 0:
+                status, data = place_market_sell(symbol, actual_held)
+                if status in (200, 201):
+                    order = data.get('data', data)
+                    price = float(order.get('average_fill_price', price))
+                    executed = True
+
+                    # Post-trade verification
+                    time.sleep(2)
+                    post_bal = get_balances()
+                    usd_now = post_bal.get('USD', {}).get('available', 0)
+                    crypto_left = post_bal.get(asset, {}).get('total', 0)
+                    print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD")
+                else:
+                    send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
+            else:
+                print(f"    ⚠ Nothing to sell (exchange balance = 0)")
+
+        pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
+        pnl_usd = position['usd_invested'] * pnl_pct / 100
+        pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
+
+        position['trades'].append({
+            'action': 'SELL', 'price': price,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+            'auto': executed,
+        })
+        position['state'] = 'cash'
+        position['entry_price'] = 0
+        position['entry_time'] = ''
+        position['base_amount'] = 0
+        position['usd_invested'] = 0
+        save_position(asset, position)
+
+    # Get gamma from the primary horizon model
+    gamma_val = ''
+    for h in [8, 4]:  # prefer 8h config
+        cfg = load_best_config(asset, horizon=h)
+        if cfg:
+            g = cfg.get('gamma', 1.0)
+            if g and g < 1.0:
+                gamma_val = str(g)
+            break
+
+    return {
+        'asset': asset, 'action': action, 'confidence': confidence,
+        'reason': reason, 'price': price, 'executed': executed,
+        'pnl_msg': pnl_msg, 'sig_4h': sig_4h, 'sig_8h': sig_8h,
+        'position': position, 'strategy': strategy,
+        'min_confidence': trading_cfg.get('min_confidence', MIN_CONFIDENCE),
+        'gamma': gamma_val,
+    }
+
+
+# ============================================================
+# TELEGRAM MESSAGE (MULTI-ASSET)
+# ============================================================
+def format_multi_asset_telegram(results, dry_run=False, balances=None):
+    """Format combined Telegram message for all assets."""
+    if balances is None:
+        balances = {}
+    lines = []
+    mode = "DRY" if dry_run else "LIVE"
+    lines.append(f"📊 <b>Hourly Update [{mode}]</b>")
+    lines.append(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append("")
+
+    for r in results:
+        if r is None:
+            continue
+        asset = r['asset']
+        action = r['action']
+        conf = r['confidence']
+        price = r['price']
+        position = r['position']
+        strategy = r['strategy']
+
+        # Get RSI + last 4 candles from data
+        rsi = 0
+        last_prices = []
+        try:
+            any_sig = r.get('sig_4h') or r.get('sig_8h')
+            if any_sig:
+                rsi = any_sig.get('rsi', 0)
+                for h in any_sig.get('last_4h', []):
+                    last_prices.append((h['datetime'], h['close']))
+        except Exception:
+            pass
+
+        # Exchange holdings
+        actual_held = balances.get(asset, {}).get('total', 0)
+        actual_usd = actual_held * price if price > 0 and actual_held > 0 else 0
+
+        # Signal emojis
+        def _se(sig, h):
+            if not sig: return f"{h}h:N/A"
+            e = '🔵' if sig['signal'] == 'BUY' else '🔴' if sig['signal'] == 'SELL' else '🟡'
+            return f"{e}{h}h:{sig['signal']}({sig['confidence']:.0f}%)"
+
+        sig_line = f"{_se(r['sig_4h'], 4)} {_se(r['sig_8h'], 8)}"
+
+        # Action
+        if action == 'BUY' and position['state'] == 'invested':
+            if r['executed']:
+                act = f"✅ BOUGHT ${position.get('usd_invested', 0):,.0f}"
+            else:
+                act = f"🔵 BUY ${position.get('usd_invested', 0):,.0f}"
+        elif action == 'SELL' and r['pnl_msg']:
+            if r['executed']:
+                act = f"🚨 SOLD{r['pnl_msg']}"
+            else:
+                act = f"🔴 SELL{r['pnl_msg']}"
+        elif position['state'] == 'invested':
+            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
+            act = f"⏸ HOLD ({cur_pnl:+.1f}%)"
+        else:
+            act = f"⏸ HOLD (cash)"
+
+        # Header with price + RSI + auto status
+        price_str = f"${price:,.2f}" if price >= 100 else f"${price:,.4f}"
+        auto_icon = "🔵" if position.get('auto_trade') else "🔴"
+        gamma_str = r.get('gamma', '')
+        gamma_suffix = f"|γ{gamma_str}" if gamma_str else ""
+        mc = r.get('min_confidence', '')
+        conf_str = f" | conf:{mc}%" if mc else ""
+        lines.append(f"{auto_icon} <b>{asset}</b> {price_str} | RSI:{rsi:.0f} | [{strategy}{gamma_suffix}]{conf_str}")
+
+        # Last 4 prices
+        if last_prices:
+            p_parts = []
+            for dt_str, p in last_prices:
+                p_str = f"${p:,.0f}" if p >= 100 else f"${p:,.4f}"
+                p_parts.append(f"{dt_str}:{p_str}")
+            lines.append(f"  <code>{' '.join(p_parts)}</code>")
+
+        # Signals + action
+        lines.append(f"  {sig_line}")
+        lines.append(f"  {act}")
+
+        # Position details if invested
+        if position['state'] == 'invested' and position['entry_price'] > 0:
+            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
+            cur_usd = position.get('usd_invested', 0) * (1 + cur_pnl / 100)
+            emoji = '📈' if cur_pnl > 0 else '📉'
+            lines.append(f"  📦 ${position.get('usd_invested',0):,.0f} @ ${position['entry_price']:,.2f} → ${cur_usd:,.0f} ({emoji}{cur_pnl:+.1f}%)")
+
+        # Exchange balance (always show if holding)
+        if actual_held > 0 and actual_usd > 5:
+            lines.append(f"  💼 Exchange: {actual_held:.6f} {asset} (≈${actual_usd:,.2f})")
+        elif position['state'] == 'invested' and actual_held == 0:
+            lines.append(f"  ⚠️ Tracker says invested but exchange shows 0!")
+
+        lines.append("")
+
+    # USD balance
+    usd_avail = balances.get('USD', {}).get('available', 0)
+    if usd_avail > 0 or balances:
+        lines.append(f"💵 USD: ${usd_avail:,.2f}")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# TELEGRAM COMMAND LISTENER
+# ============================================================
+_last_update_id = 0
+
+def check_telegram_commands():
+    global _last_update_id
+    token = TELEGRAM_CONFIG.get('token', '')
+    if not token:
+        return None
+    try:
+        url = f"https://api.telegram.org/bot{token}/getUpdates?offset={_last_update_id + 1}&timeout=0"
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
+            data = json.loads(resp.read().decode())
+        if not data.get('ok') or not data.get('result'):
+            return None
+        last_text = None
+        for update in data['result']:
+            _last_update_id = update['update_id']
+            text = update.get('message', {}).get('text', '').strip()
+            if text:
+                last_text = text
+        return last_text
+    except Exception:
+        pass
+    return None
+
+def _flush_old_updates():
+    global _last_update_id
+    token = TELEGRAM_CONFIG.get('token', '')
+    if not token:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/getUpdates?offset=-1"
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
+            data = json.loads(resp.read().decode())
+        if data.get('ok') and data.get('result'):
+            _last_update_id = data['result'][-1]['update_id']
+    except Exception:
+        pass
+
+def _handle_status_command():
+    trading_cfg = load_trading_config()
+    balances = get_balances()
+    lines = [f"📊 <b>Status</b> — {datetime.now().strftime('%H:%M')}\n"]
+
+    for asset, cfg in trading_cfg.items():
+        if not cfg.get('enabled'):
+            continue
+        pos = load_position(asset)
+        symbol = cfg.get('symbol', f'{asset}-USD')
+        strategy = cfg.get('strategy', 'both_agree')
+
+        # Get live price from exchange
+        price = get_asset_price(symbol)
+        actual_held = balances.get(asset, {}).get('total', 0)
+        actual_usd = actual_held * price if price > 0 else 0
+
+        # Get last 4 hours + RSI from data
+        last_prices = []
+        rsi = 0
+        try:
+            df_raw = load_data(asset)
+            if df_raw is not None and len(df_raw) >= 4:
+                recent = df_raw.tail(4)
+                for _, row in recent.iterrows():
+                    dt = row['datetime']
+                    if hasattr(dt, 'strftime'):
+                        dt_str = dt.strftime('%H:%M')
+                    else:
+                        dt_str = str(dt)[-5:]
+                    last_prices.append((dt_str, float(row['close'])))
+
+                # Quick RSI calc from last 15 candles
+                if len(df_raw) >= 15:
+                    closes = df_raw['close'].tail(15).values.astype(float)
+                    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+                    gains = [d for d in deltas if d > 0]
+                    losses = [-d for d in deltas if d < 0]
+                    avg_gain = sum(gains) / 14 if gains else 0.001
+                    avg_loss = sum(losses) / 14 if losses else 0.001
+                    rs = avg_gain / avg_loss
+                    rsi = 100 - (100 / (1 + rs))
+        except Exception:
+            pass
+
+        # Header
+        price_str = f"${price:,.2f}" if price >= 100 else f"${price:,.4f}"
+        lines.append(f"<b>{asset}</b> {price_str} | RSI: {rsi:.0f} | [{strategy}]")
+
+        # Last 4 prices
+        if last_prices:
+            price_line = "  "
+            for dt_str, p in last_prices:
+                p_str = f"${p:,.2f}" if p >= 100 else f"${p:,.4f}"
+                price_line += f"{dt_str}:{p_str}  "
+            lines.append(f"<code>{price_line.strip()}</code>")
+
+        # Position info
+        if pos['state'] == 'invested' and pos['entry_price'] > 0:
+            cur_pnl = (price - pos['entry_price']) / pos['entry_price'] * 100 if price > 0 else 0
+            cur_value = actual_usd if actual_usd > 0 else pos.get('usd_invested', 0) * (1 + cur_pnl / 100)
+            emoji = '📈' if cur_pnl > 0 else '📉'
+            lines.append(f"  {emoji} INVESTED ${pos.get('usd_invested',0):,.0f} → ${cur_value:,.0f} ({cur_pnl:+.1f}%)")
+            lines.append(f"  Entry: ${pos['entry_price']:,.2f} | {pos.get('entry_time', '')}")
+            if actual_held > 0:
+                lines.append(f"  Held: {actual_held:.6f} {asset}")
+        else:
+            lines.append(f"  💵 CASH (max ${cfg.get('max_position_usd',0):,.0f})")
+            if actual_held > 0 and actual_usd > 5:
+                lines.append(f"  ⚠️ Exchange: {actual_held:.6f} {asset} (≈${actual_usd:,.2f})")
+
+        # Trade history summary
+        sells = [t for t in pos.get('trades', []) if t.get('action') == 'SELL']
+        if sells:
+            total = sum(t.get('pnl_usd', 0) for t in sells)
+            wins = sum(1 for t in sells if t.get('pnl_usd', 0) > 0)
+            lines.append(f"  📊 {len(sells)} trades ({wins}W) ${total:+,.2f}")
+        lines.append("")
+
+    usd_avail = balances.get('USD', {}).get('available', 0)
+    lines.append(f"💵 USD: ${usd_avail:,.2f}")
+    send_telegram("\n".join(lines))
+
+
+# ============================================================
+# BACKGROUND TELEGRAM COMMAND THREAD
+# ============================================================
+_stop_event = threading.Event()
+_rerun_event = threading.Event()
+_paused_lock = threading.Lock()
+_paused_flag = [False]  # mutable container for thread-safe access
+
+STRATEGIES = ['both_agree', 'either_agree', '4h_only', '8h_only']
+
+# ---- Simple command handlers ----
+
+def _handle_config_command():
+    """Show current trading config for all assets."""
+    trading_cfg = load_trading_config()
+    lines = ["⚙️ <b>Config</b>\n"]
+    for asset, cfg in trading_cfg.items():
+        enabled = "ON" if cfg.get('enabled') else "OFF"
+        pos = load_position(asset)
+        auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
+        lines.append(
+            f"<b>{asset}</b> [{enabled}]\n"
+            f"  Strategy: {cfg.get('strategy', '?')}\n"
+            f"  Min confidence: {cfg.get('min_confidence', MIN_CONFIDENCE)}%\n"
+            f"  Max position: ${cfg.get('max_position_usd', 0):,.0f}\n"
+            f"  Trade mode: {auto}"
+        )
+    lines.append("\n/setup to change config")
+    send_telegram("\n".join(lines))
+
+def _handle_auto_command(cmd_text, trading_cfg):
+    """Toggle auto_trade for an asset. Usage: /auto BTC on|off"""
+    parts = cmd_text.split()
+    if len(parts) < 3:
+        send_telegram("Usage: <code>/auto BTC on</code> or <code>/auto BTC off</code>")
+        return
+    asset = parts[1].upper()
+    toggle = parts[2].lower()
+    if asset not in trading_cfg:
+        send_telegram(f"Unknown asset: {asset}")
+        return
+    if toggle not in ('on', 'off'):
+        send_telegram("Use <code>on</code> or <code>off</code>")
+        return
+    pos = load_position(asset)
+    new_val = toggle == 'on'
+    pos['auto_trade'] = new_val
+    save_position(asset, pos)
+    icon = "🟢" if new_val else "🔴"
+    msg = f"{icon} <b>{asset} auto-trade: {'ON' if new_val else 'OFF'}</b>"
+    send_telegram(msg)
+    print(f"  {icon} {asset} auto-trade -> {'ON' if new_val else 'OFF'} via Telegram")
+
+def _handle_help_command():
+    """Send list of available commands."""
+    send_telegram(
+        "📱 <b>Commands</b>\n\n"
+        "/status — Positions, prices, RSI, P&L\n"
+        "/balance — Exchange balances\n"
+        "/config — Show current config\n"
+        "/conf — Same as /config\n"
+        "/chart BTC — 24h price chart with signals\n"
+        "/setup — Interactive config editor\n"
+        "/auto BTC on — Enable auto-trade\n"
+        "/auto BTC off — Disable auto-trade\n"
+        "/sync — Sync positions from exchange\n"
+        "/pause — Pause trading (signals only)\n"
+        "/resume — Resume trading\n"
+        "/stop — Stop the trader"
+    )
+
+# ---- Signal logging for /chart ----
+SIGNAL_LOG_DIR = 'config'
+SIGNAL_LOG_FILE = os.path.join(SIGNAL_LOG_DIR, 'signal_log.csv')
+
+def _log_signal(asset, price, sigs_by_horizon, action, confidence):
+    """Append one row per signal to signal_log.csv for chart rendering."""
+    import csv
+    fieldnames = ['timestamp', 'asset', 'price', 'action', 'confidence',
+                  'sig_4h', 'conf_4h', 'sig_8h', 'conf_8h']
+    file_exists = os.path.exists(SIGNAL_LOG_FILE) and os.path.getsize(SIGNAL_LOG_FILE) > 0
+    try:
+        sig4 = sigs_by_horizon.get(4)
+        sig8 = sigs_by_horizon.get(8)
+        with open(SIGNAL_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                'asset': asset,
+                'price': f'{price:.2f}',
+                'action': action,
+                'confidence': f'{confidence:.1f}',
+                'sig_4h': sig4['signal'] if sig4 else '',
+                'conf_4h': f"{sig4['confidence']:.1f}" if sig4 else '',
+                'sig_8h': sig8['signal'] if sig8 else '',
+                'conf_8h': f"{sig8['confidence']:.1f}" if sig8 else '',
+            })
+    except Exception as e:
+        print(f"  [!] Signal log error: {e}")
+
+
+def send_telegram_photo(photo_path, caption=''):
+    """Send a photo to Telegram."""
+    token = TELEGRAM_CONFIG.get('token', '')
+    chat_id = TELEGRAM_CONFIG.get('chat_id', '')
+    if not token or not chat_id:
+        return False
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    try:
+        import io
+        boundary = '----PythonBoundary'
+        body = io.BytesIO()
+
+        # chat_id field
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(f'Content-Disposition: form-data; name="chat_id"\r\n\r\n{chat_id}\r\n'.encode())
+
+        # caption field
+        if caption:
+            body.write(f'--{boundary}\r\n'.encode())
+            body.write(f'Content-Disposition: form-data; name="caption"\r\n\r\n{caption}\r\n'.encode())
+
+        # photo file
+        with open(photo_path, 'rb') as img:
+            img_data = img.read()
+        body.write(f'--{boundary}\r\n'.encode())
+        body.write(f'Content-Disposition: form-data; name="photo"; filename="chart.png"\r\n'.encode())
+        body.write(f'Content-Type: image/png\r\n\r\n'.encode())
+        body.write(img_data)
+        body.write(f'\r\n--{boundary}--\r\n'.encode())
+
+        req = urllib.request.Request(
+            url, data=body.getvalue(),
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        )
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_ctx) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('ok'):
+                print("  ✓ Telegram photo sent")
+                return True
+            print(f"  [!] Telegram photo error: {result}")
+    except Exception as e:
+        print(f"  [!] Telegram photo error: {e}")
+    return False
+
+
+def _handle_chart_command(msg, trading_cfg):
+    """Generate and send a 24h chart with price + model predictions."""
+    parts = msg.split()
+    asset = parts[1].upper() if len(parts) >= 2 else 'BTC'
+    if asset not in trading_cfg:
+        send_telegram(f"Unknown asset: {asset}. Use: {', '.join(trading_cfg.keys())}")
+        return
+
+    # Load price data (last 24h)
+    try:
+        df_raw = load_data(asset)
+        if df_raw is None:
+            send_telegram(f"No data for {asset}")
+            return
+    except Exception as e:
+        send_telegram(f"Error loading {asset} data: {e}")
+        return
+
+    df_price = df_raw.tail(24).copy()
+    if len(df_price) < 2:
+        send_telegram(f"Not enough data for {asset}")
+        return
+
+    # Load signal log
+    signals = []
+    if os.path.exists(SIGNAL_LOG_FILE):
+        try:
+            import csv
+            with open(SIGNAL_LOG_FILE, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
+                for row in reader:
+                    if row['asset'] == asset and row['timestamp'] >= cutoff:
+                        signals.append(row)
+        except Exception:
+            pass
+
+    # Generate chart
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # Price line
+        times = pd.to_datetime(df_price['datetime'])
+        prices = df_price['close'].values
+        ax.plot(times, prices, color='#2196F3', linewidth=1.5, label=f'{asset} Price')
+        ax.fill_between(times, prices.min() * 0.999, prices, alpha=0.1, color='#2196F3')
+
+        # Overlay signals
+        for sig in signals:
+            try:
+                sig_time = pd.to_datetime(sig['timestamp'])
+                sig_price = float(sig['price'])
+                action = sig['action']
+
+                # Check if prediction was correct by comparing with next available price
+                future_prices = df_price[pd.to_datetime(df_price['datetime']) > sig_time]['close']
+                if len(future_prices) >= 4:
+                    future_price = future_prices.iloc[3]  # ~4h later
+                    if action == 'BUY':
+                        correct = future_price > sig_price
+                    elif action == 'SELL':
+                        correct = future_price < sig_price
+                    else:
+                        correct = None  # HOLD — no right/wrong
+                else:
+                    correct = None  # not enough future data yet
+
+                if action == 'BUY':
+                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    marker = '^'
+                    label_txt = f"BUY {sig.get('conf_4h', '')}%/{sig.get('conf_8h', '')}%"
+                elif action == 'SELL':
+                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    marker = 'v'
+                    label_txt = f"SELL"
+                else:
+                    continue  # skip HOLD signals on chart
+
+                ax.scatter(sig_time, sig_price, color=color, marker=marker,
+                          s=120, zorder=5, edgecolors='black', linewidth=0.5)
+
+                # Annotate
+                offset_y = (prices.max() - prices.min()) * 0.03
+                if action == 'BUY':
+                    ax.annotate(label_txt, (sig_time, sig_price - offset_y),
+                               fontsize=7, ha='center', va='top', color=color)
+                else:
+                    ax.annotate(label_txt, (sig_time, sig_price + offset_y),
+                               fontsize=7, ha='center', va='bottom', color=color)
+            except Exception:
+                continue
+
+        # Formatting
+        ax.set_title(f'{asset}/USD — Last 24h', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Price (USD)', fontsize=11)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(True, alpha=0.3)
+
+        # Legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='#4CAF50',
+                   markersize=10, label='BUY (correct)'),
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='#FF5722',
+                   markersize=10, label='BUY (wrong)'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor='#4CAF50',
+                   markersize=10, label='SELL (correct)'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor='#FF5722',
+                   markersize=10, label='SELL (wrong)'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFC107',
+                   markersize=10, label='Pending'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper left', fontsize=8)
+
+        plt.tight_layout()
+        chart_path = os.path.join('charts', f'{asset}_telegram_24h.png')
+        os.makedirs('charts', exist_ok=True)
+        fig.savefig(chart_path, dpi=120)
+        plt.close(fig)
+
+        # Send
+        caption = f"{asset}/USD 24h — Green=correct, Red=wrong, Yellow=pending"
+        send_telegram_photo(chart_path, caption=caption)
+        print(f"  Chart sent for {asset}")
+
+    except Exception as e:
+        send_telegram(f"Chart error: {e}")
+        print(f"  [!] Chart error: {e}")
+
+
+# ---- Interactive setup wizard ----
+_setup_state = {'active': False}
+
+def _setup_send_ask(asset, cfg):
+    """Ask if user wants to change this asset."""
+    enabled = "ON" if cfg.get('enabled') else "OFF"
+    pos = load_position(asset)
+    auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
+    send_telegram(
+        f"⚙️ <b>Setup — {asset}</b>\n\n"
+        f"Enabled: {enabled}\n"
+        f"Strategy: {cfg.get('strategy', '?')}\n"
+        f"Confidence: {cfg.get('min_confidence', MIN_CONFIDENCE)}%\n"
+        f"Max position: ${cfg.get('max_position_usd', 0):,.0f}\n"
+        f"Auto-trade: {auto}\n\n"
+        f"Change {asset}?  <b>yes</b> / <b>no</b>"
+    )
+
+def _setup_send_menu(asset, cfg):
+    """Show settings menu for an asset."""
+    enabled = "ON" if cfg.get('enabled') else "OFF"
+    pos = load_position(asset)
+    auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
+    send_telegram(
+        f"⚙️ <b>{asset} Settings</b>\n\n"
+        f"1. Toggle enabled ({enabled})\n"
+        f"2. Max position (${cfg.get('max_position_usd', 0):,.0f})\n"
+        f"3. Strategy ({cfg.get('strategy', '?')})\n"
+        f"4. Min confidence ({cfg.get('min_confidence', MIN_CONFIDENCE)}%)\n"
+        f"5. Toggle auto-trade ({auto})\n"
+        f"6. Done with {asset}"
+    )
+
+def _setup_start(trading_cfg):
+    """Begin interactive setup wizard."""
+    global _setup_state
+    cfg_copy = json.loads(json.dumps(trading_cfg))
+    assets = list(cfg_copy.keys())
+    _setup_state = {
+        'active': True,
+        'phase': 'ask_change',
+        'assets': assets,
+        'asset_idx': 0,
+        'cfg': cfg_copy,
+    }
+    send_telegram("⚙️ <b>Config Setup</b>\n\nWalk through each asset. /cancel to abort.")
+    _setup_send_ask(assets[0], cfg_copy[assets[0]])
+
+def _setup_next_asset(trading_cfg):
+    """Advance to next asset or finish."""
+    global _setup_state
+    _setup_state['asset_idx'] += 1
+    if _setup_state['asset_idx'] >= len(_setup_state['assets']):
+        _setup_finish(trading_cfg)
+    else:
+        _setup_state['phase'] = 'ask_change'
+        asset = _setup_state['assets'][_setup_state['asset_idx']]
+        _setup_send_ask(asset, _setup_state['cfg'][asset])
+
+def _setup_finish(trading_cfg):
+    """Save config and trigger signal re-run."""
+    global _setup_state
+    cfg = _setup_state['cfg']
+    save_trading_config(cfg)
+    # Update live trading_cfg dict
+    for asset in cfg:
+        trading_cfg[asset] = cfg[asset]
+    _setup_state = {'active': False}
+    send_telegram("✅ <b>Config saved!</b>\nRe-running signals...")
+    _send_startup_telegram(trading_cfg)
+    print("  Config updated via Telegram /setup")
+    _rerun_event.set()
+
+def _setup_handle(text, trading_cfg):
+    """Process one message during interactive setup."""
+    global _setup_state
+    text_l = text.lower().strip()
+
+    if text_l == '/cancel':
+        _setup_state = {'active': False}
+        send_telegram("❌ Setup cancelled")
+        return
+
+    phase = _setup_state['phase']
+    assets = _setup_state['assets']
+    idx = _setup_state['asset_idx']
+    cfg = _setup_state['cfg']
+    asset = assets[idx]
+
+    if phase == 'ask_change':
+        if text_l in ('yes', 'y'):
+            _setup_state['phase'] = 'menu'
+            _setup_send_menu(asset, cfg[asset])
+        elif text_l in ('no', 'n', 'skip'):
+            _setup_next_asset(trading_cfg)
+        else:
+            send_telegram("Reply <b>yes</b> or <b>no</b>")
+
+    elif phase == 'menu':
+        if text_l == '1':
+            cfg[asset]['enabled'] = not cfg[asset].get('enabled', False)
+            st = "ON" if cfg[asset]['enabled'] else "OFF"
+            send_telegram(f"✅ {asset} enabled -> {st}")
+            _setup_send_menu(asset, cfg[asset])
+        elif text_l == '2':
+            _setup_state['phase'] = 'set_max'
+            send_telegram(f"Enter max position for <b>{asset}</b> (USD):")
+        elif text_l == '3':
+            _setup_state['phase'] = 'set_strategy'
+            lines = [f"Choose strategy for <b>{asset}</b>:\n"]
+            for i, s in enumerate(STRATEGIES, 1):
+                cur = " (current)" if s == cfg[asset].get('strategy') else ""
+                lines.append(f"{i}. {s}{cur}")
+            send_telegram("\n".join(lines))
+        elif text_l == '4':
+            _setup_state['phase'] = 'set_confidence'
+            send_telegram(f"Enter min confidence for <b>{asset}</b> (50-99):")
+        elif text_l == '5':
+            pos = load_position(asset)
+            pos['auto_trade'] = not pos.get('auto_trade', False)
+            save_position(asset, pos)
+            st = "ON" if pos['auto_trade'] else "OFF"
+            send_telegram(f"✅ {asset} auto-trade -> {st}")
+            _setup_send_menu(asset, cfg[asset])
+        elif text_l in ('6', 'done'):
+            _setup_next_asset(trading_cfg)
+        else:
+            send_telegram("Reply <b>1-6</b>")
+
+    elif phase == 'set_max':
+        try:
+            val = float(text_l.replace('$', '').replace(',', '').replace('k', '000'))
+            if val < 0:
+                send_telegram("Must be >= 0")
+                return
+            cfg[asset]['max_position_usd'] = val
+            send_telegram(f"✅ {asset} max position -> ${val:,.0f}")
+            _setup_state['phase'] = 'menu'
+            _setup_send_menu(asset, cfg[asset])
+        except ValueError:
+            send_telegram("Enter a number (e.g. 6000)")
+
+    elif phase == 'set_confidence':
+        try:
+            val = int(text_l.replace('%', ''))
+            if val < 50 or val > 99:
+                send_telegram("Must be 50-99")
+                return
+            cfg[asset]['min_confidence'] = val
+            send_telegram(f"✅ {asset} min confidence -> {val}%")
+            _setup_state['phase'] = 'menu'
+            _setup_send_menu(asset, cfg[asset])
+        except ValueError:
+            send_telegram("Enter a number (e.g. 75)")
+
+    elif phase == 'set_strategy':
+        try:
+            choice = int(text_l) - 1
+            if 0 <= choice < len(STRATEGIES):
+                cfg[asset]['strategy'] = STRATEGIES[choice]
+                send_telegram(f"✅ {asset} strategy -> {STRATEGIES[choice]}")
+                _setup_state['phase'] = 'menu'
+                _setup_send_menu(asset, cfg[asset])
+            else:
+                send_telegram(f"Reply 1-{len(STRATEGIES)}")
+        except ValueError:
+            if text_l in STRATEGIES:
+                cfg[asset]['strategy'] = text_l
+                send_telegram(f"✅ {asset} strategy -> {text_l}")
+                _setup_state['phase'] = 'menu'
+                _setup_send_menu(asset, cfg[asset])
+            else:
+                send_telegram(f"Reply 1-{len(STRATEGIES)}")
+
+# ---- Command loop ----
+
+def _telegram_command_loop(trading_cfg):
+    """Background thread: polls Telegram commands every 5 seconds."""
+    while not _stop_event.is_set():
+        try:
+            msg = check_telegram_commands()
+            if not msg:
+                pass
+            elif _setup_state.get('active'):
+                # During setup: /stop and /cancel bypass, everything else goes to wizard
+                if msg.lower() == '/stop':
+                    _setup_state['active'] = False
+                    print("\n  STOP via Telegram")
+                    send_telegram("🛑 <b>Trader Stopped</b>")
+                    _stop_event.set()
+                else:
+                    _setup_handle(msg, trading_cfg)
+            else:
+                # Normal mode: only process commands
+                cmd = msg.lower()
+                if cmd == '/stop':
+                    print("\n  STOP via Telegram")
+                    send_telegram("🛑 <b>Trader Stopped</b>")
+                    _stop_event.set()
+                elif cmd == '/status':
+                    _handle_status_command()
+                elif cmd == '/pause':
+                    with _paused_lock:
+                        _paused_flag[0] = True
+                    send_telegram("⏸ <b>PAUSED</b> — /resume to continue")
+                    print("  PAUSED via Telegram")
+                elif cmd == '/resume':
+                    with _paused_lock:
+                        _paused_flag[0] = False
+                    send_telegram("▶️ <b>RESUMED</b>")
+                    print("  RESUMED via Telegram")
+                elif cmd == '/balance':
+                    bal = get_balances()
+                    bl = [f"  {c}: {b['available']:.6f}" for c, b in sorted(bal.items()) if b['total'] > 0]
+                    send_telegram("💰 <b>Balance</b>\n" + "\n".join(bl))
+                elif cmd == '/sync':
+                    sync_positions(trading_cfg, notify=True)
+                    send_telegram("🔄 <b>Synced</b>")
+                elif cmd in ('/config', '/conf'):
+                    _handle_config_command()
+                elif cmd.startswith('/chart'):
+                    _handle_chart_command(msg, trading_cfg)
+                elif cmd.startswith('/auto'):
+                    _handle_auto_command(msg, trading_cfg)
+                elif cmd == '/setup':
+                    _setup_start(trading_cfg)
+                elif cmd == '/help':
+                    _handle_help_command()
+        except Exception:
+            pass
+        _stop_event.wait(5)  # sleep 5s but wake immediately on stop
+
+def _start_telegram_thread(trading_cfg):
+    """Start background Telegram command listener. Returns the thread."""
+    _stop_event.clear()
+    _paused_flag[0] = False
+    t = threading.Thread(target=_telegram_command_loop, args=(trading_cfg,), daemon=True)
+    t.start()
+    return t
+
+def _is_paused():
+    with _paused_lock:
+        return _paused_flag[0]
+
+def _set_paused(val):
+    with _paused_lock:
+        _paused_flag[0] = val
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+def _reload_trading_config(trading_cfg):
+    """Hot-reload trading_config.json into existing dict. Returns True if anything changed."""
+    fresh = load_trading_config()
+    changed = False
+    for asset in list(fresh.keys()):
+        if asset not in trading_cfg:
+            trading_cfg[asset] = fresh[asset]
+            changed = True
+        else:
+            for key in fresh[asset]:
+                if trading_cfg[asset].get(key) != fresh[asset][key]:
+                    old_val = trading_cfg[asset].get(key)
+                    trading_cfg[asset][key] = fresh[asset][key]
+                    print(f"  CONFIG RELOAD: {asset}.{key}: {old_val} -> {fresh[asset][key]}")
+                    changed = True
+    return changed
+
+
+def _get_models_fingerprint(trading_cfg):
+    """Build fingerprint of best_models CSV for all enabled assets. Returns dict {(asset,h): summary}."""
+    fp = {}
+    for asset, cfg in trading_cfg.items():
+        if not cfg.get('enabled'):
+            continue
+        for h in [4, 8]:
+            model_cfg = load_best_config(asset, horizon=h)
+            if model_cfg:
+                fp[(asset, h)] = f"{model_cfg['best_combo']}|w{model_cfg['best_window']}|{model_cfg['accuracy']:.2f}|{model_cfg.get('feature_set','A')}|γ{model_cfg.get('gamma',1.0)}"
+            else:
+                fp[(asset, h)] = None
+    return fp
+
+
+def run_all_once(trading_cfg, dry_run=False):
+    """Sync positions, process all enabled assets."""
+    # Hot-reload trading config before each cycle
+    _reload_trading_config(trading_cfg)
+
+    print(f"\n{'='*60}")
+    mode = "DRY RUN" if dry_run else "LIVE"
+    print(f"  [{mode}] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
+
+    # Sync positions from exchange FIRST
+    balances = {}
+    if not dry_run:
+        print("\n  Syncing positions from Revolut X...")
+        sync_positions(trading_cfg)
+        balances = get_balances()
+
+    results = []
+    for asset, cfg in trading_cfg.items():
+        if not cfg.get('enabled'):
+            continue
+        if not load_best_config(asset, horizon=4) and not load_best_config(asset, horizon=8):
+            continue
+        print(f"\n  --- {asset} ({cfg['strategy']}) ---")
+        r = process_asset(asset, cfg, dry_run=dry_run)
+        results.append(r)
+
+    # Send combined Telegram
+    valid = [r for r in results if r is not None]
+    if valid:
+        msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances)
+        send_telegram(msg)
+
+    return results
+
+
+def _send_startup_telegram(trading_cfg):
+    """Send the startup/config summary banner to Telegram."""
+    asset_lines = []
+    for a, c in trading_cfg.items():
+        if not c.get('enabled'):
+            continue
+        pos = load_position(a)
+        auto = pos.get('auto_trade', False)
+        icon = "🔵 ON" if auto else "🔴 OFF"
+        asset_lines.append(f"  {a}: {c.get('strategy','?')} | ${c.get('max_position_usd',0):,.0f} | {icon}")
+
+    conf_parts_str = ', '.join(
+        f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%"
+        for a, c in trading_cfg.items() if c.get('enabled')
+    )
+
+    send_telegram(
+        f"🚀 <b>Multi-Asset Trader Started</b>\n\n"
+        + "\n".join(asset_lines) + "\n\n"
+        f"BUY needs >= {conf_parts_str}\n"
+        f"SELL when either model says SELL\n"
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"📱 /help for all commands"
+    )
+
+
+def run_loop(trading_cfg, dry_run=False):
+    mode = "DRY RUN" if dry_run else "LIVE"
+    assets_str = ", ".join(a for a, c in trading_cfg.items() if c.get('enabled'))
+
+    print(f"\n{'='*60}")
+    print(f"  REVOLUT X MULTI-ASSET TRADER [DEKU {mode}]")
+    print(f"  Assets: {assets_str}")
+    for asset, cfg in trading_cfg.items():
+        if cfg.get('enabled'):
+            pos = load_position(asset)
+            auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
+            print(f"  {asset}: {cfg.get('strategy','?')} | max=${cfg.get('max_position_usd',0):,.0f} | {auto} | {pos['state'].upper()}")
+    conf_parts = [f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%" for a, c in trading_cfg.items() if c.get('enabled')]
+    print(f"  Min confidence: {', '.join(conf_parts)}")
+    print(f"  Telegram: /help /status /config /setup /balance /auto /sync /pause /resume /stop")
+    print(f"  Hot-reload: every 5 min (config + models + positions)")
+    print(f"{'='*60}")
+
+    _flush_old_updates()
+
+    # Initial sync — detect any existing positions on exchange
+    print("\n  Initial position sync from Revolut X...")
+    changes = sync_positions(trading_cfg, notify=True)
+    if not changes:
+        print("  Positions in sync ✓")
+
+    _send_startup_telegram(trading_cfg)
+
+    # Start background Telegram command listener
+    print("  Telegram commands: background thread (responsive anytime)")
+    _start_telegram_thread(trading_cfg)
+
+    # Immediate first scan — don't wait for next hour
+    print("\n  Running initial signal scan...")
+    run_all_once(trading_cfg, dry_run=dry_run)
+
+    cycle = 0
+    while not _stop_event.is_set():
+        try:
+            now = datetime.now()
+            next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            wait_sec = (next_hour - now).total_seconds()
+
+            if wait_sec > 5:
+                # Build status string
+                parts = []
+                for a, c in trading_cfg.items():
+                    if not c.get('enabled'): continue
+                    p = load_position(a)
+                    if p['state'] == 'invested':
+                        parts.append(f"{a}:IN")
+                    else:
+                        parts.append(f"{a}:CASH")
+                status = " | ".join(parts)
+                pause_str = " [PAUSED]" if _is_paused() else ""
+                print(f"\n  [{status}{pause_str}] Next: {next_hour.strftime('%H:%M')} ({wait_sec/60:.0f} min)")
+
+                remaining = wait_sec
+                last_sync = time.time()
+                last_models_fp = _get_models_fingerprint(trading_cfg)
+                while remaining > 0 and not _stop_event.is_set():
+                    sleep_chunk = min(30, remaining)
+                    _stop_event.wait(sleep_chunk)  # interruptible sleep
+                    remaining -= sleep_chunk
+
+                    # Break early if /setup triggered a re-run
+                    if _rerun_event.is_set():
+                        _rerun_event.clear()
+                        _reload_trading_config(trading_cfg)
+                        print("  Config changed via /setup — re-running signals")
+                        run_all_once(trading_cfg, dry_run=dry_run)
+                        last_models_fp = _get_models_fingerprint(trading_cfg)
+
+                    # Every 5 minutes: sync positions + check config + check models
+                    if time.time() - last_sync >= 300:
+                        try:
+                            # Position sync
+                            changes = sync_positions(trading_cfg, notify=True)
+                            if changes:
+                                print(f"  Position sync: {len(changes)} changes")
+
+                            # Hot-reload trading config
+                            if _reload_trading_config(trading_cfg):
+                                print(f"  Config reloaded at :{datetime.now().minute:02d}")
+
+                            # Check if best_models CSV changed
+                            new_fp = _get_models_fingerprint(trading_cfg)
+                            if new_fp != last_models_fp:
+                                # Log what changed and check for regressions
+                                has_regression = False
+                                for key in set(list(new_fp.keys()) + list(last_models_fp.keys())):
+                                    old_v = last_models_fp.get(key)
+                                    new_v = new_fp.get(key)
+                                    if old_v != new_v:
+                                        asset, h = key
+                                        if old_v is None:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — NEW: {new_v}")
+                                        elif new_v is None:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — REMOVED")
+                                            has_regression = True
+                                        else:
+                                            print(f"  MODEL UPDATE: {asset} {h}h — {old_v} -> {new_v}")
+                                            # Reject if accuracy dropped (test contamination protection)
+                                            try:
+                                                old_acc = float(old_v.split('|')[2])
+                                                new_acc = float(new_v.split('|')[2])
+                                                if new_acc < old_acc - 1.0:
+                                                    print(f"  ⚠ {asset} {h}h accuracy DROPPED {old_acc:.1f}% -> {new_acc:.1f}% — IGNORING")
+                                                    has_regression = True
+                                            except (IndexError, ValueError):
+                                                pass
+                                if has_regression:
+                                    print("  Model change IGNORED — accuracy regression (possible test contamination)")
+                                else:
+                                    last_models_fp = new_fp
+                                    print("  Models improved — re-running signals")
+                                    send_telegram("🔄 <b>Models updated</b> — re-running signals")
+                                    run_all_once(trading_cfg, dry_run=dry_run)
+                                    last_models_fp = _get_models_fingerprint(trading_cfg)
+
+                            last_sync = time.time()
+                        except Exception as e:
+                            print(f"  Sync error: {e}")
+
+            if _stop_event.is_set():
+                break
+
+            cycle += 1
+            print(f"\n  --- Cycle {cycle} | {datetime.now().strftime('%H:%M:%S')} ---")
+
+            # Wait for fresh candle (use first enabled asset)
+            first_asset = next(a for a, c in trading_cfg.items() if c.get('enabled'))
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            expected = now_utc.replace(minute=0, second=0, microsecond=0)
+            wait_for_fresh_candle(first_asset, expected)
+
+            if _is_paused():
+                print("  PAUSED — signals only")
+                run_all_once(trading_cfg, dry_run=True)
+            else:
+                run_all_once(trading_cfg, dry_run=dry_run)
+
+        except KeyboardInterrupt:
+            print("\n  Stopped.")
+            _stop_event.set()
+            send_telegram("🛑 <b>Stopped</b>")
+            break
+        except Exception as e:
+            print(f"\n  ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            send_telegram(f"⚠️ <b>Error</b>\n<code>{e}</code>")
+            time.sleep(120)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    print("=" * 60)
+    print("  REVOLUT X MULTI-ASSET TRADER [DEKU]")
+    print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+
+    loop_mode = False
+    dry_run = False
+
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == '--loop': loop_mode = True
+        elif arg == '--dry-run': dry_run = True
+        elif arg == '--setup-telegram': setup_telegram(); return
+        elif arg == '--balance':
+            bal = get_balances()
+            if bal:
+                print("\n  Revolut X Balances:")
+                for c, b in sorted(bal.items()):
+                    if b['total'] > 0:
+                        print(f"    {c:6s}  {b['available']:>14.6f}")
+            return
+        elif arg == '--status':
+            trading_cfg = load_trading_config()
+            for asset, cfg in trading_cfg.items():
+                pos = load_position(asset)
+                print(f"\n  {asset} [{cfg.get('strategy','?')}]:")
+                print(f"    State: {pos['state'].upper()} | Max: ${cfg.get('max_position_usd',0):,.2f}")
+                print(f"    Auto-trade: {pos.get('auto_trade', False)}")
+                if pos['state'] == 'invested':
+                    print(f"    Entry: ${pos['entry_price']:,.2f} at {pos['entry_time']}")
+                sells = [t for t in pos.get('trades', []) if t.get('action') == 'SELL']
+                if sells:
+                    total = sum(t.get('pnl_usd', 0) for t in sells)
+                    print(f"    Trades: {len(sells)} | PnL: ${total:+,.2f}")
+            return
+        elif arg == '--reset':
+            for a in ['BTC', 'ETH', 'XRP', 'DOGE']:
+                p = _position_file(a)
+                if os.path.exists(p): os.remove(p)
+            if os.path.exists(TRADING_CONFIG_FILE): os.remove(TRADING_CONFIG_FILE)
+            print("  All positions and config reset.")
+            return
+
+    # Load or create trading config
+    trading_cfg = load_trading_config()
+
+    if not os.path.exists(MODELS_CSV):
+        print("\n  ERROR: No Deku models found! Run crypto_trading_system_deku.py Mode D first.")
+        return
+
+    # Interactive menu
+    if len(args) == 0:
+        print("\n  Current config:")
+        print(f"  {'Asset':<6} {'Strategy':<14} {'Max USD':>10} {'Enabled':>8} {'Auto':>7} {'Position':>10}")
+        print(f"  {'-'*6} {'-'*14} {'-'*10} {'-'*8} {'-'*7} {'-'*10}")
+        for asset, cfg in trading_cfg.items():
+            pos = load_position(asset)
+            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            enabled_str = "Yes" if cfg.get('enabled', True) else "No"
+            auto_str    = "Yes" if pos.get('auto_trade') else "No"
+            pos_str     = pos['state'].upper()
+            model_mark  = "" if has_model else " ✗"
+            print(f"  {asset:<6} {cfg.get('strategy','?'):<14} ${cfg.get('max_position_usd',0):>9,.0f} {enabled_str:>8} {auto_str:>7} {pos_str:>10}{model_mark}")
+
+        print(f"\n  1. Start loop (hourly)")
+        print(f"  2. Run once")
+        print(f"  3. Dry run (once)")
+        print(f"  4. Configure assets")
+        print(f"  5. View trade history")
+        print(f"  6. Check balance")
+        print(f"  7. Setup Telegram")
+        ch = input("\n  Enter 1-7: ").strip()
+
+        if ch == '7': setup_telegram(); return
+        elif ch == '6':
+            bal = get_balances()
+            for c, b in sorted(bal.items()):
+                if b['total'] > 0: print(f"    {c}: {b['available']:.6f}")
+            return
+        elif ch == '5':
+            for asset in trading_cfg:
+                pos = load_position(asset)
+                trades = pos.get('trades', [])[-5:]
+                if trades:
+                    print(f"\n  {asset} (last 5):")
+                    for t in trades:
+                        if t['action'] == 'BUY':
+                            print(f"    BUY  ${t['price']:,.2f} | {t['time']}")
+                        else:
+                            print(f"    SELL ${t['price']:,.2f} | {t['time']} | {t.get('pnl_pct',0):+.1f}%")
+            return
+        elif ch == '4':
+            VALID_STRATEGIES = ('both_agree', 'either_agree', '4h_only', '8h_only', '1h_only', '2h_only', 'any_agree')
+            for asset in trading_cfg:
+                cfg = trading_cfg[asset]
+                pos = load_position(asset)
+                print(f"\n  --- {asset} ---")
+
+                en = input(f"    Enabled (y/n) [{('y' if cfg.get('enabled', True) else 'n')}]: ").strip().lower()
+                if en == 'y': cfg['enabled'] = True
+                elif en == 'n': cfg['enabled'] = False
+
+                auto_cur = 'y' if pos.get('auto_trade') else 'n'
+                auto = input(f"    Auto-trade (y/n) [{auto_cur}]: ").strip().lower()
+                if auto == 'y':
+                    pos['auto_trade'] = True
+                    save_position(asset, pos)
+                elif auto == 'n':
+                    pos['auto_trade'] = False
+                    save_position(asset, pos)
+
+                max_inp = input(f"    Max USD [{cfg.get('max_position_usd', 0):.0f}]: ").strip()
+                if max_inp:
+                    try:
+                        cfg['max_position_usd'] = float(max_inp)
+                    except ValueError:
+                        pass
+
+                strat = input(f"    Strategy (Enter for default '{cfg['strategy']}'): ").strip().lower()
+                if strat in VALID_STRATEGIES: cfg['strategy'] = strat
+                elif strat: print(f"    Unknown strategy '{strat}' — keeping [{cfg['strategy']}]")
+
+            save_trading_config(trading_cfg)
+            print("\n  Config saved.")
+            return
+        elif ch == '3': dry_run = True
+        elif ch == '2': pass  # run once below
+        elif ch == '1': loop_mode = True
+
+    # Ensure max positions are set
+    needs_config = False
+    for asset, cfg in trading_cfg.items():
+        if cfg.get('enabled') and cfg.get('max_position_usd', 0) <= 0:
+            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            if has_model:
+                needs_config = True
+                break
+
+    if needs_config:
+        print(f"\n  ⚠️ Max positions not set. Configure now:")
+        for asset, cfg in trading_cfg.items():
+            if not cfg.get('enabled'): continue
+            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            if not has_model: continue
+            if cfg.get('max_position_usd', 0) <= 0:
+                while True:
+                    try:
+                        val = float(input(f"  {asset} max position USD: $").strip())
+                        if val > 0:
+                            cfg['max_position_usd'] = val
+                            break
+                    except ValueError:
+                        pass
+        save_trading_config(trading_cfg)
+
+    if loop_mode:
+        run_loop(trading_cfg, dry_run=dry_run)
+    else:
+        run_all_once(trading_cfg, dry_run=dry_run)
+
+
+if __name__ == '__main__':
+    main()

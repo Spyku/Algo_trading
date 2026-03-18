@@ -92,8 +92,14 @@ from datetime import datetime, timedelta
 from itertools import combinations
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.parallel import Parallel, delayed
-import optuna
-from xgboost import XGBClassifier
+try:
+    import optuna
+except ImportError:
+    optuna = None  # only needed for Mode A/D optimization, not signal generation
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None  # graceful fallback if xgboost not installed
 from hardware_config import (
     MACHINE, N_JOBS_PARALLEL, LGBM_DEVICE,
     get_cpu_models, get_gpu_models, get_all_models, get_diagnostic_models,

@@ -591,7 +591,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
-    df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
+    rolling_median = future_return.rolling(_hours_to_rows(200), min_periods=_hours_to_rows(50)).median().shift(horizon)
+    df['label'] = (future_return > rolling_median).astype(int)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
