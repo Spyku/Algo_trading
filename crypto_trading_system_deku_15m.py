@@ -230,8 +230,8 @@ def _hours_to_rows(hours):
 
 
 def _horizon_label(horizon_candles):
-    """Human-readable label: step number (e.g. s4 = 4 candles = 1h)."""
-    return f"s{horizon_candles}"
+    """Human-readable label: s4 (60') or s8 (120')."""
+    return f"s{horizon_candles} ({horizon_candles * CANDLE_MINUTES}')"
 
 
 PREDICTION_HORIZON = 4            # default horizon in candles (= 60 min)
@@ -591,8 +591,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
-    rolling_median = future_return.rolling(200, min_periods=50).median().shift(horizon)
-    df['label'] = (future_return > rolling_median).astype(int)
+    df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
@@ -1355,9 +1354,9 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
     warnings.filterwarnings('ignore')
     set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
     gamma_str = f", gamma={gamma}" if gamma < 1.0 else ""
-    print(f"\n  Generating {horizon}h-ahead signals for {asset_name} "
-          f"(models={'+'.join(model_names)}, window={window_size}h, "
-          f"replay={replay_hours}h, {set_label}{gamma_str})...")
+    print(f"\n  Generating {_horizon_label(horizon)}-ahead signals for {asset_name} "
+          f"(models={'+'.join(model_names)}, window={window_size} candles, "
+          f"replay={replay_hours} candles, {set_label}{gamma_str})...")
 
     df_raw = load_data(asset_name)
     if df_raw is None:
@@ -1543,7 +1542,7 @@ def generate_backtest_chart(asset_name, signals, model_info=None):
 
     # Model info string + feature set label
     if model_info:
-        model_str = f"{model_info['best_combo']} | w={model_info['best_window']}h | {model_info['accuracy']:.1f}% diag"
+        model_str = f"{model_info['best_combo']} | w={model_info['best_window']} candles | {model_info['accuracy']:.1f}% diag"
         fs = model_info.get('feature_set', '')
         n_feat = model_info.get('n_features', '')
         if fs in ('D', 'E2', 'E3') and n_feat:
@@ -1906,7 +1905,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
             eta_str = "done"
 
         best_str = f"best APF={best_score:.2f} ({best_label})" if best_label else f"best APF={best_score:.2f}"
-        print(f"  [{done_configs}/{total_configs}] {pct:.0f}% | w={window}h ({batch_valid} valid, {batch_time:.1f}m) | {best_str} | {eta_str}")
+        print(f"  [{done_configs}/{total_configs}] {pct:.0f}% | w={window} candles ({batch_valid} valid, {batch_time:.1f}m) | {best_str} | {eta_str}")
 
         # Save partial checkpoint after each window batch
         completed_windows.add(window)
@@ -1948,7 +1947,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
                 'raw_pf': round(raw_pf, 4),
                 'bh_pf': round(bh_pf, 4),
             }
-        print(f"    w={window:4d}h | {combo_name:20s} | acc={acc*100:5.1f}% "
+        print(f"    w={window:4d} candles | {combo_name:20s} | acc={acc*100:5.1f}% "
               f"ret={cum_ret:+6.1f}% win={win_rate:4.0f}% "
               f"rawPF={raw_pf:.2f} bhPF={bh_pf:.2f} APF={adjusted_pf:.3f} (n={n_total})"
               f"{'  <-- BEST' if adjusted_pf == best_score else ''}")
@@ -1966,7 +1965,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
         print(f"  |{'':4s}BEST MODEL for {asset_name:6s}{'':62s}|")
         print("  " + "=" * 90)
         print(f"  |{'':4s}Models:   {best_config['best_combo']:74s}|")
-        w_str = f"{best_config['best_window']}h"
+        w_str = f"{best_config['best_window']} candles"
         print(f"  |{'':4s}Window:   {w_str:74s}|")
         acc_str = f"{best_config['accuracy']:.1f}%"
         print(f"  |{'':4s}Accuracy: {acc_str:74s}|")
@@ -1982,10 +1981,10 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
         for rank, result in enumerate(top5, 1):
             combo_name, window, acc, n_total, cum_ret, win_rate, trades, avg_gain, avg_loss, max_dd, adjusted_pf, raw_pf, bh_pf = result
             marker = " <--" if rank == 1 else ""
-            print(f"  |{''!s:4s}{rank:<5d}{combo_name:22s}{window:5d}h  {acc*100:5.1f}%"
+            print(f"  |{''!s:4s}{rank:<5d}{combo_name:22s}{window:5d}  {acc*100:5.1f}%"
                   f"  {cum_ret:+6.1f}%  {raw_pf:5.2f}  {bh_pf:5.2f}  {adjusted_pf:5.3f}{marker:>4s} |")
         print("  " + "=" * 90)
-        print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']}h")
+        print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']} candles")
         print(f"  >>> Score = Adjusted PF (raw_PF / buyhold_PF) — APF > 1.0 = model adds alpha")
         print()
 
@@ -2016,8 +2015,8 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
 def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_agree'):
     """
     Generate interactive HTML charts (Plotly) with 4 panels:
-    1. Price + 4h signals (blue=BUY, red=SELL)
-    2. Price + 8h signals
+    1. Price + s4 signals (blue=BUY, red=SELL)
+    2. Price + s8 signals
     3. Price + combined strategy signals
     4. Portfolio equity ($1000 start) vs buy & hold
     Zoom synced across all panels. Colorblind-friendly.
@@ -2181,14 +2180,14 @@ function ml(t,h){{return{{title:{{text:t,font:{{color:'#94a3b8',size:13}},x:0.01
 var pl={{x:dates,y:prices,type:'scatter',mode:'lines',name:'Price',line:{{color:gray,width:1.2}}}};
 
 Plotly.newPlot('c4h',[pl,
-  {{x:{json.dumps(b4x)},y:{json.dumps(b4y)},mode:'markers',name:'4h BUY',text:{json.dumps(b4t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
-  {{x:{json.dumps(s4x)},y:{json.dumps(s4y)},mode:'markers',name:'4h SELL',text:{json.dumps(s4t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
-],ml('4h Model',240),{{responsive:true}});
+  {{x:{json.dumps(b4x)},y:{json.dumps(b4y)},mode:'markers',name:'s4 ({4*CANDLE_MINUTES}min) BUY',text:{json.dumps(b4t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
+  {{x:{json.dumps(s4x)},y:{json.dumps(s4y)},mode:'markers',name:'s4 ({4*CANDLE_MINUTES}min) SELL',text:{json.dumps(s4t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
+],ml('s4 ({4*CANDLE_MINUTES}min) Model',240),{{responsive:true}});
 
 Plotly.newPlot('c8h',[pl,
-  {{x:{json.dumps(b8x)},y:{json.dumps(b8y)},mode:'markers',name:'8h BUY',text:{json.dumps(b8t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
-  {{x:{json.dumps(s8x)},y:{json.dumps(s8y)},mode:'markers',name:'8h SELL',text:{json.dumps(s8t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
-],ml('8h Model',240),{{responsive:true}});
+  {{x:{json.dumps(b8x)},y:{json.dumps(b8y)},mode:'markers',name:'s8 ({8*CANDLE_MINUTES}min) BUY',text:{json.dumps(b8t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
+  {{x:{json.dumps(s8x)},y:{json.dumps(s8y)},mode:'markers',name:'s8 ({8*CANDLE_MINUTES}min) SELL',text:{json.dumps(s8t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
+],ml('s8 ({8*CANDLE_MINUTES}min) Model',240),{{responsive:true}});
 
 Plotly.newPlot('cComb',[pl,
   {{x:{json.dumps(cbx)},y:{json.dumps(cby)},mode:'markers',name:'BUY',text:{json.dumps(cbt)},marker:{{color:blue,symbol:'triangle-up',size:10,line:{{width:1,color:'#fff'}}}}}},
@@ -2396,14 +2395,14 @@ def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='bot
 <tr>
   <th onclick="sortTable(0)">Time</th>
   <th onclick="sortTable(1)">Price</th>
-  <th onclick="sortTable(2)">Price +1h</th>
-  <th onclick="sortTable(3)">_ 1h</th>
+  <th onclick="sortTable(2)">Price +{CANDLE_MINUTES}min</th>
+  <th onclick="sortTable(3)">_ {CANDLE_MINUTES}min</th>
   <th onclick="sortTable(4)">Strategy</th>
   <th onclick="sortTable(5)">Correct?</th>
-  <th onclick="sortTable(6)">4h Signal</th>
-  <th onclick="sortTable(7)">4h Conf</th>
-  <th onclick="sortTable(8)">8h Signal</th>
-  <th onclick="sortTable(9)">8h Conf</th>
+  <th onclick="sortTable(6)">s4 ({4*CANDLE_MINUTES}min) Signal</th>
+  <th onclick="sortTable(7)">s4 ({4*CANDLE_MINUTES}min) Conf</th>
+  <th onclick="sortTable(8)">s8 ({8*CANDLE_MINUTES}min) Signal</th>
+  <th onclick="sortTable(9)">s8 ({8*CANDLE_MINUTES}min) Conf</th>
 </tr>
 </thead>
 <tbody>
@@ -2453,8 +2452,8 @@ function sortTable(col) {{
 def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_15m_chart_data.json'):
     chart_data = {
         'generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'type': 'hourly',
-        'prediction_horizon': f'{PREDICTION_HORIZON}h',
+        'type': '15min',
+        'prediction_horizon': f's{PREDICTION_HORIZON} ({PREDICTION_HORIZON * CANDLE_MINUTES}min)',
         'feature_set': ACTIVE_FEATURE_SET,
         'assets': {}
     }
@@ -2484,14 +2483,14 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
     if horizon_filter is not None:
         df_best = df_best[df_best['horizon'] == horizon_filter].reset_index(drop=True)
         if df_best.empty:
-            print(f"\nERROR: No {horizon_filter}h models found in CSV. Run Mode D with {horizon_filter}h first.")
+            print(f"\nERROR: No {_horizon_label(horizon_filter)} models found in CSV. Run Mode D with {_horizon_label(horizon_filter)} first.")
             return
 
     print("\nLoaded best models:")
     for _, row in df_best.iterrows():
         fs = row.get('feature_set', '?')
         h = int(row.get('horizon', 4))
-        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | Set {fs} | {h}h")
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d} candles | {row['accuracy']:.1f}% | Set {fs} | {_horizon_label(h)}")
 
     available_in_csv = set(df_best['coin'].values)
     assets_to_run = [a for a in assets_list if a in available_in_csv]
@@ -2551,7 +2550,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
             signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
                                        feature_override=feature_override, horizon=h, gamma=row_gamma)
             signals = simulate_portfolio(signals)
-            _print_bootstrap_ci(signals, label=f"{asset_name} {h}h")
+            _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(h)}")
 
             label = f"{asset_name}_{h}h"
             all_signals[label] = signals
@@ -2561,7 +2560,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
 
             if signals:
                 latest = signals[-1]
-                print(f"\n  >> {asset_name} ({h}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                print(f"\n  >> {asset_name} ({_horizon_label(h)}): {latest['signal']} ({latest['confidence']:.0f}%) "
                       f"| price=${latest['close']:,.2f} | Set {fs}")
 
     export_chart_data(all_signals)
@@ -2599,7 +2598,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
                     feature_override = list(FEATURE_SET_A)
 
                 row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
-                print(f"  Generating {h}h signals (720h) for {asset_name}...")
+                print(f"  Generating {_horizon_label(h)} signals (720 candles) for {asset_name}...")
                 sigs = generate_signals(asset_name, model_names, window, 720,
                                         feature_override=feature_override, horizon=h, gamma=row_gamma)
                 sigs = simulate_portfolio(sigs)
@@ -2637,7 +2636,7 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
     warnings.filterwarnings('ignore')
 
     print(f"\n  Permutation significance test ({n_perm} permutations)...")
-    print(f"  Asset={asset_name}  window={best_config['best_window']}h  model=LGBM")
+    print(f"  Asset={asset_name}  window={best_config['best_window']} candles  model=LGBM")
     print(f"  Expected time: ~{n_perm * 0.5 / 60:.0f}-{n_perm * 1.0 / 60:.0f} min")
 
     window    = best_config['best_window']
@@ -2948,7 +2947,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         # Step 1: Build ALL features, cap at 4320 candles (~45 days)
         MAX_DIAG_ROWS = 4320  # ~45 days of 15-min candles
-        print(f"\n  Building all features (horizon={horizon}h)...")
+        print(f"\n  Building all features (horizon={_horizon_label(horizon)})...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
@@ -2985,7 +2984,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         # Step 3: Optuna study
         print(f"\n{'='*70}")
-        print(f"  OPTUNA STUDY: {asset_name} {horizon}h")
+        print(f"  OPTUNA STUDY: {asset_name} {_horizon_label(horizon)}")
         print(f"  Search space: {len(combo_options)} combos × 5 windows × gamma[0.995-1.0] × features[{min_n_features}-{max_n_features}]")
         print(f"  Trials: {n_trials} | Data: {n:,} rows")
         print(f"{'='*70}")
@@ -3035,7 +3034,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
             if apf > best_apf_so_far:
                 best_apf_so_far = apf
-                print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
+                print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d} "
                       f"g={gamma:.4f} f={n_feat:3d} | APF={apf:.3f} ret={ret:+.1f}% "
                       f"rawPF={result[11]:.2f} bhPF={result[12]:.2f}")
             elif trial_count % 20 == 0:
@@ -3050,12 +3049,12 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # Results summary
         best_trial = study.best_trial
         print(f"\n  {'='*70}")
-        print(f"  OPTUNA RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min)")
+        print(f"  OPTUNA RESULTS: {asset_name} {_horizon_label(horizon)} ({optuna_elapsed:.1f} min)")
         print(f"  {'='*70}")
         print(f"  Best trial: #{best_trial.number}")
         print(f"  APF:        {best_trial.value:.4f}")
         print(f"  Combo:      {best_trial.params['combo']}")
-        print(f"  Window:     {best_trial.params['window']}h")
+        print(f"  Window:     {best_trial.params['window']} candles")
         print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
         print(f"  N_features: {best_trial.params['n_features']}")
 
@@ -3071,7 +3070,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  {'-'*60}")
         for i, t in enumerate(completed_trials[:10], 1):
             marker = " <-- BEST" if i == 1 else ""
-            print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
+            print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}   "
                   f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}{marker}")
 
         # Parameter importance (if enough trials)
@@ -3120,8 +3119,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             best_models.append(best_config)
 
             print(f"\n  {'='*70}")
-            print(f"  WINNER: {asset_name} {horizon}h")
-            print(f"  Models: {best_trial.params['combo']}  Window: {best_window}h  Gamma: {best_gamma:.4f}")
+            print(f"  WINNER: {asset_name} {_horizon_label(horizon)}")
+            print(f"  Models: {best_trial.params['combo']}  Window: {best_window} candles  Gamma: {best_gamma:.4f}")
             print(f"  APF: {apf:.3f}  Return: {cum_ret:+.1f}%  Accuracy: {acc*100:.1f}%")
             print(f"  rawPF: {raw_pf:.2f}  bhPF: {bh_pf:.2f}  Trades: {trades}  Features: {best_n_feat}")
             print(f"  {'='*70}")
@@ -3180,7 +3179,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
     _kill_orphan_workers()
 
     print("\n" + "=" * 60)
-    print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON (V5 Cacarot)")
+    print(f"  MODE D: FULL PIPELINE -- {_horizon_label(horizon)} HORIZON (V5 Cacarot)")
     print(f"  Starts from ALL features, finds optimal subset per asset")
     print(f"  Uses ALL available data — decay weighting handles recency")
     if resume:
@@ -3213,7 +3212,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         gamma = existing_config.get('gamma', 1.0) if existing_config else 1.0
 
         print(f"\n{'='*60}")
-        print(f"  FULL PIPELINE: {asset_name} ({horizon}h horizon, gamma={gamma})")
+        print(f"  FULL PIPELINE: {asset_name} ({_horizon_label(horizon)}, gamma={gamma})")
         print(f"{'='*60}")
 
         df_raw = load_data(asset_name)
@@ -3223,7 +3222,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         # Step 1: Build ALL features, cap at 4320 candles (~45 days)
         # Decay handles recency: gamma=0.999 → 6mo data at 1% weight, gamma=0.995 → 1mo at ~0%
         MAX_DIAG_ROWS = 4320  # ~45 days of 15-min candles  # 4,320 hours
-        print(f"\n  Building all features (horizon={horizon}h)...")
+        print(f"\n  Building all features (horizon={_horizon_label(horizon)})...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
@@ -3319,11 +3318,11 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         df_best.to_csv(f'{MODELS_DIR}/crypto_deku_15m_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
-    print(f"  BEST MODELS SAVED -- {horizon}h HORIZON")
+    print(f"  BEST MODELS SAVED -- {_horizon_label(horizon)} HORIZON")
     print(f"{'='*60}")
     for row in best_models:
-        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | "
-              f"{row['accuracy']:.1f}% | {row['n_features']} features | {horizon}h")
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d} candles | "
+              f"{row['accuracy']:.1f}% | {row['n_features']} features | {_horizon_label(horizon)}")
     print(f"{'='*60}")
 
     # Step 4: Generate signals + charts
@@ -3343,14 +3342,14 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
                                    feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
-        _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
+        _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(horizon)}")
         all_signals[asset_name] = signals
 
         generate_backtest_chart(asset_name, signals, model_info=config)
 
         if signals:
             latest = signals[-1]
-            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+            print(f"\n  >> {asset_name} ({_horizon_label(horizon)}): {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price=${latest['close']:,.2f}")
 
     export_chart_data(all_signals)
@@ -3422,7 +3421,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, ga
     prev_window = prev_config['best_window']
     prev_acc = prev_config['accuracy']
 
-    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window} candles, {prev_acc:.1f}%")
 
     # --- Step 1: Leave-One-Out Refinement ---
     print(f"\n  [ITER2 1/3] Leave-One-Out Refinement (finer step=24)...")
@@ -3495,7 +3494,7 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, ga
     print(f"\n    Final feature count: {len(refined_features)}")
 
     # --- Step 3: Expanded Window Grid ---
-    print(f"\n  [ITER2 3/3] Expanded Window Search (around w={prev_window}h)...")
+    print(f"\n  [ITER2 3/3] Expanded Window Search (around w={prev_window} candles)...")
 
     # Build fine grid around winner: _100h in steps of 25h
     fine_windows = sorted(set(
@@ -3525,9 +3524,9 @@ def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, ga
         best_config['optimal_features'] = ','.join(refined_features)
         best_config['horizon'] = horizon
         best_config['iteration'] = 2
-        print(f"\n  ITERATION 2 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+        print(f"\n  ITERATION 2 RESULT: {best_config['best_combo']} | w={best_config['best_window']} candles | "
               f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
-        print(f"  vs PREVIOUS:        {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+        print(f"  vs PREVIOUS:        {prev_config['best_combo']} | w={prev_config['best_window']} candles | "
               f"{prev_config['accuracy']:.1f}%")
         improvement = best_config['accuracy'] - prev_acc
         print(f"  Improvement: {improvement:+.1f}%")
@@ -3547,7 +3546,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, ga
     prev_window = prev_config['best_window']
     prev_acc = prev_config['accuracy']
 
-    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window} candles, {prev_acc:.1f}%")
 
     # --- Step 1: Feature Interaction Test ---
     print(f"\n  [ITER3 1/2] Feature Interaction Test (top-5 pairs)...")
@@ -3603,7 +3602,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, ga
     refined_features = list(tested_features)
 
     # --- Step 2: Ultra-Fine Window Grid ---
-    print(f"\n  [ITER3 2/2] Ultra-Fine Window Search (around w={prev_window}h, step=10)...")
+    print(f"\n  [ITER3 2/2] Ultra-Fine Window Search (around w={prev_window} candles, step=10)...")
 
     fine_windows = sorted(set(
         [max(48, prev_window + offset) for offset in range(-40, 50, 10)]
@@ -3630,7 +3629,7 @@ def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, ga
         best_config['optimal_features'] = ','.join(refined_features)
         best_config['horizon'] = horizon
         best_config['iteration'] = 3
-        print(f"\n  ITERATION 3 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+        print(f"\n  ITERATION 3 RESULT: {best_config['best_combo']} | w={best_config['best_window']} candles | "
               f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
         improvement = best_config['accuracy'] - prev_acc
         print(f"  Improvement over iter 2: {improvement:+.1f}%")
@@ -3651,7 +3650,7 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
     _kill_orphan_workers()
 
     print("\n" + "=" * 60)
-    print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")
+    print(f"  MODE E: ITERATIVE REFINEMENT -- {_horizon_label(horizon)} HORIZON")
     print(f"  Iterations: {'2nd + 3rd pass' if do_iter3 else '2nd pass only'}")
     print("=" * 60)
 
@@ -3672,14 +3671,14 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         # Load previous Mode D (or E) result
         prev_config = _load_mode_d_config(asset_name, horizon)
         if prev_config is None:
-            print(f"  ERROR: No existing model for {asset_name} {horizon}h.")
+            print(f"  ERROR: No existing model for {asset_name} {_horizon_label(horizon)}.")
             print(f"  Run Mode D first!")
             continue
 
         gamma = prev_config.get('gamma', 1.0)
 
         print(f"\n{'='*60}")
-        print(f"  REFINING: {asset_name} ({horizon}h, gamma={gamma})")
+        print(f"  REFINING: {asset_name} ({_horizon_label(horizon)}, gamma={gamma})")
         print(f"{'='*60}")
 
         prev_features = prev_config['optimal_features']
@@ -3688,7 +3687,7 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
             print(f"  Run Mode D first.")
             continue
 
-        print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+        print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']} candles | "
               f"{prev_config['accuracy']:.1f}% | {len(prev_features.split(','))} features")
 
         # Build features, cap at 1 year (decay handles recency)
@@ -3696,7 +3695,7 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         if df_raw is None:
             continue
 
-        print(f"\n  Building all features (horizon={horizon}h)...")
+        print(f"\n  Building all features (horizon={_horizon_label(horizon)})...")
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
 
         MAX_E_ROWS = 4320  # ~45 days of 15-min candles
@@ -3750,11 +3749,11 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         original_acc = prev_config['accuracy']
         final_acc = final_config['accuracy']
         print(f"\n  {'='*50}")
-        print(f"  REFINEMENT SUMMARY: {asset_name} ({horizon}h)")
+        print(f"  REFINEMENT SUMMARY: {asset_name} ({_horizon_label(horizon)})")
         print(f"  {'='*50}")
-        print(f"  Before: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+        print(f"  Before: {prev_config['best_combo']} | w={prev_config['best_window']} candles | "
               f"{original_acc:.1f}% | {len(prev_config['optimal_features'].split(','))} features")
-        print(f"  After:  {final_config['best_combo']} | w={final_config['best_window']}h | "
+        print(f"  After:  {final_config['best_combo']} | w={final_config['best_window']} candles | "
               f"{final_acc:.1f}% | {final_config['n_features']} features")
         print(f"  Total improvement: {final_acc - original_acc:+.1f}%")
         print(f"  {'='*50}")
@@ -3782,8 +3781,8 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
     print(f"{'='*60}")
     for m in final_models:
         fs = m.get('feature_set', 'E')
-        print(f"  {m['coin']:6s} -> {m['best_combo']:20s} | w={m['best_window']:4d}h | "
-              f"{m['accuracy']:.1f}% | {m.get('n_features', '?')} features | {fs} | {horizon}h")
+        print(f"  {m['coin']:6s} -> {m['best_combo']:20s} | w={m['best_window']:4d} candles | "
+              f"{m['accuracy']:.1f}% | {m.get('n_features', '?')} features | {fs} | {_horizon_label(horizon)}")
 
     # Generate signals + charts
     print("\n" + "=" * 60)
@@ -3801,14 +3800,14 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
                                    feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
-        _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
+        _print_bootstrap_ci(signals, label=f"{asset_name} {_horizon_label(horizon)}")
         all_signals[asset_name] = signals
 
         generate_backtest_chart(asset_name, signals, model_info=config)
 
         if signals:
             latest = signals[-1]
-            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+            print(f"\n  >> {asset_name} ({_horizon_label(horizon)}): {latest['signal']} ({latest['confidence']:.0f}%) "
                   f"| price=${latest['close']:,.2f}")
 
     export_chart_data(all_signals)
@@ -3819,17 +3818,17 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
 
 
 # ============================================================
-# MODE F: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
+# MODE F: STRATEGY COMPARISON (both_agree / either_agree / s4 / s8)
 # ============================================================
 def run_strategy_comparison(assets_list, horizons=None):
     """
     Backtest all combination strategies for each asset using saved model configs:
-      - both_agree  : trade only when 4h AND 8h agree
-      - either_agree: trade when either 4h OR 8h signals
-      - 4h_only     : use 4h model alone
-      - 8h_only     : use 8h model alone
+      - both_agree  : trade only when s4 AND s8 agree
+      - either_agree: trade when either s4 OR s8 signals
+      - 4h_only     : use s4 model alone
+      - 8h_only     : use s8 model alone
     Deku V15: scores by return directly. Updates trading_config_deku_15m.json with best strategy.
-    Requires Mode D to have been run first for both 4h and 8h.
+    Requires Mode D to have been run first for both s4 and s8.
     """
     csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
@@ -4158,7 +4157,7 @@ def _run_quick_asset(asset):
     for h in [4, 8]:
         row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
         if row.empty:
-            print(f"\n  No {h}h model for {asset}")
+            print(f"\n  No {_horizon_label(h)} model for {asset}")
             continue
 
         print(f"\n{'#'*60}")
@@ -4186,7 +4185,7 @@ def _run_quick_asset(asset):
                     'feature_set': r.get('feature_set', '?'),
                 }
 
-    # Generate interactive HTML charts (720h for both horizons)
+    # Generate interactive HTML charts (720 candles for both horizons)
     print(f"\n{'#'*60}")
     print(f"  GENERATING INTERACTIVE STRATEGY CHARTS")
     print(f"{'#'*60}")
@@ -4220,7 +4219,7 @@ def _run_quick_asset(asset):
             feature_override = list(FEATURE_SET_A)
 
         row_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
-        print(f"  Generating {h}h signals (720h)...")
+        print(f"  Generating {_horizon_label(h)} signals (720 candles)...")
         sigs = generate_signals(asset, model_names, window, 720,
                                 feature_override=feature_override, horizon=h, gamma=row_gamma)
         sigs = simulate_portfolio(sigs)
@@ -4240,7 +4239,7 @@ def _run_quick_asset(asset):
         print(f"{'='*60}")
         for h, r in sorted(results.items()):
             emoji = '_' if r['signal'] == 'BUY' else '_' if r['signal'] == 'SELL' else '_'
-            print(f"  {emoji} {h}h: {r['signal']} ({r['confidence']:.0f}%) | {r['model']} | w={r['window']}h | {r['accuracy']:.1f}% diag")
+            print(f"  {emoji} {_horizon_label(h)}: {r['signal']} ({r['confidence']:.0f}%) | {r['model']} | w={r['window']} candles | {r['accuracy']:.1f}% diag")
 
         if len(results) == 2:
             s4 = results.get(4, {}).get('signal', 'HOLD')
@@ -4253,9 +4252,9 @@ def _run_quick_asset(asset):
                 reason = 'at least one model says SELL'
             elif s4 == 'BUY' and s8 == 'BUY' and c4 >= MIN_CONFIDENCE and c8 >= MIN_CONFIDENCE:
                 combined = 'BUY (both agree)'
-                reason = f'4h+8h both BUY with {c4:.0f}%/{c8:.0f}%'
+                reason = f's4+s8 both BUY with {c4:.0f}%/{c8:.0f}%'
             elif (s4 == 'BUY' or s8 == 'BUY') and strategy == 'either':
-                which = '4h' if s4 == 'BUY' else '8h'
+                which = 's4' if s4 == 'BUY' else 's8'
                 conf = c4 if s4 == 'BUY' else c8
                 if conf >= MIN_CONFIDENCE:
                     combined = f'BUY (either -- {which})'
@@ -4265,7 +4264,7 @@ def _run_quick_asset(asset):
                     reason = f'{which} says BUY but confidence {conf:.0f}% < {MIN_CONFIDENCE}%'
             elif s4 == 'BUY' or s8 == 'BUY':
                 # strategy == both_agree but only one side agrees
-                which = '4h' if s4 == 'BUY' else '8h'
+                which = 's4' if s4 == 'BUY' else 's8'
                 combined = 'HOLD'
                 reason = f'{which} says BUY but both_agree strategy requires both'
             else:
@@ -4342,18 +4341,18 @@ def run_mode_daf(assets_list, horizons, resume=False):
         for horizon in horizons:
             t_ah = time.time()
             print(f"\n{'#'*70}")
-            print(f"  DAF: {asset_name} {horizon}h")
+            print(f"  DAF: {asset_name} {_horizon_label(horizon)}")
             print(f"{'#'*70}")
 
             # ── D PHASE: feature analysis + diagnostic at gamma=1.0 ──
-            print(f"\n  ── D PHASE: {asset_name} {horizon}h (gamma=1.0) ──")
+            print(f"\n  ── D PHASE: {asset_name} {_horizon_label(horizon)} (gamma=1.0) ──")
 
             df_raw = load_data(asset_name)
             if df_raw is None:
                 continue
 
             MAX_DIAG_ROWS = 4320  # ~45 days of 15-min candles  # 4,320 hours
-            print(f"\n  Building all features (horizon={horizon}h)...")
+            print(f"\n  Building all features (horizon={_horizon_label(horizon)})...")
             t0 = time.time()
             df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
             print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
@@ -4423,7 +4422,7 @@ def run_mode_daf(assets_list, horizons, resume=False):
             for i, (combo_name, window) in enumerate(top_configs, 1):
                 # Find original APF for display
                 orig = next(r for r in d_sorted_results if r[0] == combo_name and r[1] == window)
-                print(f"    {i:2d}. {combo_name:22s} w={window:4d}h  APF={orig[10]:.3f}  ret={orig[4]:+.1f}%")
+                print(f"    {i:2d}. {combo_name:22s} w={window:4d} candles  APF={orig[10]:.3f}  ret={orig[4]:+.1f}%")
 
             n_tests = len(DAF_GAMMAS) * len(top_configs)
             print(f"\n  Sweeping {len(DAF_GAMMAS)} gammas × {len(top_configs)} combos = {n_tests} tests")
@@ -4490,15 +4489,15 @@ def run_mode_daf(assets_list, horizons, resume=False):
             print(f"  {'-'*88}")
             for i, (gamma, combo_name, window, apf, ret, raw_pf, bh_pf, acc, trades) in enumerate(all_candidates[:15], 1):
                 marker = " <-- WINNER" if i == 1 else ""
-                print(f"  {i:4d}  {gamma:6.3f}  {combo_name:22s}  {window:5d}h  {apf:7.3f}  {ret:+7.1f}%  {raw_pf:6.2f}  {bh_pf:6.2f}  {acc*100:5.1f}%  {trades:5d}{marker}")
+                print(f"  {i:4d}  {gamma:6.3f}  {combo_name:22s}  {window:5d}   {apf:7.3f}  {ret:+7.1f}%  {raw_pf:6.2f}  {bh_pf:6.2f}  {acc*100:5.1f}%  {trades:5d}{marker}")
 
             # Pick winner
             winner = all_candidates[0]
             w_gamma, w_combo, w_window, w_apf, w_ret, w_raw_pf, w_bh_pf, w_acc, w_trades = winner
 
             print(f"\n  {'='*70}")
-            print(f"  WINNER: {asset_name} {horizon}h")
-            print(f"  Models: {w_combo}  Window: {w_window}h  Gamma: {w_gamma}")
+            print(f"  WINNER: {asset_name} {_horizon_label(horizon)}")
+            print(f"  Models: {w_combo}  Window: {w_window} candles  Gamma: {w_gamma}")
             print(f"  APF: {w_apf:.3f}  Return: {w_ret:+.1f}%  Accuracy: {w_acc*100:.1f}%")
             print(f"  rawPF: {w_raw_pf:.2f}  bhPF: {w_bh_pf:.2f}  Trades: {w_trades}")
             print(f"  {'='*70}")
@@ -4538,7 +4537,7 @@ def run_mode_daf(assets_list, horizons, resume=False):
             print(f"  A-phase results saved: {a_csv_path}")
 
             elapsed_ah = (time.time()-t_ah)/60
-            print(f"  [{asset_name} {horizon}h total: {elapsed_ah:.1f} min]")
+            print(f"  [{asset_name} {_horizon_label(horizon)} total: {elapsed_ah:.1f} min]")
 
     if not best_models:
         print("\nNo results. Aborting.")
@@ -4564,7 +4563,7 @@ def run_mode_daf(assets_list, horizons, resume=False):
         print(f"\n  ── F PHASE: strategy comparison ──")
         run_strategy_comparison(assets_list, horizons)
     else:
-        print(f"\n  F PHASE skipped (need both 4h+8h for strategy comparison)")
+        print(f"\n  F PHASE skipped (need both s4+s8 for strategy comparison)")
 
     elapsed_total = (time.time()-t_total)/60
     print(f"\n  MODE DAF complete: {elapsed_total:.1f} min total")
@@ -4602,11 +4601,11 @@ def run_mode_a(assets_list, horizons, resume=False):
 
                 # Check if already done (resume support)
                 if resume and _mode_a_is_completed(asset, gamma, horizon):
-                    print(f"\n  [{completed}/{total_tests}] SKIP: {asset} {horizon}h gamma={gamma} (already done)")
+                    print(f"\n  [{completed}/{total_tests}] SKIP: {asset} {_horizon_label(horizon)} gamma={gamma} (already done)")
                     continue
 
                 print(f"\n{'#'*70}")
-                print(f"  [{completed}/{total_tests}] GAMMA TEST: {asset} | {horizon}h | gamma={gamma}")
+                print(f"  [{completed}/{total_tests}] GAMMA TEST: {asset} | {_horizon_label(horizon)} | gamma={gamma}")
                 print(f"{'#'*70}")
 
                 t0 = time.time()
@@ -4680,7 +4679,7 @@ def run_mode_a(assets_list, horizons, resume=False):
                               f"APF={result['adjusted_pf']:.3f} | ret={result['return_pct']:+.1f}% | "
                               f"acc={result['accuracy']:.1f}% | trades={result['trades']} | {result['elapsed_min']}min")
                     else:
-                        print(f"  No result found for {asset} {horizon}h gamma={gamma}")
+                        print(f"  No result found for {asset} {_horizon_label(horizon)} gamma={gamma}")
 
                     # Clean up temp file
                     try:
@@ -4763,8 +4762,8 @@ def _mode_a_print_summary(assets_list, horizons):
             for _, row in h_df.iterrows():
                 gamma_str = f"{row['gamma']:.3f}" if row['gamma'] < 1.0 else "1.000*"
                 marker = " <-- BEST" if row['adjusted_pf'] == best_pf else ""
-                print(f"  {h}h{'':<5} {gamma_str:<8} {row['best_combo']:<18} "
-                      f"{int(row['best_window'])}h{'':<5} {row['adjusted_pf']:<8.3f} "
+                print(f"  {_horizon_label(h):<12} {gamma_str:<8} {row['best_combo']:<18} "
+                      f"{int(row['best_window']):<8} {row['adjusted_pf']:<8.3f} "
                       f"{row['return_pct']:<+10.1f} {row['win_rate']:<8.1f} "
                       f"{int(row['trades']):<8} {row['accuracy']:<8.1f} {int(row['n_features']):<6}{marker}")
             if h != horizons[-1]:
