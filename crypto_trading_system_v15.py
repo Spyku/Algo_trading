@@ -127,6 +127,24 @@ def _kill_orphan_workers():
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(_BASE_DIR, 'models')
+# Test harnesses set this env var to redirect model output away from production CSV
+MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
+
+
+def _get_models_csv_path():
+    """Return the models CSV path — respects MODELS_CSV_OVERRIDE for test isolation."""
+    return MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_15m_best_models.csv'
+
+
+def _backup_models_csv():
+    """Create a backup of production CSV before writing."""
+    src = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
+        import shutil
+        bak = f'{MODELS_DIR}/crypto_15m_best_models_backup.csv'
+        shutil.copy2(src, bak)
+
+
 RESUME_DIR = os.path.join(MODELS_DIR, '.resume_15m')
 
 def _resume_path(asset, horizon, step):
@@ -227,7 +245,8 @@ MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS   = _hours_to_rows(200)    # 800 candles
 REPLAY_HOURS_F = _hours_to_rows(400)    # 1600 candles — Mode F longer window
 REPLAY_HOURS_G = _hours_to_rows(168)    # 672 candles — Mode G last week
-DIAG_STEP      = _hours_to_rows(24)     # 96 candles (15-min needs shorter step)
+DIAG_STEP      = _hours_to_rows(4)      # 16 candles (4h step for finer walk-forward)
+MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DIAG_WINDOWS       = [_hours_to_rows(h) for h in [12, 24, 36, 48, 72]]   # horizons s5-s8
 DIAG_WINDOWS_SHORT = [_hours_to_rows(h) for h in [8, 12, 24, 36, 48]]    # horizons s1-s4
 
@@ -697,8 +716,9 @@ def _classify_feature(feat):
 
 def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Fast walk-forward test with LGBM only.
-    Returns (accuracy, alpha, n_tests).
+    Returns (accuracy, alpha, n_tests, profit_factor).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
+    Profit factor = gross_profit / |gross_loss| (capped at 5.0, 0 if < 3 trades).
     device: override LGBM device ('cpu' for parallel safety, None = use default)."""
     from lightgbm import LGBMClassifier
 
@@ -706,16 +726,19 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     n = len(df_features)
     min_start = window + 50
     if n < min_start + 30:
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     correct = 0
     total = 0
 
     # Portfolio simulation alongside accuracy
-    cash     = 1.0
-    in_pos   = False
-    entry_px = 0.0
-    start_px = float(df_features.iloc[min_start]['close'])
+    cash       = 1.0
+    in_pos     = False
+    entry_px   = 0.0
+    start_px   = float(df_features.iloc[min_start]['close'])
+    total_gain = 0.0
+    total_loss = 0.0
+    trades     = 0
 
     for i in range(min_start, n, step):
         train    = df_features.iloc[max(0, i - window):i]
@@ -753,25 +776,48 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
             in_pos   = True
             entry_px = price * (1 + TRADING_FEE)
         elif pred == 0 and in_pos:
-            cash   *= (price * (1 - TRADING_FEE)) / entry_px
+            sell_px = price * (1 - TRADING_FEE)
+            trade_ret = (sell_px - entry_px) / entry_px
+            cash *= (1 + trade_ret)
+            trades += 1
+            if trade_ret > 0:
+                total_gain += trade_ret
+            else:
+                total_loss += trade_ret
             in_pos  = False
 
     # Close open position at end
     if in_pos and total > 0:
         last_px = float(df_features.iloc[-1]['close'])
-        cash   *= (last_px * (1 - TRADING_FEE)) / entry_px
+        sell_px = last_px * (1 - TRADING_FEE)
+        trade_ret = (sell_px - entry_px) / entry_px
+        cash *= (1 + trade_ret)
+        trades += 1
+        if trade_ret > 0:
+            total_gain += trade_ret
+        else:
+            total_loss += trade_ret
 
     last_px   = float(df_features.iloc[-1]['close'])
     strat_ret = (cash - 1.0) * 100
     bh_ret    = (last_px / start_px - 1) * 100
     alpha     = round(strat_ret - bh_ret, 2)
     accuracy  = correct / total * 100 if total > 0 else 0
-    return accuracy, alpha, total
+
+    # CASCA: profit factor
+    if trades < 3:
+        pf = 0.0
+    elif total_loss == 0:
+        pf = min(total_gain * 100, 5.0)
+    else:
+        pf = min(total_gain / abs(total_loss), 5.0)
+
+    return accuracy, alpha, total, pf
 
 
 def _quick_accuracy(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSIS_STEP, device=None, gamma=1.0):
     """Backward-compatible wrapper -- returns (accuracy, n_tests). Used by Mode E."""
-    acc, _, n = _quick_score(df_features, feature_cols, window=window, step=step, device=device, gamma=gamma)
+    acc, _, n, _ = _quick_score(df_features, feature_cols, window=window, step=step, device=device, gamma=gamma)
     return acc, n
 
 
@@ -813,91 +859,90 @@ def _test_lgbm_importance(df_features, feature_cols, gamma=1.0):
     return importance
 
 
-def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
-    """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop)."""
+def _perm_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, baseline_pf, gamma=1.0):
+    """Helper for parallel permutation test. Returns (feat, acc_drop, alpha_drop, pf_drop)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     df_shuffled = df_features.copy()
     df_shuffled[feat] = np.random.permutation(df_shuffled[feat].values)
-    shuffled_acc, shuffled_alpha, _ = _quick_score(df_shuffled, feature_cols, device='cpu', gamma=gamma)
-    return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha
+    shuffled_acc, shuffled_alpha, _, shuffled_pf = _quick_score(df_shuffled, feature_cols, device='cpu', gamma=gamma)
+    return feat, baseline_acc - shuffled_acc, baseline_alpha - shuffled_alpha, baseline_pf - shuffled_pf
 
 
 def _test_permutation_importance(df_features, feature_cols, gamma=1.0):
-    """Shuffle each feature and measure accuracy + alpha drop. Parallelized."""
+    """Shuffle each feature and measure accuracy + alpha + profit factor drop. Parallelized."""
     print(f"\n  [2/5] Permutation Importance (parallel)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, n_tests = _quick_score(df_features, feature_cols, gamma=gamma)
-    print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha (n={n_tests})")
+    baseline_acc, baseline_alpha, n_tests, baseline_pf = _quick_score(df_features, feature_cols, gamma=gamma)
+    print(f"    Baseline: {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha | PF={baseline_pf:.2f} (n={n_tests})")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
     print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
     t0 = time.time()
     with _suppress_stderr():
         perm_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
+            delayed(_perm_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, baseline_pf, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
     results = []
-    for feat, acc_drop, alpha_drop in perm_results:
-        results.append({'feature': feat, 'acc_drop': acc_drop, 'alpha_drop': alpha_drop})
-        print(f"    {feat:30s} acc_drop: {acc_drop:+5.1f}%  alpha_drop: {alpha_drop:+6.1f}%")
+    for feat, acc_drop, alpha_drop, pf_drop in perm_results:
+        results.append({'feature': feat, 'acc_drop': acc_drop, 'alpha_drop': alpha_drop, 'pf_drop': pf_drop})
+        print(f"    {feat:30s} pf_drop: {pf_drop:+5.2f}  alpha_drop: {alpha_drop:+6.1f}%")
 
-    return pd.DataFrame(results).sort_values('acc_drop', ascending=False)
+    return pd.DataFrame(results).sort_values('pf_drop', ascending=False)
 
 
-def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=1.0):
-    """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change)."""
+def _ablation_one_feature(df_features, feature_cols, feat, baseline_acc, baseline_alpha, baseline_pf, gamma=1.0):
+    """Helper for parallel ablation test. Returns (feat, acc, acc_change, alpha_change, pf_change)."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     reduced = [f for f in feature_cols if f != feat]
-    acc, alpha, _ = _quick_score(df_features, reduced, device='cpu', gamma=gamma)
-    return feat, acc, acc - baseline_acc, alpha - baseline_alpha
+    acc, alpha, _, pf = _quick_score(df_features, reduced, device='cpu', gamma=gamma)
+    return feat, acc, acc - baseline_acc, alpha - baseline_alpha, pf - baseline_pf
 
 
 def _test_ablation(df_features, feature_cols, gamma=1.0):
-    """Drop each feature one at a time and measure accuracy + alpha. Parallelized."""
+    """Drop each feature one at a time and measure profit factor + alpha. Parallelized."""
     print(f"\n  [3/5] Ablation Test (parallel, drop one at a time)  [{datetime.now().strftime('%H:%M:%S')}]")
-    baseline_acc, baseline_alpha, _ = _quick_score(df_features, feature_cols, gamma=gamma)
-    print(f"    Baseline ({len(feature_cols)} features): {baseline_acc:.1f}% acc | {baseline_alpha:+.1f}% alpha")
+    baseline_acc, baseline_alpha, _, baseline_pf = _quick_score(df_features, feature_cols, gamma=gamma)
+    print(f"    Baseline ({len(feature_cols)} features): PF={baseline_pf:.2f} | {baseline_alpha:+.1f}% alpha | {baseline_acc:.1f}% acc")
 
     n_workers = min(N_JOBS_PARALLEL, len(feature_cols))
     print(f"    Testing {len(feature_cols)} features ({n_workers} workers)...")
     t0 = time.time()
     with _suppress_stderr():
         ablation_results = Parallel(n_jobs=n_workers, verbose=0)(
-            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, gamma=gamma)
+            delayed(_ablation_one_feature)(df_features, feature_cols, feat, baseline_acc, baseline_alpha, baseline_pf, gamma=gamma)
             for feat in feature_cols
         )
     print(f"    Done in {(time.time() - t0)/60:.1f} min")
 
     results = []
-    for feat, acc, acc_change, alpha_change in ablation_results:
+    for feat, acc, acc_change, alpha_change, pf_change in ablation_results:
         results.append({'dropped': feat, 'accuracy': acc,
-                        'change': acc_change, 'alpha_change': alpha_change})
-        baseline_combined = baseline_acc * (1 + max(baseline_alpha, 0) / 100)
-        drop_combined = acc * (1 + max(baseline_alpha + alpha_change, 0) / 100)
-        marker = ' ** IMPROVES' if drop_combined > baseline_combined else ''
-        print(f"    Drop {feat:30s} -> {acc:5.1f}% ({acc_change:+5.1f}%)  "
+                        'change': acc_change, 'alpha_change': alpha_change, 'pf_change': pf_change})
+        marker = ' ** IMPROVES' if pf_change > 0 else ''
+        print(f"    Drop {feat:30s} -> PF_chg: {pf_change:+5.2f}  "
               f"alpha_chg: {alpha_change:+6.1f}%{marker}")
 
     return pd.DataFrame(results).sort_values('change', ascending=False)
 
 
 def _reduced_one_set(df_features, ranked, n_feat, gamma=1.0):
-    """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score)."""
+    """Helper for parallel reduced set test. Returns (n_feat, acc, alpha, combined_score).
+    CASCA: uses profit factor as score for feature selection."""
     import os, warnings
     os.environ['PYTHONWARNINGS'] = 'ignore'
     warnings.filterwarnings('ignore')
     warnings.simplefilter('ignore')
     top_n = ranked[:n_feat]
-    acc, alpha, _ = _quick_score(df_features, top_n, device='cpu', gamma=gamma)
-    combined = acc * (1 + max(alpha, 0) / 100)
+    acc, alpha, _, pf = _quick_score(df_features, top_n, device='cpu', gamma=gamma)
+    combined = pf  # CASCA: rank feature sets by profit factor
     return n_feat, acc, alpha, combined
 
 
@@ -924,15 +969,15 @@ def _test_reduced_sets(df_features, feature_cols, importance_df, gamma=1.0):
     for n_feat, acc, alpha, combined in sorted(reduced_results):
         results.append({'n_features': n_feat, 'accuracy': acc,
                         'alpha': alpha, 'combined_score': combined})
-        bar = '#' * int(acc * 0.5)
-        print(f"    Top {n_feat:3d} features: {acc:5.1f}% acc | {alpha:+6.1f}% alpha | "
-              f"score={combined:.1f}  {bar}")
+        bar = '#' * int(combined * 10)  # CASCA: bar based on profit factor
+        print(f"    Top {n_feat:3d} features: PF={combined:.2f} | {alpha:+6.1f}% alpha | "
+              f"{acc:5.1f}% acc  {bar}")
 
     df_results = pd.DataFrame(results)
     best_row = df_results.loc[df_results['combined_score'].idxmax()]
     print(f"\n    OPTIMAL: Top {int(best_row['n_features'])} -> "
-          f"{best_row['accuracy']:.1f}% acc | {best_row['alpha']:+.1f}% alpha | "
-          f"score={best_row['combined_score']:.1f}")
+          f"PF={best_row['combined_score']:.2f} | {best_row['alpha']:+.1f}% alpha | "
+          f"{best_row['accuracy']:.1f}% acc")
     return df_results
 
 
@@ -953,42 +998,38 @@ def _score_features(feature_cols, importance_df, ablation_df, permutation_df):
         else:
             scores[f] -= 1
 
-    # Permutation -- accuracy drop + alpha drop
+    # Permutation -- CASCA: rank by pf_drop (profit factor drop when feature is shuffled)
+    # pf_drop > 0 means shuffling this feature HURT profit factor = feature matters
     if permutation_df is not None:
         for _, row in permutation_df.iterrows():
             f = row['feature']
-            # Accuracy signal
-            if row['acc_drop'] > 0.5:
+            pf_drop = row.get('pf_drop', 0)
+            if pf_drop > 1.0:
+                scores[f] += 3
+            elif pf_drop > 0.5:
                 scores[f] += 2
-            elif row['acc_drop'] > 0:
+            elif pf_drop > 0.1:
                 scores[f] += 1
-            else:
-                scores[f] -= 1
-            # Alpha signal (shuffling this feature kills alpha = it matters)
-            alpha_drop = row.get('alpha_drop', 0)
-            if alpha_drop > 10:
-                scores[f] += 2
-            elif alpha_drop > 3:
-                scores[f] += 1
-            elif alpha_drop < -3:
+            elif pf_drop < -0.5:
+                scores[f] -= 2
+            elif pf_drop < -0.1:
                 scores[f] -= 1
 
-    # Ablation -- accuracy change + alpha change
+    # Ablation -- CASCA: rank by pf_change (profit factor change when feature is dropped)
+    # pf_change > 0 means dropping this feature IMPROVED profit factor = feature was hurting
     if ablation_df is not None:
         for _, row in ablation_df.iterrows():
             f = row['dropped']
-            # Accuracy signal
-            if row['change'] > 0.3:
+            pf_change = row.get('pf_change', 0)
+            if pf_change > 1.0:
                 scores[f] -= 3
-            elif row['change'] > 0:
-                scores[f] -= 1
-            # Alpha signal (dropping this feature improves alpha = it was hurting)
-            alpha_change = row.get('alpha_change', 0)
-            if alpha_change > 5:
+            elif pf_change > 0.5:
                 scores[f] -= 2
-            elif alpha_change > 2:
+            elif pf_change > 0.1:
                 scores[f] -= 1
-            elif alpha_change < -5:
+            elif pf_change < -0.5:
+                scores[f] += 2
+            elif pf_change < -0.1:
                 scores[f] += 1
 
     score_df = pd.DataFrame([
@@ -1045,17 +1086,15 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols, gamma=1.0):
     # Determine optimal set: KEEP features + test with/without MAYBE
     optimal_features = list(keep)
 
-    # Quick test: KEEP only vs KEEP + MAYBE -- use combined_score = acc x (1 + alpha/100)
+    # Quick test: KEEP only vs KEEP + MAYBE -- CASCA: compare by profit factor
     if maybe:
-        acc_keep,  alpha_keep,  _ = _quick_score(df_features, keep, gamma=gamma)
-        acc_all,   alpha_all,   _ = _quick_score(df_features, keep + maybe, gamma=gamma)
-        score_keep = acc_keep * (1 + max(alpha_keep, 0) / 100)
-        score_all  = acc_all  * (1 + max(alpha_all,  0) / 100)
-        print(f"\n  KEEP only       ({len(keep):3d} feat): {acc_keep:.1f}% acc | "
-              f"{alpha_keep:+.1f}% alpha | score={score_keep:.1f}")
-        print(f"  KEEP + MAYBE    ({len(keep)+len(maybe):3d} feat): {acc_all:.1f}% acc | "
-              f"{alpha_all:+.1f}% alpha | score={score_all:.1f}")
-        if score_all > score_keep + 1.0:
+        acc_keep,  alpha_keep,  _, pf_keep = _quick_score(df_features, keep, gamma=gamma)
+        acc_all,   alpha_all,   _, pf_all  = _quick_score(df_features, keep + maybe, gamma=gamma)
+        print(f"\n  KEEP only       ({len(keep):3d} feat): PF={pf_keep:.2f} | "
+              f"{alpha_keep:+.1f}% alpha | {acc_keep:.1f}% acc")
+        print(f"  KEEP + MAYBE    ({len(keep)+len(maybe):3d} feat): PF={pf_all:.2f} | "
+              f"{alpha_all:+.1f}% alpha | {acc_all:.1f}% acc")
+        if pf_all > pf_keep + 0.1:
             optimal_features = keep + maybe
             print(f"  >>> Using KEEP + MAYBE ({len(optimal_features)} features)")
         else:
@@ -1063,26 +1102,25 @@ def run_feature_analysis(asset_name, df_features, all_feature_cols, gamma=1.0):
     else:
         print(f"\n  >>> Using KEEP ({len(optimal_features)} features)")
 
-    # Also check best reduced set from test 4 -- compare by combined_score
+    # Also check best reduced set from test 4 -- compare by profit factor
     if reduced_df is not None and len(reduced_df) > 0:
         best_n_row     = reduced_df.loc[reduced_df['combined_score'].idxmax()]
         best_n         = int(best_n_row['n_features'])
-        best_n_score   = best_n_row['combined_score']
+        best_n_score   = best_n_row['combined_score']  # profit factor
         best_n_acc     = best_n_row['accuracy']
         best_n_alpha   = best_n_row['alpha']
         ranked         = importance_df['feature'].tolist()
         top_n_features = ranked[:best_n]
 
-        opt_acc, opt_alpha, _ = _quick_score(df_features, optimal_features, gamma=gamma)
-        opt_score = opt_acc * (1 + max(opt_alpha, 0) / 100)
-        print(f"  Scored optimal  ({len(optimal_features):3d} feat): {opt_acc:.1f}% acc | "
-              f"{opt_alpha:+.1f}% alpha | score={opt_score:.1f}")
-        print(f"  Top-{best_n} by LGBM ({best_n:3d} feat): {best_n_acc:.1f}% acc | "
-              f"{best_n_alpha:+.1f}% alpha | score={best_n_score:.1f}")
+        opt_acc, opt_alpha, _, opt_pf = _quick_score(df_features, optimal_features, gamma=gamma)
+        print(f"  Scored optimal  ({len(optimal_features):3d} feat): PF={opt_pf:.2f} | "
+              f"{opt_alpha:+.1f}% alpha | {opt_acc:.1f}% acc")
+        print(f"  Top-{best_n} by LGBM ({best_n:3d} feat): PF={best_n_score:.2f} | "
+              f"{best_n_alpha:+.1f}% alpha | {best_n_acc:.1f}% acc")
 
-        if best_n_score > opt_score + 2.0:
+        if best_n_score > opt_pf + 0.2:
             optimal_features = top_n_features
-            print(f"  >>> Switching to Top-{best_n} (score +{best_n_score - opt_score:.1f})")
+            print(f"  >>> Switching to Top-{best_n} (PF +{best_n_score - opt_pf:.2f})")
 
     # Save analysis results
     score_df.to_csv(f'{MODELS_DIR}/crypto_feature_analysis_{asset_name.lower()}_auto.csv', index=False)
@@ -1569,12 +1607,15 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     avg_gain = (total_gain / wins * 100) if wins > 0 else 0
     avg_loss = (total_loss / (trades - wins) * 100) if (trades - wins) > 0 else 0
 
-    # V5 scoring: acc x (1 + return/100)
-    # Directly optimises for accuracy AND return together.
-    # Calmar/Sharpe removed -- they penalise active trading and drawdowns,
-    # biasing toward low-trade-count configs. This formula rewards configs
-    # that are both right often AND make the most money.
-    combined_score = accuracy * (1 + max(cum_return, 0) / 100)
+    # CASCA scoring: Profit Factor (gross_profit / |gross_loss|)
+    # Directly measures profitability — a model that loses money scores < 1.0.
+    # Minimum 3 trades required — fewer is statistically meaningless.
+    if trades < 3:
+        combined_score = 0.0
+    elif total_loss == 0:
+        combined_score = min(total_gain * 100, 5.0)  # cap when no losses
+    else:
+        combined_score = min(total_gain / abs(total_loss), 5.0)  # cap at 5.0
 
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
             trades, avg_gain, avg_loss, max_dd * 100, combined_score)
@@ -1603,7 +1644,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PRED
 
     combos = []
     model_names = list(ALL_MODELS.keys())
-    for r in range(1, len(model_names) + 1):
+    for r in range(MIN_COMBO_SIZE, len(model_names) + 1):
         for combo in combinations(model_names, r):
             combos.append(list(combo))
 
@@ -1686,7 +1727,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PRED
         print(f"  |{'':4s}Return:   {ret_str:60s}|")
         wr_str = f"{best_config['win_rate']:.0f}% ({best_config['trades']} trades)"
         print(f"  |{'':4s}Win Rate: {wr_str:60s}|")
-        sc_str = f"{best_config['combined_score']:.4f}  (acc x (1 + return/100))"
+        sc_str = f"{best_config['combined_score']:.4f}  (profit factor, cap 5.0)"
         print(f"  |{''!s:4s}Score:    {sc_str:60s}|")
         print("  " + "-" * 76)
         print(f"  |{''!s:4s}{'Rank':5s}{'Combo':22s}{'Window':8s}{'Acc':7s}{'Return':9s}{'Score':8s}  |")
@@ -1698,7 +1739,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, horizon=PRED
                   f"  {cum_ret:+6.1f}%  {combined_score:.3f}{marker:>4s} |")
         print("  " + "=" * 76)
         print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']}")
-        print(f"  >>> Score = acc x (1 + return/100)")
+        print(f"  >>> Score = Profit Factor (gross_profit / |gross_loss|, cap 5.0, min 3 trades)")
         print()
 
     return best_config
@@ -2165,12 +2206,12 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
     print("  MODE B: QUICK HOURLY RUN (saved best models)")
     print("=" * 60)
 
-    if not os.path.exists(f'{MODELS_DIR}/crypto_15m_best_models.csv'):
+    if not os.path.exists(_get_models_csv_path()):
         print("\nERROR: crypto_15m_best_models.csv not found!")
         print("Please run Mode D first to find best models.")
         return
 
-    df_best = pd.read_csv(f'{MODELS_DIR}/crypto_15m_best_models.csv')
+    df_best = pd.read_csv(_get_models_csv_path())
     if 'horizon' not in df_best.columns:
         df_best['horizon'] = 4  # legacy = 4h
 
@@ -2550,7 +2591,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
         return
 
     # Save best models (merge with existing horizons)
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
     df_best = pd.DataFrame(best_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -2561,7 +2603,8 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
             df_existing = df_existing[~mask]
         df_best = pd.concat([df_existing, df_best], ignore_index=True)
     df_best.to_csv(csv_path, index=False)
-    df_best.to_csv(f'{MODELS_DIR}/crypto_15m_best_models_mode_d.csv', index=False)
+    if not MODELS_CSV_OVERRIDE:
+        df_best.to_csv(f'{MODELS_DIR}/crypto_15m_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
     print(f"  BEST MODELS SAVED -- {_horizon_label(horizon)} HORIZON")
@@ -2612,7 +2655,7 @@ def run_mode_d(assets_list, diag_years=1, horizon=PREDICTION_HORIZON, permtest=F
 # ============================================================
 def _load_mode_d_config(asset_name, horizon):
     """Load the Mode D (or previous E) result for a given asset/horizon."""
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         return None
     df = pd.read_csv(csv_path)
@@ -2997,7 +3040,7 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         return
 
     # Save (merge with existing)
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    csv_path = _get_models_csv_path()
     df_best = pd.DataFrame(final_models)
     if os.path.exists(csv_path):
         df_existing = pd.read_csv(csv_path)
@@ -3110,7 +3153,7 @@ def _simulate_strategy(strat, thresh, sig4_map, sig8_map, all_times, base_acc):
 
     cum_ret = (cash / 1000.0 - 1) * 100
     win_rate = (wins / trades * 100) if trades > 0 else 0
-    score = base_acc * (1 + max(cum_ret, 0) / 100)
+    score = cum_ret  # CASCA: rank strategies by return directly
     return cum_ret, win_rate, trades, score
 
 
@@ -3125,7 +3168,7 @@ def run_strategy_comparison(assets_list, horizons=None):
     Writes optimal strategy + min_confidence to trading_config_15m.json.
     Requires Mode D to have been run first for both 4h and 8h.
     """
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         print("  ERROR: No saved models found. Run Mode D first.")
         return
@@ -3297,7 +3340,7 @@ def run_horizon_pair_comparison(assets_list):
     Output: ranked table of (h1, h2, strategy) by net return after fees.
     Purpose: decide which horizon pair to promote to production Mode D + F.
     """
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         print("  ERROR: No saved models found. Run Mode D first.")
         return
@@ -3435,7 +3478,7 @@ def _run_quick_asset(asset):
     print(f"  Quick {asset}: Mode B, {_horizon_label(4)}+{_horizon_label(8)}")
     print("=" * 60)
 
-    csv_path = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
         print("  ERROR: No models found!")
         return
@@ -3583,6 +3626,205 @@ def _run_quick_asset(asset):
     print("\nDone!")
 
 
+# ============================================================
+# MODE A: GAMMA OPTIMIZATION
+# Tests multiple gamma values per horizon, saves to isolated CSV.
+# Usage: python crypto_trading_system_v15.py A BTC 4,8s
+# ============================================================
+MODE_A_GAMMAS = [0.999, 0.998, 0.997, 0.996, 0.995, 0.994]
+MODE_A_RESULTS_CSV = f'{MODELS_DIR}/testing_v15_casca_a_results.csv'
+
+
+def run_mode_a(assets_list, horizons, resume=False):
+    """Run Mode D for each gamma × horizon combo, saving results to isolated CSV."""
+    total_tests = len(MODE_A_GAMMAS) * len(horizons) * len(assets_list)
+    print(f"\n{'='*70}")
+    print(f"  MODE A: GAMMA OPTIMIZATION (V15 CASCA)")
+    print(f"  {len(MODE_A_GAMMAS)} gammas × {len(horizons)} horizons × {len(assets_list)} assets = {total_tests} tests")
+    print(f"  Gammas: {', '.join(str(g) for g in MODE_A_GAMMAS)}")
+    print(f"  Baseline (gamma=1.0) already in production CSV")
+    print(f"  Results: {MODE_A_RESULTS_CSV}")
+    print(f"{'='*70}")
+
+    t_total = time.time()
+    completed = 0
+
+    for asset in assets_list:
+        for horizon in horizons:
+            for gamma in MODE_A_GAMMAS:
+                completed += 1
+
+                if resume and _mode_a_is_completed(asset, gamma, horizon):
+                    print(f"\n  [{completed}/{total_tests}] SKIP: {asset} {_horizon_label(horizon)} gamma={gamma} (already done)")
+                    continue
+
+                print(f"\n{'#'*70}")
+                print(f"  [{completed}/{total_tests}] GAMMA TEST: {asset} | {_horizon_label(horizon)} | gamma={gamma}")
+                print(f"{'#'*70}")
+
+                t0 = time.time()
+
+                # Redirect Mode D output to a temp CSV
+                temp_csv = f'{MODELS_DIR}/_v15_casca_a_temp.csv'
+                global MODELS_CSV_OVERRIDE
+                old_override = MODELS_CSV_OVERRIDE
+                MODELS_CSV_OVERRIDE = temp_csv
+
+                # Seed with forced gamma
+                seed = pd.DataFrame([{
+                    'coin': asset, 'best_window': 100, 'best_combo': '',
+                    'accuracy': 0, 'models': '', 'return_pct': 0,
+                    'win_rate': 0, 'trades': 0, 'combined_score': 0,
+                    'feature_set': 'D', 'n_features': 0, 'optimal_features': '',
+                    'horizon': horizon, 'gamma': gamma
+                }])
+                seed.to_csv(temp_csv, index=False)
+
+                # Override charts dir for isolation
+                global CHARTS_DIR
+                old_charts = CHARTS_DIR
+                CHARTS_DIR = f'charts/v15_casca_a_test'
+                os.makedirs(CHARTS_DIR, exist_ok=True)
+
+                try:
+                    run_mode_d([asset], horizon=horizon)
+                except Exception as e:
+                    print(f"  ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    MODELS_CSV_OVERRIDE = old_override
+                    CHARTS_DIR = old_charts
+                    continue
+                finally:
+                    MODELS_CSV_OVERRIDE = old_override
+                    CHARTS_DIR = old_charts
+
+                elapsed = time.time() - t0
+
+                # Read result from temp CSV
+                if os.path.exists(temp_csv):
+                    df_temp = pd.read_csv(temp_csv)
+                    mask = (df_temp['coin'] == asset) & (df_temp['horizon'] == horizon)
+                    matches = df_temp[mask]
+                    matches = matches[matches['accuracy'] > 0]
+
+                    if not matches.empty:
+                        row = matches.iloc[-1]
+                        result = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            'asset': asset,
+                            'horizon': horizon,
+                            'gamma': gamma,
+                            'best_combo': row['best_combo'],
+                            'best_window': int(row['best_window']),
+                            'accuracy': float(row['accuracy']),
+                            'return_pct': float(row.get('return_pct', 0)),
+                            'win_rate': float(row.get('win_rate', 0)),
+                            'trades': int(row.get('trades', 0)),
+                            'profit_factor': float(row.get('combined_score', 0)),
+                            'n_features': int(row.get('n_features', 0)),
+                            'elapsed_min': round(elapsed / 60, 1),
+                        }
+                        _mode_a_save_result(result)
+                        print(f"\n  RESULT: gamma={gamma} | {result['best_combo']} w={result['best_window']} | "
+                              f"PF={result['profit_factor']:.3f} | ret={result['return_pct']:+.1f}% | "
+                              f"acc={result['accuracy']:.1f}% | trades={result['trades']} | {result['elapsed_min']}min")
+                    else:
+                        print(f"  No result found for {asset} {_horizon_label(horizon)} gamma={gamma}")
+
+                    try:
+                        os.remove(temp_csv)
+                    except OSError:
+                        pass
+
+    print(f"\n  Total time: {(time.time()-t_total)/60:.1f} min")
+    _mode_a_print_summary(assets_list, horizons)
+
+
+def _mode_a_save_result(result):
+    """Append a result to the Mode A results CSV."""
+    df_new = pd.DataFrame([result])
+    if os.path.exists(MODE_A_RESULTS_CSV):
+        df_existing = pd.read_csv(MODE_A_RESULTS_CSV)
+        mask = ((df_existing['asset'] == result['asset']) &
+                (df_existing['horizon'] == result['horizon']) &
+                (df_existing['gamma'] == result['gamma']))
+        df_existing = df_existing[~mask]
+        df_all = pd.concat([df_existing, df_new], ignore_index=True)
+    else:
+        df_all = df_new
+    df_all.to_csv(MODE_A_RESULTS_CSV, index=False)
+
+
+def _mode_a_is_completed(asset, gamma, horizon):
+    """Check if this combo already has a result."""
+    if not os.path.exists(MODE_A_RESULTS_CSV):
+        return False
+    df = pd.read_csv(MODE_A_RESULTS_CSV)
+    mask = ((df['asset'] == asset) &
+            (df['horizon'] == horizon) &
+            (df['gamma'] == gamma))
+    return mask.any()
+
+
+def _mode_a_print_summary(assets_list, horizons):
+    """Print comparison table including baseline from production CSV."""
+    if not os.path.exists(MODE_A_RESULTS_CSV):
+        print("No Mode A results yet.")
+        return
+
+    df = pd.read_csv(MODE_A_RESULTS_CSV)
+
+    # Load baseline (gamma=1.0) from production CSV
+    prod_csv = f'{MODELS_DIR}/crypto_15m_best_models.csv'
+    if os.path.exists(prod_csv):
+        df_prod = pd.read_csv(prod_csv)
+        for asset in assets_list:
+            for h in horizons:
+                mask = (df_prod['coin'] == asset) & (df_prod['horizon'] == h)
+                row = df_prod[mask]
+                if not row.empty:
+                    r = row.iloc[0]
+                    baseline = {
+                        'timestamp': '-', 'asset': asset, 'horizon': h, 'gamma': 1.0,
+                        'best_combo': r['best_combo'], 'best_window': int(r['best_window']),
+                        'accuracy': float(r['accuracy']), 'return_pct': float(r.get('return_pct', 0)),
+                        'win_rate': float(r.get('win_rate', 0)), 'trades': int(r.get('trades', 0)),
+                        'profit_factor': float(r.get('combined_score', 0)),
+                        'n_features': int(r.get('n_features', 0)), 'elapsed_min': 0,
+                    }
+                    df = pd.concat([df, pd.DataFrame([baseline])], ignore_index=True)
+
+    for asset in assets_list:
+        df_a = df[df['asset'] == asset]
+        if df_a.empty:
+            continue
+
+        print(f"\n{'='*95}")
+        print(f"  MODE A: GAMMA OPTIMIZATION — {asset} (V15 CASCA)")
+        print(f"{'='*95}")
+        print(f"  {'Horizon':<10} {'Gamma':<8} {'Model':<18} {'Window':<8} {'PF':<8} {'Return%':<10} {'WinRate':<8} {'Trades':<8} {'Acc%':<8} {'Feats':<6}")
+        print(f"  {'-'*91}")
+
+        for h in horizons:
+            h_df = df_a[df_a['horizon'] == h].sort_values('gamma', ascending=False)
+            if h_df.empty:
+                continue
+            best_pf = h_df['profit_factor'].max()
+            for _, row in h_df.iterrows():
+                gamma_str = f"{row['gamma']:.3f}" if row['gamma'] < 1.0 else "1.000*"
+                marker = " <-- BEST" if row['profit_factor'] == best_pf else ""
+                print(f"  {_horizon_label(int(row['horizon'])):<10} {gamma_str:<8} {row['best_combo']:<18} "
+                      f"{int(row['best_window']):<8} {row['profit_factor']:<8.3f} "
+                      f"{row['return_pct']:<+10.1f} {row['win_rate']:<8.1f} "
+                      f"{int(row['trades']):<8} {row['accuracy']:<8.1f} {int(row['n_features']):<6}{marker}")
+            if h != horizons[-1]:
+                print(f"  {'-'*91}")
+
+        print(f"  {'='*91}")
+        print(f"  * = baseline (gamma=1.0, from production CSV)")
+
+
 def main():
 
     has_macro = os.path.exists(MACRO_DIR)
@@ -3595,7 +3837,7 @@ def main():
     cli_args    = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_permtest = '--permtest' in sys.argv
     flag_resume   = '--resume' in sys.argv
-    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'E', 'F', 'G', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('A', 'B', 'D', 'DF', 'E', 'F', 'G', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -3626,7 +3868,14 @@ def main():
 
         e_iterations = '2'
 
-        if mode == 'G':
+        if mode == 'A':
+            print("=" * 60)
+            print(f"  CLI: Mode A | {','.join(assets_list)} | {','.join(_horizon_label(h) for h in horizons)} | Gamma optimization")
+            print("=" * 60)
+            run_mode_a(assets_list, horizons, resume=flag_resume)
+            print("\nDone!")
+            return
+        elif mode == 'G':
             print("=" * 60)
             print(f"  CLI: Mode G | {','.join(assets_list)} | All horizon pairs | {REPLAY_HOURS_G} candle window")
             print("=" * 60)
@@ -3645,6 +3894,7 @@ def main():
         print("=" * 60)
 
         print("\nChoose mode:")
+        print("  A. GAMMA OPTIMIZATION (test 6 gamma values per horizon)")
         print("  B. Quick run (saved models + signals + chart)")
         print("  D. FULL PIPELINE (feature analysis -> diagnostic -> signals)")
         print("  E. ITERATIVE REFINEMENT (2nd/3rd pass on Mode D)")
@@ -3654,7 +3904,7 @@ def main():
         print(f"  5. Quick BTC (Mode B, {_horizon_label(4)}+{_horizon_label(8)})")
         print(f"  6. Quick ETH (Mode B, {_horizon_label(4)}+{_horizon_label(8)})")
         print(f"  7. Quick XRP (Mode B, {_horizon_label(4)}+{_horizon_label(8)})")
-        mode = input("\nEnter B/D/E/F/G or 5-7: ").strip().upper()
+        mode = input("\nEnter A/B/D/E/F/G or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
         if mode in ('5', '6', '7'):
@@ -3662,7 +3912,10 @@ def main():
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('B', 'D', 'DF', 'E', 'F', 'G'):
+        if mode == 'A':
+            # Interactive Mode A needs asset + horizon selection first, handled below
+            pass
+        if mode not in ('A', 'B', 'D', 'DF', 'E', 'F', 'G'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
@@ -3720,6 +3973,12 @@ def main():
         diag_years = 1  # sub-hourly: max 1 year
         if mode in ('D', 'E'):
             print("\nDiagnostic data range: last 1 year (max for 15-min candles)")
+
+    # Mode A handled above (early return)
+    if mode == 'A':
+        run_mode_a(assets_list, horizons, resume=flag_resume)
+        print("\nDone!")
+        return
 
     # Mode B doesn't loop per horizon -- it handles all horizons in one call
     if mode == 'B':

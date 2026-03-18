@@ -45,7 +45,19 @@ python crypto_trading_system_casca.py DF BTC,ETH 4,8h  # CASCA D then F
 python crypto_trading_system_casca.py A BTC 4,8h    # CASCA Mode A — gamma optimization (6 gammas × horizons)
 python crypto_trading_system_casca.py B BTC 4,8h    # CASCA Mode B — signals from saved models
 
-# === CRYPTO SUB-HOURLY (V15 / V30) ===
+# === DEKU (Optuna + XGBoost — Bayesian optimization) ===
+python crypto_trading_system_deku.py D BTC 4,8h          # Deku hourly — Optuna joint optimization
+python crypto_trading_system_deku.py D BTC 4,8h --trials 150  # Custom trial count
+python crypto_trading_system_deku.py DF BTC,ETH 4,8h     # Deku hourly — D then F
+python crypto_trading_system_deku_15m.py D BTC 4,8h      # Deku V15 — 15-min candles (s4=60', s8=120')
+python crypto_trading_system_deku_15m.py DF BTC,ETH 4,8h # Deku V15 — D then F
+
+# === DEKU FUSION (multi-timeframe backtest) ===
+python testing_deku_fusion.py BTC              # Fusion backtest — hourly cadence
+python testing_deku_fusion.py BTC --15min      # Fusion backtest — 15-min cadence
+python testing_deku_fusion.py BTC --compare    # Deku V15 vs CASCA V15 comparison only
+
+# === CRYPTO SUB-HOURLY (V15 / V30 — CASCA grid search) ===
 python crypto_trading_system_v15.py D BTC 4,8h 1y   # 15-min candles (h4=60', h8=120')
 python crypto_trading_system_v30.py D BTC 4,8h 1y   # 30-min candles (h4=2h, h8=4h)
 python crypto_trading_system_v15.py F BTC 4,8h       # Strategy optimizer (15-min)
@@ -89,6 +101,20 @@ python tools/detect_hardware.py                # Detect CPU/GPU → hardware_con
 │    ├── 4 ML models × 15 combinations × 5 windows                   │
 │    ├── Walk-forward validation (no future leakage)                  │
 │    └── hardware_config.py (machine-specific GPU/CPU settings)       │
+│                                                                     │
+│  crypto_trading_system_deku.py  (Deku — Optuna Bayesian Optimization)│
+│    ├── Optuna TPE + Hyperband pruning (100 trials default)          │
+│    ├── Joint optimization: (combo, window, gamma, n_features)       │
+│    ├── 5 models: RF, GB, XGB, LR, LGBM — 26 combos                │
+│    ├── APF scoring: raw_PF / buyhold_PF (regime-normalized)        │
+│    ├── LGBM importance ranking (~5s vs ~10min feature analysis)     │
+│    ├── Continuous gamma [0.995–1.0] (vs CASCA discrete grid)       │
+│    └── Output: models/crypto_deku_best_models.csv                   │
+│                                                                     │
+│  crypto_trading_system_deku_15m.py  (Deku V15 — 15-min candles)     │
+│    ├── Same Optuna pipeline, 15-min candle scaling                  │
+│    ├── s4=60', s8=120' horizons, 4320-candle cap (~45 days)        │
+│    └── Output: models/crypto_deku_15m_best_models.csv               │
 │                                                                     │
 │  crypto_trading_system_v6.py  (V6 Experimental)                     │
 │    ├── 12 ENHANCEMENTS flags (toggle on/off, env var override)      │
@@ -292,14 +318,15 @@ Set per asset by Mode F, stored in `config/trading_config.json`:
 
 ---
 
-## Sub-Hourly Crypto Systems (V15 / V30 Cacarot)
+## Sub-Hourly Crypto Systems (V15 / V30)
 
-The hourly system produces good signals but few trades. V15 and V30 use shorter candles for higher trade frequency while keeping the same ML pipeline. Both now include the Cacarot upgrade (temporal decay + data cap).
+The hourly system produces good signals but few trades. V15 and V30 use shorter candles for higher trade frequency while keeping the same ML pipeline. Available in both CASCA (grid search) and Deku (Optuna) variants.
 
-| System | Candle | Horizons (candles 1-8) | Data cap | Decay half-life (γ=0.995) | File |
-|--------|--------|----------------------|----------|--------------------------|------|
-| **V15 Cacarot** | 15 min | 15'–120' | 4320 rows (~45 days) | ~1.4 days | `crypto_trading_system_v15.py` |
-| **V30 Cacarot** | 30 min | 30'–240' | 4320 rows (~3 months) | ~3 days | `crypto_trading_system_v30.py` |
+| System | Candle | Horizons | Data cap | Optimizer | File |
+|--------|--------|----------|----------|-----------|------|
+| **Deku V15** | 15 min | s4=60', s8=120' | 4320 rows (~45 days) | Optuna TPE+Hyperband | `crypto_trading_system_deku_15m.py` |
+| **V15 Cacarot** | 15 min | 15'–120' | 4320 rows (~45 days) | Grid search | `crypto_trading_system_v15.py` |
+| **V30 Cacarot** | 30 min | 30'–240' | 4320 rows (~3 months) | Grid search | `crypto_trading_system_v30.py` |
 
 **Key differences from hourly system:**
 - All rolling/shift/diff periods scaled via `_hours_to_rows()` (e.g., RSI 14h = 56 candles on V15)
@@ -350,6 +377,25 @@ python testing_casca.py ETH          # Test ETH
 
 Results: `models/testing_casca_results.csv`
 
+### Deku — Multi-Timeframe Fusion Test
+
+Combines Deku hourly (1h candles, 4h+8h horizons) and Deku V15 (15-min candles, s4+s8 horizons) into a single decision engine. Tests 16 cross-timeframe strategies to find optimal signal mixing.
+
+**Strategy types:**
+- 1h-only (4): `1h_both_agree`, `1h_either_agree`, `1h_4h_only`, `1h_8h_only`
+- 15'-only (4): `15m_s4_only`, `15m_s8_only`, `15m_both_agree`, `15m_either_agree`
+- Cross-TF (8): `all_4_agree`, `any_4_buy`, `majority_3of4`, `1h_8h_and_15m_s8`, `1h_8h_or_15m_s8`, `1h_4h_and_15m_s4`, `1h_8h_confirmed_15m`, `15m_fast_entry_1h_exit`
+
+**Two evaluation cadences:** hourly (15' signals snapped to :00) and 15-min (1h signals carried forward). Confidence sweep [55–90%]. Max drawdown tracking.
+
+```bash
+python testing_deku_fusion.py BTC              # Hourly evaluation cadence
+python testing_deku_fusion.py BTC --15min      # 15-min evaluation cadence
+python testing_deku_fusion.py BTC --compare    # Deku V15 vs CASCA V15 side-by-side
+```
+
+Results: `models/testing_deku_fusion_results.csv`
+
 ---
 
 ## Index CFD System
@@ -392,7 +438,11 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `crypto_trading_system_casca.py` | ~3,900 | **CASCA Production** — Modes A/B/D/E/F/DF. Profit factor scoring. Mode A gamma optimization. Live trader imports from this. Output: `crypto_casca_best_models.csv` |
+| `crypto_trading_system_casca.py` | ~3,900 | **CASCA Production** — Modes A/B/D/E/F/DF. Profit factor scoring. MIN_COMBO_SIZE=2 (no solo models). Mode A gamma optimization. Live trader imports from this. Output: `crypto_casca_best_models.csv` |
+| `crypto_trading_system_casca_v1.3.1.py` | ~3,900 | **CASCA V1.3.1 Experimental** — Per-model feature analysis: each model (RF, GB, LR, LGBM) gets its own optimal feature set. Feature analysis cached to JSON for reuse. Output: `crypto_casca_v1.3.1_best_models.csv` |
+| `crypto_trading_system_casca_v1.4.py` | ~3,900 | **CASCA V1.4 Experimental** — CASCA baseline for Deku comparison. LGBM importance ranking. Output: `crypto_casca_v1.4_best_models.csv` |
+| `crypto_trading_system_deku.py` | ~4,900 | **Deku Hourly** — Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. APF scoring. Output: `crypto_deku_best_models.csv` |
+| `crypto_trading_system_deku_15m.py` | ~4,900 | **Deku V15** — Deku with 15-min candles, s4=60'/s8=120', 4320-candle cap. Output: `crypto_deku_15m_best_models.csv` |
 | `crypto_revolut_trader.py` | 1,109 | Multi-asset crypto auto-trader |
 | `crypto_live_trader.py` | 506 | Signal generation library (imported by trader) |
 | `crypto_trading_system_v15.py` | ~3,600 | V15 Cacarot — 15-min candles, temporal decay, 4320-row cap (Modes B/D/E/F/G/DF) |
@@ -419,6 +469,7 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 | `testing_v15.1.py` | ~275 | V15 gamma optimization — 7 gammas × 2 horizons, isolated results |
 | `testing_v30.1.py` | ~275 | V30 gamma optimization — 7 gammas × 2 horizons, isolated results |
 | `testing_casca.py` | ~600 | Multi-timeframe fusion — V5 + V15 combined, 16 strategies, confidence sweep |
+| `testing_deku_fusion.py` | ~400 | Deku multi-timeframe fusion — Deku hourly + Deku V15, 16 strategies, confidence sweep, max drawdown |
 | `testing_feature_stability.py` | ~300 | Feature stability test — cross-references KEEP/DROP across BTC+ETH × 4h+8h |
 
 ### Archived Scripts (in `archive/`)
@@ -445,6 +496,8 @@ Market data fetched directly from broker API, no yfinance during trading. 44 bas
 
 | File | Version | Status |
 |------|---------|--------|
+| `crypto_trading_system_deku.py` | Deku | **Hourly** — Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. APF scoring. Continuous gamma. |
+| `crypto_trading_system_deku_15m.py` | Deku V15 | **Sub-hourly** — Deku with 15-min candles, s4=60'/s8=120', 4320-candle cap. |
 | `crypto_trading_system_casca.py` | CASCA | **Production** — Profit Factor scoring. Modes A/B/D/E/F/DF. Mode A gamma optimization. Live trader imports from this. |
 | `archive/crypto_trading_system_v5_cacarot.py` | V5.4+ | Archived — old scoring (acc×ret). Superseded by CASCA. |
 | `crypto_trading_system_v6.py` | V6 | Experimental — 12 literature enhancements behind ENHANCEMENTS flags (env var override) |
@@ -474,12 +527,16 @@ engine/
 ├── crypto_live_trader.py              # Signal generation library (NOT run directly)
 ├── hardware_config.py                 # Auto-detects Desktop/Laptop config
 ├── download_macro_data.py             # Macro data downloader (macro + on-chain + derivatives)
+├── crypto_trading_system_deku.py      # Deku hourly — Optuna + XGBoost, APF scoring
+├── crypto_trading_system_deku_15m.py  # Deku V15 — 15-min candles, Optuna optimization
+├── crypto_trading_system_casca_v1.4.py # CASCA V1.4 — baseline for Deku comparison
 ├── crypto_trading_system_v6.py        # V6 — 12 literature enhancements (experimental)
 ├── # testing_literature.py → archived (V5.5 A/B tests COMPLETE)
 ├── testing_literature_v2.py           # A/B test harness for V6 (12 enhancements)
 ├── testing_v15.1.py                  # V15 gamma optimization (7 gammas × 2 horizons)
 ├── testing_v30.1.py                  # V30 gamma optimization (7 gammas × 2 horizons)
 ├── testing_casca.py                  # Multi-timeframe fusion test (V5 + V15, 16 strategies)
+├── testing_deku_fusion.py            # Deku fusion test (1h + 15', 16 strategies)
 ├── testing_feature_stability.py      # Feature stability test (BTC+ETH × 4h+8h)
 ├── requirements.txt                   # Python dependencies
 │
@@ -550,6 +607,8 @@ engine/
 ├── models/
 │   ├── crypto_hourly_best_models.csv  # V5 Cacarot: best model per (asset, horizon)
 │   ├── crypto_casca_best_models.csv   # CASCA: best model per (asset, horizon) — PF scored
+│   ├── crypto_deku_best_models.csv   # Deku hourly: best model per (asset, horizon) — APF scored
+│   ├── crypto_deku_15m_best_models.csv # Deku V15: 15-min candle models — APF scored
 │   ├── crypto_15m_best_models.csv    # V15 best models
 │   ├── crypto_30m_best_models.csv    # V30 best models
 │   ├── crypto_feature_analysis_*.csv  # Feature scores per asset
@@ -652,21 +711,51 @@ xgboost              # XGBoost model (added to model pool)
 
 ## Current Best Models
 
-### Crypto (V5)
+### Crypto (CASCA Production)
 
-| Asset | Horizon | Models | Window | Accuracy | Return | Score | Features | Status |
-|-------|---------|--------|--------|----------|--------|-------|----------|--------|
-| BTC | 4h | RF+GB+LR | 100h | 80.2% | +125.0% | 1.804 | 125 (all) | V5 2y |
-| BTC | 8h | RF+GB | 150h | 84.7% | +319.4% | 3.550 | 15 (optimal) | V5 2y |
-| ETH | 4h | RF+LGBM | 100h | 68.6% | +505% | 4.154 | custom | V5 2y |
-| ETH | 8h | GB | 48h | 79.3% | +616% | 5.681 | custom | V5 2y ⚠️ WARNING |
-| XRP | 4h | GB | 100h | 69.2% | — | — | custom | V4 1y — needs V5 run |
-| XRP | 8h | RF+LR | 100h | 80.8% | — | — | custom | V4 1y — needs V5 run |
+| Asset | Horizon | Models | Window | Accuracy | Return | PF Score | Features | Gamma | Status |
+|-------|---------|--------|--------|----------|--------|----------|----------|-------|--------|
+| BTC | 4h | RF+GB | 48h | 72.9% | +27.2% | 5.00 | 34 | 1.0 | CASCA 6mo |
+| BTC | 8h | GB+LGBM | 150h | 72.4% | +25.4% | 2.00 | 8 | 1.0 | CASCA 6mo |
+| ETH | 4h | — | — | — | — | — | — | — | CASCA DF running |
+| ETH | 8h | — | — | — | — | — | — | — | CASCA DF running |
+| XRP | 4h | RF+GB+LGBM | 100h | 71.7% | +202.3% | — | 15 | 1.0 | V5 2y |
+| XRP | 8h | RF | 100h | 82.5% | +139.2% | — | 50 | 1.0 | V5 2y |
 
-**⚠️ ETH 8h WARNING:** GB model outputs 100% confidence on every signal — overfit on 48h window. Do not increase ETH `max_position_usd` until `CalibratedClassifierCV` fix is applied.
+**BTC trading config:** `4h_only` @80% confidence, $6k max position. Mode F selected 2026-03-17.
 
-**BTC 8h Optimal Features (15):**
-`logret_120h, xa_dax_relstr5d, price_to_sma100h, logret_240h, xa_sp500_relstr5d, vol_ratio_12_48, hour_cos, volatility_48h, atr_pct_14h, xa_nasdaq_relstr5d, sma20_to_sma50h, hour_sin, logret_72h, spread_24h_4h, m_nasdaq_chg1d`
+### Crypto (Deku — Optuna)
+
+| Asset | Horizon | Models | Window | Return | APF Score | Gamma | Status |
+|-------|---------|--------|--------|--------|-----------|-------|--------|
+| BTC | 4h | RF+XGB+LGBM | 48h | +54.2% | 5.902 | 0.9951 | Deku 6mo |
+| BTC | 8h | RF+XGB+LR+LGBM | 48h | +36.2% | 4.543 | 0.9995 | Deku 6mo |
+
+### Mode A Gamma Optimization Results (BTC, 2026-03-17)
+
+Best gamma per horizon (tested 0.999–0.994, baseline gamma=1.0):
+
+**BTC 4h — Winner: gamma=0.996** (baseline +27.2% → +55.8%, 2× improvement)
+
+| Gamma | Combo | Window | Acc | Return | Win% | PF |
+|-------|-------|--------|-----|--------|------|----|
+| 0.999 | LR+LGBM | 200h | 68.4% | +24.8% | 66.7% | 1.80 |
+| 0.998 | RF+LGBM | 200h | 73.7% | +45.2% | 70.6% | 3.80 |
+| 0.997 | LGBM | 200h | 68.4% | +35.7% | 76.5% | 2.75 |
+| **0.996** | **LGBM** | **200h** | **75.4%** | **+55.8%** | **81.2%** | **5.00** |
+| 0.995 | RF+GB | 200h | 73.7% | +50.5% | 75.0% | 5.00 |
+| 0.994 | LR+LGBM | 200h | 66.7% | +35.1% | 78.6% | 5.00 |
+
+**BTC 8h — Winner: gamma=0.997** (baseline +25.4% → +50.0%, 2× improvement)
+
+| Gamma | Combo | Window | Acc | Return | Win% | PF |
+|-------|-------|--------|-----|--------|------|----|
+| 0.999 | RF+GB+LGBM | 200h | 89.5% | +34.7% | 75.0% | 4.48 |
+| 0.998 | GB | 200h | 87.7% | +34.7% | 75.0% | 4.48 |
+| **0.997** | **RF+LGBM** | **100h** | **87.9%** | **+50.0%** | **73.3%** | **3.88** |
+| 0.996 | RF+GB | 100h | 86.2% | +43.6% | 63.6% | 5.00 |
+| 0.995 | RF+LR | 100h | 84.5% | +34.7% | 62.5% | 2.63 |
+| 0.994 | RF+LGBM | 100h | 87.9% | +37.6% | 66.7% | 3.11 |
 
 ### Index CFDs (Broly 1.2)
 
@@ -714,7 +803,10 @@ MACRO_DIR = 'data/macro_data'
 
 | Version | File | Scoring | Key Changes |
 |---------|------|---------|-------------|
-| **CASCA** | `crypto_trading_system_casca.py` | Profit Factor | **Production.** PF model selection (cap 5.0, min 3 trades). Feature selection by PF. Mode A gamma optimization. Mode F by return. Live trader imports from this. |
+| **Deku** | `crypto_trading_system_deku.py` | APF (PF/buyhold) | Optuna TPE+Hyperband Bayesian optimization. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. Joint search over (combo, window, gamma, n_features). LGBM importance ranking. BTC 4h: +54.2% APF=5.9 vs CASCA +27.2%. |
+| **Deku V15** | `crypto_trading_system_deku_15m.py` | APF (PF/buyhold) | Deku with 15-min candles. s4=60', s8=120'. 4320-candle cap (~45 days). |
+| **CASCA** | `crypto_trading_system_casca.py` | Profit Factor | **Production.** PF model selection (cap 5.0, min 3 trades). Feature selection by PF. MIN_COMBO_SIZE=2 (no solo models). Mode A gamma optimization. Mode F by return. Live trader imports from this. |
+| **CASCA V1.3.1** | `crypto_trading_system_casca_v1.3.1.py` | Profit Factor | **Experimental.** Per-model feature analysis: 5-test pipeline run independently for RF, GB, LR, LGBM. Each model gets its own optimal features. Union matrix with per-model column slicing. Feature analysis cached to `models/feature_analysis_v1.3.1_{ASSET}_{H}h.json` — skip ~80 min on re-runs. |
 | **V5 Cacarot** | `archive/crypto_trading_system_v5_cacarot.py` | `acc × (1 + ret/100)` | **Archived.** Temporal decay, 6mo data cap, DF mode, slippage model. Superseded by CASCA. |
 | **V5.5** | `crypto_trading_system_v5.5.py` | `acc × (1 + ret/100)` | Experimental. 7 literature enhancements behind ENHANCEMENTS flags (on-chain, derivatives, triple-barrier, slippage, extended diag, GB calibration, purged embargo). A/B testable via `testing_literature.py` |
 | **V15 Cacarot** | `crypto_trading_system_v15.py` | `acc × (1 + ret/100)` | Sub-hourly. 15-min candles, 8 horizons (15'–120'), temporal decay, 4320-row cap |
@@ -724,6 +816,14 @@ MACRO_DIR = 'data/macro_data'
 | **V5.1** | `archive/crypto_trading_system_v5.1.py` | Archived | Alpha scoring patches integrated |
 | **V4** | `archive/crypto_trading_system_v4.py` | `0.45×Calmar + 0.35×Sharpe + 0.20×Acc` | Bootstrap CI, Calmar/Sharpe, --permtest. Superseded — biased toward low-trade configs |
 | **V3** | `archive/crypto_trading_system_v3_old.py` | Heuristic | Original production. Archived |
+
+### What Deku Adds Over CASCA
+
+1. **Optuna Bayesian optimization** — TPE + Hyperband jointly optimizes (combo, window, gamma, n_features) in ~100 trials. CASCA grid-searches 75 fixed configs. Deku finds better hyperparameter combinations in similar time.
+2. **XGBoost (5th model)** — 26 ensemble combinations (vs CASCA's 11 from 4 models). More diversity, better ensembles.
+3. **APF scoring** — `raw_PF / buyhold_PF` normalizes against market regime. A PF of 3 in a bull run is less impressive than PF=3 in a bear market.
+4. **LGBM importance ranking** — Features ranked by LGBM gain importance (~5 sec) instead of 5-test analysis (~10 min). Optuna picks n_features from the ranked list.
+5. **Continuous gamma** — Optuna searches [0.995–1.0] continuously instead of testing 6 discrete values with Mode A.
 
 ### What CASCA Adds Over V5
 
@@ -766,6 +866,9 @@ MACRO_DIR = 'data/macro_data'
 | **2026-03-10** | `23bc9f2` | **V5 Production** — acc×(1+ret/100) scoring, Mode F, BTC 2y: 80.2%/84.7% |
 | **2026-03-10** | `289c5d4` | Update trading system |
 | **2026-03-11** | `7b681c2` | **V5.3** — thread/worker fixes; V5.4 added; archive/ cleanup; ETH V5 2y results |
+| **2026-03-15–16** | `6530d60` | **CASCA Production** — PF scoring replaces acc×ret. V5 archived. Mode A gamma optimization. V15/V30 Cacarot. |
+| **2026-03-17** | — | **CASCA DF BTC** — RF+GB 4h PF=5.00, GB+LGBM 8h PF=2.00. V1.3.1 (per-model features). V30 CASCA port. MIN_COMBO_SIZE=2. |
+| **2026-03-18** | — | **Deku release** — Optuna TPE+Hyperband replaces CASCA grid search. XGBoost (5th model), APF scoring, LGBM importance ranking, continuous gamma. BTC 4h: +54.2% APF=5.9 (2× CASCA). Deku V15 (15-min candles). Deku fusion test harness. |
 
 ### Session History (Detailed)
 
@@ -777,6 +880,9 @@ MACRO_DIR = 'data/macro_data'
 6. **Mar 8**: V4 created — bootstrap CI, Calmar/Sharpe scoring, --permtest. Mock validation (Phase 1 + Phase 2) on synthetic data. hardware_config lightened. DIAG_WINDOWS reduced. BTC 4h V4: GB+LR w=200h 63% +48.7%.
 7. **Mar 9**: V5 created — scoring replaced with acc×(1+ret/100). Mode F + confidence sweep. Per-step timers. SSL fix. Trader bugfixes.
 8. **Mar 10**: V5 Mode D BTC 4,8h 2y complete. **4h: RF+GB+LR w=100h 80.2% +125%. 8h: RF+GB w=150h 84.7% +319%.** Mode F: either_agree + 75%. V5 promoted to production. V3 archived.
+9. **Mar 15-16**: Cacarot release (temporal decay + 6mo data cap). CASCA created (profit factor scoring). V5 archived. V15/V30 Cacarot+DF. CASCA V1.1 (fee-aware labels). Live trader connected to CASCA.
+10. **Mar 17**: CASCA DF BTC complete (RF+GB 4h PF=5.00, GB+LGBM 8h PF=2.00, `4h_only` @80%). MIN_COMBO_SIZE=2 fixes solo-model overconfidence. V30 CASCA port (PF scoring + Mode A). CASCA V1.3.1 created (per-model feature analysis). ETH DF running.
+11. **Mar 18**: **Deku release** — Optuna TPE+Hyperband Bayesian optimization replaces CASCA sequential grid search. XGBoost added as 5th model (26 combos). APF scoring (PF/buyhold). LGBM importance ranking (~5s vs ~10min). Continuous gamma [0.995–1.0]. BTC 4h: RF+XGB+LGBM +54.2% APF=5.9 (vs CASCA +27.2%). Deku V15 (15-min candles, s4=60'/s8=120'). CASCA V1.4 baseline. Deku fusion test harness (16 strategies, 2 cadences).
 
 ---
 
@@ -792,6 +898,12 @@ crypto_trading_system_casca.py  (CASCA production — PF scoring, Modes A/B/D/E/
   ├── writes: charts/*.html, charts/*.png, models/*.json
   └── writes: models/testing_casca_a_results.csv  (Mode A gamma results)
 
+crypto_trading_system_casca_v1.3.1.py  (CASCA V1.3.1 experimental — per-model features)
+  ├── imports: hardware_config.py
+  ├── reads/writes: models/crypto_casca_v1.3.1_best_models.csv
+  ├── reads/writes: config/trading_config_v1.3.1.json
+  ├── reads/writes: models/feature_analysis_v1.3.1_{ASSET}_{H}h.json  (feature cache)
+  └── writes: models/testing_casca_v1.3.1_a_results.csv  (Mode A)
 
 crypto_trading_system_v15.py  (V15 Cacarot — 15-min candles)
   ├── imports: hardware_config.py
@@ -816,6 +928,26 @@ testing_v15.1.py  (V15 gamma optimization)
 testing_v30.1.py  (V30 gamma optimization)
   ├── imports: crypto_trading_system_v30.py  (patches _load_mode_d_config)
   └── writes: models/testing_v30.1_results.csv, charts/v30.1_test/
+
+crypto_trading_system_deku.py  (Deku hourly — Optuna optimization)
+  ├── imports: hardware_config.py
+  ├── reads: data/macro_data/*.csv
+  ├── reads/writes: data/{asset}_hourly_data.csv
+  ├── reads/writes: models/crypto_deku_best_models.csv
+  ├── reads/writes: config/trading_config_deku.json  (Mode F)
+  └── writes: charts/*.html, charts/*.png
+
+crypto_trading_system_deku_15m.py  (Deku V15 — 15-min candles)
+  ├── imports: hardware_config.py
+  ├── reads/writes: data/{asset}_15m_data.csv
+  ├── reads/writes: models/crypto_deku_15m_best_models.csv
+  ├── reads/writes: config/trading_config_deku_15m.json  (Mode F)
+  └── writes: charts/*_15m_*.html, charts/*_15m_backtest.png
+
+testing_deku_fusion.py  (Deku multi-timeframe fusion)
+  ├── imports: crypto_trading_system_deku.py  (Deku hourly signals)
+  ├── imports: crypto_trading_system_deku_15m.py  (Deku V15 signals)
+  └── writes: models/testing_deku_fusion_results.csv
 
 testing_casca.py  (multi-timeframe fusion)
   ├── imports: crypto_trading_system_casca.py  (CASCA signals)
@@ -891,53 +1023,50 @@ Testing 12 V6 literature enhancements individually via Mode D BTC 4h+8h 1y:
 
 ## Pending Actions
 
-### BIGGEST PRIORITY — CASCA Scoring Model
-
-CASCA replaces V5's broken scoring (`acc × (1 + max(ret, 0) / 100)`) with Profit Factor. V5 picked money-losing models because accuracy dominated. CASCA fixes this across the entire pipeline.
+### Active
 
 | # | Task | Command | Status |
 |---|------|---------|--------|
-| 1 | **CASCA BTC** | `python crypto_trading_system_casca.py D BTC 4,8h` | RUNNING |
-| 2 | **CASCA ETH** | `python crypto_trading_system_casca.py DF ETH 4,8h` | Next |
-| 3 | **Compare CASCA vs V5** | Side-by-side: models selected, return, win rate | After 1-2 |
-| 4 | **CASCA V15/V30** | Apply PF scoring to V15 and V30 (files not yet created) | After 3 |
+| 1 | **Deku V15 BTC** | `python crypto_trading_system_deku_15m.py D BTC 4,8h` | RUNNING (2026-03-18) |
+| 2 | **Deku fusion backtest** | `python testing_deku_fusion.py BTC` + `--15min` | After Deku V15 completes |
+| 3 | **Apply Mode A gamma winners** | Re-run Mode D with gamma=0.996 (4h), 0.997 (8h) | Ready |
+| 4 | **Test CASCA V1.1** | `python crypto_trading_system_casca_v1.1.py D BTC 4,8h` | Fee-aware labels |
+| 5 | **Re-enable ETH** | Set `enabled: true` in trading_config.json | After ETH DF completes |
 
-**Why CASCA matters (BTC s4 example, 2026-03-16):**
-- V5 picked: RF+GB+LR+LGBM w=96 — 84.1% acc, **+14.2% return**, 69% win rate
-- CASCA would pick: RF w=48 — 72.7% acc, **+22.9% return**, 82% win rate
-- V5 chose the wrong model because accuracy dominated scoring
-
-### After CASCA
+### After Active
 
 | # | Task | Command | Status |
 |---|------|---------|--------|
-| 5 | **V15.1 gamma results** | Re-rank by PF (no rerun needed) | V15.1 RUNNING ON DESKTOP |
-| 6 | **V30.1 gamma optimization** | `python testing_v30.1.py` | READY FOR LAPTOP |
-| 7 | **Production V15 with CASCA** | Pick winning gamma → CASCA V15 Mode D | After 4-5 |
-| 8 | **Multi-timeframe fusion** | V5 + V15 only, ranked by return | After 7 |
+| 6 | **Deku DF ETH** | `python crypto_trading_system_deku.py DF ETH 4,8h` | Optuna for ETH |
+| 7 | **V15.1 gamma optimization** | `python testing_v15.1.py --resume` | Re-run with MIN_COMBO_SIZE=2 |
+| 8 | **V30.1 gamma optimization** | `python testing_v30.1.py` | 7 gammas × 2 horizons |
 | 9 | **Fee-aware labels** | `label = 1` when return > 2×TRADING_FEE (0.22%) | 2 tests only |
 | 10 | **Dynamic data cap** | `calc_data_cap(gamma)` formula | TODO |
 
 ### Other TODO
 
 - [ ] **V6 A/B tests** — `python testing_literature_v2.py --resume` — RUNNING on desktop
-- [ ] **V1.5 feature test** — `python testing_cacarot_v1.5.py D BTC 4,8h`
-- [ ] **XRP CASCA** — `python crypto_trading_system_casca.py D XRP 4,8h` then Mode F
-- [ ] **Feature stability test** — `python testing_feature_stability.py`
+- [ ] **XRP CASCA** — `python crypto_trading_system_casca.py DF XRP 4,8h`
 - [ ] **Weekly F runs** — re-run CASCA `F BTC 4,8h` and `F ETH 4,8h` weekly
+- [ ] **Windows auto-start** — CryptoTrader scheduled task registered, needs reboot test
 
 ### Completed
 
+- [x] **Deku hourly release** — DONE (2026-03-18). Optuna+Hyperband, XGBoost, APF scoring, LGBM importance. BTC 4h: +54.2% APF=5.9 (vs CASCA +27.2%).
+- [x] **Deku V15 created** — DONE (2026-03-18). 15-min candles, s4=60'/s8=120', 4320-candle cap.
+- [x] **Deku fusion test harness** — DONE (2026-03-18). `testing_deku_fusion.py` — 16 strategies, 2 cadences, confidence sweep.
+- [x] **CASCA V1.4 created** — DONE (2026-03-18). CASCA baseline for Deku comparison.
+- [x] **CASCA DF BTC** — DONE (2026-03-17). 4h: RF+GB w=48, 72.9% acc, +27.2%, PF=5.00. 8h: GB+LGBM w=150, 72.4% acc, +25.4%, PF=2.00. Mode F: `4h_only` @80%.
+- [x] **CASCA V1.3.1 created** — DONE (2026-03-17). Per-model feature analysis (RF/GB/LR/LGBM each optimized independently). Union matrix with per-model slicing. Feature analysis cached to JSON for reuse across runs (auto-invalidates on gamma change).
+- [x] **V30 CASCA port** — DONE (2026-03-17). PF scoring, MIN_COMBO_SIZE=2, Mode A, `_get_models_csv_path()`.
+- [x] **MIN_COMBO_SIZE=2** — DONE (2026-03-17). Solo models removed from CASCA diagnostic. Fixes overconfidence from uncalibrated solo predictions.
 - [x] **CASCA scoring model** — DONE (2026-03-16). `crypto_trading_system_casca.py` — profit factor replaces acc×ret. Feature selection by PF. Isolated output: `models/crypto_casca_best_models.csv`.
 - [x] **V15 Mode D + Mode F** — DONE (2026-03-16). BTC s8: LGBM 88.1% acc. Mode F: `both_agree` @61%, +62.6% return.
 - [x] **V5+V15 fusion backtest** — DONE (2026-03-16). V15 override (+17.6%) beats V5 (+13.9%), V15 (+12.1%), B&H (+7.9%).
-- [x] **Bug fix: test harnesses overwriting production config** — DONE (2026-03-16).
-- [x] **Bug fix: MODELS_DIR forward reference in V15/V30** — DONE (2026-03-16).
+- [x] **Bug fixes** — DONE (2026-03-16). Test harnesses overwriting production config; MODELS_DIR forward reference in V15/V30.
 - [x] **V15/V30 Cacarot release** — DONE (2026-03-16). Temporal decay + 4320-row cap + DF mode.
 - [x] **Cacarot release (V5)** — DONE (2026-03-16). Temporal decay, 6mo data cap, Mode F charts.
-- [x] **BTC Cacarot Mode DF** — DONE (2026-03-16). BTC: `either_agree` @90%.
-- [x] **ETH Cacarot Mode DF** — DONE (2026-03-16). ETH: `4h_only` @60%.
-- [x] **Live trader restarted** — DONE (2026-03-16). BTC+ETH with Cacarot configs.
+- [x] **BTC + ETH Cacarot DF** — DONE (2026-03-16). BTC: `either_agree` @90%. ETH: `4h_only` @60%.
 - [x] **V5.5 A/B tests** — COMPLETE, archived. Only slippage_model won → promoted.
 - [x] **V5.6 feature tests** — COMPLETE, archived. Only ADX + Garman-Klass useful → added to production.
 - [x] V5 scoring, Mode F, DF mode, per-step timers, hardware_config lightened
@@ -948,4 +1077,4 @@ CASCA replaces V5's broken scoring (`acc × (1 + max(ret, 0) / 100)`) with Profi
 
 ---
 
-*Last updated: March 16, 2026 — Cacarot release (V5 + V15 + V30): temporal decay, 6mo/4320-row data caps, DF mode. Gamma optimization tests (V15.1, V30.1). Casca multi-timeframe fusion test. V6 A/B tests running.*
+*Last updated: March 18, 2026 — Deku release: Optuna TPE+Hyperband replaces CASCA grid search, XGBoost (5th model), APF scoring, BTC 4h +54.2% (2× CASCA). Deku V15 (15-min candles). Deku fusion test harness. CASCA V1.4 baseline.*

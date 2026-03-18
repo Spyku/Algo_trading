@@ -11,4 +11,6 @@ cryptography
 # V6 literature enhancements
 PyWavelets
 xgboost
+# Deku: Bayesian hyperparameter optimization
+optuna
 # fracdiff, hmmlearn removed — manual implementations in V6 (no C build / Python 3.14 support)

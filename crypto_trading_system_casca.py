@@ -8,7 +8,7 @@ CASCA — based on V5 Cacarot with new scoring model:
   - Model selection by Profit Factor (gross_profit / |gross_loss|)
     instead of accuracy × (1 + return/100). Picks models that
     actually make money, not models that predict HOLD well.
-  - Profit factor capped at 5.0 (handles 0-loss edge case)
+  - Profit factor capped at 20.0 (handles 0-loss edge case)
   - Minimum 3 trades required for a valid score
   - Feature selection uses alpha (excess return over buy&hold)
   - Temporal decay sample weighting: gamma^age per sample in all .fit() calls
@@ -157,7 +157,7 @@ def _load_checkpoint(asset, horizon, step):
 
 def _clear_checkpoints(asset, horizon):
     """Remove all checkpoints for an (asset, horizon) after successful completion."""
-    for step in ('features', 'diagnostic'):
+    for step in ('features', 'diagnostic', 'diag_partial'):
         path = _resume_path(asset, horizon, step)
         if os.path.exists(path):
             os.remove(path)
@@ -224,6 +224,7 @@ REPLAY_HOURS = 200
 REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
 DIAG_STEP = 72
 DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 300/500 removed: slow and rarely win
+MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 
 
@@ -798,7 +799,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     """Fast walk-forward test with LGBM only.
     Returns (accuracy, alpha, n_tests, profit_factor).
     Alpha = strategy return - buy & hold return (same period, with 0.09% fees).
-    Profit factor = gross_profit / |gross_loss| (capped at 5.0, 0 if < 3 trades).
+    Profit factor = gross_profit / |gross_loss| (capped at 20.0, 0 if < 3 trades).
     device: override LGBM device ('cpu' for parallel safety, None = use default)."""
     from lightgbm import LGBMClassifier
 
@@ -888,9 +889,9 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     if trades < 3:
         pf = 0.0
     elif total_loss == 0:
-        pf = min(total_gain * 100, 5.0)
+        pf = min(total_gain * 100, 20.0)
     else:
-        pf = min(total_gain / abs(total_loss), 5.0)
+        pf = min(total_gain / abs(total_loss), 20.0)
 
     return accuracy, alpha, total, pf
 
@@ -1701,9 +1702,9 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     if trades < 3:
         combined_score = 0.0
     elif total_loss == 0:
-        combined_score = min(total_gain * 100, 5.0)  # cap when no losses
+        combined_score = min(total_gain * 100, 20.0)  # cap when no losses
     else:
-        combined_score = min(total_gain / abs(total_loss), 5.0)  # cap at 5.0
+        combined_score = min(total_gain / abs(total_loss), 20.0)  # cap at 20.0
 
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
             trades, avg_gain, avg_loss, max_dd * 100, combined_score)
@@ -1712,10 +1713,11 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 DIAG_MODELS = get_diagnostic_models()
 
 
-def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
+def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, resume=False, horizon=None):
     """Run diagnostic and return best config + all results.
     Kills the loky worker pool and removes BLAS limits before running,
-    so RF/GB/LR get full BLAS parallelism in fresh workers."""
+    so RF/GB/LR get full BLAS parallelism in fresh workers.
+    With resume=True, loads partial results from checkpoint and skips completed windows."""
     from joblib.externals.loky import get_reusable_executor
 
     # === KEY V5.4 OPTIMIZATION ===
@@ -1732,17 +1734,38 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
 
     combos = []
     model_names = list(ALL_MODELS.keys())
-    for r in range(1, len(model_names) + 1):
+    for r in range(MIN_COMBO_SIZE, len(model_names) + 1):
         for combo in combinations(model_names, r):
             combos.append(list(combo))
 
-    all_configs = []
-    for window in DIAG_WINDOWS:
-        for combo in combos:
-            all_configs.append((combo, window))
+    # Load partial results from checkpoint if resuming
+    completed_windows = set()
+    all_results = []
+    if resume and horizon is not None:
+        partial = _load_checkpoint(asset_name, horizon, 'diag_partial')
+        if partial:
+            all_results = partial.get('results', [])
+            completed_windows = set(partial.get('completed_windows', []))
+            # Convert stored results back to tuples
+            all_results = [tuple(r) for r in all_results]
+            print(f"  RESUME: loaded {len(all_results)} results from {len(completed_windows)} completed windows")
 
-    print(f"  {len(all_configs)} configs, ALL parallel ({N_JOBS_PARALLEL} workers, step={DIAG_STEP})...")
-    print(f"  Running... (no output until complete)")
+    # Build config batches per window (for progress + resume)
+    window_batches = []
+    for window in DIAG_WINDOWS:
+        if window in completed_windows:
+            continue
+        batch = [(combo, window) for combo in combos]
+        window_batches.append((window, batch))
+
+    total_configs = len(DIAG_WINDOWS) * len(combos)
+    done_configs = len(all_results)
+
+    if not window_batches:
+        print(f"  All {total_configs} configs already completed (resume)")
+    else:
+        remaining = sum(len(b) for _, b in window_batches)
+        print(f"  {total_configs} configs total, {done_configs} done, {remaining} remaining ({N_JOBS_PARALLEL} workers, step={DIAG_STEP})")
 
     n = len(df_features)
     features_np = df_features[feature_cols].values.astype(np.float64)
@@ -1750,14 +1773,54 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
     closes_np = df_features['close'].values.astype(np.float64)
 
     t_diag = time.time()
-    with _suppress_stderr():
-        all_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
-            delayed(_eval_one_config)(
-                features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
-                gamma=gamma
+    best_score = max((r[10] for r in all_results), default=0)
+    best_label = ''
+
+    for batch_idx, (window, batch_configs) in enumerate(window_batches):
+        t_batch = time.time()
+        with _suppress_stderr():
+            batch_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
+                delayed(_eval_one_config)(
+                    features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
+                    gamma=gamma
+                )
+                for combo, window in batch_configs
             )
-            for combo, window in all_configs
-        )
+
+        # Collect results from this batch
+        batch_valid = 0
+        for result in batch_results:
+            if result is not None:
+                all_results.append(result)
+                batch_valid += 1
+                if result[10] > best_score:
+                    best_score = result[10]
+                    best_label = f"{result[0]} w={result[1]}"
+
+        done_configs += len(batch_configs)
+        pct = done_configs / total_configs * 100
+        elapsed = (time.time() - t_diag) / 60
+        batch_time = (time.time() - t_batch) / 60
+
+        # ETA calculation
+        if done_configs < total_configs:
+            rate = elapsed / done_configs if done_configs > 0 else 0
+            eta = rate * (total_configs - done_configs)
+            eta_str = f"ETA {eta:.0f}m"
+        else:
+            eta_str = "done"
+
+        best_str = f"best PF={best_score:.2f} ({best_label})" if best_label else f"best PF={best_score:.2f}"
+        print(f"  [{done_configs}/{total_configs}] {pct:.0f}% | w={window}h ({batch_valid} valid, {batch_time:.1f}m) | {best_str} | {eta_str}")
+
+        # Save partial checkpoint after each window batch
+        completed_windows.add(window)
+        if horizon is not None:
+            _save_checkpoint(asset_name, horizon, 'diag_partial', {
+                'results': [list(r) for r in all_results],
+                'completed_windows': list(completed_windows),
+            })
+
     print(f"  Diagnostic completed in {(time.time() - t_diag)/60:.1f} minutes")
 
     # Restore BLAS limits for any subsequent feature analysis (e.g. next horizon)
@@ -1775,7 +1838,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
             continue
         combo_name, window, acc, n_total, cum_ret, win_rate, trades, avg_gain, avg_loss, max_dd, combined_score = result
         sorted_results.append(result)
-        if combined_score > best_score:
+        if combined_score > best_score or (combined_score == best_score and best_config and cum_ret > best_config.get('return_pct', -999)):
             best_score = combined_score
             best_config = {
                 'coin': asset_name,
@@ -1813,7 +1876,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
         print(f"  |{'':4s}Return:   {ret_str:60s}|")
         wr_str = f"{best_config['win_rate']:.0f}% ({best_config['trades']} trades)"
         print(f"  |{'':4s}Win Rate: {wr_str:60s}|")
-        sc_str = f"{best_config['combined_score']:.4f}  (profit factor, cap 5.0)"
+        sc_str = f"{best_config['combined_score']:.4f}  (profit factor, cap 20.0)"
         print(f"  |{''!s:4s}Score:    {sc_str:60s}|")
         print("  " + "-" * 76)
         print(f"  |{''!s:4s}{'Rank':5s}{'Combo':22s}{'Window':8s}{'Acc':7s}{'Return':9s}{'Score':8s}  |")
@@ -1825,7 +1888,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0):
                   f"  {cum_ret:+6.1f}%  {combined_score:.3f}{marker:>4s} |")
         print("  " + "=" * 76)
         print(f"\n  >>> USE: models={best_config['best_combo']}, window={best_config['best_window']}h")
-        print(f"  >>> Score = Profit Factor (gross_profit / |gross_loss|, cap 5.0, min 3 trades)")
+        print(f"  >>> Score = Profit Factor (gross_profit / |gross_loss|, cap 20.0, min 3 trades)")
         print()
 
     return best_config
@@ -2652,7 +2715,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
             print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
 
             t0 = time.time()
-            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, gamma=gamma)
+            best_config = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, gamma=gamma, resume=resume, horizon=horizon)
             print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
             if best_config:
                 _save_checkpoint(asset_name, horizon, 'diagnostic', best_config)
