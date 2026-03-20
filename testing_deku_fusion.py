@@ -606,15 +606,18 @@ def main():
     print(f"  {'Strategy':<28} {'Conf%':<7} {'Return%':<10} {'Trades':<8} {'WinRate':<9} {'MaxDD':<8} {'B&H%':<9} {'Alpha':<8}")
     print(f"  {'-'*96}")
 
+    # Categorize by actual signal usage, not name prefix
+    PURE_1H = {'1h_both_agree', '1h_either_agree', '1h_4h_only', '1h_8h_only'}
+    PURE_15M = {'15m_both_agree', '15m_either_agree', '15m_s4_only', '15m_s8_only'}
+
+    def _cat(name):
+        if name in PURE_1H: return '[1h]'
+        if name in PURE_15M: return '[15]'
+        return '[MIX]'
+
     for r in all_results:
         marker = ' ***' if r == all_results[0] else ''
-        # Color-code category
-        if r['strategy'].startswith('1h_'):
-            cat = '[1h]'
-        elif r['strategy'].startswith('15m_'):
-            cat = '[15]'
-        else:
-            cat = '[MIX]'
+        cat = _cat(r['strategy'])
         print(f"  {cat} {r['strategy']:<24} {r['min_conf']:<7} {r['return_pct']:<+10.1f} "
               f"{r['trades']:<8} {r['win_rate']:<9.1f} {r['max_dd_pct']:<8.1f} {r['buy_hold_pct']:<+9.1f} "
               f"{r['alpha']:<+8.1f}{marker}")
@@ -627,10 +630,10 @@ def main():
           f"{best['return_pct']:+.1f}% return, {best['trades']} trades, "
           f"alpha={best['alpha']:+.1f}% vs B&H")
 
-    # Compare categories
-    cat_1h = [r for r in all_results if r['strategy'].startswith('1h_')]
-    cat_15m = [r for r in all_results if r['strategy'].startswith('15m_')]
-    cat_mix = [r for r in all_results if not r['strategy'].startswith('1h_') and not r['strategy'].startswith('15m_')]
+    # Compare categories (using actual signal usage, not name prefix)
+    cat_1h = [r for r in all_results if _cat(r['strategy']) == '[1h]']
+    cat_15m = [r for r in all_results if _cat(r['strategy']) == '[15]']
+    cat_mix = [r for r in all_results if _cat(r['strategy']) == '[MIX]']
 
     best_1h = max(cat_1h, key=lambda x: x['return_pct']) if cat_1h else None
     best_15m = max(cat_15m, key=lambda x: x['return_pct']) if cat_15m else None

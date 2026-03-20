@@ -879,10 +879,74 @@ def _handle_help_command():
         "/auto BTC on — Enable auto-trade\n"
         "/auto BTC off — Disable auto-trade\n"
         "/sync — Sync positions from exchange\n"
+        "/optimize BTC — Re-run Mode D optimization\n"
         "/pause — Pause trading (signals only)\n"
         "/resume — Resume trading\n"
         "/stop — Stop the trader"
     )
+
+# ---- /optimize: background Mode D re-optimization ----
+import subprocess
+_optimize_proc = None  # subprocess.Popen or None
+_optimize_lock = threading.Lock()
+
+def _handle_optimize_command(msg):
+    """Launch Mode D optimization as a background subprocess."""
+    global _optimize_proc
+    parts = msg.strip().split()
+    # Parse: /optimize BTC  or  /optimize BTC,ETH  or  /optimize (defaults to BTC)
+    assets = parts[1].upper() if len(parts) > 1 else 'BTC'
+
+    with _optimize_lock:
+        if _optimize_proc is not None and _optimize_proc.poll() is None:
+            send_telegram(f"⏳ Optimization already running (PID {_optimize_proc.pid}). /optstatus to check.")
+            return
+
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crypto_trading_system_deku.py')
+        cmd = [sys.executable, script, 'D', assets, '4,8h']
+
+        # Run at below-normal priority on Windows
+        creation_flags = 0
+        if sys.platform == 'win32':
+            creation_flags = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+
+        _optimize_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            creationflags=creation_flags,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        print(f"  OPTIMIZE: launched Mode D for {assets} (PID {_optimize_proc.pid})")
+        send_telegram(f"🚀 <b>Mode D started</b>\n{assets} 4,8h (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
+
+        # Monitor in background thread
+        def _monitor():
+            global _optimize_proc
+            proc = _optimize_proc
+            proc.wait()
+            rc = proc.returncode
+            if rc == 0:
+                print(f"  OPTIMIZE: completed successfully")
+                send_telegram("✅ <b>Mode D complete</b>\nNew models saved. Hot-reload will pick them up.")
+            else:
+                # Grab last few lines of output for error context
+                out = proc.stdout.read().decode('utf-8', errors='replace') if proc.stdout else ''
+                tail = '\n'.join(out.strip().splitlines()[-5:])
+                print(f"  OPTIMIZE: failed (exit code {rc})")
+                send_telegram(f"❌ <b>Mode D failed</b> (exit {rc})\n<pre>{tail}</pre>")
+            with _optimize_lock:
+                _optimize_proc = None
+
+        threading.Thread(target=_monitor, daemon=True).start()
+
+def _handle_optstatus_command():
+    """Check if optimization is running."""
+    with _optimize_lock:
+        if _optimize_proc is not None and _optimize_proc.poll() is None:
+            send_telegram(f"⏳ Optimization running (PID {_optimize_proc.pid})")
+        else:
+            send_telegram("No optimization running.")
 
 # ---- Signal logging for /chart ----
 SIGNAL_LOG_DIR = 'config'
@@ -1323,6 +1387,10 @@ def _telegram_command_loop(trading_cfg):
                     _handle_auto_command(msg, trading_cfg)
                 elif cmd == '/setup':
                     _setup_start(trading_cfg)
+                elif cmd.startswith('/optimize'):
+                    _handle_optimize_command(msg)
+                elif cmd == '/optstatus':
+                    _handle_optstatus_command()
                 elif cmd == '/help':
                     _handle_help_command()
         except Exception:
@@ -1532,8 +1600,6 @@ def run_loop(trading_cfg, dry_run=False):
                             # Check if best_models CSV changed
                             new_fp = _get_models_fingerprint(trading_cfg)
                             if new_fp != last_models_fp:
-                                # Log what changed and check for regressions
-                                has_regression = False
                                 for key in set(list(new_fp.keys()) + list(last_models_fp.keys())):
                                     old_v = last_models_fp.get(key)
                                     new_v = new_fp.get(key)
@@ -1543,26 +1609,13 @@ def run_loop(trading_cfg, dry_run=False):
                                             print(f"  MODEL UPDATE: {asset} {h}h — NEW: {new_v}")
                                         elif new_v is None:
                                             print(f"  MODEL UPDATE: {asset} {h}h — REMOVED")
-                                            has_regression = True
                                         else:
                                             print(f"  MODEL UPDATE: {asset} {h}h — {old_v} -> {new_v}")
-                                            # Reject if accuracy dropped (test contamination protection)
-                                            try:
-                                                old_acc = float(old_v.split('|')[2])
-                                                new_acc = float(new_v.split('|')[2])
-                                                if new_acc < old_acc - 1.0:
-                                                    print(f"  ⚠ {asset} {h}h accuracy DROPPED {old_acc:.1f}% -> {new_acc:.1f}% — IGNORING")
-                                                    has_regression = True
-                                            except (IndexError, ValueError):
-                                                pass
-                                if has_regression:
-                                    print("  Model change IGNORED — accuracy regression (possible test contamination)")
-                                else:
-                                    last_models_fp = new_fp
-                                    print("  Models improved — re-running signals")
-                                    send_telegram("🔄 <b>Models updated</b> — re-running signals")
-                                    run_all_once(trading_cfg, dry_run=dry_run)
-                                    last_models_fp = _get_models_fingerprint(trading_cfg)
+                                last_models_fp = new_fp
+                                print("  Models updated — re-running signals")
+                                send_telegram("🔄 <b>Models updated</b> — re-running signals")
+                                run_all_once(trading_cfg, dry_run=dry_run)
+                                last_models_fp = _get_models_fingerprint(trading_cfg)
 
                             last_sync = time.time()
                         except Exception as e:

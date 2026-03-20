@@ -237,10 +237,40 @@ TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
-DIAG_STEP = 72
-DIAG_WINDOWS = [48, 72, 100, 150, 200]  # 300/500 removed: slow and rarely win
+DIAG_STEP = 36
+DIAG_WINDOWS = [24, 36, 48, 72, 100, 150, 200]  # 24/36 added: winners hit floor at 48
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
+
+# Optuna scoring metric — set via --metric flag (default: apf)
+OPTUNA_METRIC = 'apf'
+VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
+
+
+
+def _compute_optuna_score(result):
+    """Compute Optuna objective score from eval result tuple based on selected metric.
+    Result tuple: (combo, window, acc, total, cum_return, win_rate,
+                   trades, total_gain, total_loss, max_dd%, adjusted_pf, raw_pf, bh_pf)"""
+    cum_return = result[4]
+    trades = result[6]
+    max_dd = result[9]  # already in %
+    adjusted_pf = result[10]
+    raw_pf = result[11]
+
+    if OPTUNA_METRIC == 'apf':
+        return adjusted_pf
+    elif OPTUNA_METRIC == 'rawpf':
+        return raw_pf
+    elif OPTUNA_METRIC == 'calmar':
+        return cum_return / max_dd if max_dd > 0 else cum_return
+    elif OPTUNA_METRIC == 'return':
+        return cum_return
+    elif OPTUNA_METRIC == 'rpf_sqrt':
+        import math
+        return raw_pf * math.sqrt(trades) if trades > 0 else 0.0
+    else:
+        return adjusted_pf
 
 
 def get_decay_weights(n_samples, gamma):
@@ -630,8 +660,12 @@ MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 
 
 def _get_models_csv_path():
-    """Return the models CSV path — respects MODELS_CSV_OVERRIDE for test isolation."""
-    return MODELS_CSV_OVERRIDE if MODELS_CSV_OVERRIDE else f'{MODELS_DIR}/crypto_deku_best_models.csv'
+    """Return the models CSV path — respects MODELS_CSV_OVERRIDE and --metric for test isolation."""
+    if MODELS_CSV_OVERRIDE:
+        return MODELS_CSV_OVERRIDE
+    if OPTUNA_METRIC != 'apf':
+        return f'{MODELS_DIR}/crypto_deku_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_deku_best_models.csv'
 
 
 def _backup_models_csv():
@@ -2903,7 +2937,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     print(f"  DEKU MODE D: OPTUNA JOINT OPTIMIZATION -- {horizon}h HORIZON")
     print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
     print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
-    print(f"  Search: combo × window × gamma (0.995-1.0) × n_features")
+    metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
+    print(f"  Search: combo × window × gamma (0.994-1.0) × n_features{metric_label}")
     print("=" * 70)
 
     # Download fresh data
@@ -2975,7 +3010,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # Step 3: Optuna study
         print(f"\n{'='*70}")
         print(f"  OPTUNA STUDY: {asset_name} {horizon}h")
-        print(f"  Search space: {len(combo_options)} combos × 5 windows × gamma[0.995-1.0] × features[{min_n_features}-{max_n_features}]")
+        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma[0.994-1.0] × features[{min_n_features}-{max_n_features}]")
         print(f"  Trials: {n_trials} | Data: {n:,} rows")
         print(f"{'='*70}")
 
@@ -3002,8 +3037,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             trial_count += 1
 
             combo_name = trial.suggest_categorical('combo', combo_options)
-            window = trial.suggest_categorical('window', [48, 72, 100, 150, 200])
-            gamma = trial.suggest_float('gamma', 0.995, 1.0)
+            window = trial.suggest_categorical('window', DIAG_WINDOWS)
+            gamma = trial.suggest_float('gamma', 0.994, 1.0)
             n_feat = trial.suggest_int('n_features', min_n_features, max_n_features)
 
             combo = combo_name.split('+')
@@ -3019,21 +3054,42 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             if result is None:
                 return 0.0
 
-            apf = result[10]
+            trades = result[6]
+
+            # Reject configs with too few trades — not statistically reliable
+            MIN_TRADES = 8
+            if trades < MIN_TRADES:
+                return 0.0
+
+            score = _compute_optuna_score(result)
             ret = result[4]
 
-            if apf > best_apf_so_far:
-                best_apf_so_far = apf
+            if score > best_apf_so_far:
+                best_apf_so_far = score
                 print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
-                      f"g={gamma:.4f} f={n_feat:3d} | APF={apf:.3f} ret={ret:+.1f}% "
-                      f"rawPF={result[11]:.2f} bhPF={result[12]:.2f}")
+                      f"g={gamma:.4f} f={n_feat:3d} | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
+                      f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
             elif trial_count % 20 == 0:
-                print(f"  #{trial_count:3d} progress: APF={apf:.3f} | best so far: {best_apf_so_far:.3f}")
+                print(f"  #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
 
-            return apf
+            return score
 
         t_optuna = time.time()
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+        # Auto-extend trials if best APF is below threshold
+        APF_EXTEND_THRESH = 1.7
+        extend_steps = [150, 200]
+        for ext_target in extend_steps:
+            if ext_target <= n_trials:
+                continue
+            if study.best_value >= APF_EXTEND_THRESH:
+                break
+            extra = ext_target - len(study.trials)
+            if extra > 0:
+                print(f"\n  Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} trials (+{extra})...")
+                study.optimize(objective, n_trials=extra, show_progress_bar=False)
+
         optuna_elapsed = (time.time() - t_optuna) / 60
 
         # Results summary
@@ -3042,7 +3098,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  OPTUNA RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min)")
         print(f"  {'='*70}")
         print(f"  Best trial: #{best_trial.number}")
-        print(f"  APF:        {best_trial.value:.4f}")
+        print(f"  {OPTUNA_METRIC.upper():10s} {best_trial.value:.4f}")
         print(f"  Combo:      {best_trial.params['combo']}")
         print(f"  Window:     {best_trial.params['window']}h")
         print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
@@ -3056,7 +3112,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # Top 10 trials
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
         completed_trials.sort(key=lambda t: -t.value)
-        print(f"\n  {'Rank':>4s}  {'APF':>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}")
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}")
         print(f"  {'-'*60}")
         for i, t in enumerate(completed_trials[:10], 1):
             marker = " <-- BEST" if i == 1 else ""
@@ -3111,7 +3167,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             print(f"\n  {'='*70}")
             print(f"  WINNER: {asset_name} {horizon}h")
             print(f"  Models: {best_trial.params['combo']}  Window: {best_window}h  Gamma: {best_gamma:.4f}")
-            print(f"  APF: {apf:.3f}  Return: {cum_ret:+.1f}%  Accuracy: {acc*100:.1f}%")
+            score = _compute_optuna_score(full_result)
+            print(f"  {OPTUNA_METRIC.upper()}: {score:.3f}  Return: {cum_ret:+.1f}%  Accuracy: {acc*100:.1f}%")
             print(f"  rawPF: {raw_pf:.2f}  bhPF: {bh_pf:.2f}  Trades: {trades}  Features: {best_n_feat}")
             print(f"  {'='*70}")
 
@@ -3832,7 +3889,8 @@ def run_strategy_comparison(assets_list, horizons=None):
     print("=" * 60)
 
     # Load trading config for updates
-    tcfg_path = f'{CONFIG_DIR}/trading_config_deku.json'
+    metric_suffix = f'_{OPTUNA_METRIC}' if OPTUNA_METRIC != 'apf' else ''
+    tcfg_path = f'{CONFIG_DIR}/trading_config_deku{metric_suffix}.json'
     try:
         with open(tcfg_path) as f:
             trading_config = json.load(f)
@@ -4789,6 +4847,22 @@ def main():
             except ValueError:
                 pass
 
+    # Parse --metric NAME or --metric all
+    global OPTUNA_METRIC
+    run_all_metrics = False
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--metric' and i < len(sys.argv) - 1:
+            m = sys.argv[i + 1].lower()
+            if m == 'all':
+                run_all_metrics = True
+                print(f"  Scoring metric: ALL ({', '.join(sorted(VALID_METRICS))})")
+            elif m in VALID_METRICS:
+                OPTUNA_METRIC = m
+                print(f"  Scoring metric: {OPTUNA_METRIC}")
+            else:
+                print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
+                return
+
     if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'F', '5', '6', '7'):
         mode = cli_args[0].upper()
 
@@ -4890,7 +4964,86 @@ def main():
                 pass
 
     # Execute mode
-    if mode == 'B':
+    if run_all_metrics and mode in ('D', 'DF'):
+        # --metric all: run Mode DF for each metric, then compare
+        all_results = {}  # metric -> {asset: {strategy, conf, return, win_rate, trades}}
+        for metric in sorted(VALID_METRICS):
+            OPTUNA_METRIC = metric
+            print(f"\n{'#'*70}")
+            print(f"  METRIC: {metric.upper()}")
+            print(f"{'#'*70}")
+            for h in horizons:
+                if len(horizons) > 1:
+                    print(f"\n{'#'*60}")
+                    print(f"  RUNNING {h}h HORIZON")
+                    print(f"{'#'*60}")
+                run_mode_d_optuna(assets_list, horizon=h, n_trials=n_trials, resume=flag_resume)
+            run_strategy_comparison(assets_list, horizons)
+
+            # Read the trading config that Mode F just wrote
+            metric_suffix = f'_{metric}' if metric != 'apf' else ''
+            tcfg_path = f'{CONFIG_DIR}/trading_config_deku{metric_suffix}.json'
+            csv_path = _get_models_csv_path()
+            try:
+                with open(tcfg_path) as f:
+                    tcfg = json.load(f)
+            except Exception:
+                tcfg = {}
+            try:
+                df_m = pd.read_csv(csv_path)
+            except Exception:
+                df_m = pd.DataFrame()
+
+            metric_res = {}
+            for asset in assets_list:
+                ac = tcfg.get(asset, {})
+                strat = ac.get('strategy', '?')
+                conf = ac.get('min_confidence', '?')
+                # Get return/trades from the CSV
+                ret_4h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 4)]['return_pct'].values
+                ret_8h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 8)]['return_pct'].values
+                tr_4h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 4)]['trades'].values
+                tr_8h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 8)]['trades'].values
+                metric_res[asset] = {
+                    'strategy': strat, 'conf': conf,
+                    'ret_4h': float(ret_4h[0]) if len(ret_4h) > 0 else None,
+                    'ret_8h': float(ret_8h[0]) if len(ret_8h) > 0 else None,
+                    'trades_4h': int(tr_4h[0]) if len(tr_4h) > 0 else None,
+                    'trades_8h': int(tr_8h[0]) if len(tr_8h) > 0 else None,
+                }
+            all_results[metric] = metric_res
+
+        # Print comparison table
+        print(f"\n{'='*80}")
+        print(f"  METRIC COMPARISON — ALL RESULTS")
+        print(f"{'='*80}")
+        for asset in assets_list:
+            print(f"\n  {asset}:")
+            print(f"  {'Metric':<10} {'4h Ret':>8} {'4h Tr':>6} {'8h Ret':>8} {'8h Tr':>6} {'Strategy':<16} {'Conf':>5}")
+            print(f"  {'-'*62}")
+            best_metric = None
+            best_total = -999
+            for metric in sorted(VALID_METRICS):
+                r = all_results[metric].get(asset, {})
+                r4 = r.get('ret_4h')
+                r8 = r.get('ret_8h')
+                t4 = r.get('trades_4h')
+                t8 = r.get('trades_8h')
+                strat = r.get('strategy', '?')
+                conf = r.get('conf', '?')
+                r4_s = f"{r4:+.1f}%" if r4 is not None else "   N/A"
+                r8_s = f"{r8:+.1f}%" if r8 is not None else "   N/A"
+                t4_s = f"{t4:>5d}" if t4 is not None else "  N/A"
+                t8_s = f"{t8:>5d}" if t8 is not None else "  N/A"
+                total = (r4 or 0) + (r8 or 0)
+                marker = ""
+                if total > best_total:
+                    best_total = total
+                    best_metric = metric
+                print(f"  {metric:<10} {r4_s:>8} {t4_s:>6} {r8_s:>8} {t8_s:>6} {strat:<16} {conf:>5}")
+            # Mark best after printing all
+            print(f"  >>> BEST METRIC for {asset}: {best_metric.upper()} (combined return: {best_total:+.1f}%)")
+    elif mode == 'B':
         run_mode_b(assets_list, horizon_filter=horizons[0] if len(horizons) == 1 else None)
     elif mode in ('D', 'DF'):
         for h in horizons:

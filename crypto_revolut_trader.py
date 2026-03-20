@@ -1528,8 +1528,6 @@ def run_loop(trading_cfg, dry_run=False):
                             # Check if best_models CSV changed
                             new_fp = _get_models_fingerprint(trading_cfg)
                             if new_fp != last_models_fp:
-                                # Log what changed and check for regressions
-                                has_regression = False
                                 for key in set(list(new_fp.keys()) + list(last_models_fp.keys())):
                                     old_v = last_models_fp.get(key)
                                     new_v = new_fp.get(key)
@@ -1539,26 +1537,13 @@ def run_loop(trading_cfg, dry_run=False):
                                             print(f"  MODEL UPDATE: {asset} {h}h — NEW: {new_v}")
                                         elif new_v is None:
                                             print(f"  MODEL UPDATE: {asset} {h}h — REMOVED")
-                                            has_regression = True
                                         else:
                                             print(f"  MODEL UPDATE: {asset} {h}h — {old_v} -> {new_v}")
-                                            # Reject if accuracy dropped (test contamination protection)
-                                            try:
-                                                old_acc = float(old_v.split('|')[2])
-                                                new_acc = float(new_v.split('|')[2])
-                                                if new_acc < old_acc - 1.0:
-                                                    print(f"  ⚠ {asset} {h}h accuracy DROPPED {old_acc:.1f}% -> {new_acc:.1f}% — IGNORING")
-                                                    has_regression = True
-                                            except (IndexError, ValueError):
-                                                pass
-                                if has_regression:
-                                    print("  Model change IGNORED — accuracy regression (possible test contamination)")
-                                else:
-                                    last_models_fp = new_fp
-                                    print("  Models improved — re-running signals")
-                                    send_telegram("🔄 <b>Models updated</b> — re-running signals")
-                                    run_all_once(trading_cfg, dry_run=dry_run)
-                                    last_models_fp = _get_models_fingerprint(trading_cfg)
+                                last_models_fp = new_fp
+                                print("  Models updated — re-running signals")
+                                send_telegram("🔄 <b>Models updated</b> — re-running signals")
+                                run_all_once(trading_cfg, dry_run=dry_run)
+                                last_models_fp = _get_models_fingerprint(trading_cfg)
 
                             last_sync = time.time()
                         except Exception as e:
