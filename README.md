@@ -96,7 +96,7 @@ Exchange API (Ed25519 signed)               Exchange API (Ed25519 signed)
 | **No model persistence** | Retrains from scratch every prediction. No .pkl files. Always uses latest market data. |
 | **Temporal decay** | Exponential sample weighting `w_i = gamma^(age)`. Recent data matters more. gamma=0.996 → half-life ~7 days. |
 | **6-month data cap** | Training capped at 4,320 hours. Prevents stale data from diluting recent patterns. |
-| **Relative labels** | `label = 1` when return > 168h rolling median return. Drift-robust — adapts to changing market conditions. |
+| **Fee-aware labels** | `label = 1` when future return > 2×TRADING_FEE (0.22%). Only labels profitable moves as positive. Fallback: 200h rolling median. |
 | **Walk-forward validation** | Train on `window` hours → predict next candle → step forward. No future leakage. |
 | **Ensemble voting** | Majority vote across model combo. Confidence = average probability across models. |
 
@@ -105,7 +105,7 @@ Exchange API (Ed25519 signed)               Exchange API (Ed25519 signed)
 1. **Data download** — Hourly candles (Binance via ccxt) + macro data (yfinance)
 2. **Feature engineering** — 130 features (technical + macro + sentiment + cross-asset)
 3. **Feature ranking** — LGBM gain importance ranks all features (~5 sec)
-4. **Optuna optimization** — Joint search over (model combo, window, gamma, n_features) using TPE + Hyperband pruning. Default 100 trials, auto-extends to 150/200 if APF < 1.7
+4. **Optuna optimization** — Joint search over (model combo, window, gamma, n_features) using TPE + Hyperband pruning. Default 150 trials, auto-extends to 200/250 if APF < 1.7
 5. **Walk-forward evaluation** — Train → predict → step forward (DIAG_STEP=36h). Score by APF
 6. **Signal generation** — Best config generates signals with bootstrap confidence intervals
 7. **Charts** — Backtest PNG + interactive HTML strategy charts
@@ -204,7 +204,7 @@ Set per asset by Mode F, stored in trading config:
 | `4h_only` | 4h says BUY | 4h says SELL |
 | `8h_only` | 8h says BUY | 8h says SELL |
 
-Mode F backtests all strategies with a confidence sweep (55–90%) and writes the winner to `trading_config_deku.json`.
+Mode F backtests all strategies with a confidence sweep (60–90%) and writes the winner to `trading_config_deku.json`.
 
 ---
 
@@ -215,7 +215,7 @@ Mode F backtests all strategies with a confidence sweep (55–90%) and writes th
 1. **Startup** — Sync positions with exchange → Telegram notification → immediate scan
 2. **Every hour** — Download data → generate 4h+8h signals → apply strategy → execute trades → Telegram
 3. **Every 5 min** — Position sync (detects manual trades), model hot-reload from CSV
-4. **Every 30 sec** — Poll Telegram for commands
+4. **Every 5 sec** — Poll Telegram for commands
 
 ### Telegram Commands
 
@@ -226,7 +226,9 @@ Mode F backtests all strategies with a confidence sweep (55–90%) and writes th
 | `/stop` | Graceful shutdown |
 | `/pause` / `/resume` | Pause/resume trading |
 | `/sync` | Force position sync |
-| `/conf` | Show current config |
+| `/conf` / `/config` | Show current config |
+| `/setup` | Interactive config editor |
+| `/help` | List all commands |
 | `/chart BTC` | Generate and send chart |
 | `/optimize BTC` | Launch Mode D in background (Deku only) |
 | `/optstatus` | Check optimization progress (Deku only) |
@@ -243,17 +245,37 @@ Asymmetric Ed25519 signature: `timestamp + method + path + body → base64 signa
 
 | Asset | Horizon | Models | Window | Return | APF | Features | Gamma | Trades |
 |-------|---------|--------|--------|--------|-----|----------|-------|--------|
-| BTC | 4h | RF+GB+XGB+LR | 200h | +2.8% | — | 54 | 0.9992 | — |
-| BTC | 8h | GB+XGB+LGBM | 72h | +13.6% | — | 80 | 0.9984 | — |
-| ETH | 4h | RF+GB+LGBM | 100h | +3.8% | 1.59 | 7 | 0.9978 | 14 |
-| ETH | 8h | GB+XGB+LGBM | 24h | +4.9% | 2.92 | 60 | 0.9992 | 11 |
+| BTC | 4h | GB+XGB+LR | 150h | +1.9% | 1.82 | 4 | 0.9962 | 16 |
+| BTC | 8h | RF+XGB | 150h | +10.6% | 7.73 | 48 | 0.9956 | 15 |
+| ETH | 4h | RF+GB+XGB+LGBM | 36h | +4.6% | 4.16 | 5 | 0.9944 | 14 |
+| ETH | 8h | RF+GB+XGB+LGBM | 48h | +6.5% | 2.41 | 21 | 0.9957 | 14 |
+| XRP | 4h | RF+XGB+LR+LGBM | 36h | +0.5% | 2.49 | 34 | 0.9941 | 8 |
+| XRP | 8h | GB+LR+LGBM | 150h | +7.6% | 2.29 | 73 | 0.9971 | 16 |
+| DOGE | 4h | LR+LGBM | 150h | +3.2% | 2.15 | 27 | 0.9962 | 14 |
+| DOGE | 8h | GB+LR+LGBM | 150h | +6.4% | 2.22 | 73 | 0.9971 | 14 |
+| SOL | 4h | RF+XGB+LR+LGBM | 72h | -0.7% | 1.98 | 13 | 0.9972 | 12 |
+| SOL | 8h | RF+GB+XGB | 48h | +5.4% | 2.18 | 17 | 0.9971 | 17 |
+| LINK | 4h | XGB+LGBM | 150h | +5.3% | 2.15 | 6 | 0.9972 | 17 |
+| LINK | 8h | RF+LGBM | 150h | +16.4% | 5.31 | 73 | 0.9993 | 16 |
+| ADA | 4h | RF+GB+XGB+LR+LGBM | 150h | +3.6% | 1.78 | 24 | 0.9967 | 14 |
+| ADA | 8h | RF+GB+XGB+LGBM | 24h | +21.3% | 7.94 | 26 | 0.9996 | 8 |
+| AVAX | 4h | RF+XGB+LR+LGBM | 100h | +6.5% | 1.97 | 20 | 1.0 | 11 |
+| AVAX | 8h | XGB+LR | 150h | +19.6% | 4.03 | 52 | 0.9944 | 18 |
+| DOT | 4h | RF+XGB+LGBM | 100h | +12.5% | 2.83 | 27 | 0.9954 | 16 |
+| DOT | 8h | XGB+LR | 150h | +9.3% | 8.47 | 41 | 0.999 | 17 |
 
 ### Trading Config
 
 ```
-BTC: 8h_only @90%   ($6,000 max)
-ETH: 4h_only @80%   ($6,000 max)
-XRP: disabled
+BTC:  4h_only      @75%  ($1,000 max)  enabled
+ETH:  4h_only      @60%  ($1,000 max)  disabled
+XRP:  either_agree @60%                 enabled
+DOGE: 8h_only      @75%                 disabled
+SOL:  4h_only      @75%                 disabled
+LINK: 8h_only      @85%  ($1,000 max)  enabled
+ADA:  4h_only      @75%                 enabled
+AVAX: 4h_only      @60%                 enabled
+DOT:  8h_only      @80%                 enabled
 ```
 
 ---
@@ -267,7 +289,7 @@ engine/
 ├── crypto_trading_system_casca.py       # CASCA standby — PF scoring, Modes A/B/D/E/F/DF
 ├── crypto_trading_system_v15.py         # V15 Cacarot — 15-min, grid search
 ├── crypto_trading_system_v30.py         # V30 Cacarot — 30-min, grid search
-├── crypto_trading_system_v6.py          # V6 experimental — 12 enhancements
+├── crypto_trading_system_v6.py          # V5.4 legacy — enhancement test bed
 │
 ├── crypto_revolut_deku.py               # Deku live trader
 ├── crypto_revolut_trader.py             # CASCA live trader
@@ -294,7 +316,9 @@ engine/
 │   ├── debug_price.py                   # API price diagnostic
 │   ├── revolut_x_test.py               # API connectivity test
 │   ├── detect_hardware.py               # Hardware detection → config
-│   └── buy_btc.py                       # Manual BTC purchase
+│   ├── buy_btc.py                       # Manual BTC purchase
+│   ├── backtest_v5_v15.py              # V5 vs V15 backtest comparison
+│   └── ib_test_connection.py            # IB broker connectivity test
 │
 ├── data/
 │   ├── {asset}_hourly_data.csv          # Hourly OHLCV (Binance)
@@ -377,7 +401,7 @@ DIAG_STEP = 36                  # walk-forward step (2× CASCA)
 DIAG_WINDOWS = [24, 36, 48, 72, 100, 150, 200]
 GAMMA_RANGE = [0.994, 1.0]      # continuous gamma search
 MIN_TRADES = 8                  # reject low-trade trials
-DEKU_DEFAULT_TRIALS = 150       # auto-extends to 200/250 if APF < 1.7
+DEKU_DEFAULT_TRIALS = 150       # auto-extends to 200 then 250 if APF < 1.7
 APF_EXTEND_THRESH = 1.7         # extension threshold
 
 # CASCA
@@ -397,7 +421,7 @@ REPLAY_HOURS_F = 400            # Mode F — longer for more trades
 
 | Date | Milestone |
 |------|-----------|
-| **2026-03-21** | **Multi-asset expansion.** Added SOL, LINK, ADA, AVAX, DOT. Per-asset DF pipeline. 150 default trials. Diversity-aware holdout. Optional enhancements (return weighting, disagreement filter, funding gate). |
+| **2026-03-21** | **Multi-asset expansion.** Added SOL, LINK, ADA, AVAX, DOT. All 9 assets optimized. Per-asset DF pipeline. 150 default trials. Diversity-aware holdout. Optional enhancements. BTC+LINK activated for live trading. Top: LINK 8h +16.4%, ADA 8h +21.3%, AVAX 8h +19.6%. |
 | **2026-03-20** | **Deku promoted to production.** 3-fold holdout validation. Enhancements tested and rejected. Auto-extend trials. |
 | **2026-03-19** | Deku tuning: DIAG_STEP=36, expanded search space, `--metric` flag. Deku trader + `/optimize` Telegram. ETH DF: 4h +79.8%, 8h +77.1%. |
 | **2026-03-18** | **Deku release.** Optuna TPE+Hyperband, XGBoost, APF scoring, LGBM importance. BTC 4h: +54.2% (2× CASCA). Deku V15 + fusion test. |

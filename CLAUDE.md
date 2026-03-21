@@ -73,7 +73,7 @@ python crypto_revolut_trader.py --loop            # Live trading loop
 python crypto_revolut_trader.py --dry-run --loop  # Signals only, no trades
 ```
 
-**Telegram commands (Deku trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/chart BTC` `/optimize BTC` `/optstatus`
+**Telegram commands (Deku trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/optimize BTC` `/optstatus`
 
 **Telegram commands (CASCA trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/chart BTC`
 
@@ -102,7 +102,7 @@ crypto_revolut_trader.py  (CASCA auto-trader — standby, reads trading_config.j
 - **No model persistence:** System retrains from scratch every prediction. No .pkl files. Intentional design.
 - **Temporal decay (Cacarot):** Exponential sample weighting `w_i = gamma^(age_in_hours)`. Per-model gamma stored in best_models.csv. Newest sample weight=1, oldest=gamma^(n-1). gamma=0.995 → half-life ~6 days, gamma=0.999 → ~29 days. gamma >= 1.0 disables decay (zero overhead).
 - **6-month data cap:** Mode D caps training data at 4,320 hours (6 months). Hardcoded as `MAX_DIAG_HOURS`.
-- **Labels:** Relative to 168h rolling median return, not absolute price direction. `label = 1` means return > median.
+- **Labels (fee-aware):** `label = 1` when future return > 2×TRADING_FEE (0.22%). Fallback mode uses 200h rolling median. Set by `LABEL_MODE = 'fee_aware'`.
 - **Walk-forward validation:** Train on last `window` hours → predict next candle → step forward. DIAG_STEP=36 (Deku) or 72 (CASCA). No future leakage.
 - **Scoring (Deku — production):** Default APF (Adjusted Profit Factor) = `raw_PF / buyhold_PF`. Normalizes against market regime. Supports `--metric` flag: `apf`, `rawpf`, `calmar`, `return`, `rpf_sqrt`. Use `--metric all` to compare.
 - **Scoring (CASCA — standby):** Profit Factor `gross_profit / |gross_loss|` (capped at 5.0, min 3 trades). Feature selection also uses PF. Mode F ranks by return.
@@ -156,7 +156,7 @@ HORIZON_LONG = 8                                   # Deku long horizon (parametr
 AVAILABLE_HORIZONS = [4, 8]                        # Deku production horizons
 DIAG_STEP = 36                                     # Deku walk-forward step (doubled eval points)
 DIAG_WINDOWS = [24, 36, 48, 72, 100, 150, 200]    # Deku search space (7 windows)
-GAMMA_RANGE = [0.994, 1.0]                         # Deku continuous gamma range
+GAMMA_RANGE = (0.994, 1.0)                         # Deku continuous gamma (hardcoded in Optuna suggest_float)
 MIN_TRADES = 8                                     # Deku minimum trades filter
 DEKU_DEFAULT_TRIALS = 150                          # Deku Optuna trial count
 APF_EXTEND_THRESH = 1.7                            # Auto-extend trials if best APF below this
@@ -165,7 +165,7 @@ OPTUNA_METRIC = 'apf'                              # Deku scoring (apf|rawpf|cal
 # CASCA
 DIAG_STEP = 72                                     # CASCA walk-forward step
 DIAG_WINDOWS = [48, 72, 100, 150, 200]             # CASCA windows
-DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA horizons 1-4h
+DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4h
 ```
 
 ---
@@ -206,19 +206,38 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA horizons 1-4h
 
 | Asset | Horizon | Models | Window | Return | APF | Features | Gamma | Trades |
 |-------|---------|--------|--------|--------|-----|----------|-------|--------|
-| BTC | 4h | RF+GB+XGB+LR | 200h | +2.8% | — | 54 | 0.9992 | — |
-| BTC | 8h | GB+XGB+LGBM | 72h | +13.6% | — | 80 | 0.9984 | — |
-| ETH | 4h | RF+GB+LGBM | 100h | +3.8% | 1.59 | 7 | 0.9978 | 14 |
-| ETH | 8h | GB+XGB+LGBM | 24h | +4.9% | 2.92 | 60 | 0.9992 | 11 |
+| BTC | 4h | GB+XGB+LR | 150h | +1.9% | 1.82 | 4 | 0.9962 | 16 |
+| BTC | 8h | RF+XGB | 150h | +10.6% | 7.73 | 48 | 0.9956 | 15 |
+| ETH | 4h | RF+GB+XGB+LGBM | 36h | +4.6% | 4.16 | 5 | 0.9944 | 14 |
+| ETH | 8h | RF+GB+XGB+LGBM | 48h | +6.5% | 2.41 | 21 | 0.9957 | 14 |
+| XRP | 4h | RF+XGB+LR+LGBM | 36h | +0.5% | 2.49 | 34 | 0.9941 | 8 |
+| XRP | 8h | GB+LR+LGBM | 150h | +7.6% | 2.29 | 73 | 0.9971 | 16 |
+| DOGE | 4h | LR+LGBM | 150h | +3.2% | 2.15 | 27 | 0.9962 | 14 |
+| DOGE | 8h | GB+LR+LGBM | 150h | +6.4% | 2.22 | 73 | 0.9971 | 14 |
+| SOL | 4h | RF+XGB+LR+LGBM | 72h | -0.7% | 1.98 | 13 | 0.9972 | 12 |
+| SOL | 8h | RF+GB+XGB | 48h | +5.4% | 2.18 | 17 | 0.9971 | 17 |
+| LINK | 4h | XGB+LGBM | 150h | +5.3% | 2.15 | 6 | 0.9972 | 17 |
+| LINK | 8h | RF+LGBM | 150h | +16.4% | 5.31 | 73 | 0.9993 | 16 |
+| ADA | 4h | RF+GB+XGB+LR+LGBM | 150h | +3.6% | 1.78 | 24 | 0.9967 | 14 |
+| ADA | 8h | RF+GB+XGB+LGBM | 24h | +21.3% | 7.94 | 26 | 0.9996 | 8 |
+| AVAX | 4h | RF+XGB+LR+LGBM | 100h | +6.5% | 1.97 | 20 | 1.0 | 11 |
+| AVAX | 8h | XGB+LR | 150h | +19.6% | 4.03 | 52 | 0.9944 | 18 |
+| DOT | 4h | RF+XGB+LGBM | 100h | +12.5% | 2.83 | 27 | 0.9954 | 16 |
+| DOT | 8h | XGB+LR | 150h | +9.3% | 8.47 | 41 | 0.999 | 17 |
 
 ## Current Trading Config (Deku)
 
 ```json
 {
-  "BTC": { "strategy": "8h_only", "min_confidence": 90, "max_position_usd": 6000, "enabled": true },
-  "ETH": { "strategy": "4h_only", "min_confidence": 80, "max_position_usd": 6000, "enabled": true },
-  "XRP": { "enabled": false },
-  "DOGE": { "enabled": false }
+  "BTC": { "strategy": "4h_only", "min_confidence": 75, "max_position_usd": 1000, "enabled": true },
+  "ETH": { "strategy": "4h_only", "min_confidence": 60, "max_position_usd": 1000, "enabled": false },
+  "XRP": { "strategy": "either_agree", "min_confidence": 60, "enabled": true },
+  "DOGE": { "strategy": "8h_only", "min_confidence": 75, "enabled": false },
+  "SOL": { "strategy": "4h_only", "min_confidence": 75, "enabled": false },
+  "LINK": { "strategy": "8h_only", "min_confidence": 85, "max_position_usd": 1000, "enabled": true },
+  "ADA": { "strategy": "4h_only", "min_confidence": 75, "enabled": true },
+  "AVAX": { "strategy": "4h_only", "min_confidence": 60, "enabled": true },
+  "DOT": { "strategy": "8h_only", "min_confidence": 80, "enabled": true }
 }
 ```
 
@@ -238,12 +257,11 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA horizons 1-4h
 ## Pending Work
 
 ### Active
-1. **Multi-asset DF test** — `python crypto_trading_system_deku.py DF ETH,XRP,DOGE,SOL,LINK,ADA,AVAX,DOT 4,8h` — running now
-2. **Enhancement A/B test** — Compare `--enhancements` vs baseline across assets to decide keep/drop
-3. **Fold weighting** — Change equal fold weights to [0.25, 0.35, 0.40] (F1/F2/F3) to favor recent regime
+1. **Enhancement A/B test** — Compare `--enhancements` vs baseline across assets to decide keep/drop
+2. **Fold weighting** — Change equal fold weights to [0.25, 0.35, 0.40] (F1/F2/F3) to favor recent regime
 
 ### Lower Priority
-4. **Weekly F re-runs** — re-run Deku `F BTC 4,8h` and `F ETH 4,8h` weekly
+3. **Weekly F re-runs** — re-run Deku `F` for all active assets weekly
 
 ### Dropped
 - ~~Mode A gamma optimization~~ — Replaced by Optuna continuous gamma search
@@ -255,6 +273,7 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA horizons 1-4h
 - ~~3h/7h horizons~~ — Performed well in bullish market but poorly in bearish (2026-03-20). Reverted to 4h/8h.
 
 ### Completed (Recent)
+- **Multi-asset DF test** — DONE (2026-03-21). All 9 assets optimized. LINK 8h best (+16.4%, APF 5.31), ADA 8h (+21.3%), AVAX 8h (+19.6%). BTC and LINK activated for live trading.
 - **Multi-asset expansion** — DONE (2026-03-21). Added SOL, LINK, ADA, AVAX, DOT to ASSETS dict. Per-asset DF pipeline (D+F per asset before next).
 - **Diversity-aware holdout** — DONE (2026-03-21). Top 10 by APF + best per unexplored combo → up to 20 candidates. Ensures every combo gets a fair holdout shot.
 - **Default trials bumped to 150** — DONE (2026-03-21). Was 100. Auto-extend now 150→200→250.

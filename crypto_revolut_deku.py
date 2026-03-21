@@ -684,6 +684,20 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
 # ============================================================
 _last_update_id = 0
 
+def _answer_callback_query(callback_query_id):
+    """Acknowledge inline button press (removes loading spinner)."""
+    token = TELEGRAM_CONFIG.get('token', '')
+    if not token:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+        payload = json.dumps({'callback_query_id': callback_query_id}).encode('utf-8')
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=5, context=_ssl_ctx)
+    except Exception:
+        pass
+
+
 def check_telegram_commands():
     global _last_update_id
     token = TELEGRAM_CONFIG.get('token', '')
@@ -699,9 +713,17 @@ def check_telegram_commands():
         last_text = None
         for update in data['result']:
             _last_update_id = update['update_id']
+            # Handle text messages
             text = update.get('message', {}).get('text', '').strip()
             if text:
                 last_text = text
+            # Handle inline button presses (callback queries)
+            cb = update.get('callback_query')
+            if cb:
+                _answer_callback_query(cb['id'])
+                cb_data = cb.get('data', '').strip()
+                if cb_data:
+                    last_text = cb_data
         return last_text
     except Exception:
         pass
@@ -722,14 +744,16 @@ def _flush_old_updates():
     except Exception:
         pass
 
-def _handle_status_command():
+def _handle_status_command(with_charts=False):
     trading_cfg = load_trading_config()
     balances = get_balances()
     lines = [f"📊 <b>Status</b> — {datetime.now().strftime('%H:%M')}\n"]
 
+    enabled_assets = []
     for asset, cfg in trading_cfg.items():
         if not cfg.get('enabled'):
             continue
+        enabled_assets.append(asset)
         pos = load_position(asset)
         symbol = cfg.get('symbol', f'{asset}-USD')
         strategy = cfg.get('strategy', 'both_agree')
@@ -801,9 +825,20 @@ def _handle_status_command():
             lines.append(f"  📊 {len(sells)} trades ({wins}W) ${total:+,.2f}")
         lines.append("")
 
+    # Balance summary
     usd_avail = balances.get('USD', {}).get('available', 0)
     lines.append(f"💵 USD: ${usd_avail:,.2f}")
-    send_telegram("\n".join(lines))
+    other = [(c, b) for c, b in sorted(balances.items()) if c != 'USD' and b['total'] > 0 and c not in enabled_assets]
+    if other:
+        for c, b in other:
+            lines.append(f"  {c}: {b['available']:.6f}")
+
+    send_telegram_with_buttons("\n".join(lines), MAIN_BUTTONS)
+
+    # Auto-send charts
+    if with_charts:
+        for asset in enabled_assets:
+            _generate_and_send_chart(asset)
 
 
 # ============================================================
@@ -836,46 +871,27 @@ def _handle_config_command():
     lines.append("\n/setup to change config")
     send_telegram("\n".join(lines))
 
-def _handle_auto_command(cmd_text, trading_cfg):
-    """Toggle auto_trade for an asset. Usage: /auto BTC on|off"""
-    parts = cmd_text.split()
-    if len(parts) < 3:
-        send_telegram("Usage: <code>/auto BTC on</code> or <code>/auto BTC off</code>")
-        return
-    asset = parts[1].upper()
-    toggle = parts[2].lower()
-    if asset not in trading_cfg:
-        send_telegram(f"Unknown asset: {asset}")
-        return
-    if toggle not in ('on', 'off'):
-        send_telegram("Use <code>on</code> or <code>off</code>")
-        return
-    pos = load_position(asset)
-    new_val = toggle == 'on'
-    pos['auto_trade'] = new_val
-    save_position(asset, pos)
-    icon = "🟢" if new_val else "🔴"
-    msg = f"{icon} <b>{asset} auto-trade: {'ON' if new_val else 'OFF'}</b>"
-    send_telegram(msg)
-    print(f"  {icon} {asset} auto-trade -> {'ON' if new_val else 'OFF'} via Telegram")
+def _handle_summary_command():
+    """Full summary: status + balance + charts for all enabled assets."""
+    _handle_status_command(with_charts=True)
+
 
 def _handle_help_command():
     """Send list of available commands."""
-    send_telegram(
+    send_telegram_with_buttons(
         "📱 <b>Commands</b>\n\n"
-        "/status — Positions, prices, RSI, P&L\n"
-        "/balance — Exchange balances\n"
-        "/config — Show current config\n"
-        "/conf — Same as /config\n"
-        "/chart BTC — 24h price chart with signals\n"
+        "/status — Positions, prices, P&L + balance\n"
+        "/summary — Status + balance + charts\n"
+        "/chart — 24h charts (all active assets)\n"
+        "/chart BTC — 24h chart for single asset\n"
+        "/conf — Show current config\n"
         "/setup — Interactive config editor\n"
-        "/auto BTC on — Enable auto-trade\n"
-        "/auto BTC off — Disable auto-trade\n"
         "/sync — Sync positions from exchange\n"
         "/optimize BTC — Re-run Mode D optimization\n"
         "/pause — Pause trading (signals only)\n"
         "/resume — Resume trading\n"
-        "/stop — Stop the trader"
+        "/stop — Stop the trader",
+        MAIN_BUTTONS
     )
 
 # ---- /optimize: background Mode D re-optimization ----
@@ -1018,14 +1034,72 @@ def send_telegram_photo(photo_path, caption=''):
     return False
 
 
-def _handle_chart_command(msg, trading_cfg):
-    """Generate and send a 24h chart with price + model predictions."""
-    parts = msg.split()
-    asset = parts[1].upper() if len(parts) >= 2 else 'BTC'
-    if asset not in trading_cfg:
-        send_telegram(f"Unknown asset: {asset}. Use: {', '.join(trading_cfg.keys())}")
-        return
+def send_telegram_with_buttons(message, buttons, parse_mode='HTML'):
+    """Send Telegram message with inline keyboard buttons.
+    buttons: list of rows, each row is a list of (text, callback_data) tuples.
+    Example: [[('📊 Charts', '/chart'), ('💰 Status', '/status')], [('⏸ Pause', '/pause')]]
+    """
+    token = TELEGRAM_CONFIG.get('token', '')
+    chat_id = TELEGRAM_CONFIG.get('chat_id', '')
+    if not token or not chat_id:
+        return send_telegram(message, parse_mode)
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    keyboard = {
+        'inline_keyboard': [
+            [{'text': text, 'callback_data': cb} for text, cb in row]
+            for row in buttons
+        ]
+    }
+    payload = json.dumps({
+        'chat_id': chat_id, 'text': message,
+        'parse_mode': parse_mode, 'reply_markup': keyboard
+    }).encode('utf-8')
+    try:
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=15, context=_ssl_ctx) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('ok'):
+                print("  Telegram sent (with buttons)")
+                return True
+            print(f"  [!] Telegram error: {result}")
+            return False
+    except Exception as e:
+        print(f"  [!] Telegram error: {e}")
+        return False
 
+
+# Standard button layouts
+MAIN_BUTTONS = [
+    [('📊 Status', '/status'), ('📈 Charts', '/chart')],
+    [('⚙️ Config', '/conf'), ('🔄 Sync', '/sync')],
+]
+
+
+def _handle_chart_command(msg, trading_cfg):
+    """Generate and send a 24h chart with price + model predictions.
+    /chart       → all enabled assets (separate charts)
+    /chart BTC   → single asset
+    """
+    parts = msg.split()
+    if len(parts) >= 2:
+        asset = parts[1].upper()
+        if asset not in trading_cfg:
+            send_telegram(f"Unknown asset: {asset}. Use: {', '.join(trading_cfg.keys())}")
+            return
+        assets_to_chart = [asset]
+    else:
+        # No asset specified → all enabled
+        assets_to_chart = [a for a, c in trading_cfg.items() if c.get('enabled')]
+        if not assets_to_chart:
+            send_telegram("No enabled assets to chart.")
+            return
+
+    for asset in assets_to_chart:
+        _generate_and_send_chart(asset)
+
+
+def _generate_and_send_chart(asset):
+    """Generate and send a single 24h chart for one asset."""
     # Load price data (last 24h)
     try:
         df_raw = load_data(asset)
@@ -1062,13 +1136,26 @@ def _handle_chart_command(msg, trading_cfg):
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
 
-        fig, ax = plt.subplots(figsize=(10, 5))
+        # Colors (match backtest dark theme)
+        c_bg     = '#0b1120'
+        c_card   = '#111b2e'
+        c_buy    = '#3b82f6'  # blue for BUY
+        c_sell   = '#ef4444'  # red for SELL
+        c_price  = '#94a3b8'  # gray for price line
+        c_gold   = '#eab308'  # yellow for pending
+        c_text   = '#e0e6f0'
+        c_muted  = '#6b7a94'
+        c_grid   = '#1e2d4a'
+        c_green  = '#22c55e'  # green for correct
+
+        fig, ax = plt.subplots(figsize=(10, 5), facecolor=c_bg)
+        ax.set_facecolor(c_card)
 
         # Price line
         times = pd.to_datetime(df_price['datetime'])
         prices = df_price['close'].values
-        ax.plot(times, prices, color='#2196F3', linewidth=1.5, label=f'{asset} Price')
-        ax.fill_between(times, prices.min() * 0.999, prices, alpha=0.1, color='#2196F3')
+        ax.plot(times, prices, color=c_price, linewidth=1.5, label=f'{asset} Price')
+        ax.fill_between(times, prices.min() * 0.999, prices, alpha=0.1, color=c_price)
 
         # Overlay signals
         for sig in signals:
@@ -1091,18 +1178,18 @@ def _handle_chart_command(msg, trading_cfg):
                     correct = None  # not enough future data yet
 
                 if action == 'BUY':
-                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    color = c_green if correct else c_sell if correct is not None else c_gold
                     marker = '^'
                     label_txt = f"BUY {sig.get(f'conf_{HORIZON_SHORT}h', '')}%/{sig.get(f'conf_{HORIZON_LONG}h', '')}%"
                 elif action == 'SELL':
-                    color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
+                    color = c_green if correct else c_sell if correct is not None else c_gold
                     marker = 'v'
                     label_txt = f"SELL"
                 else:
                     continue  # skip HOLD signals on chart
 
                 ax.scatter(sig_time, sig_price, color=color, marker=marker,
-                          s=120, zorder=5, edgecolors='black', linewidth=0.5)
+                          s=120, zorder=5, edgecolors='white', linewidth=0.5)
 
                 # Annotate
                 offset_y = (prices.max() - prices.min()) * 0.03
@@ -1116,32 +1203,37 @@ def _handle_chart_command(msg, trading_cfg):
                 continue
 
         # Formatting
-        ax.set_title(f'{asset}/USD — Last 24h', fontsize=14, fontweight='bold')
-        ax.set_ylabel('Price (USD)', fontsize=11)
+        ax.set_title(f'{asset}/USD — Last 24h', fontsize=14, fontweight='bold',
+                     color=c_text, fontfamily='monospace')
+        ax.set_ylabel('Price (USD)', fontsize=11, color=c_muted)
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax.tick_params(axis='x', rotation=45)
-        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='x', rotation=45, colors=c_muted)
+        ax.tick_params(axis='y', colors=c_muted)
+        ax.grid(True, alpha=0.3, color=c_grid)
+        for spine in ax.spines.values():
+            spine.set_color(c_grid)
 
         # Legend
         from matplotlib.lines import Line2D
         legend_elements = [
-            Line2D([0], [0], marker='^', color='w', markerfacecolor='#4CAF50',
-                   markersize=10, label='BUY (correct)'),
-            Line2D([0], [0], marker='^', color='w', markerfacecolor='#FF5722',
-                   markersize=10, label='BUY (wrong)'),
-            Line2D([0], [0], marker='v', color='w', markerfacecolor='#4CAF50',
-                   markersize=10, label='SELL (correct)'),
-            Line2D([0], [0], marker='v', color='w', markerfacecolor='#FF5722',
-                   markersize=10, label='SELL (wrong)'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFC107',
+            Line2D([0], [0], marker='^', color='w', markerfacecolor=c_buy,
+                   markersize=10, label='BUY'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor=c_sell,
+                   markersize=10, label='SELL'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_green,
+                   markersize=10, label='Correct'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_sell,
+                   markersize=10, label='Wrong'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_gold,
                    markersize=10, label='Pending'),
         ]
-        ax.legend(handles=legend_elements, loc='upper left', fontsize=8)
+        ax.legend(handles=legend_elements, loc='upper left', fontsize=8,
+                  facecolor=c_card, edgecolor=c_grid, labelcolor=c_text)
 
         plt.tight_layout()
         chart_path = os.path.join('charts', f'{asset}_telegram_24h.png')
         os.makedirs('charts', exist_ok=True)
-        fig.savefig(chart_path, dpi=120)
+        fig.savefig(chart_path, dpi=120, facecolor=c_bg)
         plt.close(fig)
 
         # Send
@@ -1355,6 +1447,8 @@ def _telegram_command_loop(trading_cfg):
                     _stop_event.set()
                 elif cmd == '/status':
                     _handle_status_command()
+                elif cmd == '/summary':
+                    _handle_summary_command()
                 elif cmd == '/pause':
                     with _paused_lock:
                         _paused_flag[0] = True
@@ -1365,19 +1459,13 @@ def _telegram_command_loop(trading_cfg):
                         _paused_flag[0] = False
                     send_telegram("▶️ <b>RESUMED</b>")
                     print("  RESUMED via Telegram")
-                elif cmd == '/balance':
-                    bal = get_balances()
-                    bl = [f"  {c}: {b['available']:.6f}" for c, b in sorted(bal.items()) if b['total'] > 0]
-                    send_telegram("💰 <b>Balance</b>\n" + "\n".join(bl))
                 elif cmd == '/sync':
                     sync_positions(trading_cfg, notify=True)
                     send_telegram("🔄 <b>Synced</b>")
-                elif cmd in ('/config', '/conf'):
+                elif cmd == '/conf':
                     _handle_config_command()
                 elif cmd.startswith('/chart'):
                     _handle_chart_command(msg, trading_cfg)
-                elif cmd.startswith('/auto'):
-                    _handle_auto_command(msg, trading_cfg)
                 elif cmd == '/setup':
                     _setup_start(trading_cfg)
                 elif cmd.startswith('/optimize'):
@@ -1470,11 +1558,11 @@ def run_all_once(trading_cfg, dry_run=False):
         r = process_asset(asset, cfg, dry_run=dry_run)
         results.append(r)
 
-    # Send combined Telegram
+    # Send combined Telegram with inline buttons
     valid = [r for r in results if r is not None]
     if valid:
         msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances)
-        send_telegram(msg)
+        send_telegram_with_buttons(msg, MAIN_BUTTONS)
 
     return results
 
@@ -1519,7 +1607,7 @@ def run_loop(trading_cfg, dry_run=False):
             print(f"  {asset}: {cfg.get('strategy','?')} | max=${cfg.get('max_position_usd',0):,.0f} | {auto} | {pos['state'].upper()}")
     conf_parts = [f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%" for a, c in trading_cfg.items() if c.get('enabled')]
     print(f"  Min confidence: {', '.join(conf_parts)}")
-    print(f"  Telegram: /help /status /config /setup /balance /auto /sync /pause /resume /stop")
+    print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 

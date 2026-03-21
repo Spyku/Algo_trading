@@ -260,6 +260,10 @@ N_FEATURES_RANGE = {
 }
 N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
 
+# Mode H: horizon search range
+HORIZON_SEARCH = [3, 4, 5, 6, 7, 8]
+MODE_H_DEFAULT_TRIALS = 200  # extra budget for horizon dimension
+
 # 3-fold rolling holdout — train on ~60%, validate on ~20%, across 3 temporal folds
 N_HOLDOUT_FOLDS = 3
 
@@ -3569,6 +3573,536 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
 
 # ============================================================
+# MODE H: HORIZON SEARCH (Optuna searches horizon alongside other params)
+# ============================================================
+def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
+    """
+    DEKU Mode H: Like Mode D but with horizon as an Optuna parameter (3-8h).
+    Finds the optimal horizon for each asset. Saves top-2 distinct horizons
+    so that Mode F can compare dual-horizon strategies.
+    """
+    t_mode_start = time.time()
+    _kill_orphan_workers()
+
+    combo_options = _build_combo_list()
+    search_horizons = HORIZON_SEARCH
+
+    print("\n" + "=" * 70)
+    print(f"  DEKU MODE H: HORIZON SEARCH ({min(search_horizons)}-{max(search_horizons)}h)")
+    print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
+    print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
+    metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
+    print(f"  Search: combo × window × gamma × n_features × horizon[{min(search_horizons)}-{max(search_horizons)}]{metric_label}")
+    print("=" * 70)
+
+    # Download fresh data
+    print("\n  Updating macro & sentiment data...")
+    t0 = time.time()
+    try:
+        import download_macro_data
+        download_macro_data.main()
+    except ImportError:
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+    except Exception as e:
+        print(f"  WARNING: Macro data update failed: {e}")
+    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+
+    t0 = time.time()
+    update_all_data(assets_list)
+    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+
+    best_models = []
+
+    for asset_name in assets_list:
+        t_asset = time.time()
+
+        print(f"\n{'='*70}")
+        print(f"  DEKU HORIZON SEARCH: {asset_name} ({min(search_horizons)}-{max(search_horizons)}h)")
+        print(f"{'='*70}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        # Step 1: Build features with reference horizon (midpoint=5h for LGBM ranking)
+        MAX_DIAG_HOURS = 6 * 30 * 24
+        ref_horizon = 5
+        print(f"\n  Building all features (horizon={ref_horizon}h [reference])...")
+        t0 = time.time()
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=ref_horizon)
+        print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
+
+        total_rows = len(df_full)
+        if total_rows > MAX_DIAG_HOURS:
+            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+
+        # Pre-compute labels and forward returns for each searchable horizon
+        for h in search_horizons:
+            fwd_ret = df_full['close'].shift(-h) / df_full['close'] - 1
+            if LABEL_MODE == 'fee_aware':
+                df_full[f'label_{h}h'] = (fwd_ret > 2 * TRADING_FEE).astype(int)
+            else:
+                past_ret = df_full['close'] / df_full['close'].shift(h) - 1
+                rolling_med = past_ret.rolling(200, min_periods=50).median()
+                df_full[f'label_{h}h'] = (fwd_ret > rolling_med).astype(int)
+            df_full[f'_fwd_ret_{h}h'] = fwd_ret
+
+        # Drop NaN across all horizon labels
+        label_cols = [f'label_{h}h' for h in search_horizons]
+        df_clean = df_full.dropna(subset=all_cols + label_cols).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features, {len(search_horizons)} horizons")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
+            continue
+
+        # Step 2: LGBM importance ranking (using reference horizon labels)
+        # Use label_5h as the ranking target — feature importance is stable across horizons
+        df_clean_rank = df_clean.copy()
+        df_clean_rank['label'] = df_clean_rank['label_5h']
+        print(f"\n  LGBM feature importance ranking (ref: {ref_horizon}h)...")
+        t0 = time.time()
+        importance_df = _test_lgbm_importance(df_clean_rank, all_cols, gamma=1.0)
+        ranked_features = importance_df['feature'].tolist()
+        print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features ranked")
+
+        # Prepare numpy arrays
+        df_optuna = df_clean.dropna(subset=ranked_features + label_cols).reset_index(drop=True)
+        features_np_all = df_optuna[ranked_features].values.astype(np.float64)
+        closes_np_all = df_optuna['close'].values.astype(np.float64)
+
+        # Per-horizon label arrays
+        labels_np_by_h = {}
+        fwd_ret_np_by_h = {}
+        for h in search_horizons:
+            labels_np_by_h[h] = df_optuna[f'label_{h}h'].values.astype(np.int32)
+            fwd_ret_np_by_h[h] = df_optuna[f'_fwd_ret_{h}h'].values.astype(np.float64)
+
+        # Funding rate
+        if '_funding_rate' in df_optuna.columns:
+            funding_np_all = df_optuna['_funding_rate'].values.astype(np.float64)
+        else:
+            funding_np_all = np.full(len(df_optuna), np.nan)
+        n_total = len(df_optuna)
+
+        # 3-fold rolling holdout setup
+        fold_train_frac = 0.60
+        fold_test_frac = 0.20
+        fold_stride = 0.10
+        holdout_folds = []
+        for fi in range(N_HOLDOUT_FOLDS):
+            train_s = int(n_total * fi * fold_stride)
+            train_e = int(n_total * (fi * fold_stride + fold_train_frac))
+            test_s = train_e
+            test_e = int(n_total * (fi * fold_stride + fold_train_frac + fold_test_frac))
+            test_e = min(test_e, n_total)
+            holdout_folds.append((train_s, train_e, test_s, test_e))
+            print(f"  Fold {fi+1}: train [{train_s}:{train_e}] ({train_e-train_s:,} rows) → test [{test_s}:{test_e}] ({test_e-test_s:,} rows)")
+
+        # Optuna trains on fold 1
+        f1_train_s, f1_train_e, _, _ = holdout_folds[0]
+        features_np = features_np_all[f1_train_s:f1_train_e]
+        closes_np = closes_np_all[f1_train_s:f1_train_e]
+        funding_np = funding_np_all[f1_train_s:f1_train_e]
+        # Per-horizon labels for fold 1
+        labels_np_f1_by_h = {h: labels_np_by_h[h][f1_train_s:f1_train_e] for h in search_horizons}
+        n = len(features_np)
+
+        print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
+
+        # Step 3: Optuna study
+        print(f"\n{'='*70}")
+        print(f"  OPTUNA STUDY: {asset_name} (horizon search {min(search_horizons)}-{max(search_horizons)}h)")
+        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma × features × {len(search_horizons)} horizons")
+        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
+        print(f"{'='*70}")
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.HyperbandPruner(
+                min_resource=DEKU_PRUNING_WARMUP,
+                max_resource=n // DIAG_STEP,
+                reduction_factor=3,
+            ),
+            study_name=f'deku_H_{asset_name}',
+        )
+
+        model_factories = _get_deku_diagnostic_models()
+        best_apf_so_far = 0.0
+        trial_count = 0
+
+        def objective(trial):
+            nonlocal best_apf_so_far, trial_count
+            trial_count += 1
+
+            h = trial.suggest_categorical('horizon', search_horizons)
+            combo_name = trial.suggest_categorical('combo', combo_options)
+            window = trial.suggest_categorical('window', DIAG_WINDOWS)
+            gamma = trial.suggest_float('gamma', 0.994, 1.0)
+
+            # Per-horizon feature range
+            feat_min, feat_max = N_FEATURES_RANGE.get(h, N_FEATURES_RANGE_DEFAULT)
+            max_f = min(len(ranked_features), feat_max)
+            n_feat = trial.suggest_int('n_features', feat_min, max_f)
+
+            # Enhancement toggles
+            if DEKU_ENHANCEMENTS:
+                enh_return_weight = trial.suggest_categorical('return_weight', [True, False])
+                enh_disagree = trial.suggest_categorical('disagree_filter', [True, False])
+                enh_disagree_thresh = trial.suggest_float('disagree_threshold', 0.6, 0.9) if enh_disagree else 0.75
+                enh_funding = trial.suggest_categorical('funding_gate', [True, False])
+                enh_funding_thresh = trial.suggest_float('funding_threshold', 0.0003, 0.002) if enh_funding else 0.001
+            else:
+                enh_return_weight = False
+                enh_disagree = False
+                enh_disagree_thresh = 0.75
+                enh_funding = False
+                enh_funding_thresh = 0.001
+
+            combo = combo_name.split('+')
+            feat_np = features_np[:, :n_feat]
+            labels_np_h = labels_np_f1_by_h[h]
+
+            result = _deku_eval_with_pruning(
+                feat_np, labels_np_h, closes_np, combo, window, n,
+                DIAG_STEP, model_factories, gamma=gamma, trial=trial,
+                return_weight=enh_return_weight, disagree_filter=enh_disagree,
+                disagree_threshold=enh_disagree_thresh, funding_gate=enh_funding,
+                funding_threshold=enh_funding_thresh, funding_np=funding_np,
+                horizon=h
+            )
+
+            if result is None:
+                return 0.0
+
+            trades = result[6]
+            MIN_TRADES = 8
+            if trades < MIN_TRADES:
+                return 0.0
+
+            score = _compute_optuna_score(result)
+            ret = result[4]
+
+            if score > best_apf_so_far:
+                best_apf_so_far = score
+                print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
+                      f"g={gamma:.4f} f={n_feat:3d} h={h}h | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
+                      f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
+            elif trial_count % 20 == 0:
+                print(f"  #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
+
+            return score
+
+        t_optuna = time.time()
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+        # Auto-extend
+        APF_EXTEND_THRESH = 1.7
+        extend_steps = [250, 300]
+        for ext_target in extend_steps:
+            if ext_target <= n_trials:
+                continue
+            if study.best_value >= APF_EXTEND_THRESH:
+                break
+            extra = ext_target - len(study.trials)
+            if extra > 0:
+                print(f"\n  Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} trials (+{extra})...")
+                study.optimize(objective, n_trials=extra, show_progress_bar=False)
+
+        optuna_elapsed = (time.time() - t_optuna) / 60
+
+        # Results summary
+        best_trial = study.best_trial
+        print(f"\n  {'='*70}")
+        print(f"  OPTUNA RESULTS: {asset_name} horizon search ({optuna_elapsed:.1f} min)")
+        print(f"  {'='*70}")
+        print(f"  Best trial: #{best_trial.number}")
+        print(f"  {OPTUNA_METRIC.upper():12s} {best_trial.value:.4f}")
+        print(f"  Horizon:    {best_trial.params['horizon']}h")
+        print(f"  Combo:      {best_trial.params['combo']}")
+        print(f"  Window:     {best_trial.params['window']}h")
+        print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
+        print(f"  N_features: {best_trial.params['n_features']}")
+
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
+        completed_trials.sort(key=lambda t: -t.value)
+
+        n_completed = len(completed_trials)
+        n_pruned = len(study.trials) - n_completed
+        print(f"\n  Trials: {n_completed} completed, {n_pruned} pruned ({100*n_pruned//len(study.trials) if study.trials else 0}% pruned)")
+
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}  {'H':>3s}")
+        print(f"  {'-'*65}")
+        for i, t in enumerate(completed_trials[:10], 1):
+            marker = " <-- BEST" if i == 1 else ""
+            print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
+                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}  {t.params['horizon']:2d}h{marker}")
+
+        # Horizon distribution
+        from collections import Counter
+        h_counts = Counter(t.params['horizon'] for t in completed_trials)
+        print(f"\n  Horizon distribution (completed trials):")
+        for h in sorted(h_counts.keys()):
+            bar = '#' * (h_counts[h] * 30 // max(h_counts.values()))
+            print(f"    {h}h: {h_counts[h]:4d} {bar}")
+
+        # Parameter importance
+        try:
+            importances = optuna.importance.get_param_importances(study)
+            print(f"\n  Parameter importance:")
+            for param, imp in importances.items():
+                bar = '#' * int(imp * 40)
+                print(f"    {param:20s} {imp*100:5.1f}% {bar}")
+        except Exception:
+            pass
+
+        # ── 3-FOLD ROLLING HOLDOUT ──
+        # Diversity-aware: best per (combo, window, horizon), then ensure combo diversity
+        seen_configs = set()
+        unique_candidates = []
+        for t in completed_trials:
+            key = (t.params['combo'], t.params['window'], t.params['horizon'])
+            if key not in seen_configs:
+                seen_configs.add(key)
+                unique_candidates.append(t)
+
+        phase1 = unique_candidates[:10]
+        phase1_set = set(id(t) for t in phase1)
+        combos_in_phase1 = set(t.params['combo'] for t in phase1)
+
+        phase2 = []
+        seen_combos_p2 = set()
+        for t in unique_candidates:
+            combo = t.params['combo']
+            if combo not in combos_in_phase1 and combo not in seen_combos_p2:
+                seen_combos_p2.add(combo)
+                phase2.append(t)
+
+        candidates = phase1 + phase2
+        N_CANDIDATES = min(20, len(candidates))
+        candidates = candidates[:N_CANDIDATES]
+
+        print(f"\n  {'='*70}")
+        print(f"  {N_HOLDOUT_FOLDS}-FOLD ROLLING HOLDOUT: {asset_name} (top {N_CANDIDATES} candidates)")
+        print(f"  {'='*70}")
+
+        holdout_results = []
+        min_fold_rows = min(te - ts for _, _, ts, te in holdout_folds)
+        if min_fold_rows >= 200:
+            for ci, trial in enumerate(candidates):
+                c_combo = trial.params['combo'].split('+')
+                c_window = trial.params['window']
+                c_gamma = trial.params['gamma']
+                c_n_feat = trial.params['n_features']
+                c_horizon = trial.params['horizon']
+                c_return_weight = trial.params.get('return_weight', False)
+                c_disagree = trial.params.get('disagree_filter', False)
+                c_disagree_thresh = trial.params.get('disagree_threshold', 0.75)
+                c_funding = trial.params.get('funding_gate', False)
+                c_funding_thresh = trial.params.get('funding_threshold', 0.001)
+
+                fold_scores = []
+                fold_rets = []
+                fold_accs = []
+                fold_trades = []
+                fold_raw_pfs = []
+
+                for fi, (tr_s, tr_e, te_s, te_e) in enumerate(holdout_folds):
+                    fold_feat_test = features_np_all[te_s:te_e, :c_n_feat]
+                    fold_labels_test = labels_np_by_h[c_horizon][te_s:te_e]
+                    fold_closes_test = closes_np_all[te_s:te_e]
+                    fold_funding_test = funding_np_all[te_s:te_e]
+                    n_fold_test = te_e - te_s
+
+                    HOLDOUT_STEP = 12
+                    ho_result = _deku_eval_with_pruning(
+                        fold_feat_test, fold_labels_test, fold_closes_test,
+                        c_combo, c_window, n_fold_test,
+                        HOLDOUT_STEP, model_factories, gamma=c_gamma, trial=None,
+                        return_weight=c_return_weight, disagree_filter=c_disagree,
+                        disagree_threshold=c_disagree_thresh, funding_gate=c_funding,
+                        funding_threshold=c_funding_thresh, funding_np=fold_funding_test,
+                        horizon=c_horizon
+                    )
+
+                    if ho_result:
+                        fold_scores.append(_compute_optuna_score(ho_result))
+                        fold_rets.append(ho_result[4])
+                        fold_accs.append(ho_result[2])
+                        fold_trades.append(ho_result[6])
+                        fold_raw_pfs.append(ho_result[11])
+                    else:
+                        fold_scores.append(0.0)
+                        fold_rets.append(0.0)
+                        fold_accs.append(0.0)
+                        fold_trades.append(0)
+                        fold_raw_pfs.append(0.0)
+
+                avg_score = np.mean(fold_scores)
+                avg_ret = np.mean(fold_rets)
+                avg_acc = np.mean(fold_accs)
+                total_trades = sum(fold_trades)
+                avg_raw_pf = np.mean(fold_raw_pfs)
+
+                holdout_results.append((trial, avg_score, avg_ret, avg_acc, total_trades,
+                                        avg_raw_pf, fold_scores, fold_rets))
+
+            holdout_results.sort(key=lambda x: -x[1])
+
+            print(f"\n  {'Rank':>4s}  {'AVG_'+OPTUNA_METRIC.upper():>8s}  {'AVG_Ret':>8s}  {'AVG_Acc':>7s}  {'Tr':>4s}  "
+                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}  {'H':>3s}")
+            print(f"  {'-'*132}")
+            for i, (trial, avg_sc, avg_ret, avg_acc, tot_tr, avg_rpf, f_scores, f_rets) in enumerate(holdout_results[:10], 1):
+                is_score = trial.value
+                marker = " <-- BEST" if i == 1 else ""
+                gen = "✓" if avg_ret > 0 and avg_acc > 0.55 else "~" if avg_ret > 0 else "✗"
+                f_str = "  ".join(f"{s:+5.1f}" for s in f_rets)
+                print(f"  {i:4d}  {avg_sc:8.3f}  {avg_ret:+7.1f}%  {avg_acc*100:6.1f}%  {tot_tr:4d}  "
+                      f"{f_str}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  "
+                      f"{trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}  {trial.params['horizon']:2d}h{marker}")
+        else:
+            print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
+
+        # Pick top-2 distinct horizons for dual-horizon strategy comparison
+        winners_by_h = {}  # horizon -> (trial, holdout_result)
+        source = holdout_results if (holdout_results and holdout_results[0][1] > 0) else [(t, t.value, 0, 0, 0, 0, [], []) for t in completed_trials]
+
+        for entry in source:
+            trial = entry[0]
+            h = trial.params['horizon']
+            if h not in winners_by_h:
+                winners_by_h[h] = entry
+
+        # Sort horizons by their best holdout score
+        sorted_horizons = sorted(winners_by_h.keys(), key=lambda h: -winners_by_h[h][1])
+        selected_horizons = sorted_horizons[:2]  # top 2
+        selected_horizons.sort()  # short first
+
+        print(f"\n  {'='*70}")
+        print(f"  TOP HORIZONS for {asset_name}: {', '.join(str(h)+'h' for h in selected_horizons)}")
+        print(f"  {'='*70}")
+
+        # Save a model for each selected horizon
+        for h in selected_horizons:
+            entry = winners_by_h[h]
+            winner_trial = entry[0]
+            winner_ho = entry if holdout_results else None
+
+            best_combo = winner_trial.params['combo'].split('+')
+            best_window = winner_trial.params['window']
+            best_gamma = winner_trial.params['gamma']
+            best_n_feat = winner_trial.params['n_features']
+            best_features = ranked_features[:best_n_feat]
+            w_return_weight = winner_trial.params.get('return_weight', False)
+            w_disagree = winner_trial.params.get('disagree_filter', False)
+            w_disagree_thresh = winner_trial.params.get('disagree_threshold', 0.75)
+            w_funding = winner_trial.params.get('funding_gate', False)
+            w_funding_thresh = winner_trial.params.get('funding_threshold', 0.001)
+
+            # Re-run winner for in-sample metrics
+            feat_np = features_np[:, :best_n_feat]
+            labels_np_h = labels_np_f1_by_h[h]
+            full_result = _deku_eval_with_pruning(
+                feat_np, labels_np_h, closes_np, best_combo, best_window, n,
+                DIAG_STEP, model_factories, gamma=best_gamma, trial=None,
+                return_weight=w_return_weight, disagree_filter=w_disagree,
+                disagree_threshold=w_disagree_thresh, funding_gate=w_funding,
+                funding_threshold=w_funding_thresh, funding_np=funding_np,
+                horizon=h
+            )
+
+            if full_result:
+                combo_name, window, acc, n_total_r, cum_ret, win_rate, trades, _, _, max_dd, apf, raw_pf, bh_pf = full_result
+                is_score = _compute_optuna_score(full_result)
+
+                ho_score = winner_ho[1] if winner_ho else 0
+                ho_ret = winner_ho[2] if winner_ho else 0
+                ho_acc = winner_ho[3] if winner_ho else 0
+                ho_trades = winner_ho[4] if winner_ho else 0
+                ho_raw_pf = winner_ho[5] if winner_ho else 0
+                ho_fold_rets = winner_ho[7] if winner_ho else []
+
+                enh_labels = []
+                if w_return_weight: enh_labels.append('retw')
+                if w_disagree: enh_labels.append(f'disagree@{w_disagree_thresh:.2f}')
+                if w_funding: enh_labels.append(f'funding@{w_funding_thresh:.4f}')
+
+                best_config = {
+                    'coin': asset_name,
+                    'best_window': best_window,
+                    'best_combo': winner_trial.params['combo'],
+                    'accuracy': round(acc * 100, 2),
+                    'models': winner_trial.params['combo'],
+                    'return_pct': round(ho_ret if winner_ho else cum_ret, 2),
+                    'win_rate': round(win_rate, 1),
+                    'trades': trades,
+                    'combined_score': round(ho_score if winner_ho else apf, 4),
+                    'feature_set': 'D',
+                    'n_features': best_n_feat,
+                    'optimal_features': ','.join(best_features),
+                    'horizon': h,
+                    'gamma': round(best_gamma, 4),
+                    'enhancements': ','.join(enh_labels) if enh_labels else '',
+                    'enh_return_weight': w_return_weight,
+                    'enh_disagree_filter': w_disagree,
+                    'enh_disagree_threshold': round(w_disagree_thresh, 4) if w_disagree else '',
+                    'enh_funding_gate': w_funding,
+                    'enh_funding_threshold': round(w_funding_thresh, 6) if w_funding else '',
+                }
+                best_models.append(best_config)
+
+                gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
+                print(f"\n  WINNER {h}h: {winner_trial.params['combo']}  w={best_window}h  g={best_gamma:.4f}  f={best_n_feat}  {gen_icon}")
+                print(f"    In-sample:  {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}")
+                if winner_ho and len(ho_fold_rets) > 0:
+                    fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets)
+                    print(f"    Holdout:    {OPTUNA_METRIC}={ho_score:.3f}  avg_ret={ho_ret:+.1f}%  [{fold_str}]")
+
+        print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
+
+    if not best_models:
+        print("\nNo results. Aborting.")
+        return best_models
+
+    # Save best models (merge with existing — clear all horizons for each asset)
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == m['horizon'])
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+    print(f"\n  Best models saved: {csv_path}")
+
+    # Generate signals + charts for best models
+    for m in best_models:
+        features_list = m['optimal_features'].split(',')
+        model_names = m['models'].split('+')
+        generate_signals(m['coin'], model_names, m['best_window'],
+                         feature_override=features_list, horizon=m['horizon'],
+                         gamma=m.get('gamma', 1.0),
+                         return_weight=m.get('enh_return_weight', False),
+                         disagree_filter=m.get('enh_disagree_filter', False),
+                         disagree_threshold=float(m.get('enh_disagree_threshold', 0.75) or 0.75),
+                         funding_gate=m.get('enh_funding_gate', False),
+                         funding_threshold=float(m.get('enh_funding_threshold', 0.001) or 0.001))
+
+    elapsed = (time.time() - t_mode_start) / 60
+    print(f"\n  Mode H complete: {elapsed:.1f} min total")
+
+    return best_models
+
+
+# ============================================================
 # LEGACY MODE D (grid-based, kept for comparison)
 # ============================================================
 def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=False):
@@ -5262,7 +5796,7 @@ def main():
                 print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
                 return
 
-    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'F', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'F', 'H', 'HF', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -5280,14 +5814,20 @@ def main():
             assets_list = list(ASSETS.keys())
 
         # Parse horizon (default: both for Mode B and DF, short for others)
+        # Mode H/HF ignores horizon args (searches 3-8h automatically)
         horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF') else [HORIZON_SHORT]
         for a in cli_args:
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
 
-        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF') else ""
+        # Use MODE_H_DEFAULT_TRIALS for H/HF modes
+        if mode in ('H', 'HF') and n_trials == DEKU_DEFAULT_TRIALS:
+            n_trials = MODE_H_DEFAULT_TRIALS
+
+        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'H', 'HF') else ""
+        h_str = f"search {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h" if mode in ('H', 'HF') else ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DEKU: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)}{trials_str}")
+        print(f"  DEKU: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
         print("=" * 60)
 
     else:
@@ -5462,6 +6002,25 @@ def main():
                 run_strategy_comparison([asset], horizons)
     elif mode == 'F':
         run_strategy_comparison(assets_list, horizons)
+    elif mode in ('H', 'HF'):
+        # Per-asset: run Mode H (horizon search), then F if HF
+        for asset in assets_list:
+            print(f"\n{'='*60}")
+            print(f"  ASSET: {asset}")
+            print(f"{'='*60}")
+            h_results = run_mode_h([asset], n_trials=n_trials, resume=flag_resume)
+
+            if mode == 'HF' and h_results:
+                # Discover which horizons Mode H saved for this asset
+                found_horizons = sorted(set(m['horizon'] for m in h_results if m['coin'] == asset))
+                if len(found_horizons) >= 2:
+                    print(f"\n  Running Mode F with discovered horizons: {', '.join(str(h)+'h' for h in found_horizons)}")
+                    run_strategy_comparison([asset], found_horizons)
+                elif len(found_horizons) == 1:
+                    print(f"\n  Only 1 horizon found ({found_horizons[0]}h) — running F as single-horizon")
+                    run_strategy_comparison([asset], found_horizons)
+                else:
+                    print(f"\n  No horizons found for {asset} — skipping Mode F")
 
     print("\nDone!")
 
