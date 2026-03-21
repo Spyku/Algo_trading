@@ -5844,11 +5844,13 @@ def main():
         print("  D.  OPTUNA OPTIMIZATION (joint combo × window × gamma × features)")
         print("  DF. D then F (optimize + strategy comparison)")
         print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
+        print(f"  H.  HORIZON SEARCH (Optuna sweeps {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h)")
+        print(f"  HF. H then F (horizon search + strategy comparison)")
         print("  ---")
         print(f"  5. Quick BTC (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  6. Quick ETH (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  7. Quick XRP (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        mode = input("\nEnter B/D/DF/F or 5-7: ").strip().upper()
+        mode = input("\nEnter B/D/DF/F/H/HF or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
         if mode in ('5', '6', '7'):
@@ -5856,7 +5858,7 @@ def main():
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('B', 'D', 'DF', 'F'):
+        if mode not in ('B', 'D', 'DF', 'F', 'H', 'HF'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
