@@ -84,17 +84,15 @@ python crypto_revolut_trader.py --dry-run --loop  # Signals only, no trades
 ### Production File Chain
 
 ```
-crypto_trading_system_deku.py  (Deku production — Modes B/D/F/DF, Optuna + APF scoring)
+crypto_trading_system_deku.py  (Deku 1.3 production — Modes B/D/F/DF, Optuna + APF scoring)
   └── hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
 
 crypto_revolut_deku.py  (Deku auto-trader — reads trading_config_deku.json)
   └── crypto_live_trader_deku.py  (signal generation library — NOT run directly)
         └── crypto_trading_system_deku.py  (imports ASSETS, features, models, download/load/build)
-
-crypto_revolut_trader.py  (CASCA auto-trader — standby, reads trading_config.json)
-  └── crypto_live_trader.py  (signal generation library — NOT run directly)
-        └── crypto_trading_system_casca.py  (imports ASSETS, features, models, download/load/build)
 ```
+
+CASCA and all legacy systems (V15/V30 Cacarot, V6) archived — Deku strictly superior.
 
 ### Key Concepts
 
@@ -175,15 +173,9 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | File | Status | Notes |
 |------|--------|-------|
 | `crypto_trading_system_deku.py` | **Deku Production** | Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. 3-fold holdout. Auto-extend trials. `--metric` flag. Writes to `models/crypto_deku_best_models.csv`. |
-| `crypto_trading_system_casca.py` | **CASCA Standby** | Profit factor scoring. 4 models, 11 combos. Feature selection by PF. Writes to `models/crypto_casca_best_models.csv`. |
 | `crypto_trading_system_deku_15m.py` | **Deku V15** | Deku with 15-min candles. s4=60', s8=120'. 4320-candle cap (~45 days). |
-| `crypto_revolut_deku.py` | **Live** | Deku auto-trader + `/optimize` `/optstatus` Telegram commands |
-| `crypto_revolut_trader.py` | Standby | CASCA auto-trader + `/conf` `/chart` Telegram commands |
+| `crypto_revolut_deku.py` | **Live** | Deku auto-trader + Telegram inline buttons + `/optimize` `/optstatus` |
 | `crypto_live_trader_deku.py` | **Live** | Deku signal generation library — NOT run directly |
-| `crypto_live_trader.py` | Standby | CASCA signal generation library — NOT run directly |
-| `crypto_trading_system_v15.py` | V15 Cacarot | 15-min candles, temporal decay, 4320-row cap. |
-| `crypto_trading_system_v30.py` | V30 Cacarot | 30-min candles, temporal decay, 4320-row cap. |
-| `crypto_trading_system_v6.py` | V6 Experimental | 12 literature enhancements behind `ENHANCEMENTS` flags. NOT production. |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
 | `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
@@ -258,12 +250,13 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 
 ### Active
 1. **Enhancement A/B test** — Compare `--enhancements` vs baseline across assets to decide keep/drop
-2. **Fold weighting** — Change equal fold weights to [0.25, 0.35, 0.40] (F1/F2/F3) to favor recent regime
 
 ### Lower Priority
-3. **Weekly F re-runs** — re-run Deku `F` for all active assets weekly
+2. **Weekly F re-runs** — re-run Deku `F` for all active assets weekly
+3. **CPCV validation** — Combinatorial Purged Cross-Validation (López de Prado) as upgrade to 3-fold holdout
 
 ### Dropped
+- ~~Fold weighting~~ — Gamma already handles recency at sample level. Literature doesn't support fold weighting; CPCV is the proper next step.
 - ~~Mode A gamma optimization~~ — Replaced by Optuna continuous gamma search
 - ~~V15/V30 gamma optimization~~ — Multi-timeframe fusion gave bad results
 - ~~Multi-timeframe fusion~~ — Cross-TF fusion worse than single-timeframe (tested 2026-03-19)
