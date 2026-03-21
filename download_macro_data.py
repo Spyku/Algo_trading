@@ -42,7 +42,7 @@ def download_yfinance_data():
     # Tickers to download
     tickers = {
         'VIX':      '^VIX',       # CBOE Volatility Index
-        'DXY':      'DX=F',        # US Dollar Index Futures (DX-Y.NYB unreliable)
+        'DXY':      'DX-Y.NYB',    # US Dollar Index (DX=F delisted 2026-03-20)
         'SP500':    '^GSPC',       # S&P 500
         'NASDAQ':   '^IXIC',      # Nasdaq Composite
         'GOLD':     'GC=F',       # Gold Futures

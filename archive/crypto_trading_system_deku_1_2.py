@@ -1,44 +1,22 @@
 """
-Crypto Hourly Trading System — DEKU
+Crypto Hourly Trading System — DEKU 1.2
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
-130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
+Based on DEKU, adds:
+  1. Label lookahead fix: rolling median on PAST realized returns only
+  2. Fee-aware labels: label=1 when return > 2×fee (LABEL_MODE toggle)
+  3. Hold-out validation: Optuna on 80%, final eval on last 20%
 
-DEKU — Optuna-based joint optimization + XGBoost:
-  Based on CASCA V1.4 (APF scoring), replaces grid search with Bayesian optimization.
-
-  Key changes vs CASCA:
-  1. Optuna TPE + Hyperband: joint optimization of (combo, window, gamma, n_features)
-     - TPE sampler: learns which regions are promising (vs exhaustive grid)
-     - Hyperband pruner: kills bad trials early during walk-forward
-     - ~100 trials finds better optima than 330+ grid configs
-  2. XGBoost added: 5 base models (RF, GB, XGB, LR, LGBM) = 26 ensemble combos
-     - XGB adds L1+L2 regularized boosting with histogram splits
-     - Level-wise growth (vs LGBM leaf-wise, GB depth-wise)
-  3. Feature count as parameter: instead of fixed feature selection, Optuna picks
-     n_features (how many top-ranked features to use) jointly with other params
-  4. Continuous gamma: 0.995-1.0 range instead of 5 discrete values
-  5. LGBM importance ranking replaces 5-test analysis (~1 min vs ~10 min)
-
-  APF scoring (from CASCA V1.4):
-  - Adjusted PF = raw_PF / buyhold_PF (measures skill vs passive holding)
-  - Eliminates market-regime bias
-  - Raw PF capped at 20.0, minimum 3 trades
-
-Modes:
-  B. Quick run (saved models)    D. Optuna optimization
-  DF. D then F                   F. Strategy comparison
-  5/6/7. Quick BTC/ETH/XRP
+Everything else identical to DEKU. Isolated outputs — does NOT touch production.
 
 CLI Usage:
-  python crypto_trading_system_deku.py D BTC 4,8h
-  python crypto_trading_system_deku.py D BTC 4,8h --trials 150
-  python crypto_trading_system_deku.py DF BTC,ETH 4,8h
-  python crypto_trading_system_deku.py B BTC
+  python crypto_trading_system_deku_1_2.py D BTC 4,8h
+  python crypto_trading_system_deku_1_2.py D BTC 4,8h --trials 150
+  python crypto_trading_system_deku_1_2.py DF BTC,ETH 4,8h
+  python crypto_trading_system_deku_1_2.py B BTC
 
 Outputs:
   charts/{ASSET}_backtest.png
-  models/crypto_deku_best_models.csv
+  models/crypto_deku_1_2_best_models.csv
   models/crypto_hourly_chart_data.json
 """
 
@@ -220,20 +198,13 @@ ASSETS = {
     'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
     'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
     'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'data/doge_hourly_data.csv', 'start': '2019-07-01T00:00:00Z'},
-    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
-    'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_hourly_data.csv', 'start': '2019-01-01T00:00:00Z'},
-    'ADA':   {'source': 'binance', 'ticker': 'ADA/USDT',  'file': 'data/ada_hourly_data.csv',  'start': '2018-04-01T00:00:00Z'},
-    'AVAX':  {'source': 'binance', 'ticker': 'AVAX/USDT', 'file': 'data/avax_hourly_data.csv', 'start': '2021-09-01T00:00:00Z'},
-    'DOT':   {'source': 'binance', 'ticker': 'DOT/USDT',  'file': 'data/dot_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
     'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
     'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
     'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
 }
 
-HORIZON_SHORT = 4                 # short horizon (parametric — change here to switch)
-HORIZON_LONG = 8                  # long horizon (parametric — change here to switch)
-AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
-PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
+PREDICTION_HORIZON = 4            # default horizon (legacy)
+AVAILABLE_HORIZONS = [4, 8]       # 4h and 8h models
 
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
@@ -248,26 +219,12 @@ DIAG_STEP = 36
 DIAG_WINDOWS = [24, 36, 48, 72, 100, 150, 200]  # 24/36 added: winners hit floor at 48
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
-EMBARGO_CANDLES = 4  # gap between train/test in walk-forward to prevent label overlap leakage
-
-# Enhancement toggles (Optuna-searchable, controlled by --enhancements flag)
-DEKU_ENHANCEMENTS = False  # master switch — set via --enhancements CLI flag
-
-# Per-horizon feature ranges — short tighter to avoid overfitting, long keeps full range
-N_FEATURES_RANGE = {
-    HORIZON_SHORT: (4, 40),   # short horizon: narrower (overfitting observed with 80+ features)
-    HORIZON_LONG:  (4, 80),   # long horizon: full range (kept 75 features and performed well)
-}
-N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
-
-# 3-fold rolling holdout — train on ~60%, validate on ~20%, across 3 temporal folds
-N_HOLDOUT_FOLDS = 3
 
 # Optuna scoring metric — set via --metric flag (default: apf)
 OPTUNA_METRIC = 'apf'
 VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 
-# Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
+# Label mode: 'fee_aware' = label=1 when return > 2×fee; 'rolling_median' = fixed rolling median (no lookahead)
 LABEL_MODE = 'fee_aware'
 
 
@@ -304,53 +261,6 @@ def get_decay_weights(n_samples, gamma):
         return None
     ages = np.arange(n_samples - 1, -1, -1)
     return gamma ** ages
-
-
-def get_return_weights(closes, horizon, train_start, train_end):
-    """Weight samples by |forward_return|, normalized to mean=1.
-    Samples near end without known forward return get weight=1.0."""
-    n = train_end - train_start
-    weights = np.ones(n, dtype=np.float64)
-    for j in range(n):
-        idx = train_start + j
-        fwd_idx = idx + horizon
-        if fwd_idx < len(closes):
-            ret = abs(closes[fwd_idx] / closes[idx] - 1)
-            weights[j] = ret
-    # Cap at 95th percentile to prevent outlier dominance
-    cap = np.percentile(weights[weights > 0], 95) if np.any(weights > 0) else 1.0
-    weights = np.clip(weights, 0, cap)
-    # Normalize to mean=1
-    mean_w = weights.mean()
-    if mean_w > 0:
-        weights = weights / mean_w
-    return weights
-
-
-def combine_weights(decay_weights, return_weights):
-    """Multiply decay and return weights. Either can be None."""
-    if decay_weights is None and return_weights is None:
-        return None
-    if decay_weights is None:
-        return return_weights
-    if return_weights is None:
-        return decay_weights
-    return decay_weights * return_weights
-
-
-def load_funding_rate(asset_name='BTC'):
-    """Load funding rate from derivatives CSV. Returns Series indexed by datetime, or None."""
-    fname = f'derivatives_{asset_name.lower()}.csv'
-    fpath = os.path.join(MACRO_DIR, fname)
-    if not os.path.exists(fpath):
-        return None
-    try:
-        df = pd.read_csv(fpath, parse_dates=['datetime'], index_col='datetime')
-        if 'funding_rate' in df.columns:
-            return df['funding_rate'].dropna()
-    except Exception:
-        pass
-    return None
 
 
 # ============================================================
@@ -687,7 +597,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         # Fee-aware: label=1 only when future return exceeds round-trip cost
         df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
     else:
-        # Rolling median on PAST realized returns (no lookahead)
+        # Rolling median on PAST realized returns only (no lookahead bias)
+        # past_return[t] = close[t] / close[t-horizon] - 1  (known at time t)
         past_return = df['close'] / df['close'].shift(horizon) - 1
         rolling_median = past_return.rolling(200, min_periods=50).median()
         df['label'] = (future_return > rolling_median).astype(int)
@@ -711,10 +622,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         'price_jerk_1h',
     ]
 
-    # Persist forward return for return-weighted sampling (not a feature, underscore prefix)
-    df['_forward_return'] = future_return
-
-    keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label', '_forward_return']
+    keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label']
     df = df[keep_cols].copy()
 
     nan_counts = df[feature_cols + ['label']].isna().sum()
@@ -745,16 +653,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_deku_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_deku_best_models.csv'
+        return f'{MODELS_DIR}/crypto_deku_1_2_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_deku_1_2_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_deku_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_deku_1_2_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_deku_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_deku_1_2_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -894,21 +802,6 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     macro_cols = [c for c in all_cols if c not in base_cols]
     if macro_cols:
         df[macro_cols] = df[macro_cols].ffill()
-
-    # Load funding rate for regime gate (not a feature — underscore prefix)
-    funding_series = load_funding_rate(asset_name)
-    if funding_series is not None:
-        fr_df = funding_series.to_frame('_funding_rate')
-        fr_df['_merge_dt'] = fr_df.index.floor('h')
-        df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
-        df = df.merge(fr_df[['_merge_dt', '_funding_rate']], on='_merge_dt', how='left')
-        df = df.drop(columns=['_merge_dt'], errors='ignore')
-        df['_funding_rate'] = df['_funding_rate'].ffill()
-        n_funding = df['_funding_rate'].notna().sum()
-        if verbose and n_funding > 0:
-            print(f"    Funding rate: {n_funding} rows loaded (regime gate)")
-    else:
-        df['_funding_rate'] = np.nan
 
     if verbose:
         print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
@@ -1471,9 +1364,7 @@ def _print_bootstrap_ci(signals, label=''):
 
 
 def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS,
-                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0,
-                     return_weight=False, disagree_filter=False, disagree_threshold=0.75,
-                     funding_gate=False, funding_threshold=0.001):
+                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0):
     warnings.filterwarnings('ignore')
     set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
     gamma_str = f", gamma={gamma}" if gamma < 1.0 else ""
@@ -1511,13 +1402,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols, index=X_train.index)
         X_test_s  = pd.DataFrame(scaler.transform(X_test), columns=feature_cols, index=X_test.index)
 
-        decay_w = get_decay_weights(len(y_train), gamma)
-        if return_weight:
-            closes_arr = df_features['close'].values
-            ret_w = get_return_weights(closes_arr, horizon, train_start, i)
-            sw = combine_weights(decay_w, ret_w)
-        else:
-            sw = decay_w
+        sw = get_decay_weights(len(y_train), gamma)
         votes = []
         probas = []
 
@@ -1541,21 +1426,12 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         total_votes = len(votes)
         buy_ratio = buy_votes / total_votes
 
-        # Ensemble disagreement filter
-        if disagree_filter and max(buy_ratio, 1 - buy_ratio) < disagree_threshold:
-            signal = 'HOLD'
-        elif buy_ratio > 0.5:
+        if buy_ratio > 0.5:
             signal = 'BUY'
         elif buy_ratio == 0:
             signal = 'SELL'
         else:
             signal = 'HOLD'
-
-        # Funding rate regime gate: suppress BUY when overleveraged longs
-        if funding_gate and signal == 'BUY' and '_funding_rate' in df_features.columns:
-            fr_val = df_features.iloc[i].get('_funding_rate', np.nan)
-            if not np.isnan(fr_val) and fr_val > funding_threshold:
-                signal = 'HOLD'
 
         avg_proba = np.mean(probas)
         if signal == 'SELL':
@@ -1831,9 +1707,8 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        train_end = max(train_start, i - EMBARGO_CANDLES)  # embargo: gap between train and test
-        X_train = features_np[train_start:train_end]
-        y_train = labels_np[train_start:train_end]
+        X_train = features_np[train_start:i]
+        y_train = labels_np[train_start:i]
         X_test  = features_np[i:i+1]
         y_true  = labels_np[i]
 
@@ -2151,21 +2026,20 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
 # ============================================================
 # CHART DATA EXPORT
 # ============================================================
-def generate_strategy_html(asset_name, signals_short, signals_long, strategy='both_agree'):
+def generate_strategy_html(asset_name, signals_4h, signals_8h, strategy='both_agree'):
     """
     Generate interactive HTML charts (Plotly) with 4 panels:
-    1. Price + short-horizon signals (blue=BUY, red=SELL)
-    2. Price + long-horizon signals
+    1. Price + 4h signals (blue=BUY, red=SELL)
+    2. Price + 8h signals
     3. Price + combined strategy signals
     4. Portfolio equity ($1000 start) vs buy & hold
     Zoom synced across all panels. Colorblind-friendly.
     """
     os.makedirs(CHARTS_DIR, exist_ok=True)
-    h_short, h_long = HORIZON_SHORT, HORIZON_LONG
 
-    sig_s_map = {s['datetime']: s for s in (signals_short or [])}
-    sig_l_map = {s['datetime']: s for s in (signals_long or [])}
-    all_times = sorted(set(list(sig_s_map.keys()) + list(sig_l_map.keys())))
+    sig4_map = {s['datetime']: s for s in (signals_4h or [])}
+    sig8_map = {s['datetime']: s for s in (signals_8h or [])}
+    all_times = sorted(set(list(sig4_map.keys()) + list(sig8_map.keys())))
 
     if not all_times:
         print("  No signals to chart.")
@@ -2173,32 +2047,32 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
 
     merged = []
     for dt in all_times:
-        ss = sig_s_map.get(dt)
-        sl = sig_l_map.get(dt)
-        price = (ss or sl)['close']
-        sig_s = ss['signal'] if ss else 'HOLD'
-        conf_s = ss['confidence'] if ss else 50
-        sig_l = sl['signal'] if sl else 'HOLD'
-        conf_l = sl['confidence'] if sl else 50
+        s4 = sig4_map.get(dt)
+        s8 = sig8_map.get(dt)
+        price = (s4 or s8)['close']
+        sig4 = s4['signal'] if s4 else 'HOLD'
+        conf4 = s4['confidence'] if s4 else 50
+        sig8 = s8['signal'] if s8 else 'HOLD'
+        conf8 = s8['confidence'] if s8 else 50
 
         # Combined signal based on strategy
-        if sig_s == 'SELL' or sig_l == 'SELL':
+        if sig4 == 'SELL' or sig8 == 'SELL':
             combined = 'SELL'
         elif strategy == 'both_agree':
-            if sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= MIN_CONFIDENCE and conf_l >= MIN_CONFIDENCE:
+            if sig4 == 'BUY' and sig8 == 'BUY' and conf4 >= MIN_CONFIDENCE and conf8 >= MIN_CONFIDENCE:
                 combined = 'BUY'
             else:
                 combined = 'HOLD'
         else:  # either
-            if (sig_s == 'BUY' and conf_s >= MIN_CONFIDENCE) or (sig_l == 'BUY' and conf_l >= MIN_CONFIDENCE):
+            if (sig4 == 'BUY' and conf4 >= MIN_CONFIDENCE) or (sig8 == 'BUY' and conf8 >= MIN_CONFIDENCE):
                 combined = 'BUY'
             else:
                 combined = 'HOLD'
 
         merged.append({
             'datetime': dt, 'close': price,
-            'sig_s': sig_s, 'conf_s': conf_s,
-            'sig_l': sig_l, 'conf_l': conf_l,
+            'sig4': sig4, 'conf4': conf4,
+            'sig8': sig8, 'conf8': conf8,
             'combined': combined,
         })
 
@@ -2255,9 +2129,9 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
                     sx.append(d['datetime']); sy.append(d['close']); st.append(f"SELL {d[conf_key]:.0f}%")
             return bx, by, bt, sx, sy, st
 
-        b4x, b4y, b4t, s4x, s4y, s4t = _markers(data, 'sig_s', 'conf_s')
-        b8x, b8y, b8t, s8x, s8y, s8t = _markers(data, 'sig_l', 'conf_l')
-        cbx, cby, _, csx, csy, _ = _markers(data, 'combined', 'conf_s')
+        b4x, b4y, b4t, s4x, s4y, s4t = _markers(data, 'sig4', 'conf4')
+        b8x, b8y, b8t, s8x, s8y, s8t = _markers(data, 'sig8', 'conf8')
+        cbx, cby, _, csx, csy, _ = _markers(data, 'combined', 'conf4')
         cbt = ['STRATEGY BUY'] * len(cbx)
         cst = ['STRATEGY SELL'] * len(csx)
 
@@ -2320,14 +2194,14 @@ function ml(t,h){{return{{title:{{text:t,font:{{color:'#94a3b8',size:13}},x:0.01
 var pl={{x:dates,y:prices,type:'scatter',mode:'lines',name:'Price',line:{{color:gray,width:1.2}}}};
 
 Plotly.newPlot('c4h',[pl,
-  {{x:{json.dumps(b4x)},y:{json.dumps(b4y)},mode:'markers',name:'{h_short}h BUY',text:{json.dumps(b4t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
-  {{x:{json.dumps(s4x)},y:{json.dumps(s4y)},mode:'markers',name:'{h_short}h SELL',text:{json.dumps(s4t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
-],ml('{h_short}h Model',240),{{responsive:true}});
+  {{x:{json.dumps(b4x)},y:{json.dumps(b4y)},mode:'markers',name:'4h BUY',text:{json.dumps(b4t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
+  {{x:{json.dumps(s4x)},y:{json.dumps(s4y)},mode:'markers',name:'4h SELL',text:{json.dumps(s4t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
+],ml('4h Model',240),{{responsive:true}});
 
 Plotly.newPlot('c8h',[pl,
-  {{x:{json.dumps(b8x)},y:{json.dumps(b8y)},mode:'markers',name:'{h_long}h BUY',text:{json.dumps(b8t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
-  {{x:{json.dumps(s8x)},y:{json.dumps(s8y)},mode:'markers',name:'{h_long}h SELL',text:{json.dumps(s8t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
-],ml('{h_long}h Model',240),{{responsive:true}});
+  {{x:{json.dumps(b8x)},y:{json.dumps(b8y)},mode:'markers',name:'8h BUY',text:{json.dumps(b8t)},marker:{{color:blue,symbol:'triangle-up',size:8}}}},
+  {{x:{json.dumps(s8x)},y:{json.dumps(s8y)},mode:'markers',name:'8h SELL',text:{json.dumps(s8t)},marker:{{color:red,symbol:'triangle-down',size:8}}}}
+],ml('8h Model',240),{{responsive:true}});
 
 Plotly.newPlot('cComb',[pl,
   {{x:{json.dumps(cbx)},y:{json.dumps(cby)},mode:'markers',name:'BUY',text:{json.dumps(cbt)},marker:{{color:blue,symbol:'triangle-up',size:10,line:{{width:1,color:'#fff'}}}}}},
@@ -2364,49 +2238,48 @@ Plotly.newPlot('cPort',[
     print(f"  Strategy: {strategy} | Trades: {o_trades} | Win rate: {(o_wins/o_trades*100) if o_trades else 0:.0f}% | Alpha: {o_alpha:+.1f}%")
 
 
-def generate_signal_table_html(asset_name, signals_short, signals_long, strategy='both_agree'):
+def generate_signal_table_html(asset_name, signals_4h, signals_8h, strategy='both_agree'):
     """Generate interactive HTML table: price, price+1h, delta, signals, strategy, correct."""
     os.makedirs(CHARTS_DIR, exist_ok=True)
-    h_short, h_long = HORIZON_SHORT, HORIZON_LONG
 
-    sig_s_map = {s['datetime']: s for s in (signals_short or [])}
-    sig_l_map = {s['datetime']: s for s in (signals_long or [])}
-    all_times = sorted(set(list(sig_s_map.keys()) + list(sig_l_map.keys())))
+    sig4_map = {s['datetime']: s for s in (signals_4h or [])}
+    sig8_map = {s['datetime']: s for s in (signals_8h or [])}
+    all_times = sorted(set(list(sig4_map.keys()) + list(sig8_map.keys())))
     if not all_times:
         return
     all_times = all_times[-168:]
 
     rows = []
     for i, dt in enumerate(all_times):
-        ss = sig_s_map.get(dt)
-        sl = sig_l_map.get(dt)
-        price = (ss or sl)['close']
+        s4 = sig4_map.get(dt)
+        s8 = sig8_map.get(dt)
+        price = (s4 or s8)['close']
 
         # Price +1h = actual price at next timestamp
         if i + 1 < len(all_times):
             next_dt = all_times[i + 1]
-            next_s = sig_s_map.get(next_dt) or sig_l_map.get(next_dt)
+            next_s = sig4_map.get(next_dt) or sig8_map.get(next_dt)
             price_next = next_s['close'] if next_s else price
         else:
             price_next = price
 
         delta = ((price_next - price) / price * 100) if price > 0 else 0
 
-        sig_s = ss['signal'] if ss else 'N/A'
-        conf_s = ss['confidence'] if ss else 0
-        sig_l = sl['signal'] if sl else 'N/A'
-        conf_l = sl['confidence'] if sl else 0
+        sig4 = s4['signal'] if s4 else 'N/A'
+        conf4 = s4['confidence'] if s4 else 0
+        sig8 = s8['signal'] if s8 else 'N/A'
+        conf8 = s8['confidence'] if s8 else 0
 
         # Combined strategy
-        if sig_s == 'SELL' or sig_l == 'SELL':
+        if sig4 == 'SELL' or sig8 == 'SELL':
             combined = 'SELL'
         elif strategy == 'both_agree':
-            if sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= MIN_CONFIDENCE and conf_l >= MIN_CONFIDENCE:
+            if sig4 == 'BUY' and sig8 == 'BUY' and conf4 >= MIN_CONFIDENCE and conf8 >= MIN_CONFIDENCE:
                 combined = 'BUY'
             else:
                 combined = 'HOLD'
         else:
-            if (sig_s == 'BUY' and conf_s >= MIN_CONFIDENCE) or (sig_l == 'BUY' and conf_l >= MIN_CONFIDENCE):
+            if (sig4 == 'BUY' and conf4 >= MIN_CONFIDENCE) or (sig8 == 'BUY' and conf8 >= MIN_CONFIDENCE):
                 combined = 'BUY'
             else:
                 combined = 'HOLD'
@@ -2424,8 +2297,8 @@ def generate_signal_table_html(asset_name, signals_short, signals_long, strategy
         rows.append({
             'dt': dt, 'price': price, 'price_next': price_next,
             'delta': delta,
-            'sig_s': sig_s, 'conf_s': conf_s,
-            'sig_l': sig_l, 'conf_l': conf_l,
+            'sig4': sig4, 'conf4': conf4,
+            'sig8': sig8, 'conf8': conf8,
             'combined': combined, 'correct': correct,
         })
 
@@ -2457,10 +2330,10 @@ def generate_signal_table_html(asset_name, signals_short, signals_long, strategy
   <td class="{dc}">{r['delta']:+.2f}%</td>
   <td class="{_sc(r['combined'])}"><b>{r['combined']}</b></td>
   <td class="{cc}">{r['correct']}</td>
-  <td class="{_sc(r['sig_s'])}">{r['sig_s']}</td>
-  <td>{r['conf_s']:.0f}%</td>
-  <td class="{_sc(r['sig_l'])}">{r['sig_l']}</td>
-  <td>{r['conf_l']:.0f}%</td>
+  <td class="{_sc(r['sig4'])}">{r['sig4']}</td>
+  <td>{r['conf4']:.0f}%</td>
+  <td class="{_sc(r['sig8'])}">{r['sig8']}</td>
+  <td>{r['conf8']:.0f}%</td>
 </tr>
 """
 
@@ -2540,10 +2413,10 @@ def generate_signal_table_html(asset_name, signals_short, signals_long, strategy
   <th onclick="sortTable(3)">_ 1h</th>
   <th onclick="sortTable(4)">Strategy</th>
   <th onclick="sortTable(5)">Correct?</th>
-  <th onclick="sortTable(6)">{h_short}h Signal</th>
-  <th onclick="sortTable(7)">{h_short}h Conf</th>
-  <th onclick="sortTable(8)">{h_long}h Signal</th>
-  <th onclick="sortTable(9)">{h_long}h Conf</th>
+  <th onclick="sortTable(6)">4h Signal</th>
+  <th onclick="sortTable(7)">4h Conf</th>
+  <th onclick="sortTable(8)">8h Signal</th>
+  <th onclick="sortTable(9)">8h Conf</th>
 </tr>
 </thead>
 <tbody>
@@ -2689,12 +2562,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
             }
 
             signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                       feature_override=feature_override, horizon=h, gamma=row_gamma,
-                                       return_weight=str(row.get('enh_return_weight', '')).lower() == 'true',
-                                       disagree_filter=str(row.get('enh_disagree_filter', '')).lower() == 'true',
-                                       disagree_threshold=float(row.get('enh_disagree_threshold', 0.75) or 0.75),
-                                       funding_gate=str(row.get('enh_funding_gate', '')).lower() == 'true',
-                                       funding_threshold=float(row.get('enh_funding_threshold', 0.001) or 0.001))
+                                       feature_override=feature_override, horizon=h, gamma=row_gamma)
             signals = simulate_portfolio(signals)
             _print_bootstrap_ci(signals, label=f"{asset_name} {h}h")
 
@@ -2746,12 +2614,7 @@ def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
                 row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
                 print(f"  Generating {h}h signals (720h) for {asset_name}...")
                 sigs = generate_signals(asset_name, model_names, window, 720,
-                                        feature_override=feature_override, horizon=h, gamma=row_gamma,
-                                        return_weight=str(row.get('enh_return_weight', '')).lower() == 'true',
-                                        disagree_filter=str(row.get('enh_disagree_filter', '')).lower() == 'true',
-                                        disagree_threshold=float(row.get('enh_disagree_threshold', 0.75) or 0.75),
-                                        funding_gate=str(row.get('enh_funding_gate', '')).lower() == 'true',
-                                        funding_threshold=float(row.get('enh_funding_threshold', 0.001) or 0.001))
+                                        feature_override=feature_override, horizon=h, gamma=row_gamma)
                 sigs = simulate_portfolio(sigs)
                 if h == 4:
                     signals_4h = sigs
@@ -2876,20 +2739,15 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
 # Replaces CASCA's sequential feature analysis + grid diagnostic + gamma sweep
 # with a single Optuna study that jointly optimizes all hyperparameters.
 # ============================================================
-DEKU_DEFAULT_TRIALS = 150
+DEKU_DEFAULT_TRIALS = 100
 DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 
 
 def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
-                             step, model_factories, gamma=1.0, trial=None,
-                             return_weight=False, disagree_filter=False,
-                             disagree_threshold=0.75, funding_gate=False,
-                             funding_threshold=0.001, funding_np=None,
-                             horizon=PREDICTION_HORIZON):
+                             step, model_factories, gamma=1.0, trial=None):
     """Walk-forward evaluation with optional Optuna pruning.
     Same logic as _eval_one_config but reports intermediate scores for Hyperband.
-    Runs in the main process (not joblib worker) so models can use all cores.
-    Enhancement params: return_weight, disagree_filter, funding_gate."""
+    Runs in the main process (not joblib worker) so models can use all cores."""
     min_start = window + 50
     if n < min_start + 50:
         return None
@@ -2915,9 +2773,8 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        train_end = max(train_start, i - EMBARGO_CANDLES)  # embargo: gap between train and test
-        X_train = features_np[train_start:train_end]
-        y_train = labels_np[train_start:train_end]
+        X_train = features_np[train_start:i]
+        y_train = labels_np[train_start:i]
         X_test = features_np[i:i+1]
         y_true = labels_np[i]
 
@@ -2942,12 +2799,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
         std[std == 0] = 1.0
         X_train_s = (X_train - mean) / std
         X_test_s = (X_test - mean) / std
-        decay_w = get_decay_weights(len(y_train), gamma)
-        if return_weight:
-            ret_w = get_return_weights(closes_np, horizon, train_start, train_end)
-            sw = combine_weights(decay_w, ret_w)
-        else:
-            sw = decay_w
+        sw = get_decay_weights(len(y_train), gamma)
 
         votes = []
         for model_name in combo:
@@ -2962,27 +2814,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
             step_idx += 1
             continue
 
-        # Ensemble disagreement filter: skip if models disagree too much
-        buy_ratio = sum(votes) / len(votes)
-        if disagree_filter and max(buy_ratio, 1 - buy_ratio) < disagree_threshold:
-            # Models disagree — no action (preserve current position)
-            step_idx += 1
-            # Still track B&H
-            current_val = portfolio * (price / entry_price) if in_position else portfolio
-            if current_val > peak:
-                peak = current_val
-            dd = (peak - current_val) / peak
-            if dd > max_dd:
-                max_dd = dd
-            continue
-
-        ensemble_pred = 1 if buy_ratio > 0.5 else 0
-
-        # Funding rate regime gate: suppress BUY when overleveraged longs
-        if funding_gate and funding_np is not None and ensemble_pred == 1:
-            if i < len(funding_np) and not np.isnan(funding_np[i]):
-                if funding_np[i] > funding_threshold:
-                    ensemble_pred = 0  # suppress BUY
+        ensemble_pred = 1 if sum(votes) > len(votes) / 2 else 0
         if ensemble_pred == y_true:
             correct += 1
         total += 1
@@ -3091,7 +2923,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     combo_options = _build_combo_list()
 
     print("\n" + "=" * 70)
-    print(f"  DEKU MODE D: OPTUNA JOINT OPTIMIZATION -- {horizon}h HORIZON")
+    print(f"  DEKU 1.2 MODE D: OPTUNA JOINT OPTIMIZATION -- {horizon}h HORIZON")
     print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
     print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
@@ -3120,7 +2952,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         t_asset = time.time()
 
         print(f"\n{'='*70}")
-        print(f"  DEKU OPTIMIZATION: {asset_name} ({horizon}h)")
+        print(f"  DEKU 1.2 OPTIMIZATION: {asset_name} ({horizon}h)")
         print(f"{'='*70}")
 
         df_raw = load_data(asset_name)
@@ -3159,47 +2991,34 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         features_np_all = df_optuna[ranked_features].values.astype(np.float64)
         labels_np_all = df_optuna['label'].values.astype(np.int32)
         closes_np_all = df_optuna['close'].values.astype(np.float64)
-        # Funding rate for regime gate (NaN-filled if not available)
-        if '_funding_rate' in df_optuna.columns:
-            funding_np_all = df_optuna['_funding_rate'].values.astype(np.float64)
-        else:
-            funding_np_all = np.full(len(df_optuna), np.nan)
         n_total = len(df_optuna)
 
-        # 3-fold rolling holdout: each fold trains on ~60%, validates on ~20%
-        fold_train_frac = 0.60
-        fold_test_frac = 0.20
-        fold_stride = 0.10
-        holdout_folds = []
-        for fi in range(N_HOLDOUT_FOLDS):
-            train_s = int(n_total * fi * fold_stride)
-            train_e = int(n_total * (fi * fold_stride + fold_train_frac))
-            test_s = train_e
-            test_e = int(n_total * (fi * fold_stride + fold_train_frac + fold_test_frac))
-            test_e = min(test_e, n_total)
-            holdout_folds.append((train_s, train_e, test_s, test_e))
-            print(f"  Fold {fi+1}: train [{train_s}:{train_e}] ({train_e-train_s:,} rows) → test [{test_s}:{test_e}] ({test_e-test_s:,} rows)")
+        # Hold-out split: Optuna on first 80%, final validation on last 20%
+        HOLDOUT_FRACTION = 0.20
+        n_train = int(n_total * (1 - HOLDOUT_FRACTION))
+        n_holdout = n_total - n_train
 
-        # Optuna trains on fold 1's training partition
-        f1_train_s, f1_train_e, _, _ = holdout_folds[0]
-        features_np = features_np_all[f1_train_s:f1_train_e]
-        labels_np = labels_np_all[f1_train_s:f1_train_e]
-        closes_np = closes_np_all[f1_train_s:f1_train_e]
-        funding_np = funding_np_all[f1_train_s:f1_train_e]
-        n = len(features_np)
+        # Training partition — Optuna sees only this
+        features_np = features_np_all[:n_train]
+        labels_np = labels_np_all[:n_train]
+        closes_np = closes_np_all[:n_train]
+        n = n_train
 
-        print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
+        # Hold-out partition — for final validation only
+        holdout_features_np = features_np_all[n_train:]
+        holdout_labels_np = labels_np_all[n_train:]
+        holdout_closes_np = closes_np_all[n_train:]
 
-        # Per-horizon feature range
-        feat_min, feat_max = N_FEATURES_RANGE.get(horizon, N_FEATURES_RANGE_DEFAULT)
-        min_n_features = feat_min
-        max_n_features = min(len(ranked_features), feat_max)
+        print(f"  Hold-out split: {n_train:,} train ({100-HOLDOUT_FRACTION*100:.0f}%) + {n_holdout:,} holdout ({HOLDOUT_FRACTION*100:.0f}%)")
+
+        min_n_features = 8
+        max_n_features = min(len(ranked_features), 80)  # cap to avoid noise from low-importance features
 
         # Step 3: Optuna study
         print(f"\n{'='*70}")
         print(f"  OPTUNA STUDY: {asset_name} {horizon}h")
         print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma[0.994-1.0] × features[{min_n_features}-{max_n_features}]")
-        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
+        print(f"  Trials: {n_trials} | Data: {n_train:,} train + {n_holdout:,} holdout rows")
         print(f"{'='*70}")
 
         # Suppress Optuna's default logging
@@ -3213,7 +3032,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 max_resource=n // DIAG_STEP,  # total walk-forward steps
                 reduction_factor=3,
             ),
-            study_name=f'deku_{asset_name}_{horizon}h',
+            study_name=f'deku_1_2_{asset_name}_{horizon}h',
         )
 
         model_factories = _get_deku_diagnostic_models()
@@ -3229,20 +3048,6 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             gamma = trial.suggest_float('gamma', 0.994, 1.0)
             n_feat = trial.suggest_int('n_features', min_n_features, max_n_features)
 
-            # Enhancement toggles (only active when --enhancements flag is set)
-            if DEKU_ENHANCEMENTS:
-                enh_return_weight = trial.suggest_categorical('return_weight', [True, False])
-                enh_disagree = trial.suggest_categorical('disagree_filter', [True, False])
-                enh_disagree_thresh = trial.suggest_float('disagree_threshold', 0.6, 0.9) if enh_disagree else 0.75
-                enh_funding = trial.suggest_categorical('funding_gate', [True, False])
-                enh_funding_thresh = trial.suggest_float('funding_threshold', 0.0003, 0.002) if enh_funding else 0.001
-            else:
-                enh_return_weight = False
-                enh_disagree = False
-                enh_disagree_thresh = 0.75
-                enh_funding = False
-                enh_funding_thresh = 0.001
-
             combo = combo_name.split('+')
 
             # Slice top n_feat features (ranked by LGBM importance)
@@ -3250,11 +3055,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
             result = _deku_eval_with_pruning(
                 feat_np, labels_np, closes_np, combo, window, n,
-                DIAG_STEP, model_factories, gamma=gamma, trial=trial,
-                return_weight=enh_return_weight, disagree_filter=enh_disagree,
-                disagree_threshold=enh_disagree_thresh, funding_gate=enh_funding,
-                funding_threshold=enh_funding_thresh, funding_np=funding_np,
-                horizon=horizon
+                DIAG_STEP, model_factories, gamma=gamma, trial=trial
             )
 
             if result is None:
@@ -3285,7 +3086,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         # Auto-extend trials if best APF is below threshold
         APF_EXTEND_THRESH = 1.7
-        extend_steps = [200, 250]
+        extend_steps = [150, 200]
         for ext_target in extend_steps:
             if ext_target <= n_trials:
                 continue
@@ -3299,31 +3100,22 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         optuna_elapsed = (time.time() - t_optuna) / 60
 
         # Results summary
-        best_trial = study.best_trial
-        print(f"\n  {'='*70}")
-        print(f"  OPTUNA RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min)")
-        print(f"  {'='*70}")
-        print(f"  Best trial: #{best_trial.number}")
-        print(f"  {OPTUNA_METRIC.upper():10s} {best_trial.value:.4f}")
-        print(f"  Combo:      {best_trial.params['combo']}")
-        print(f"  Window:     {best_trial.params['window']}h")
-        print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
-        print(f"  N_features: {best_trial.params['n_features']}")
-
-        # Stats
         n_pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
         n_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-        print(f"\n  Trials: {n_complete} completed, {n_pruned} pruned ({n_pruned/(n_complete+n_pruned)*100:.0f}% pruned)")
 
-        # Top 10 trials
+        # In-sample top 10
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
         completed_trials.sort(key=lambda t: -t.value)
+
+        print(f"\n  {'='*70}")
+        print(f"  OPTUNA IN-SAMPLE RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min)")
+        print(f"  {'='*70}")
+        print(f"  Trials: {n_complete} completed, {n_pruned} pruned ({n_pruned/(n_complete+n_pruned)*100:.0f}% pruned)")
         print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}")
         print(f"  {'-'*60}")
         for i, t in enumerate(completed_trials[:10], 1):
-            marker = " <-- BEST" if i == 1 else ""
             print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
-                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}{marker}")
+                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}")
 
         # Parameter importance (if enough trials)
         if n_complete >= 20:
@@ -3336,117 +3128,55 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             except Exception:
                 pass
 
-        # ── 3-FOLD ROLLING HOLDOUT: re-evaluate top candidates on unseen data ──
-        # Diversity-aware selection: best per (combo,window), then ensure every
-        # unique combo has at least one representative in holdout.
-        seen_configs = set()
-        unique_candidates = []
-        for t in completed_trials:
-            key = (t.params['combo'], t.params['window'])
-            if key not in seen_configs:
-                seen_configs.add(key)
-                unique_candidates.append(t)
-
-        # Phase 1: take top 10 by in-sample APF (deduped by combo+window)
-        phase1 = unique_candidates[:10]
-        phase1_set = set(id(t) for t in phase1)
-        combos_in_phase1 = set(t.params['combo'] for t in phase1)
-
-        # Phase 2: add best trial from each combo NOT already represented
-        phase2 = []
-        seen_combos_p2 = set()
-        for t in unique_candidates:
-            combo = t.params['combo']
-            if combo not in combos_in_phase1 and combo not in seen_combos_p2:
-                seen_combos_p2.add(combo)
-                phase2.append(t)
-
-        candidates = phase1 + phase2
-        N_CANDIDATES = min(20, len(candidates))
+        # ── HOLD-OUT RANKING: re-evaluate top candidates on unseen data ──
+        # Optuna narrows the search; hold-out picks the actual winner
+        N_CANDIDATES = min(15, len(completed_trials))
+        candidates = completed_trials[:N_CANDIDATES]
 
         print(f"\n  {'='*70}")
-        print(f"  {N_HOLDOUT_FOLDS}-FOLD ROLLING HOLDOUT: {asset_name} {horizon}h (top {N_CANDIDATES} candidates)")
+        print(f"  HOLD-OUT RANKING: {asset_name} {horizon}h (top {N_CANDIDATES} → last {HOLDOUT_FRACTION*100:.0f}% of data)")
         print(f"  {'='*70}")
 
         holdout_results = []
-        min_fold_rows = min(te - ts for _, _, ts, te in holdout_folds)
-        if min_fold_rows >= 200:
+        if n_holdout >= 200:
             for ci, trial in enumerate(candidates):
                 c_combo = trial.params['combo'].split('+')
                 c_window = trial.params['window']
                 c_gamma = trial.params['gamma']
                 c_n_feat = trial.params['n_features']
-                # Read enhancement params from trial (defaults for non-enhanced runs)
-                c_return_weight = trial.params.get('return_weight', False)
-                c_disagree = trial.params.get('disagree_filter', False)
-                c_disagree_thresh = trial.params.get('disagree_threshold', 0.75)
-                c_funding = trial.params.get('funding_gate', False)
-                c_funding_thresh = trial.params.get('funding_threshold', 0.001)
 
-                fold_scores = []
-                fold_rets = []
-                fold_accs = []
-                fold_trades = []
-                fold_raw_pfs = []
+                ho_feat = holdout_features_np[:, :c_n_feat]
+                ho_result = _deku_eval_with_pruning(
+                    ho_feat, holdout_labels_np, holdout_closes_np,
+                    c_combo, c_window, n_holdout,
+                    DIAG_STEP, model_factories, gamma=c_gamma, trial=None
+                )
 
-                for fi, (tr_s, tr_e, te_s, te_e) in enumerate(holdout_folds):
-                    fold_feat_test = features_np_all[te_s:te_e, :c_n_feat]
-                    fold_labels_test = labels_np_all[te_s:te_e]
-                    fold_closes_test = closes_np_all[te_s:te_e]
-                    fold_funding_test = funding_np_all[te_s:te_e]
-                    n_fold_test = te_e - te_s
+                if ho_result:
+                    ho_ret = ho_result[4]
+                    ho_acc = ho_result[2]
+                    ho_trades = ho_result[6]
+                    ho_raw_pf = ho_result[11]
+                    ho_score = _compute_optuna_score(ho_result)
+                    holdout_results.append((trial, ho_result, ho_score, ho_ret, ho_acc, ho_trades, ho_raw_pf))
+                else:
+                    holdout_results.append((trial, None, 0.0, 0.0, 0.0, 0, 0.0))
 
-                    HOLDOUT_STEP = 12  # finer step for holdout — more trades for statistical significance
-                    ho_result = _deku_eval_with_pruning(
-                        fold_feat_test, fold_labels_test, fold_closes_test,
-                        c_combo, c_window, n_fold_test,
-                        HOLDOUT_STEP, model_factories, gamma=c_gamma, trial=None,
-                        return_weight=c_return_weight, disagree_filter=c_disagree,
-                        disagree_threshold=c_disagree_thresh, funding_gate=c_funding,
-                        funding_threshold=c_funding_thresh, funding_np=fold_funding_test,
-                        horizon=horizon
-                    )
+            # Sort by hold-out score (descending)
+            holdout_results.sort(key=lambda x: -x[2])
 
-                    if ho_result:
-                        fold_scores.append(_compute_optuna_score(ho_result))
-                        fold_rets.append(ho_result[4])
-                        fold_accs.append(ho_result[2])
-                        fold_trades.append(ho_result[6])
-                        fold_raw_pfs.append(ho_result[11])
-                    else:
-                        fold_scores.append(0.0)
-                        fold_rets.append(0.0)
-                        fold_accs.append(0.0)
-                        fold_trades.append(0)
-                        fold_raw_pfs.append(0.0)
-
-                avg_score = np.mean(fold_scores)
-                avg_ret = np.mean(fold_rets)
-                avg_acc = np.mean(fold_accs)
-                total_trades = sum(fold_trades)
-                avg_raw_pf = np.mean(fold_raw_pfs)
-
-                holdout_results.append((trial, avg_score, avg_ret, avg_acc, total_trades,
-                                        avg_raw_pf, fold_scores, fold_rets))
-
-            holdout_results.sort(key=lambda x: -x[1])
-
-            print(f"\n  {'Rank':>4s}  {'AVG_'+OPTUNA_METRIC.upper():>8s}  {'AVG_Ret':>8s}  {'AVG_Acc':>7s}  {'Tr':>4s}  "
-                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}")
-            print(f"  {'-'*125}")
-            for i, (trial, avg_sc, avg_ret, avg_acc, tot_tr, avg_rpf, f_scores, f_rets) in enumerate(holdout_results[:10], 1):
+            print(f"\n  {'Rank':>4s}  {'HO_'+OPTUNA_METRIC.upper():>8s}  {'HO_Ret':>7s}  {'HO_Acc':>6s}  {'Tr':>3s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}")
+            print(f"  {'-'*100}")
+            for i, (trial, ho_r, ho_sc, ho_ret, ho_acc, ho_tr, ho_rpf) in enumerate(holdout_results[:10], 1):
                 is_score = trial.value
                 marker = " <-- BEST" if i == 1 else ""
-                gen = "✓" if avg_ret > 0 and avg_acc > 0.55 else "~" if avg_ret > 0 else "✗"
-                f_str = "  ".join(f"{s:+5.1f}" for s in f_rets)
-                print(f"  {i:4d}  {avg_sc:8.3f}  {avg_ret:+7.1f}%  {avg_acc*100:6.1f}%  {tot_tr:4d}  "
-                      f"{f_str}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  "
-                      f"{trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}{marker}")
+                gen = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
+                print(f"  {i:4d}  {ho_sc:8.3f}  {ho_ret:+6.1f}%  {ho_acc*100:5.1f}%  {ho_tr:3d}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  {trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}{marker}")
         else:
-            print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
+            print(f"  Hold-out skipped: only {n_holdout} rows (need 200+)")
 
-        # Pick winner: best average hold-out score if available, else best in-sample
-        if holdout_results and holdout_results[0][1] > 0:
+        # Pick winner: best hold-out score if available, else best in-sample
+        if holdout_results and holdout_results[0][1] is not None:
             winner_trial = holdout_results[0][0]
             winner_ho = holdout_results[0]
         else:
@@ -3458,41 +3188,24 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         best_gamma = winner_trial.params['gamma']
         best_n_feat = winner_trial.params['n_features']
         best_features = ranked_features[:best_n_feat]
-        # Enhancement params from winner
-        w_return_weight = winner_trial.params.get('return_weight', False)
-        w_disagree = winner_trial.params.get('disagree_filter', False)
-        w_disagree_thresh = winner_trial.params.get('disagree_threshold', 0.75)
-        w_funding = winner_trial.params.get('funding_gate', False)
-        w_funding_thresh = winner_trial.params.get('funding_threshold', 0.001)
 
         # Re-run winner on training data for in-sample metrics
         feat_np = features_np[:, :best_n_feat]
         full_result = _deku_eval_with_pruning(
             feat_np, labels_np, closes_np, best_combo, best_window, n,
-            DIAG_STEP, model_factories, gamma=best_gamma, trial=None,
-            return_weight=w_return_weight, disagree_filter=w_disagree,
-            disagree_threshold=w_disagree_thresh, funding_gate=w_funding,
-            funding_threshold=w_funding_thresh, funding_np=funding_np,
-            horizon=horizon
+            DIAG_STEP, model_factories, gamma=best_gamma, trial=None
         )
 
         if full_result:
-            combo_name, window, acc, n_total_r, cum_ret, win_rate, trades, _, _, max_dd, apf, raw_pf, bh_pf = full_result
+            combo_name, window, acc, n_total, cum_ret, win_rate, trades, _, _, max_dd, apf, raw_pf, bh_pf = full_result
             is_score = _compute_optuna_score(full_result)
 
-            # Hold-out metrics (3-fold average)
-            ho_score = winner_ho[1] if winner_ho else 0
-            ho_ret = winner_ho[2] if winner_ho else 0
-            ho_acc = winner_ho[3] if winner_ho else 0
-            ho_trades = winner_ho[4] if winner_ho else 0
-            ho_raw_pf = winner_ho[5] if winner_ho else 0
-            ho_fold_rets = winner_ho[7] if winner_ho else []
-
-            # Enhancement labels for CSV
-            enh_labels = []
-            if w_return_weight: enh_labels.append('retw')
-            if w_disagree: enh_labels.append(f'disagree@{w_disagree_thresh:.2f}')
-            if w_funding: enh_labels.append(f'funding@{w_funding_thresh:.4f}')
+            # Hold-out metrics
+            ho_ret = winner_ho[3] if winner_ho else 0
+            ho_acc = winner_ho[4] if winner_ho else 0
+            ho_trades = winner_ho[5] if winner_ho else 0
+            ho_score = winner_ho[2] if winner_ho else 0
+            ho_raw_pf = winner_ho[6] if winner_ho else 0
 
             best_config = {
                 'coin': asset_name,
@@ -3509,25 +3222,17 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 'optimal_features': ','.join(best_features),
                 'horizon': horizon,
                 'gamma': round(best_gamma, 4),
-                'enhancements': ','.join(enh_labels) if enh_labels else '',
-                'enh_return_weight': w_return_weight,
-                'enh_disagree_filter': w_disagree,
-                'enh_disagree_threshold': round(w_disagree_thresh, 4) if w_disagree else '',
-                'enh_funding_gate': w_funding,
-                'enh_funding_threshold': round(w_funding_thresh, 6) if w_funding else '',
             }
             best_models.append(best_config)
 
             gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
 
             print(f"\n  {'='*70}")
-            print(f"  WINNER (by {N_HOLDOUT_FOLDS}-fold holdout): {asset_name} {horizon}h  {gen_icon}")
+            print(f"  WINNER (by hold-out): {asset_name} {horizon}h  {gen_icon}")
             print(f"  Models: {winner_trial.params['combo']}  Window: {best_window}h  Gamma: {best_gamma:.4f}  Features: {best_n_feat}")
             print(f"  In-sample:     {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}  rawPF={raw_pf:.2f}")
             if winner_ho:
-                fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets)
-                print(f"  Out-of-sample: {OPTUNA_METRIC}={ho_score:.3f}  avg_ret={ho_ret:+.1f}%  avg_acc={ho_acc*100:.1f}%  trades={ho_trades}  rawPF={ho_raw_pf:.2f}")
-                print(f"  Per-fold returns: [{fold_str}]")
+                print(f"  Out-of-sample: {OPTUNA_METRIC}={ho_score:.3f}  ret={ho_ret:+.1f}%  acc={ho_acc*100:.1f}%  trades={ho_trades}  rawPF={ho_raw_pf:.2f}")
             print(f"  {'='*70}")
 
         print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
@@ -3557,12 +3262,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         model_names = m['models'].split('+')
         generate_signals(m['coin'], model_names, m['best_window'],
                          feature_override=features_list, horizon=horizon,
-                         gamma=m.get('gamma', 1.0),
-                         return_weight=m.get('enh_return_weight', False),
-                         disagree_filter=m.get('enh_disagree_filter', False),
-                         disagree_threshold=float(m.get('enh_disagree_threshold', 0.75) or 0.75),
-                         funding_gate=m.get('enh_funding_gate', False),
-                         funding_threshold=float(m.get('enh_funding_threshold', 0.001) or 0.001))
+                         gamma=m.get('gamma', 1.0))
 
     elapsed = (time.time() - t_mode_start) / 60
     print(f"\n  Mode D complete: {elapsed:.1f} min total")
@@ -3725,7 +3425,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         df_best = pd.concat([df_existing, df_best], ignore_index=True)
     df_best.to_csv(csv_path, index=False)
     if not MODELS_CSV_OVERRIDE:
-        df_best.to_csv(f'{MODELS_DIR}/crypto_casca_best_models_mode_d.csv', index=False)
+        df_best.to_csv(f'{MODELS_DIR}/crypto_deku_1_2_best_models_mode_d.csv', index=False)
 
     print(f"\n{'='*60}")
     print(f"  BEST MODELS SAVED -- {horizon}h HORIZON")
@@ -3750,12 +3450,7 @@ def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=F
         cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma,
-                                   return_weight=config.get('enh_return_weight', False),
-                                   disagree_filter=config.get('enh_disagree_filter', False),
-                                   disagree_threshold=float(config.get('enh_disagree_threshold', 0.75) or 0.75),
-                                   funding_gate=config.get('enh_funding_gate', False),
-                                   funding_threshold=float(config.get('enh_funding_threshold', 0.001) or 0.001))
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
         all_signals[asset_name] = signals
@@ -4213,12 +3908,7 @@ def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
         cfg_gamma = config.get('gamma', 1.0)
 
         signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma,
-                                   return_weight=str(config.get('enh_return_weight', '')).lower() == 'true',
-                                   disagree_filter=str(config.get('enh_disagree_filter', '')).lower() == 'true',
-                                   disagree_threshold=float(config.get('enh_disagree_threshold', 0.75) or 0.75),
-                                   funding_gate=str(config.get('enh_funding_gate', '')).lower() == 'true',
-                                   funding_threshold=float(config.get('enh_funding_threshold', 0.001) or 0.001))
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
         signals = simulate_portfolio(signals)
         _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
         all_signals[asset_name] = signals
@@ -4263,7 +3953,7 @@ def run_strategy_comparison(assets_list, horizons=None):
 
     # Load trading config for updates
     metric_suffix = f'_{OPTUNA_METRIC}' if OPTUNA_METRIC != 'apf' else ''
-    tcfg_path = f'{CONFIG_DIR}/trading_config_deku{metric_suffix}.json'
+    tcfg_path = f'{CONFIG_DIR}/trading_config_deku_1_2{metric_suffix}.json'
     try:
         with open(tcfg_path) as f:
             trading_config = json.load(f)
@@ -4275,72 +3965,62 @@ def run_strategy_comparison(assets_list, horizons=None):
         print(f"  {asset}: Strategy Comparison")
         print(f"{'='*60}")
 
-        # Load configs for each horizon (use CLI horizons if provided, else defaults)
-        active_horizons = sorted(horizons) if horizons else sorted(AVAILABLE_HORIZONS)
-        h_short = active_horizons[0]
-        h_long = active_horizons[-1] if len(active_horizons) > 1 else active_horizons[0]
-        cfg_by_h = {}
-        for h in active_horizons:
-            cfg_h = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
-            if len(cfg_h) > 0:
-                cfg_by_h[h] = cfg_h
+        # Load configs for 4h and 8h
+        cfg4 = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == 4)]
+        cfg8 = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == 8)]
 
-        has_short = h_short in cfg_by_h
-        has_long = h_long in cfg_by_h
+        has_4h = len(cfg4) > 0
+        has_8h = len(cfg8) > 0
 
-        if not has_short and not has_long:
+        if not has_4h and not has_8h:
             print(f"  No saved models for {asset}. Run Mode D first.")
             continue
 
         # Generate signals for available horizons
-        signals_by_h = {}
+        signals_4h, signals_8h = None, None
 
         with _suppress_stderr():
-            for h in active_horizons:
-                if h not in cfg_by_h:
-                    continue
-                row_h = cfg_by_h[h].iloc[0]
-                feats_h = row_h['optimal_features'].split(',') if pd.notna(row_h.get('optimal_features', '')) else None
-                gamma_h = float(row_h.get('gamma', 1.0)) if pd.notna(row_h.get('gamma', 1.0)) else 1.0
-                # Read enhancement params from CSV row
-                rw = str(row_h.get('enh_return_weight', 'False')).lower() == 'true'
-                df_flag = str(row_h.get('enh_disagree_filter', 'False')).lower() == 'true'
-                dt = float(row_h.get('enh_disagree_threshold', 0.75)) if pd.notna(row_h.get('enh_disagree_threshold', 0.75)) and str(row_h.get('enh_disagree_threshold', '')).strip() else 0.75
-                fg = str(row_h.get('enh_funding_gate', 'False')).lower() == 'true'
-                ft = float(row_h.get('enh_funding_threshold', 0.001)) if pd.notna(row_h.get('enh_funding_threshold', 0.001)) and str(row_h.get('enh_funding_threshold', '')).strip() else 0.001
-                sigs = generate_signals(asset, row_h['models'].split('+'),
-                                        int(row_h['best_window']), REPLAY_HOURS_F,
-                                        feature_override=feats_h, horizon=h, gamma=gamma_h,
-                                        return_weight=rw, disagree_filter=df_flag,
-                                        disagree_threshold=dt, funding_gate=fg,
-                                        funding_threshold=ft)
-                signals_by_h[h] = simulate_portfolio(sigs)
+            if has_4h:
+                row4 = cfg4.iloc[0]
+                feats4 = row4['optimal_features'].split(',') if pd.notna(row4.get('optimal_features', '')) else None
+                gamma4 = float(row4.get('gamma', 1.0)) if pd.notna(row4.get('gamma', 1.0)) else 1.0
+                signals_4h = generate_signals(asset, row4['models'].split('+'),
+                                              int(row4['best_window']), REPLAY_HOURS_F,
+                                              feature_override=feats4, horizon=4, gamma=gamma4)
+                signals_4h = simulate_portfolio(signals_4h)
+
+            if has_8h:
+                row8 = cfg8.iloc[0]
+                feats8 = row8['optimal_features'].split(',') if pd.notna(row8.get('optimal_features', '')) else None
+                gamma8 = float(row8.get('gamma', 1.0)) if pd.notna(row8.get('gamma', 1.0)) else 1.0
+                signals_8h = generate_signals(asset, row8['models'].split('+'),
+                                              int(row8['best_window']), REPLAY_HOURS_F,
+                                              feature_override=feats8, horizon=8, gamma=gamma8)
+                signals_8h = simulate_portfolio(signals_8h)
 
         # Build merged timeline
-        sig_maps = {h: {s['datetime']: s for s in (signals_by_h.get(h) or [])} for h in active_horizons}
-        all_dts = set()
-        for sm in sig_maps.values():
-            all_dts.update(sm.keys())
-        all_times = sorted(all_dts)
+        sig4_map = {s['datetime']: s for s in (signals_4h or [])}
+        sig8_map = {s['datetime']: s for s in (signals_8h or [])}
+        all_times = sorted(set(list(sig4_map.keys()) + list(sig8_map.keys())))
 
         if not all_times:
             print(f"  No signals generated for {asset}.")
             continue
 
-        # Hold-out: evaluate strategies on last 33% of signals
+        # Hold-out split: evaluate strategies on last 20% of signals only
         n_signals = len(all_times)
-        holdout_start = int(n_signals * 0.67)
+        holdout_start = int(n_signals * 0.80)
         holdout_times = all_times[holdout_start:]
-        print(f"  Signals: {n_signals} total, evaluating on last {len(holdout_times)} (hold-out 33%)")
+        print(f"  Signals: {n_signals} total, evaluating on last {len(holdout_times)} (hold-out 20%)")
 
         # Define strategies to test
         strategies = []
-        if has_short and has_long:
-            strategies = ['both_agree', 'either_agree', f'{h_short}h_only', f'{h_long}h_only']
-        elif has_short:
-            strategies = [f'{h_short}h_only']
-        elif has_long:
-            strategies = [f'{h_long}h_only']
+        if has_4h and has_8h:
+            strategies = ['both_agree', 'either_agree', '4h_only', '8h_only']
+        elif has_4h:
+            strategies = ['4h_only']
+        elif has_8h:
+            strategies = ['8h_only']
 
         results = []
         for strat in strategies:
@@ -4349,33 +4029,33 @@ def run_strategy_comparison(assets_list, horizons=None):
             total_candles = 0
 
             for dt in holdout_times:
-                s_short = sig_maps[h_short].get(dt) if has_short else None
-                s_long = sig_maps[h_long].get(dt) if has_long else None
-                price = (s_short or s_long)['close']
-                sig_s = s_short['signal'] if s_short else 'HOLD'
-                conf_s = s_short['confidence'] if s_short else 50
-                sig_l = s_long['signal'] if s_long else 'HOLD'
-                conf_l = s_long['confidence'] if s_long else 50
+                s4 = sig4_map.get(dt)
+                s8 = sig8_map.get(dt)
+                price = (s4 or s8)['close']
+                sig4 = s4['signal'] if s4 else 'HOLD'
+                conf4 = s4['confidence'] if s4 else 50
+                sig8 = s8['signal'] if s8 else 'HOLD'
+                conf8 = s8['confidence'] if s8 else 50
 
                 # Determine combined signal based on strategy
                 if strat == 'both_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
+                    if sig4 == 'SELL' or sig8 == 'SELL':
                         signal = 'SELL'
-                    elif sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= MIN_CONFIDENCE and conf_l >= MIN_CONFIDENCE:
+                    elif sig4 == 'BUY' and sig8 == 'BUY' and conf4 >= MIN_CONFIDENCE and conf8 >= MIN_CONFIDENCE:
                         signal = 'BUY'
                     else:
                         signal = 'HOLD'
                 elif strat == 'either_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
+                    if sig4 == 'SELL' or sig8 == 'SELL':
                         signal = 'SELL'
-                    elif (sig_s == 'BUY' and conf_s >= MIN_CONFIDENCE) or (sig_l == 'BUY' and conf_l >= MIN_CONFIDENCE):
+                    elif (sig4 == 'BUY' and conf4 >= MIN_CONFIDENCE) or (sig8 == 'BUY' and conf8 >= MIN_CONFIDENCE):
                         signal = 'BUY'
                     else:
                         signal = 'HOLD'
-                elif strat == f'{h_short}h_only':
-                    signal = sig_s if conf_s >= MIN_CONFIDENCE or sig_s == 'SELL' else 'HOLD'
-                else:  # Xh_only (long)
-                    signal = sig_l if conf_l >= MIN_CONFIDENCE or sig_l == 'SELL' else 'HOLD'
+                elif strat == '4h_only':
+                    signal = sig4 if conf4 >= MIN_CONFIDENCE or sig4 == 'SELL' else 'HOLD'
+                else:  # 8h_only
+                    signal = sig8 if conf8 >= MIN_CONFIDENCE or sig8 == 'SELL' else 'HOLD'
 
                 # Simulate trade
                 if signal == 'BUY' and not in_pos:
@@ -4392,29 +4072,33 @@ def run_strategy_comparison(assets_list, horizons=None):
                     in_pos = False
 
                 # Accuracy: did signal match direction?
-                ref_sig = sig_s if s_short else sig_l
+                # Use 4h signal if available, else 8h
+                ref_sig = sig4 if s4 else sig8
                 if ref_sig != 'HOLD':
                     total_candles += 1
+                    # Correct if signal aligns with strategy signal
                     if ref_sig == signal:
                         correct += 1
 
             # Close open position
             if in_pos and holdout_times:
-                last_px = None
-                for sm in sig_maps.values():
-                    if holdout_times[-1] in sm:
-                        last_px = sm[holdout_times[-1]]['close']
-                        break
-                if last_px:
-                    cash = held * last_px * (1 - TRADING_FEE)
+                last_px = (sig4_map.get(holdout_times[-1]) or sig8_map.get(holdout_times[-1]))['close']
+                cash = held * last_px * (1 - TRADING_FEE)
 
             cum_ret = (cash / 1000.0 - 1) * 100
             win_rate = (wins / trades * 100) if trades > 0 else 0
-            # Use underlying model accuracy (average of available horizons)
-            accs = [cfg_by_h[h].iloc[0].get('accuracy', 65) / 100 for h in cfg_by_h]
-            base_acc = sum(accs) / len(accs) if accs else 0.65
+            # Use underlying model accuracy as accuracy signal
+            # (weighted average of 4h/8h model accuracies if both available)
+            if has_4h and has_8h:
+                acc4 = cfg4.iloc[0].get('accuracy', 65) / 100
+                acc8 = cfg8.iloc[0].get('accuracy', 65) / 100
+                base_acc = (acc4 + acc8) / 2
+            elif has_4h:
+                base_acc = cfg4.iloc[0].get('accuracy', 65) / 100
+            else:
+                base_acc = cfg8.iloc[0].get('accuracy', 65) / 100
 
-            score = cum_ret  # rank strategies by return directly
+            score = cum_ret  # CASCA: rank strategies by return directly
             results.append((strat, cum_ret, win_rate, trades, score))
 
         # Sort by score
@@ -4445,33 +4129,33 @@ def run_strategy_comparison(assets_list, horizons=None):
             trades_c, wins_c = 0, 0
 
             for dt in holdout_times:
-                s_short = sig_maps[h_short].get(dt) if has_short else None
-                s_long = sig_maps[h_long].get(dt) if has_long else None
-                price = (s_short or s_long)['close']
-                sig_s = s_short['signal'] if s_short else 'HOLD'
-                conf_s = s_short['confidence'] if s_short else 50
-                sig_l = s_long['signal'] if s_long else 'HOLD'
-                conf_l = s_long['confidence'] if s_long else 50
+                s4 = sig4_map.get(dt)
+                s8 = sig8_map.get(dt)
+                price = (s4 or s8)['close']
+                sig4 = s4['signal'] if s4 else 'HOLD'
+                conf4 = s4['confidence'] if s4 else 50
+                sig8 = s8['signal'] if s8 else 'HOLD'
+                conf8 = s8['confidence'] if s8 else 50
 
                 # Apply best strategy with this threshold
                 if best_strat == 'both_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
+                    if sig4 == 'SELL' or sig8 == 'SELL':
                         signal = 'SELL'
-                    elif sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= thresh and conf_l >= thresh:
+                    elif sig4 == 'BUY' and sig8 == 'BUY' and conf4 >= thresh and conf8 >= thresh:
                         signal = 'BUY'
                     else:
                         signal = 'HOLD'
                 elif best_strat == 'either_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
+                    if sig4 == 'SELL' or sig8 == 'SELL':
                         signal = 'SELL'
-                    elif (sig_s == 'BUY' and conf_s >= thresh) or (sig_l == 'BUY' and conf_l >= thresh):
+                    elif (sig4 == 'BUY' and conf4 >= thresh) or (sig8 == 'BUY' and conf8 >= thresh):
                         signal = 'BUY'
                     else:
                         signal = 'HOLD'
-                elif best_strat == f'{h_short}h_only':
-                    signal = sig_s if conf_s >= thresh or sig_s == 'SELL' else 'HOLD'
-                else:  # Xh_only (long)
-                    signal = sig_l if conf_l >= thresh or sig_l == 'SELL' else 'HOLD'
+                elif best_strat == '4h_only':
+                    signal = sig4 if conf4 >= thresh or sig4 == 'SELL' else 'HOLD'
+                else:  # 8h_only
+                    signal = sig8 if conf8 >= thresh or sig8 == 'SELL' else 'HOLD'
 
                 if signal == 'BUY' and not in_pos:
                     held = cash * (1 - TRADING_FEE) / price
@@ -4482,13 +4166,8 @@ def run_strategy_comparison(assets_list, horizons=None):
                     held = 0; in_pos = False
 
             if in_pos and holdout_times:
-                last_px = None
-                for sm in sig_maps.values():
-                    if holdout_times[-1] in sm:
-                        last_px = sm[holdout_times[-1]]['close']
-                        break
-                if last_px:
-                    cash = held * last_px * (1 - TRADING_FEE)
+                last_px = (sig4_map.get(holdout_times[-1]) or sig8_map.get(holdout_times[-1]))['close']
+                cash = held * last_px * (1 - TRADING_FEE)
 
             cum_ret_c = (cash / 1000.0 - 1) * 100
             win_rate_c = (wins_c / trades_c * 100) if trades_c > 0 else 0
@@ -4505,44 +4184,43 @@ def run_strategy_comparison(assets_list, horizons=None):
         # Generate chart for best strategy + threshold
         chart_signals = []
         for dt in all_times:
-            s_short = sig_maps[h_short].get(dt) if has_short else None
-            s_long = sig_maps[h_long].get(dt) if has_long else None
-            price = (s_short or s_long)['close']
-            sig_s_v = s_short['signal'] if s_short else 'HOLD'
-            conf_s_v = s_short['confidence'] if s_short else 50
-            sig_l_v = s_long['signal'] if s_long else 'HOLD'
-            conf_l_v = s_long['confidence'] if s_long else 50
+            s4 = sig4_map.get(dt)
+            s8 = sig8_map.get(dt)
+            price = (s4 or s8)['close']
+            sig4_s = s4['signal'] if s4 else 'HOLD'
+            conf4_s = s4['confidence'] if s4 else 50
+            sig8_s = s8['signal'] if s8 else 'HOLD'
+            conf8_s = s8['confidence'] if s8 else 50
 
             if best_strat == 'both_agree':
-                if sig_s_v == 'SELL' or sig_l_v == 'SELL':
+                if sig4_s == 'SELL' or sig8_s == 'SELL':
                     signal = 'SELL'
-                elif sig_s_v == 'BUY' and sig_l_v == 'BUY' and conf_s_v >= best_conf and conf_l_v >= best_conf:
+                elif sig4_s == 'BUY' and sig8_s == 'BUY' and conf4_s >= best_conf and conf8_s >= best_conf:
                     signal = 'BUY'
                 else:
                     signal = 'HOLD'
             elif best_strat == 'either_agree':
-                if sig_s_v == 'SELL' or sig_l_v == 'SELL':
+                if sig4_s == 'SELL' or sig8_s == 'SELL':
                     signal = 'SELL'
-                elif (sig_s_v == 'BUY' and conf_s_v >= best_conf) or (sig_l_v == 'BUY' and conf_l_v >= best_conf):
+                elif (sig4_s == 'BUY' and conf4_s >= best_conf) or (sig8_s == 'BUY' and conf8_s >= best_conf):
                     signal = 'BUY'
                 else:
                     signal = 'HOLD'
-            elif best_strat == f'{h_short}h_only':
-                signal = sig_s_v if conf_s_v >= best_conf or sig_s_v == 'SELL' else 'HOLD'
+            elif best_strat == '4h_only':
+                signal = sig4_s if conf4_s >= best_conf or sig4_s == 'SELL' else 'HOLD'
             else:
-                signal = sig_l_v if conf_l_v >= best_conf or sig_l_v == 'SELL' else 'HOLD'
+                signal = sig8_s if conf8_s >= best_conf or sig8_s == 'SELL' else 'HOLD'
 
-            best_conf_val = max(conf_s_v, conf_l_v)
-            rsi_val = (s_short or s_long).get('rsi', 50)
+            best_conf_val = max(conf4_s, conf8_s)
+            rsi_val = (s4 or s8).get('rsi', 50)
             chart_signals.append({
                 'datetime': dt, 'close': price, 'signal': signal,
                 'confidence': best_conf_val, 'rsi': rsi_val,
             })
 
         chart_signals = simulate_portfolio(chart_signals)
-        first_cfg = cfg_by_h[h_short].iloc[0] if has_short else cfg_by_h[h_long].iloc[0]
         model_info = {'best_combo': f'{best_strat}@{best_conf}%', 'best_window': 'F',
-                       'accuracy': base_acc * 100, 'gamma': first_cfg.get('gamma', 1.0)}
+                       'accuracy': base_acc * 100, 'gamma': cfg4.iloc[0].get('gamma', 1.0) if has_4h else cfg8.iloc[0].get('gamma', 1.0)}
         generate_backtest_chart(asset, chart_signals, model_info=model_info)
 
         # Update trading config with both strategy and threshold
@@ -4568,7 +4246,7 @@ def run_strategy_comparison(assets_list, horizons=None):
 def _run_quick_asset(asset):
     """Quick Mode B for a single asset, both horizons, with combined summary + interactive charts."""
     print("=" * 60)
-    print(f"  Quick {asset}: Mode B, {HORIZON_SHORT}h+{HORIZON_LONG}h")
+    print(f"  Quick {asset}: Mode B, 4h+8h")
     print("=" * 60)
 
     csv_path = _get_models_csv_path()
@@ -4593,7 +4271,7 @@ def _run_quick_asset(asset):
     update_all_data([asset])
 
     results = {}
-    for h in AVAILABLE_HORIZONS:
+    for h in [4, 8]:
         row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
         if row.empty:
             print(f"\n  No {h}h model for {asset}")
@@ -4638,8 +4316,9 @@ def _run_quick_asset(asset):
     except Exception:
         strategy = 'both_agree'
 
-    signals_by_h = {}
-    for h in AVAILABLE_HORIZONS:
+    signals_4h = None
+    signals_8h = None
+    for h in [4, 8]:
         row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
         if row.empty:
             continue
@@ -4659,19 +4338,16 @@ def _run_quick_asset(asset):
         row_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
         print(f"  Generating {h}h signals (720h)...")
         sigs = generate_signals(asset, model_names, window, 720,
-                                feature_override=feature_override, horizon=h, gamma=row_gamma,
-                                return_weight=str(r.get('enh_return_weight', '')).lower() == 'true',
-                                disagree_filter=str(r.get('enh_disagree_filter', '')).lower() == 'true',
-                                disagree_threshold=float(r.get('enh_disagree_threshold', 0.75) or 0.75),
-                                funding_gate=str(r.get('enh_funding_gate', '')).lower() == 'true',
-                                funding_threshold=float(r.get('enh_funding_threshold', 0.001) or 0.001))
-        signals_by_h[h] = simulate_portfolio(sigs)
+                                feature_override=feature_override, horizon=h, gamma=row_gamma)
+        sigs = simulate_portfolio(sigs)
+        if h == 4:
+            signals_4h = sigs
+        else:
+            signals_8h = sigs
 
-    signals_short = signals_by_h.get(HORIZON_SHORT)
-    signals_long = signals_by_h.get(HORIZON_LONG)
-    if signals_short or signals_long:
-        generate_strategy_html(asset, signals_short, signals_long, strategy=strategy)
-        generate_signal_table_html(asset, signals_short, signals_long, strategy=strategy)
+    if signals_4h or signals_8h:
+        generate_strategy_html(asset, signals_4h, signals_8h, strategy=strategy)
+        generate_signal_table_html(asset, signals_4h, signals_8h, strategy=strategy)
 
     # Combined summary
     if results:
@@ -5016,7 +4692,7 @@ def run_mode_daf(assets_list, horizons, resume=False):
 # Usage: python crypto_trading_system_casca.py A BTC 4,8h
 # ============================================================
 MODE_A_GAMMAS = [0.999, 0.998, 0.997, 0.996, 0.995]
-MODE_A_RESULTS_CSV = f'{MODELS_DIR}/testing_deku_a_results.csv'
+MODE_A_RESULTS_CSV = f'{MODELS_DIR}/testing_deku_1_2_a_results.csv'
 
 
 def run_mode_a(assets_list, horizons, resume=False):
@@ -5231,12 +4907,6 @@ def main():
     cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_resume = '--resume' in sys.argv
 
-    # Parse --enhancements flag
-    global DEKU_ENHANCEMENTS
-    if '--enhancements' in sys.argv:
-        DEKU_ENHANCEMENTS = True
-        print("  Enhancements ENABLED: return_weight, disagree_filter, funding_gate (Optuna toggles)")
-
     # Parse --trials N
     n_trials = DEKU_DEFAULT_TRIALS
     for i, a in enumerate(sys.argv[1:], 1):
@@ -5279,21 +4949,21 @@ def main():
         else:
             assets_list = list(ASSETS.keys())
 
-        # Parse horizon (default: both for Mode B and DF, short for others)
-        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF') else [HORIZON_SHORT]
+        # Parse horizon (default: 4,8h for Mode B and DF, 4h for others)
+        horizons = [4, 8] if mode in ('B', 'DF') else [4]
         for a in cli_args:
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DF') else ""
         print("=" * 60)
-        print(f"  DEKU: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)}{trials_str}")
+        print(f"  DEKU 1.2: Mode {mode} | {','.join(assets_list)} | {','.join(str(h)+'h' for h in horizons)}{trials_str}")
         print("=" * 60)
 
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DEKU")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DEKU 1.2")
         print("  Optuna TPE + Hyperband | 5 models (RF+GB+XGB+LR+LGBM)")
         print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
@@ -5303,11 +4973,11 @@ def main():
         print("  B.  Quick run (saved models + signals + chart)")
         print("  D.  OPTUNA OPTIMIZATION (joint combo × window × gamma × features)")
         print("  DF. D then F (optimize + strategy comparison)")
-        print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
+        print("  F.  STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)")
         print("  ---")
-        print(f"  5. Quick BTC (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        print(f"  6. Quick ETH (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        print(f"  7. Quick XRP (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
+        print("  5. Quick BTC (Mode B, both 4h+8h)")
+        print("  6. Quick ETH (Mode B, both 4h+8h)")
+        print("  7. Quick XRP (Mode B, both 4h+8h)")
         mode = input("\nEnter B/D/DF/F or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
@@ -5342,16 +5012,16 @@ def main():
 
         # Horizon selection
         print("\nPrediction horizon:")
-        print(f"  1. {HORIZON_SHORT} hours ahead (default)")
-        print(f"  2. {HORIZON_LONG} hours ahead")
-        print(f"  3. Both ({HORIZON_SHORT}h + {HORIZON_LONG}h)")
+        print("  1. 4 hours ahead (default)")
+        print("  2. 8 hours ahead")
+        print("  3. Both (4h + 8h)")
         h_choice = input("Enter choice (1-3) [1]: ").strip()
         if h_choice == '2':
-            horizons = [HORIZON_LONG]
+            horizons = [8]
         elif h_choice == '3':
-            horizons = list(AVAILABLE_HORIZONS)
+            horizons = [4, 8]
         else:
-            horizons = [HORIZON_SHORT]
+            horizons = [4]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
         if mode in ('D', 'DF'):
@@ -5381,7 +5051,7 @@ def main():
 
             # Read the trading config that Mode F just wrote
             metric_suffix = f'_{metric}' if metric != 'apf' else ''
-            tcfg_path = f'{CONFIG_DIR}/trading_config_deku{metric_suffix}.json'
+            tcfg_path = f'{CONFIG_DIR}/trading_config_deku_1_2{metric_suffix}.json'
             csv_path = _get_models_csv_path()
             try:
                 with open(tcfg_path) as f:
@@ -5399,16 +5069,16 @@ def main():
                 strat = ac.get('strategy', '?')
                 conf = ac.get('min_confidence', '?')
                 # Get return/trades from the CSV
-                ret_short = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == HORIZON_SHORT)]['return_pct'].values
-                ret_long = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == HORIZON_LONG)]['return_pct'].values
-                tr_short = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == HORIZON_SHORT)]['trades'].values
-                tr_long = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == HORIZON_LONG)]['trades'].values
+                ret_4h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 4)]['return_pct'].values
+                ret_8h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 8)]['return_pct'].values
+                tr_4h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 4)]['trades'].values
+                tr_8h = df_m[(df_m['coin'] == asset) & (df_m['horizon'] == 8)]['trades'].values
                 metric_res[asset] = {
                     'strategy': strat, 'conf': conf,
-                    'ret_short': float(ret_short[0]) if len(ret_short) > 0 else None,
-                    'ret_long': float(ret_long[0]) if len(ret_long) > 0 else None,
-                    'trades_short': int(tr_short[0]) if len(tr_short) > 0 else None,
-                    'trades_long': int(tr_long[0]) if len(tr_long) > 0 else None,
+                    'ret_4h': float(ret_4h[0]) if len(ret_4h) > 0 else None,
+                    'ret_8h': float(ret_8h[0]) if len(ret_8h) > 0 else None,
+                    'trades_4h': int(tr_4h[0]) if len(tr_4h) > 0 else None,
+                    'trades_8h': int(tr_8h[0]) if len(tr_8h) > 0 else None,
                 }
             all_results[metric] = metric_res
 
@@ -5418,16 +5088,16 @@ def main():
         print(f"{'='*80}")
         for asset in assets_list:
             print(f"\n  {asset}:")
-            print(f"  {'Metric':<10} {f'{HORIZON_SHORT}h Ret':>8} {f'{HORIZON_SHORT}h Tr':>6} {f'{HORIZON_LONG}h Ret':>8} {f'{HORIZON_LONG}h Tr':>6} {'Strategy':<16} {'Conf':>5}")
+            print(f"  {'Metric':<10} {'4h Ret':>8} {'4h Tr':>6} {'8h Ret':>8} {'8h Tr':>6} {'Strategy':<16} {'Conf':>5}")
             print(f"  {'-'*62}")
             best_metric = None
             best_total = -999
             for metric in sorted(VALID_METRICS):
                 r = all_results[metric].get(asset, {})
-                r4 = r.get('ret_short')
-                r8 = r.get('ret_long')
-                t4 = r.get('trades_short')
-                t8 = r.get('trades_long')
+                r4 = r.get('ret_4h')
+                r8 = r.get('ret_8h')
+                t4 = r.get('trades_4h')
+                t8 = r.get('trades_8h')
                 strat = r.get('strategy', '?')
                 conf = r.get('conf', '?')
                 r4_s = f"{r4:+.1f}%" if r4 is not None else "   N/A"
@@ -5445,21 +5115,16 @@ def main():
     elif mode == 'B':
         run_mode_b(assets_list, horizon_filter=horizons[0] if len(horizons) == 1 else None)
     elif mode in ('D', 'DF'):
-        # Per-asset pipeline: D (all horizons) then F for each asset before moving to the next
-        for asset in assets_list:
-            print(f"\n{'='*60}")
-            print(f"  ASSET: {asset}")
-            print(f"{'='*60}")
-            for h in horizons:
-                if len(horizons) > 1:
-                    print(f"\n{'#'*60}")
-                    print(f"  RUNNING {h}h HORIZON")
-                    print(f"{'#'*60}")
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
+        for h in horizons:
+            if len(horizons) > 1:
+                print(f"\n{'#'*60}")
+                print(f"  RUNNING {h}h HORIZON")
+                print(f"{'#'*60}")
+            run_mode_d_optuna(assets_list, horizon=h, n_trials=n_trials, resume=flag_resume)
 
-            # Run strategy comparison right after D for this asset
-            if mode == 'DF' or len(horizons) == 2:
-                run_strategy_comparison([asset], horizons)
+        # Run strategy comparison after D if DF or both horizons
+        if mode == 'DF' or len(horizons) == 2:
+            run_strategy_comparison(assets_list, horizons)
     elif mode == 'F':
         run_strategy_comparison(assets_list, horizons)
 

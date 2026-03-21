@@ -51,8 +51,9 @@ warnings.filterwarnings('ignore')
 from crypto_trading_system_deku import (
     ASSETS, FEATURE_SET_A, FEATURE_SET_B,
     PREDICTION_HORIZON, ALL_MODELS,
+    HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
     download_asset, load_data, build_all_features,
-    get_decay_weights,
+    get_decay_weights, get_return_weights, combine_weights,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -105,7 +106,7 @@ def load_best_config(asset_name, horizon=None):
         return None
     df = pd.read_csv(MODELS_CSV)
     if 'horizon' not in df.columns:
-        df['horizon'] = 4
+        df['horizon'] = HORIZON_SHORT
     match = df[df['coin'] == asset_name]
     if horizon is not None:
         match = match[match['horizon'] == horizon]
@@ -119,9 +120,15 @@ def load_best_config(asset_name, horizon=None):
         'coin': row['coin'], 'models': row['models'],
         'best_combo': row['best_combo'], 'best_window': int(row['best_window']),
         'accuracy': row['accuracy'], 'feature_set': row.get('feature_set', 'A'),
-        'horizon': int(row.get('horizon', 4)), 'optimal_features': str(opt),
+        'horizon': int(row.get('horizon', HORIZON_SHORT)), 'optimal_features': str(opt),
         'training_period': str(row['training_period']) if 'training_period' in row and pd.notna(row['training_period']) else '',
         'gamma': float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0,
+        # Enhancement toggles (backward compatible — defaults to disabled)
+        'return_weight': str(row.get('enh_return_weight', 'False')).lower() == 'true',
+        'disagree_filter': str(row.get('enh_disagree_filter', 'False')).lower() == 'true',
+        'disagree_threshold': float(row.get('enh_disagree_threshold', 0.75)) if pd.notna(row.get('enh_disagree_threshold', 0.75)) and str(row.get('enh_disagree_threshold', '')).strip() else 0.75,
+        'funding_gate': str(row.get('enh_funding_gate', 'False')).lower() == 'true',
+        'funding_threshold': float(row.get('enh_funding_threshold', 0.001)) if pd.notna(row.get('enh_funding_threshold', 0.001)) and str(row.get('enh_funding_threshold', '')).strip() else 0.001,
     }
 
 # ============================================================
@@ -131,7 +138,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     model_names = config['models'].split('+')
     window = config['best_window']
     fs = config.get('feature_set', 'A')
-    horizon = config.get('horizon', 4)
+    horizon = config.get('horizon', HORIZON_SHORT)
     opt_features = config.get('optimal_features', '')
     gamma = config.get('gamma', 1.0)
 
@@ -176,7 +183,15 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
     X_test_s = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
 
-    sw = get_decay_weights(len(y_train), gamma)
+    # Enhancement: return-weighted sampling
+    decay_w = get_decay_weights(len(y_train), gamma)
+    enh_return_weight = config.get('return_weight', False)
+    if enh_return_weight:
+        closes_arr = df['close'].values
+        ret_w = get_return_weights(closes_arr, horizon, train_start, i)
+        sw = combine_weights(decay_w, ret_w)
+    else:
+        sw = decay_w
     votes, probas = [], []
     for model_name in model_names:
         try:
@@ -192,12 +207,26 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
 
     buy_votes = sum(votes)
     buy_ratio = buy_votes / len(votes)
-    if buy_ratio > 0.5:
+
+    # Enhancement: ensemble disagreement filter
+    enh_disagree = config.get('disagree_filter', False)
+    enh_disagree_thresh = config.get('disagree_threshold', 0.75)
+    if enh_disagree and max(buy_ratio, 1 - buy_ratio) < enh_disagree_thresh:
+        signal = 'HOLD'
+    elif buy_ratio > 0.5:
         signal = 'BUY'
     elif buy_ratio == 0:
         signal = 'SELL'
     else:
         signal = 'HOLD'
+
+    # Enhancement: funding rate regime gate
+    enh_funding = config.get('funding_gate', False)
+    enh_funding_thresh = config.get('funding_threshold', 0.001)
+    if enh_funding and signal == 'BUY' and '_funding_rate' in df.columns:
+        fr_val = df.iloc[i].get('_funding_rate', np.nan)
+        if not np.isnan(fr_val) and fr_val > enh_funding_thresh:
+            signal = 'HOLD'
 
     avg_proba = np.mean(probas)
     confidence = avg_proba * 100 if signal != 'SELL' else (1 - avg_proba) * 100
@@ -225,29 +254,30 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
 # ============================================================
 # "BOTH AGREE" STRATEGY
 # ============================================================
-def compute_combined_signal(sig_4h, sig_8h, min_confidence=MIN_CONFIDENCE):
-    if sig_4h is None or sig_8h is None:
-        sig = sig_4h or sig_8h
+def compute_combined_signal(sig_short, sig_long, min_confidence=MIN_CONFIDENCE):
+    h_s, h_l = HORIZON_SHORT, HORIZON_LONG
+    if sig_short is None or sig_long is None:
+        sig = sig_short or sig_long
         if sig and sig['confidence'] >= min_confidence:
             return sig['signal'], sig['confidence'], 'single_model'
         return 'HOLD', 50, 'missing_model'
 
-    s4, c4 = sig_4h['signal'], sig_4h['confidence']
-    s8, c8 = sig_8h['signal'], sig_8h['confidence']
+    ss, cs = sig_short['signal'], sig_short['confidence']
+    sl, cl = sig_long['signal'], sig_long['confidence']
 
-    if s4 == 'SELL' or s8 == 'SELL':
-        if s4 == 'SELL' and s8 == 'SELL':
-            return 'SELL', max(c4, c8), 'both_sell'
-        elif s4 == 'SELL':
-            return 'SELL', c4, '4h_sell'
+    if ss == 'SELL' or sl == 'SELL':
+        if ss == 'SELL' and sl == 'SELL':
+            return 'SELL', max(cs, cl), 'both_sell'
+        elif ss == 'SELL':
+            return 'SELL', cs, f'{h_s}h_sell'
         else:
-            return 'SELL', c8, '8h_sell'
+            return 'SELL', cl, f'{h_l}h_sell'
 
-    if s4 == 'BUY' and s8 == 'BUY':
-        if c4 >= min_confidence and c8 >= min_confidence:
-            return 'BUY', (c4 + c8) / 2, 'both_buy'
-        low = '4h' if c4 < min_confidence else '8h'
-        return 'HOLD', min(c4, c8), f'low_conf_{low}'
+    if ss == 'BUY' and sl == 'BUY':
+        if cs >= min_confidence and cl >= min_confidence:
+            return 'BUY', (cs + cl) / 2, 'both_buy'
+        low = f'{h_s}h' if cs < min_confidence else f'{h_l}h'
+        return 'HOLD', min(cs, cl), f'low_conf_{low}'
 
     return 'HOLD', 50, 'disagree'
 
@@ -258,9 +288,9 @@ def run_once(asset_name, _stale_warning=False):
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
-    config_4h = load_best_config(asset_name, horizon=4)
-    config_8h = load_best_config(asset_name, horizon=8)
-    if not config_4h and not config_8h:
+    config_short = load_best_config(asset_name, horizon=HORIZON_SHORT)
+    config_long = load_best_config(asset_name, horizon=HORIZON_LONG)
+    if not config_short and not config_long:
         print("  ERROR: No Deku models found!")
         return None
 
@@ -275,38 +305,38 @@ def run_once(asset_name, _stale_warning=False):
         print("  ERROR: No data.")
         return None
 
-    sig_4h = sig_8h = None
-    if config_4h:
-        print(f"\n  --- 4h: {config_4h['best_combo']} | w={config_4h['best_window']}h ---")
-        sig_4h = generate_live_signal(asset_name, config_4h, df_raw=df_raw)
-        if sig_4h:
-            print(f"  {sig_4h['signal']} ({sig_4h['confidence']:.0f}%)")
+    sig_short = sig_long = None
+    if config_short:
+        print(f"\n  --- {HORIZON_SHORT}h: {config_short['best_combo']} | w={config_short['best_window']}h ---")
+        sig_short = generate_live_signal(asset_name, config_short, df_raw=df_raw)
+        if sig_short:
+            print(f"  {sig_short['signal']} ({sig_short['confidence']:.0f}%)")
 
-    if config_8h:
-        print(f"\n  --- 8h: {config_8h['best_combo']} | w={config_8h['best_window']}h ---")
-        sig_8h = generate_live_signal(asset_name, config_8h, df_raw=df_raw)
-        if sig_8h:
-            print(f"  {sig_8h['signal']} ({sig_8h['confidence']:.0f}%)")
+    if config_long:
+        print(f"\n  --- {HORIZON_LONG}h: {config_long['best_combo']} | w={config_long['best_window']}h ---")
+        sig_long = generate_live_signal(asset_name, config_long, df_raw=df_raw)
+        if sig_long:
+            print(f"  {sig_long['signal']} ({sig_long['confidence']:.0f}%)")
 
-    action, confidence, reason = compute_combined_signal(sig_4h, sig_8h)
-    any_sig = sig_4h or sig_8h
+    action, confidence, reason = compute_combined_signal(sig_short, sig_long)
+    any_sig = sig_short or sig_long
     price = any_sig['close'] if any_sig else 0
 
     print(f"\n  {'='*50}")
     print(f"  >>> {action} ({confidence:.0f}%) -- {reason}")
     print(f"  {'='*50}")
 
-    msg = _format_combined_message(asset_name, sig_4h, sig_8h, action, confidence, reason)
+    msg = _format_combined_message(asset_name, sig_short, sig_long, action, confidence, reason)
     if _stale_warning:
         msg += "\n\nData may be delayed"
     send_telegram(msg)
 
     return {'action': action, 'confidence': confidence, 'reason': reason,
-            'price': price, 'sig_4h': sig_4h, 'sig_8h': sig_8h}
+            'price': price, 'sig_short': sig_short, 'sig_long': sig_long}
 
 
-def _format_combined_message(asset_name, sig_4h, sig_8h, action, confidence, reason):
-    any_sig = sig_4h or sig_8h
+def _format_combined_message(asset_name, sig_short, sig_long, action, confidence, reason):
+    any_sig = sig_short or sig_long
     price = any_sig['close'] if any_sig else 0
     price_str = f"${price:,.2f}" if price > 1000 else f"${price:.4f}"
 
@@ -317,30 +347,32 @@ def _format_combined_message(asset_name, sig_4h, sig_8h, action, confidence, rea
     else:
         action_line = f"<b>HOLD</b> -- no action"
 
+    h_s, h_l = HORIZON_SHORT, HORIZON_LONG
+
     def _sig_str(sig, h):
         if not sig:
             return f"{h}h: N/A"
         return f"{h}h: {sig['signal']} ({sig['confidence']:.0f}%)"
 
     reason_map = {
-        'both_buy': '4h + 8h both BUY', 'both_sell': '4h + 8h both SELL',
-        '4h_sell': '4h triggered SELL', '8h_sell': '8h triggered SELL',
-        'disagree': 'Models disagree', 'low_conf_4h': '4h confidence too low',
-        'low_conf_8h': '8h confidence too low', 'single_model': 'One model only',
+        'both_buy': f'{h_s}h + {h_l}h both BUY', 'both_sell': f'{h_s}h + {h_l}h both SELL',
+        f'{h_s}h_sell': f'{h_s}h triggered SELL', f'{h_l}h_sell': f'{h_l}h triggered SELL',
+        'disagree': 'Models disagree', f'low_conf_{h_s}h': f'{h_s}h confidence too low',
+        f'low_conf_{h_l}h': f'{h_l}h confidence too low', 'single_model': 'One model only',
         'missing_model': 'Model failed',
     }
 
     lines = [
-        f"<b>[DEKU] {asset_name}</b>  {_sig_str(sig_4h, 4)} | {_sig_str(sig_8h, 8)}",
+        f"<b>[DEKU] {asset_name}</b>  {_sig_str(sig_short, h_s)} | {_sig_str(sig_long, h_l)}",
         "", action_line, f"Reason: {reason_map.get(reason, reason)}",
         "", f"<b>Price: {price_str}</b>",
     ]
     if any_sig:
         lines.append(f"RSI: {any_sig['rsi']}")
-    if sig_4h:
-        lines.append(f"4h: {sig_4h['model']} | w={sig_4h['window']}h | {sig_4h['diag_accuracy']:.1f}%")
-    if sig_8h:
-        lines.append(f"8h: {sig_8h['model']} | w={sig_8h['window']}h | {sig_8h['diag_accuracy']:.1f}%")
+    if sig_short:
+        lines.append(f"{h_s}h: {sig_short['model']} | w={sig_short['window']}h | {sig_short['diag_accuracy']:.1f}%")
+    if sig_long:
+        lines.append(f"{h_l}h: {sig_long['model']} | w={sig_long['window']}h | {sig_long['diag_accuracy']:.1f}%")
     lines.append(f"{any_sig['datetime'] if any_sig else ''}")
     return "\n".join(lines)
 
@@ -375,11 +407,11 @@ def run_loop(asset_name):
     print(f"  Min confidence: {MIN_CONFIDENCE}%")
     print(f"{'='*60}")
 
-    c4 = load_best_config(asset_name, horizon=4)
-    c8 = load_best_config(asset_name, horizon=8)
-    if c4: print(f"  4h: {c4['best_combo']} | {c4['accuracy']:.1f}%")
-    if c8: print(f"  8h: {c8['best_combo']} | {c8['accuracy']:.1f}%")
-    if not c4 and not c8:
+    c_s = load_best_config(asset_name, horizon=HORIZON_SHORT)
+    c_l = load_best_config(asset_name, horizon=HORIZON_LONG)
+    if c_s: print(f"  {HORIZON_SHORT}h: {c_s['best_combo']} | {c_s['accuracy']:.1f}%")
+    if c_l: print(f"  {HORIZON_LONG}h: {c_l['best_combo']} | {c_l['accuracy']:.1f}%")
+    if not c_s and not c_l:
         print("  ERROR: No Deku models!")
         return
 

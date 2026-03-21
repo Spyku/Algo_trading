@@ -39,7 +39,7 @@ from crypto_live_trader_deku import (
     load_best_config, generate_live_signal, compute_combined_signal,
     send_telegram, wait_for_fresh_candle, setup_telegram,
     download_asset, load_data, TELEGRAM_CONFIG, MIN_CONFIDENCE,
-    MODELS_CSV,
+    MODELS_CSV, HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
 )
 
 
@@ -50,7 +50,7 @@ TRADING_CONFIG_FILE = 'config/trading_config_deku.json'
 
 DEFAULT_TRADING_CONFIG = {
     'BTC': {
-        'strategy': 'both_agree',   # BUY when 4h+8h agree
+        'strategy': 'both_agree',   # BUY when both horizons agree
         'max_position_usd': 0,
         'symbol': 'BTC-USD',
         'enabled': True,
@@ -338,11 +338,10 @@ def sync_positions(trading_cfg, notify=True):
 def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
     """
     Apply per-asset strategy using signals from any available horizons.
-    sigs_by_horizon: dict {1: sig_1h, 2: sig_2h, 4: sig_4h, 8: sig_8h} (any subset)
+    sigs_by_horizon: dict {h: signal_dict} for each horizon (any subset)
     Returns (action, confidence, reason).
 
-    Strategies: both_agree, either_agree, 4h_only, 8h_only, 1h_only, 2h_only,
-                8h_and_1h, 8h_and_2h, any_agree
+    Strategies: both_agree, either_agree, Xh_only (any horizon), any_agree
     """
     if not sigs_by_horizon or all(v is None for v in sigs_by_horizon.values()):
         return 'HOLD', 50, 'no_signal'
@@ -359,18 +358,12 @@ def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
         return 'HOLD', c, 'low_conf' if s == 'BUY' else 'no_signal'
 
     # --- multi horizon: determine relevant horizons ---
-    if strategy == 'both_agree':
-        horizons = [4, 8]
-    elif strategy == 'either_agree':
-        horizons = [4, 8]
-    elif strategy == '8h_and_1h':
-        horizons = [8, 1]
-    elif strategy == '8h_and_2h':
-        horizons = [8, 2]
+    if strategy in ('both_agree', 'either_agree'):
+        horizons = list(AVAILABLE_HORIZONS)
     elif strategy == 'any_agree':
-        horizons = [h for h in [1, 2, 4, 8] if sigs_by_horizon.get(h)]
+        horizons = [h for h in sorted(sigs_by_horizon.keys()) if sigs_by_horizon.get(h)]
     else:
-        horizons = [4, 8]  # default fallback
+        horizons = list(AVAILABLE_HORIZONS)  # default fallback
 
     available = [h for h in horizons if sigs_by_horizon.get(h)]
     if not available:
@@ -383,7 +376,7 @@ def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
         return 'SELL', max(_c(h) for h in selling), reason
 
     # BUY logic
-    if strategy in ('both_agree', '8h_and_1h', '8h_and_2h'):
+    if strategy == 'both_agree':
         # AND: all available relevant horizons must BUY with conf >= min_conf
         if all(_s(h) == 'BUY' and _c(h) >= min_conf for h in available):
             reason = '+'.join(f'{h}h' for h in available) + '_buy'
@@ -413,7 +406,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
     # Load configs for all available horizons
     sigs_by_horizon = {}
     any_config = False
-    for h in [1, 2, 4, 8]:
+    for h in AVAILABLE_HORIZONS:
         cfg = load_best_config(asset, horizon=h)
         if cfg:
             any_config = True
@@ -459,9 +452,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
     # Log signal for /chart command
     _log_signal(asset, price, sigs_by_horizon, action, confidence)
 
-    # Keep backward compat: expose sig_4h, sig_8h for Telegram message
-    sig_4h = sigs_by_horizon.get(4)
-    sig_8h = sigs_by_horizon.get(8)
+    # Expose sig_short, sig_long for Telegram message
+    sig_short = sigs_by_horizon.get(HORIZON_SHORT)
+    sig_long = sigs_by_horizon.get(HORIZON_LONG)
 
     # Execute
     executed = False
@@ -560,7 +553,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
     # Get gamma from the primary horizon model
     gamma_val = ''
-    for h in [8, 4]:  # prefer 8h config
+    for h in [HORIZON_LONG, HORIZON_SHORT]:  # prefer long horizon config
         cfg = load_best_config(asset, horizon=h)
         if cfg:
             g = cfg.get('gamma', 1.0)
@@ -571,7 +564,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
     return {
         'asset': asset, 'action': action, 'confidence': confidence,
         'reason': reason, 'price': price, 'executed': executed,
-        'pnl_msg': pnl_msg, 'sig_4h': sig_4h, 'sig_8h': sig_8h,
+        'pnl_msg': pnl_msg, 'sig_short': sig_short, 'sig_long': sig_long,
         'position': position, 'strategy': strategy,
         'min_confidence': trading_cfg.get('min_confidence', MIN_CONFIDENCE),
         'gamma': gamma_val,
@@ -605,7 +598,7 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
         rsi = 0
         last_prices = []
         try:
-            any_sig = r.get('sig_4h') or r.get('sig_8h')
+            any_sig = r.get('sig_short') or r.get('sig_long')
             if any_sig:
                 rsi = any_sig.get('rsi', 0)
                 for h in any_sig.get('last_4h', []):
@@ -623,7 +616,7 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
             e = '🔵' if sig['signal'] == 'BUY' else '🔴' if sig['signal'] == 'SELL' else '🟡'
             return f"{e}{h}h:{sig['signal']}({sig['confidence']:.0f}%)"
 
-        sig_line = f"{_se(r['sig_4h'], 4)} {_se(r['sig_8h'], 8)}"
+        sig_line = f"{_se(r['sig_short'], HORIZON_SHORT)} {_se(r['sig_long'], HORIZON_LONG)}"
 
         # Action
         if action == 'BUY' and position['state'] == 'invested':
@@ -821,7 +814,7 @@ _rerun_event = threading.Event()
 _paused_lock = threading.Lock()
 _paused_flag = [False]  # mutable container for thread-safe access
 
-STRATEGIES = ['both_agree', 'either_agree', '4h_only', '8h_only']
+STRATEGIES = ['both_agree', 'either_agree', f'{HORIZON_SHORT}h_only', f'{HORIZON_LONG}h_only']
 
 # ---- Simple command handlers ----
 
@@ -903,7 +896,7 @@ def _handle_optimize_command(msg):
             return
 
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crypto_trading_system_deku.py')
-        cmd = [sys.executable, script, 'D', assets, '4,8h']
+        cmd = [sys.executable, script, 'D', assets, f'{HORIZON_SHORT},{HORIZON_LONG}h']
 
         # Run at below-normal priority on Windows
         creation_flags = 0
@@ -918,7 +911,7 @@ def _handle_optimize_command(msg):
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
         print(f"  OPTIMIZE: launched Mode D for {assets} (PID {_optimize_proc.pid})")
-        send_telegram(f"🚀 <b>Mode D started</b>\n{assets} 4,8h (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
+        send_telegram(f"🚀 <b>Mode D started</b>\n{assets} {HORIZON_SHORT},{HORIZON_LONG}h (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
 
         # Monitor in background thread
         def _monitor():
@@ -956,11 +949,11 @@ def _log_signal(asset, price, sigs_by_horizon, action, confidence):
     """Append one row per signal to signal_log.csv for chart rendering."""
     import csv
     fieldnames = ['timestamp', 'asset', 'price', 'action', 'confidence',
-                  'sig_4h', 'conf_4h', 'sig_8h', 'conf_8h']
+                  f'sig_{HORIZON_SHORT}h', f'conf_{HORIZON_SHORT}h', f'sig_{HORIZON_LONG}h', f'conf_{HORIZON_LONG}h']
     file_exists = os.path.exists(SIGNAL_LOG_FILE) and os.path.getsize(SIGNAL_LOG_FILE) > 0
     try:
-        sig4 = sigs_by_horizon.get(4)
-        sig8 = sigs_by_horizon.get(8)
+        sig_s = sigs_by_horizon.get(HORIZON_SHORT)
+        sig_l = sigs_by_horizon.get(HORIZON_LONG)
         with open(SIGNAL_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
@@ -971,10 +964,10 @@ def _log_signal(asset, price, sigs_by_horizon, action, confidence):
                 'price': f'{price:.2f}',
                 'action': action,
                 'confidence': f'{confidence:.1f}',
-                'sig_4h': sig4['signal'] if sig4 else '',
-                'conf_4h': f"{sig4['confidence']:.1f}" if sig4 else '',
-                'sig_8h': sig8['signal'] if sig8 else '',
-                'conf_8h': f"{sig8['confidence']:.1f}" if sig8 else '',
+                f'sig_{HORIZON_SHORT}h': sig_s['signal'] if sig_s else '',
+                f'conf_{HORIZON_SHORT}h': f"{sig_s['confidence']:.1f}" if sig_s else '',
+                f'sig_{HORIZON_LONG}h': sig_l['signal'] if sig_l else '',
+                f'conf_{HORIZON_LONG}h': f"{sig_l['confidence']:.1f}" if sig_l else '',
             })
     except Exception as e:
         print(f"  [!] Signal log error: {e}")
@@ -1100,7 +1093,7 @@ def _handle_chart_command(msg, trading_cfg):
                 if action == 'BUY':
                     color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
                     marker = '^'
-                    label_txt = f"BUY {sig.get('conf_4h', '')}%/{sig.get('conf_8h', '')}%"
+                    label_txt = f"BUY {sig.get(f'conf_{HORIZON_SHORT}h', '')}%/{sig.get(f'conf_{HORIZON_LONG}h', '')}%"
                 elif action == 'SELL':
                     color = '#4CAF50' if correct else '#FF5722' if correct is not None else '#FFC107'
                     marker = 'v'
@@ -1441,7 +1434,7 @@ def _get_models_fingerprint(trading_cfg):
     for asset, cfg in trading_cfg.items():
         if not cfg.get('enabled'):
             continue
-        for h in [4, 8]:
+        for h in AVAILABLE_HORIZONS:
             model_cfg = load_best_config(asset, horizon=h)
             if model_cfg:
                 fp[(asset, h)] = f"{model_cfg['best_combo']}|w{model_cfg['best_window']}|{model_cfg['accuracy']:.2f}|{model_cfg.get('feature_set','A')}|γ{model_cfg.get('gamma',1.0)}"
@@ -1471,7 +1464,7 @@ def run_all_once(trading_cfg, dry_run=False):
     for asset, cfg in trading_cfg.items():
         if not cfg.get('enabled'):
             continue
-        if not load_best_config(asset, horizon=4) and not load_best_config(asset, horizon=8):
+        if not load_best_config(asset, horizon=HORIZON_SHORT) and not load_best_config(asset, horizon=HORIZON_LONG):
             continue
         print(f"\n  --- {asset} ({cfg['strategy']}) ---")
         r = process_asset(asset, cfg, dry_run=dry_run)
@@ -1713,7 +1706,7 @@ def main():
         print(f"  {'-'*6} {'-'*14} {'-'*10} {'-'*8} {'-'*7} {'-'*10}")
         for asset, cfg in trading_cfg.items():
             pos = load_position(asset)
-            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            has_model = load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG)
             enabled_str = "Yes" if cfg.get('enabled', True) else "No"
             auto_str    = "Yes" if pos.get('auto_trade') else "No"
             pos_str     = pos['state'].upper()
@@ -1748,7 +1741,7 @@ def main():
                             print(f"    SELL ${t['price']:,.2f} | {t['time']} | {t.get('pnl_pct',0):+.1f}%")
             return
         elif ch == '4':
-            VALID_STRATEGIES = ('both_agree', 'either_agree', '4h_only', '8h_only', '1h_only', '2h_only', 'any_agree')
+            VALID_STRATEGIES = ('both_agree', 'either_agree', f'{HORIZON_SHORT}h_only', f'{HORIZON_LONG}h_only', 'any_agree')
             for asset in trading_cfg:
                 cfg = trading_cfg[asset]
                 pos = load_position(asset)
@@ -1789,7 +1782,7 @@ def main():
     needs_config = False
     for asset, cfg in trading_cfg.items():
         if cfg.get('enabled') and cfg.get('max_position_usd', 0) <= 0:
-            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            has_model = load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG)
             if has_model:
                 needs_config = True
                 break
@@ -1798,7 +1791,7 @@ def main():
         print(f"\n  ⚠️ Max positions not set. Configure now:")
         for asset, cfg in trading_cfg.items():
             if not cfg.get('enabled'): continue
-            has_model = load_best_config(asset, horizon=4) or load_best_config(asset, horizon=8)
+            has_model = load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG)
             if not has_model: continue
             if cfg.get('max_position_usd', 0) <= 0:
                 while True:
