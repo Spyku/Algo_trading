@@ -53,7 +53,7 @@ from crypto_trading_system_deku import (
     PREDICTION_HORIZON, ALL_MODELS,
     HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
     download_asset, load_data, build_all_features,
-    get_decay_weights, get_return_weights, combine_weights,
+    get_decay_weights,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -183,15 +183,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=feature_cols)
     X_test_s = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
 
-    # Enhancement: return-weighted sampling
-    decay_w = get_decay_weights(len(y_train), gamma)
-    enh_return_weight = config.get('return_weight', False)
-    if enh_return_weight:
-        closes_arr = df['close'].values
-        ret_w = get_return_weights(closes_arr, horizon, train_start, i)
-        sw = combine_weights(decay_w, ret_w)
-    else:
-        sw = decay_w
+    sw = get_decay_weights(len(y_train), gamma)
     votes, probas = [], []
     for model_name in model_names:
         try:
@@ -231,9 +223,11 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     avg_proba = np.mean(probas)
     confidence = avg_proba * 100 if signal != 'SELL' else (1 - avg_proba) * 100
 
+    # Use raw data (df_raw) for last 4h — df drops last `horizon` rows due to label shift
     last_4h = []
-    for j in range(max(0, n - 4), n):
-        r = df.iloc[j]
+    src = df_raw if df_raw is not None and len(df_raw) >= 4 else df
+    for j in range(max(0, len(src) - 4), len(src)):
+        r = src.iloc[j]
         last_4h.append({
             'datetime': _to_local(r['datetime']).strftime('%H:%M') if hasattr(r['datetime'], 'strftime') else str(r['datetime']),
             'close': float(r['close']),

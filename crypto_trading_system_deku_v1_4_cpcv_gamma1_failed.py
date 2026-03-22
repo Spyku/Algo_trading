@@ -1,44 +1,35 @@
 """
-Crypto Hourly Trading System — DEKU
+Crypto Hourly Trading System — DEKU V1.4
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
-130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
+ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT
+with 4h and 8h horizons. 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
-DEKU — Optuna-based joint optimization + XGBoost:
-  Based on CASCA V1.4 (APF scoring), replaces grid search with Bayesian optimization.
+DEKU V1.4 — Fixed gamma=1.0, data_months hyperparameter, adaptive CPCV:
+  1. RandomSampler always (no TPE) — pure random search
+  2. gamma=1.0 fixed (no decay) — removed from search space
+  3. data_months as Optuna param: [1, 2, 3, 4, 6] months of training history
+  4. Adaptive CPCV: 6 groups for data_months >= 4, 4 groups otherwise
+  5. 5 base models (RF, GB, XGB, LR, LGBM) = 26 ensemble combos
+  6. LGBM importance ranking for feature selection
 
-  Key changes vs CASCA:
-  1. Optuna TPE + Hyperband: joint optimization of (combo, window, gamma, n_features)
-     - TPE sampler: learns which regions are promising (vs exhaustive grid)
-     - Hyperband pruner: kills bad trials early during walk-forward
-     - ~100 trials finds better optima than 330+ grid configs
-  2. XGBoost added: 5 base models (RF, GB, XGB, LR, LGBM) = 26 ensemble combos
-     - XGB adds L1+L2 regularized boosting with histogram splits
-     - Level-wise growth (vs LGBM leaf-wise, GB depth-wise)
-  3. Feature count as parameter: instead of fixed feature selection, Optuna picks
-     n_features (how many top-ranked features to use) jointly with other params
-  4. Continuous gamma: 0.995-1.0 range instead of 5 discrete values
-  5. LGBM importance ranking replaces 5-test analysis (~1 min vs ~10 min)
-
-  APF scoring (from CASCA V1.4):
-  - Adjusted PF = raw_PF / buyhold_PF (measures skill vs passive holding)
-  - Eliminates market-regime bias
-  - Raw PF capped at 20.0, minimum 3 trades
+  Search space: combo × window × data_months × n_features
+  APF scoring: Adjusted PF = raw_PF / buyhold_PF
 
 Modes:
   B. Quick run (saved models)    D. Optuna optimization
   DF. D then F                   F. Strategy comparison
+  H. Horizon search              HF. H then F
   5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage:
-  python crypto_trading_system_deku.py D BTC 4,8h
-  python crypto_trading_system_deku.py D BTC 4,8h --trials 150
-  python crypto_trading_system_deku.py DF BTC,ETH 4,8h
-  python crypto_trading_system_deku.py B BTC
+  python crypto_trading_system_deku_v1_4.py D BTC 4,8h
+  python crypto_trading_system_deku_v1_4.py D BTC 4,8h --trials 150
+  python crypto_trading_system_deku_v1_4.py DF BTC,ETH 4,8h
+  python crypto_trading_system_deku_v1_4.py B BTC
 
 Outputs:
   charts/{ASSET}_backtest.png
-  models/crypto_deku_best_models.csv
+  models/crypto_deku_v14_best_models.csv
   models/crypto_hourly_chart_data.json
 """
 
@@ -95,7 +86,7 @@ from sklearn.utils.parallel import Parallel, delayed
 try:
     import optuna
 except ImportError:
-    optuna = None  # only needed for Mode A/D optimization, not signal generation
+    optuna = None  # only needed for Mode D/H optimization, not signal generation
 try:
     from xgboost import XGBClassifier
 except ImportError:
@@ -230,6 +221,8 @@ ASSETS = {
     'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
 }
 
+DEKU_VERSION = '1.4'              # Deku V1.4: Fixed gamma=1.0, data_months hyperparameter, adaptive CPCV
+
 HORIZON_SHORT = 4                 # short horizon (parametric — change here to switch)
 HORIZON_LONG = 8                  # long horizon (parametric — change here to switch)
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
@@ -250,7 +243,6 @@ MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (o
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 EMBARGO_CANDLES = 4  # gap between train/test in walk-forward to prevent label overlap leakage
 
-
 # Per-horizon feature ranges — short tighter to avoid overfitting, long keeps full range
 N_FEATURES_RANGE = {
     HORIZON_SHORT: (4, 40),   # short horizon: narrower (overfitting observed with 80+ features)
@@ -262,8 +254,21 @@ N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
 HORIZON_SEARCH = [3, 4, 5, 6, 7, 8]
 MODE_H_DEFAULT_TRIALS = 200  # extra budget for horizon dimension
 
-# 3-fold rolling holdout — train on ~60%, validate on ~20%, across 3 temporal folds
-N_HOLDOUT_FOLDS = 3
+# CPCV: Combinatorial Purged Cross-Validation (López de Prado)
+# Adaptive groups based on data_months — see _get_cpcv_params()
+CPCV_PURGE_CANDLES = 4   # purge rows at train/test boundary (same as EMBARGO_CANDLES)
+PBO_MAX = 0.50       # reject configs with PBO > 50% (probability of backtest overfitting)
+
+
+def _get_cpcv_params(data_months):
+    """Adaptive CPCV groups based on data size.
+    Fewer groups for shorter data to keep folds statistically meaningful."""
+    if data_months >= 4:
+        return 6, 2  # 6 groups, k=2 → C(6,2) = 15 paths
+    else:
+        return 4, 2  # 4 groups, k=2 → C(4,2) = 6 paths
+
+DATA_MONTHS_OPTIONS = [1, 2, 3, 4, 5, 6]  # months of training history for Optuna to search
 
 # Optuna scoring metric — set via --metric flag (default: apf)
 OPTUNA_METRIC = 'apf'
@@ -306,8 +311,6 @@ def get_decay_weights(n_samples, gamma):
         return None
     ages = np.arange(n_samples - 1, -1, -1)
     return gamma ** ages
-
-
 
 
 def load_funding_rate(asset_name='BTC'):
@@ -713,12 +716,12 @@ MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 
 
 def _get_models_csv_path():
-    """Return the models CSV path — respects MODELS_CSV_OVERRIDE and --metric for test isolation."""
+    """Return the models CSV path for V1.4."""
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_deku_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_deku_best_models.csv'
+        return f'{MODELS_DIR}/crypto_deku_v14_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_deku_v14_best_models.csv'
 
 
 def _backup_models_csv():
@@ -2900,6 +2903,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
 
         buy_ratio = sum(votes) / len(votes)
         ensemble_pred = 1 if buy_ratio > 0.5 else 0
+
         if ensemble_pred == y_true:
             correct += 1
         total += 1
@@ -2977,6 +2981,63 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
             trades, total_gain, total_loss, max_dd * 100, adjusted_pf, raw_pf, bh_pf)
 
 
+def _build_cpcv_paths(n_total, n_groups=6, k_test=2, purge=CPCV_PURGE_CANDLES):
+    """
+    Build CPCV (Combinatorial Purged Cross-Validation) paths.
+
+    Splits n_total rows into n_groups contiguous groups.
+    For each C(n_groups, k_test) combination of test groups:
+      - test = union of selected groups
+      - train = remaining groups, with purge rows removed at boundaries
+
+    Returns list of (train_indices, test_indices) tuples — one per path.
+    C(6,2) = 15 paths.
+    """
+    group_size = n_total // n_groups
+    group_boundaries = []
+    for g in range(n_groups):
+        start = g * group_size
+        end = (g + 1) * group_size if g < n_groups - 1 else n_total
+        group_boundaries.append((start, end))
+
+    paths = []
+    for test_combo in combinations(range(n_groups), k_test):
+        test_set = set()
+        for g in test_combo:
+            s, e = group_boundaries[g]
+            test_set.update(range(s, e))
+
+        # Build train set: all rows NOT in test, with purge around test boundaries
+        purge_set = set()
+        for g in test_combo:
+            s, e = group_boundaries[g]
+            # Purge rows just before and after each test group
+            for p in range(max(0, s - purge), s):
+                purge_set.add(p)
+            for p in range(e, min(n_total, e + purge)):
+                purge_set.add(p)
+
+        train_indices = sorted([i for i in range(n_total) if i not in test_set and i not in purge_set])
+        test_indices = sorted(test_set)
+
+        paths.append((np.array(train_indices), np.array(test_indices)))
+
+    return paths
+
+
+def _compute_pbo(path_returns):
+    """
+    Compute Probability of Backtest Overfitting (PBO).
+
+    PBO = fraction of CPCV paths where the strategy lost money (return <= 0).
+    Lower is better. PBO > 50% means more paths lose money than gain.
+    """
+    if not path_returns:
+        return 1.0
+    n_losing = sum(1 for r in path_returns if r <= 0)
+    return n_losing / len(path_returns)
+
+
 def _build_combo_list():
     """Build all ensemble combos from Deku's 5 base models (MIN_COMBO_SIZE=2)."""
     model_names = list(ALL_MODELS.keys())
@@ -2989,18 +3050,17 @@ def _build_combo_list():
 
 def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False):
     """
-    DEKU Mode D: Optuna TPE + Hyperband joint optimization.
+    DEKU V1.4 Mode D: RANDOM OPTUNA + ADAPTIVE CPCV.
 
     Pipeline:
     1. Download fresh data
-    2. Build all features, cap at 6 months
-    3. LGBM importance ranking (~1 min) — replaces 5-test analysis (~10 min)
-    4. Optuna study: jointly optimize (combo, window, gamma, n_features)
-       - TPE sampler directs search to promising regions
-       - Hyperband pruner kills bad trials after partial walk-forward
-       - ~100 trials ≈ better than exhaustive 330+ grid configs
-    5. Save best model to CSV
-    6. Generate signals + backtest charts
+    2. Build all features (no fixed cap — data_months is an Optuna param)
+    3. LGBM importance ranking (~1 min)
+    4. Optuna study (RandomSampler, fixed gamma=1.0, data_months as param)
+    5. Adaptive CPCV validation with PBO filter on top candidates
+    6. Save best model to CSV
+    7. Calibration summary (top trials analysis)
+    8. Generate signals + backtest charts
     """
     t_mode_start = time.time()
     _kill_orphan_workers()
@@ -3008,11 +3068,12 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     combo_options = _build_combo_list()
 
     print("\n" + "=" * 70)
-    print(f"  DEKU MODE D: OPTUNA JOINT OPTIMIZATION -- {horizon}h HORIZON")
+    print(f"  DEKU V1.4 MODE D: RANDOM OPTUNA + ADAPTIVE CPCV -- {horizon}h HORIZON")
     print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
-    print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
+    print(f"  Trials: {n_trials} (RandomSampler) | gamma=1.0 (fixed)")
+    print(f"  data_months: {DATA_MONTHS_OPTIONS} | CPCV: adaptive (4 or 6 groups) | PBO ≤ {PBO_MAX*100:.0f}%")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
-    print(f"  Search: combo × window × gamma (0.994-1.0) × n_features{metric_label}")
+    print(f"  Search: combo × window × data_months × n_features{metric_label}")
     print("=" * 70)
 
     # Download fresh data
@@ -3044,17 +3105,17 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         if df_raw is None:
             continue
 
-        # Step 1: Build ALL features, cap at 6 months
-        MAX_DIAG_HOURS = 6 * 30 * 24
+        # Step 1: Build ALL features (no fixed cap — data_months is an Optuna param)
+        max_data_hours = max(DATA_MONTHS_OPTIONS) * 720  # keep enough for largest data_months option
         print(f"\n  Building all features (horizon={horizon}h)...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
-        if total_rows > MAX_DIAG_HOURS:
-            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+        if total_rows > max_data_hours:
+            df_full = df_full.tail(max_data_hours).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last {max(DATA_MONTHS_OPTIONS)}mo)")
 
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
@@ -3078,53 +3139,44 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         closes_np_all = df_optuna['close'].values.astype(np.float64)
         n_total = len(df_optuna)
 
-        # 3-fold rolling holdout: each fold trains on ~60%, validates on ~20%
-        fold_train_frac = 0.60
-        fold_test_frac = 0.20
-        fold_stride = 0.10
-        holdout_folds = []
-        for fi in range(N_HOLDOUT_FOLDS):
-            train_s = int(n_total * fi * fold_stride)
-            train_e = int(n_total * (fi * fold_stride + fold_train_frac))
-            test_s = train_e
-            test_e = int(n_total * (fi * fold_stride + fold_train_frac + fold_test_frac))
-            test_e = min(test_e, n_total)
-            holdout_folds.append((train_s, train_e, test_s, test_e))
-            print(f"  Fold {fi+1}: train [{train_s}:{train_e}] ({train_e-train_s:,} rows) → test [{test_s}:{test_e}] ({test_e-test_s:,} rows)")
+        # CPCV is built adaptively after Optuna (depends on winner's data_months)
+        print(f"  CPCV: adaptive (4 or 6 groups based on winner's data_months) | Purge: {CPCV_PURGE_CANDLES} candles")
 
-        # Optuna trains on fold 1's training partition
-        f1_train_s, f1_train_e, _, _ = holdout_folds[0]
-        features_np = features_np_all[f1_train_s:f1_train_e]
-        labels_np = labels_np_all[f1_train_s:f1_train_e]
-        closes_np = closes_np_all[f1_train_s:f1_train_e]
-        n = len(features_np)
+        # Optuna trains on data sliced per trial's data_months
+        features_np = features_np_all
+        labels_np = labels_np_all
+        closes_np = closes_np_all
+        n_full = len(features_np)
 
-        print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
+        print(f"  Full data: {n_full:,} rows | data_months slicing per trial | CPCV validation after")
 
         # Per-horizon feature range
         feat_min, feat_max = N_FEATURES_RANGE.get(horizon, N_FEATURES_RANGE_DEFAULT)
         min_n_features = feat_min
         max_n_features = min(len(ranked_features), feat_max)
 
-        # Step 3: Optuna study
+        # Step 3: Optuna study (RandomSampler, fixed gamma=1.0, data_months as param)
         print(f"\n{'='*70}")
-        print(f"  OPTUNA STUDY: {asset_name} {horizon}h")
-        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma[0.994-1.0] × features[{min_n_features}-{max_n_features}]")
-        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
+        print(f"  OPTUNA: {asset_name} {horizon}h")
+        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × data_months{DATA_MONTHS_OPTIONS} × features[{min_n_features}-{max_n_features}]")
+        print(f"  gamma=1.0 (fixed) | {n_trials} random trials")
         print(f"{'='*70}")
 
         # Suppress Optuna's default logging
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+        # RandomSampler always (no TPE)
+        sampler = optuna.samplers.RandomSampler(seed=42)
+
         study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42),
+            sampler=sampler,
             pruner=optuna.pruners.HyperbandPruner(
                 min_resource=DEKU_PRUNING_WARMUP,
-                max_resource=n // DIAG_STEP,  # total walk-forward steps
+                max_resource=n_full // DIAG_STEP,
                 reduction_factor=3,
             ),
-            study_name=f'deku_{asset_name}_{horizon}h',
+            study_name=f'deku_v14_{asset_name}_{horizon}h',
         )
 
         model_factories = _get_deku_diagnostic_models()
@@ -3137,16 +3189,28 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
             combo_name = trial.suggest_categorical('combo', combo_options)
             window = trial.suggest_categorical('window', DIAG_WINDOWS)
-            gamma = trial.suggest_float('gamma', 0.994, 1.0)
+            data_months = trial.suggest_categorical('data_months', DATA_MONTHS_OPTIONS)
             n_feat = trial.suggest_int('n_features', min_n_features, max_n_features)
+            gamma = 1.0  # fixed — no decay
+
+            data_hours = data_months * 720  # approximate hours per month
 
             combo = combo_name.split('+')
 
-            # Slice top n_feat features (ranked by LGBM importance)
-            feat_np = features_np[:, :n_feat]
+            # Slice data to data_months worth of history
+            if n_full > data_hours:
+                trial_feat = features_np[-data_hours:, :n_feat]
+                trial_labels = labels_np[-data_hours:]
+                trial_closes = closes_np[-data_hours:]
+                n = data_hours
+            else:
+                trial_feat = features_np[:, :n_feat]
+                trial_labels = labels_np
+                trial_closes = closes_np
+                n = n_full
 
             result = _deku_eval_with_pruning(
-                feat_np, labels_np, closes_np, combo, window, n,
+                trial_feat, trial_labels, trial_closes, combo, window, n,
                 DIAG_STEP, model_factories, gamma=gamma, trial=trial,
                 horizon=horizon
             )
@@ -3167,7 +3231,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             if score > best_apf_so_far:
                 best_apf_so_far = score
                 print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
-                      f"g={gamma:.4f} f={n_feat:3d} | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
+                      f"dm={data_months}mo f={n_feat:3d} | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
                       f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
             elif trial_count % 20 == 0:
                 print(f"  #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
@@ -3175,20 +3239,9 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             return score
 
         t_optuna = time.time()
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
-        # Auto-extend trials if best APF is below threshold
-        APF_EXTEND_THRESH = 1.7
-        extend_steps = [200, 250]
-        for ext_target in extend_steps:
-            if ext_target <= n_trials:
-                continue
-            if study.best_value >= APF_EXTEND_THRESH:
-                break
-            extra = ext_target - len(study.trials)
-            if extra > 0:
-                print(f"\n  Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} trials (+{extra})...")
-                study.optimize(objective, n_trials=extra, show_progress_bar=False)
+        print(f"\n  {n_trials} random trials...")
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         optuna_elapsed = (time.time() - t_optuna) / 60
 
@@ -3201,7 +3254,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  {OPTUNA_METRIC.upper():10s} {best_trial.value:.4f}")
         print(f"  Combo:      {best_trial.params['combo']}")
         print(f"  Window:     {best_trial.params['window']}h")
-        print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
+        print(f"  Data_months:{best_trial.params['data_months']}mo")
+        print(f"  Gamma:      1.0 (fixed)")
         print(f"  N_features: {best_trial.params['n_features']}")
 
         # Stats
@@ -3212,12 +3266,12 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # Top 10 trials
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
         completed_trials.sort(key=lambda t: -t.value)
-        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}")
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'DM':>4s}  {'Feats':>5s}")
         print(f"  {'-'*60}")
         for i, t in enumerate(completed_trials[:10], 1):
             marker = " <-- BEST" if i == 1 else ""
             print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
-                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}{marker}")
+                  f"{t.params['data_months']:3d}m  {t.params['n_features']:5d}{marker}")
 
         # Parameter importance (if enough trials)
         if n_complete >= 20:
@@ -3230,122 +3284,187 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             except Exception:
                 pass
 
-        # ── 3-FOLD ROLLING HOLDOUT: re-evaluate top candidates on unseen data ──
-        # Diversity-aware selection: best per (combo,window), then ensure every
-        # unique combo has at least one representative in holdout.
+        # ── ADAPTIVE CPCV VALIDATION ──
+        # Deduplicate by (combo, window, data_months) — keep best per unique config
         seen_configs = set()
         unique_candidates = []
         for t in completed_trials:
-            key = (t.params['combo'], t.params['window'])
+            key = (t.params['combo'], t.params['window'], t.params['data_months'])
             if key not in seen_configs:
                 seen_configs.add(key)
                 unique_candidates.append(t)
 
-        # Phase 1: take top 10 by in-sample APF (deduped by combo+window)
-        phase1 = unique_candidates[:10]
-        phase1_set = set(id(t) for t in phase1)
-        combos_in_phase1 = set(t.params['combo'] for t in phase1)
-
-        # Phase 2: add best trial from each combo NOT already represented
-        phase2 = []
-        seen_combos_p2 = set()
+        # Select top 10 deduped + best per unexplored combo
+        cand_top = unique_candidates[:10]
+        combos_in_top = set(t.params['combo'] for t in cand_top)
+        cand_extra = []
+        seen_extra = set()
         for t in unique_candidates:
-            combo = t.params['combo']
-            if combo not in combos_in_phase1 and combo not in seen_combos_p2:
-                seen_combos_p2.add(combo)
-                phase2.append(t)
-
-        candidates = phase1 + phase2
+            c = t.params['combo']
+            if c not in combos_in_top and c not in seen_extra:
+                seen_extra.add(c)
+                cand_extra.append(t)
+        candidates = cand_top + cand_extra
         N_CANDIDATES = min(20, len(candidates))
 
+        # Use winner's data_months for adaptive CPCV
+        winner_data_months = study.best_trial.params['data_months']
+        cpcv_n_groups, cpcv_k_test = _get_cpcv_params(winner_data_months)
+        winner_data_hours = winner_data_months * 720
+
+        # Cap CPCV data to winner's data_months
+        if n_full > winner_data_hours:
+            cpcv_features = features_np_all[-winner_data_hours:]
+            cpcv_labels = labels_np_all[-winner_data_hours:]
+            cpcv_closes = closes_np_all[-winner_data_hours:]
+            n_cpcv = winner_data_hours
+        else:
+            cpcv_features = features_np_all
+            cpcv_labels = labels_np_all
+            cpcv_closes = closes_np_all
+            n_cpcv = n_full
+
+        cpcv_paths = _build_cpcv_paths(n_cpcv, cpcv_n_groups, cpcv_k_test, CPCV_PURGE_CANDLES)
+        n_paths = len(cpcv_paths)
+
         print(f"\n  {'='*70}")
-        print(f"  {N_HOLDOUT_FOLDS}-FOLD ROLLING HOLDOUT: {asset_name} {horizon}h (top {N_CANDIDATES} candidates)")
+        print(f"  ADAPTIVE CPCV VALIDATION: {asset_name} {horizon}h ({N_CANDIDATES} candidates × {n_paths} paths)")
+        print(f"  data_months={winner_data_months} → {cpcv_n_groups} groups, k={cpcv_k_test} → C({cpcv_n_groups},{cpcv_k_test})={n_paths} paths")
+        print(f"  CPCV data: {n_cpcv:,} rows | PBO threshold: ≤ {PBO_MAX*100:.0f}% | Winner by: median return")
         print(f"  {'='*70}")
 
-        holdout_results = []
-        min_fold_rows = min(te - ts for _, _, ts, te in holdout_folds)
-        if min_fold_rows >= 200:
+        cpcv_results = []
+        min_test_rows = min(len(te) for _, te in cpcv_paths)
+        if min_test_rows >= 100:
+            CPCV_STEP = 12  # finer step for CPCV paths
+
             for ci, trial in enumerate(candidates):
                 c_combo = trial.params['combo'].split('+')
                 c_window = trial.params['window']
-                c_gamma = trial.params['gamma']
+                c_gamma = 1.0  # fixed
                 c_n_feat = trial.params['n_features']
+                c_data_months = trial.params['data_months']
 
-                fold_scores = []
-                fold_rets = []
-                fold_accs = []
-                fold_trades = []
-                fold_raw_pfs = []
+                # Cap candidate data to its own data_months
+                c_data_hours = c_data_months * 720
+                if n_full > c_data_hours:
+                    c_feat_all = features_np_all[-c_data_hours:]
+                    c_labels_all = labels_np_all[-c_data_hours:]
+                    c_closes_all = closes_np_all[-c_data_hours:]
+                    c_n_total = c_data_hours
+                else:
+                    c_feat_all = features_np_all
+                    c_labels_all = labels_np_all
+                    c_closes_all = closes_np_all
+                    c_n_total = n_full
 
-                for fi, (tr_s, tr_e, te_s, te_e) in enumerate(holdout_folds):
-                    fold_feat_test = features_np_all[te_s:te_e, :c_n_feat]
-                    fold_labels_test = labels_np_all[te_s:te_e]
-                    fold_closes_test = closes_np_all[te_s:te_e]
-                    n_fold_test = te_e - te_s
+                # Build CPCV paths for this candidate's data_months
+                c_cpcv_n_groups, c_cpcv_k_test = _get_cpcv_params(c_data_months)
+                c_cpcv_paths = _build_cpcv_paths(c_n_total, c_cpcv_n_groups, c_cpcv_k_test, CPCV_PURGE_CANDLES)
 
-                    HOLDOUT_STEP = 12  # finer step for holdout — more trades for statistical significance
-                    ho_result = _deku_eval_with_pruning(
-                        fold_feat_test, fold_labels_test, fold_closes_test,
-                        c_combo, c_window, n_fold_test,
-                        HOLDOUT_STEP, model_factories, gamma=c_gamma, trial=None,
+                path_rets = []
+                path_scores = []
+                path_trades = []
+
+                for pi, (train_idx, test_idx) in enumerate(c_cpcv_paths):
+                    # Use test partition only — walk-forward within test set
+                    p_feat = c_feat_all[test_idx][:, :c_n_feat]
+                    p_labels = c_labels_all[test_idx]
+                    p_closes = c_closes_all[test_idx]
+                    n_p = len(test_idx)
+
+                    p_result = _deku_eval_with_pruning(
+                        p_feat, p_labels, p_closes,
+                        c_combo, c_window, n_p,
+                        CPCV_STEP, model_factories, gamma=c_gamma, trial=None,
                         horizon=horizon
                     )
 
-                    if ho_result:
-                        fold_scores.append(_compute_optuna_score(ho_result))
-                        fold_rets.append(ho_result[4])
-                        fold_accs.append(ho_result[2])
-                        fold_trades.append(ho_result[6])
-                        fold_raw_pfs.append(ho_result[11])
+                    if p_result:
+                        path_rets.append(p_result[4])
+                        path_scores.append(_compute_optuna_score(p_result))
+                        path_trades.append(p_result[6])
                     else:
-                        fold_scores.append(0.0)
-                        fold_rets.append(0.0)
-                        fold_accs.append(0.0)
-                        fold_trades.append(0)
-                        fold_raw_pfs.append(0.0)
+                        path_rets.append(0.0)
+                        path_scores.append(0.0)
+                        path_trades.append(0)
 
-                avg_score = np.mean(fold_scores)
-                avg_ret = np.mean(fold_rets)
-                avg_acc = np.mean(fold_accs)
-                total_trades = sum(fold_trades)
-                avg_raw_pf = np.mean(fold_raw_pfs)
+                median_ret = float(np.median(path_rets))
+                median_score = float(np.median(path_scores))
+                pbo = _compute_pbo(path_rets)
+                total_trades = sum(path_trades)
+                n_positive = sum(1 for r in path_rets if r > 0)
+                c_n_paths = len(c_cpcv_paths)
 
-                holdout_results.append((trial, avg_score, avg_ret, avg_acc, total_trades,
-                                        avg_raw_pf, fold_scores, fold_rets))
+                cpcv_results.append({
+                    'trial': trial,
+                    'median_ret': median_ret,
+                    'median_score': median_score,
+                    'pbo': pbo,
+                    'total_trades': total_trades,
+                    'n_positive': n_positive,
+                    'n_paths': c_n_paths,
+                    'path_rets': path_rets,
+                    'is_score': trial.value,
+                })
 
-            holdout_results.sort(key=lambda x: -x[1])
+                if (ci + 1) % 5 == 0:
+                    print(f"    Evaluated {ci+1}/{N_CANDIDATES} candidates...")
 
-            print(f"\n  {'Rank':>4s}  {'AVG_'+OPTUNA_METRIC.upper():>8s}  {'AVG_Ret':>8s}  {'AVG_Acc':>7s}  {'Tr':>4s}  "
-                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}")
-            print(f"  {'-'*125}")
-            for i, (trial, avg_sc, avg_ret, avg_acc, tot_tr, avg_rpf, f_scores, f_rets) in enumerate(holdout_results[:10], 1):
-                is_score = trial.value
-                marker = " <-- BEST" if i == 1 else ""
-                gen = "✓" if avg_ret > 0 and avg_acc > 0.55 else "~" if avg_ret > 0 else "✗"
-                f_str = "  ".join(f"{s:+5.1f}" for s in f_rets)
-                print(f"  {i:4d}  {avg_sc:8.3f}  {avg_ret:+7.1f}%  {avg_acc*100:6.1f}%  {tot_tr:4d}  "
-                      f"{f_str}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  "
-                      f"{trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}{marker}")
+            # Sort by median return (descending)
+            cpcv_results.sort(key=lambda x: -x['median_ret'])
+
+            # Display results
+            print(f"\n  {'Rank':>4s}  {'Med_Ret':>8s}  {'PBO':>5s}  {'Pos':>5s}  "
+                  f"{'Tr':>4s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'DM':>4s}  {'F':>3s}  {'Status':>8s}")
+            print(f"  {'-'*110}")
+            for i, r in enumerate(cpcv_results[:15], 1):
+                t = r['trial']
+                passed = r['pbo'] <= PBO_MAX
+                status = "PASS" if passed else "REJECT"
+                marker = " <-- BEST" if i == 1 and passed else ""
+                icon = "✓" if passed else "✗"
+                c_n_paths = r['n_paths']
+                print(f"  {i:4d}  {r['median_ret']:+7.1f}%  {r['pbo']*100:4.0f}%  {r['n_positive']:3d}/{c_n_paths:2d}  "
+                      f"{r['total_trades']:4d}  {r['is_score']:8.3f}  {t.params['combo']:22s}  {t.params['window']:3d}h  "
+                      f"{t.params['data_months']:3d}m  {t.params['n_features']:3d}  {icon} {status}{marker}")
         else:
-            print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
+            print(f"  CPCV skipped: smallest test partition only {min_test_rows} rows (need 100+)")
 
-        # Pick winner: best average hold-out score if available, else best in-sample
-        if holdout_results and holdout_results[0][1] > 0:
-            winner_trial = holdout_results[0][0]
-            winner_ho = holdout_results[0]
+        # Pick winner: best median return among PBO-passing candidates
+        passing = [r for r in cpcv_results if r['pbo'] <= PBO_MAX and r['median_ret'] > 0]
+        if passing:
+            winner = passing[0]
+            winner_trial = winner['trial']
+            winner_cpcv = winner
         else:
+            # Fallback: best in-sample if no CPCV candidate passes
             winner_trial = study.best_trial
-            winner_ho = None
+            winner_cpcv = None
+            if cpcv_results:
+                print(f"\n  WARNING: No candidate passed PBO ≤ {PBO_MAX*100:.0f}%. Using best in-sample trial.")
 
         best_combo = winner_trial.params['combo'].split('+')
         best_window = winner_trial.params['window']
-        best_gamma = winner_trial.params['gamma']
+        best_gamma = 1.0  # fixed
         best_n_feat = winner_trial.params['n_features']
+        best_data_months = winner_trial.params['data_months']
         best_features = ranked_features[:best_n_feat]
-        # Re-run winner on training data for in-sample metrics
-        feat_np = features_np[:, :best_n_feat]
+
+        # Re-run winner on its data slice for in-sample metrics
+        best_data_hours = best_data_months * 720
+        if n_full > best_data_hours:
+            win_feat = features_np[-best_data_hours:, :best_n_feat]
+            win_labels = labels_np[-best_data_hours:]
+            win_closes = closes_np[-best_data_hours:]
+            win_n = best_data_hours
+        else:
+            win_feat = features_np[:, :best_n_feat]
+            win_labels = labels_np
+            win_closes = closes_np
+            win_n = n_full
         full_result = _deku_eval_with_pruning(
-            feat_np, labels_np, closes_np, best_combo, best_window, n,
+            win_feat, win_labels, win_closes, best_combo, best_window, win_n,
             DIAG_STEP, model_factories, gamma=best_gamma, trial=None,
             horizon=horizon
         )
@@ -3354,13 +3473,11 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             combo_name, window, acc, n_total_r, cum_ret, win_rate, trades, _, _, max_dd, apf, raw_pf, bh_pf = full_result
             is_score = _compute_optuna_score(full_result)
 
-            # Hold-out metrics (3-fold average)
-            ho_score = winner_ho[1] if winner_ho else 0
-            ho_ret = winner_ho[2] if winner_ho else 0
-            ho_acc = winner_ho[3] if winner_ho else 0
-            ho_trades = winner_ho[4] if winner_ho else 0
-            ho_raw_pf = winner_ho[5] if winner_ho else 0
-            ho_fold_rets = winner_ho[7] if winner_ho else []
+            # CPCV metrics
+            cpcv_med_ret = winner_cpcv['median_ret'] if winner_cpcv else 0
+            cpcv_pbo = winner_cpcv['pbo'] if winner_cpcv else 1.0
+            cpcv_n_pos = winner_cpcv['n_positive'] if winner_cpcv else 0
+            cpcv_path_rets = winner_cpcv['path_rets'] if winner_cpcv else []
 
             best_config = {
                 'coin': asset_name,
@@ -3368,29 +3485,75 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 'best_combo': winner_trial.params['combo'],
                 'accuracy': round(acc * 100, 2),
                 'models': winner_trial.params['combo'],
-                'return_pct': round(ho_ret if winner_ho else cum_ret, 2),
+                'return_pct': round(cpcv_med_ret if winner_cpcv else cum_ret, 2),
                 'win_rate': round(win_rate, 1),
                 'trades': trades,
-                'combined_score': round(ho_score if winner_ho else apf, 4),
+                'combined_score': round(is_score, 4),
                 'feature_set': 'D',
                 'n_features': best_n_feat,
                 'optimal_features': ','.join(best_features),
                 'horizon': horizon,
-                'gamma': round(best_gamma, 4),
+                'gamma': 1.0,
+                'data_months': best_data_months,
+                'pbo': round(cpcv_pbo, 4),
+                'cpcv_median_ret': round(cpcv_med_ret, 2),
+                'cpcv_positive_paths': cpcv_n_pos,
             }
             best_models.append(best_config)
 
-            gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
+            pbo_icon = "✓" if cpcv_pbo <= PBO_MAX else "✗"
+            cpcv_n_groups_w, cpcv_k_test_w = _get_cpcv_params(best_data_months)
+            n_paths_w = winner_cpcv['n_paths'] if winner_cpcv and 'n_paths' in winner_cpcv else n_paths
 
             print(f"\n  {'='*70}")
-            print(f"  WINNER (by {N_HOLDOUT_FOLDS}-fold holdout): {asset_name} {horizon}h  {gen_icon}")
-            print(f"  Models: {winner_trial.params['combo']}  Window: {best_window}h  Gamma: {best_gamma:.4f}  Features: {best_n_feat}")
-            print(f"  In-sample:     {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}  rawPF={raw_pf:.2f}")
-            if winner_ho:
-                fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets)
-                print(f"  Out-of-sample: {OPTUNA_METRIC}={ho_score:.3f}  avg_ret={ho_ret:+.1f}%  avg_acc={ho_acc*100:.1f}%  trades={ho_trades}  rawPF={ho_raw_pf:.2f}")
-                print(f"  Per-fold returns: [{fold_str}]")
+            print(f"  WINNER (Optuna + CPCV): {asset_name} {horizon}h  {pbo_icon}")
+            print(f"  Models: {winner_trial.params['combo']}  Window: {best_window}h  data_months: {best_data_months}mo  Features: {best_n_feat}")
+            print(f"  gamma=1.0 (fixed) | CPCV: {cpcv_n_groups_w} groups, k={cpcv_k_test_w}")
+            print(f"  In-sample:  {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}  rawPF={raw_pf:.2f}")
+            if winner_cpcv:
+                path_str = " / ".join(f"{r:+.1f}%" for r in cpcv_path_rets[:5])
+                if len(cpcv_path_rets) > 5:
+                    path_str += f" ... ({len(cpcv_path_rets)} total)"
+                print(f"  CPCV:       median_ret={cpcv_med_ret:+.1f}%  PBO={cpcv_pbo*100:.0f}%  positive={cpcv_n_pos}/{n_paths_w} paths")
+                print(f"  Path returns: [{path_str}]")
             print(f"  {'='*70}")
+
+            # ── Calibration summary ──
+            completed_trials = [t for t in study.trials if t.value is not None and t.value > 0]
+            top_trials = sorted(completed_trials, key=lambda t: t.value, reverse=True)[:20]
+
+            if top_trials:
+                from collections import Counter
+                print(f"\n  {'═'*70}")
+                print(f"  CALIBRATION SUMMARY: {asset_name} {horizon}h")
+                print(f"  {'═'*70}")
+
+                print(f"  Top 10 trials by {OPTUNA_METRIC}:")
+                for rank, t in enumerate(top_trials[:10], 1):
+                    p = t.params
+                    print(f"    #{rank:2d}  combo={p['combo']:22s}  w={p['window']:4d}h  "
+                          f"dm={p['data_months']}mo  feats={p['n_features']:3d}  "
+                          f"{OPTUNA_METRIC}={t.value:.4f}")
+
+                combo_counts = Counter(t.params['combo'] for t in top_trials)
+                combo_str = ' | '.join(f"{c}: {n}x" for c, n in combo_counts.most_common())
+                print(f"\n  Combo frequency (top {len(top_trials)} trials):")
+                print(f"    {combo_str}")
+
+                window_counts = Counter(t.params['window'] for t in top_trials)
+                window_str = ' | '.join(f"{w}h: {n}x" for w, n in sorted(window_counts.most_common(), key=lambda x: -x[1]))
+                print(f"\n  Window frequency (top {len(top_trials)} trials):")
+                print(f"    {window_str}")
+
+                dm_counts = Counter(t.params['data_months'] for t in top_trials)
+                dm_str = ' | '.join(f"{d}mo: {n}x" for d, n in sorted(dm_counts.most_common(), key=lambda x: -x[1]))
+                print(f"\n  Data_months frequency (top {len(top_trials)} trials):")
+                print(f"    {dm_str}")
+
+                feats = [t.params['n_features'] for t in top_trials]
+                print(f"  Feature range (top {len(top_trials)} trials): "
+                      f"{min(feats)} – {max(feats)} (median: {sorted(feats)[len(feats)//2]})")
+                print(f"  {'═'*70}")
 
         print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
 
@@ -3422,7 +3585,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                          gamma=m.get('gamma', 1.0))
 
     elapsed = (time.time() - t_mode_start) / 60
-    print(f"\n  Mode D complete: {elapsed:.1f} min total")
+    print(f"\n  Deku V1.4 Mode D complete: {elapsed:.1f} min total")
 
 
 # ============================================================
@@ -3441,11 +3604,12 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
     search_horizons = HORIZON_SEARCH
 
     print("\n" + "=" * 70)
-    print(f"  DEKU MODE H: HORIZON SEARCH ({min(search_horizons)}-{max(search_horizons)}h)")
+    print(f"  DEKU V1.4 MODE H: HORIZON SEARCH ({min(search_horizons)}-{max(search_horizons)}h)")
     print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
-    print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
+    print(f"  Trials: {n_trials} (RandomSampler + Hyperband pruner) | gamma=1.0 (fixed)")
+    print(f"  data_months: {DATA_MONTHS_OPTIONS} | CPCV: adaptive (4 or 6 groups)")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
-    print(f"  Search: combo × window × gamma × n_features × horizon[{min(search_horizons)}-{max(search_horizons)}]{metric_label}")
+    print(f"  Search: combo × window × data_months × n_features × horizon[{min(search_horizons)}-{max(search_horizons)}]{metric_label}")
     print("=" * 70)
 
     # Download fresh data
@@ -3478,7 +3642,7 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             continue
 
         # Step 1: Build features with reference horizon (midpoint=5h for LGBM ranking)
-        MAX_DIAG_HOURS = 6 * 30 * 24
+        max_data_hours = max(DATA_MONTHS_OPTIONS) * 720
         ref_horizon = 5
         print(f"\n  Building all features (horizon={ref_horizon}h [reference])...")
         t0 = time.time()
@@ -3486,9 +3650,9 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
-        if total_rows > MAX_DIAG_HOURS:
-            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+        if total_rows > max_data_hours:
+            df_full = df_full.tail(max_data_hours).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last {max(DATA_MONTHS_OPTIONS)}mo)")
 
         # Pre-compute labels and forward returns for each searchable horizon
         for h in search_horizons:
@@ -3558,24 +3722,26 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
 
         print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
 
-        # Step 3: Optuna study
+        # Step 3: Optuna study (RandomSampler, fixed gamma=1.0, data_months as param)
         print(f"\n{'='*70}")
         print(f"  OPTUNA STUDY: {asset_name} (horizon search {min(search_horizons)}-{max(search_horizons)}h)")
-        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma × features × {len(search_horizons)} horizons")
-        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
+        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × data_months{DATA_MONTHS_OPTIONS} × features × {len(search_horizons)} horizons")
+        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | gamma=1.0 (fixed)")
         print(f"{'='*70}")
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+        sampler = optuna.samplers.RandomSampler(seed=42)
+
         study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42),
+            sampler=sampler,
             pruner=optuna.pruners.HyperbandPruner(
                 min_resource=DEKU_PRUNING_WARMUP,
                 max_resource=n // DIAG_STEP,
                 reduction_factor=3,
             ),
-            study_name=f'deku_H_{asset_name}',
+            study_name=f'deku_v14_H_{asset_name}',
         )
 
         model_factories = _get_deku_diagnostic_models()
@@ -3589,7 +3755,10 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             h = trial.suggest_categorical('horizon', search_horizons)
             combo_name = trial.suggest_categorical('combo', combo_options)
             window = trial.suggest_categorical('window', DIAG_WINDOWS)
-            gamma = trial.suggest_float('gamma', 0.994, 1.0)
+            data_months = trial.suggest_categorical('data_months', DATA_MONTHS_OPTIONS)
+            gamma = 1.0  # fixed — no decay
+
+            data_hours = data_months * 720
 
             # Per-horizon feature range
             feat_min, feat_max = N_FEATURES_RANGE.get(h, N_FEATURES_RANGE_DEFAULT)
@@ -3597,11 +3766,21 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             n_feat = trial.suggest_int('n_features', feat_min, max_f)
 
             combo = combo_name.split('+')
-            feat_np = features_np[:, :n_feat]
-            labels_np_h = labels_np_f1_by_h[h]
+
+            # Slice data to data_months worth of history
+            if n > data_hours:
+                trial_feat = features_np[-data_hours:, :n_feat]
+                trial_labels = labels_np_f1_by_h[h][-data_hours:]
+                trial_closes = closes_np[-data_hours:]
+                trial_n = data_hours
+            else:
+                trial_feat = features_np[:, :n_feat]
+                trial_labels = labels_np_f1_by_h[h]
+                trial_closes = closes_np
+                trial_n = n
 
             result = _deku_eval_with_pruning(
-                feat_np, labels_np_h, closes_np, combo, window, n,
+                trial_feat, trial_labels, trial_closes, combo, window, trial_n,
                 DIAG_STEP, model_factories, gamma=gamma, trial=trial,
                 horizon=h
             )
@@ -3620,7 +3799,7 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             if score > best_apf_so_far:
                 best_apf_so_far = score
                 print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
-                      f"g={gamma:.4f} f={n_feat:3d} h={h}h | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
+                      f"dm={data_months}mo f={n_feat:3d} h={h}h | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
                       f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
             elif trial_count % 20 == 0:
                 print(f"  #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
@@ -3629,19 +3808,6 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
 
         t_optuna = time.time()
         study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-
-        # Auto-extend
-        APF_EXTEND_THRESH = 1.7
-        extend_steps = [250, 300]
-        for ext_target in extend_steps:
-            if ext_target <= n_trials:
-                continue
-            if study.best_value >= APF_EXTEND_THRESH:
-                break
-            extra = ext_target - len(study.trials)
-            if extra > 0:
-                print(f"\n  Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} trials (+{extra})...")
-                study.optimize(objective, n_trials=extra, show_progress_bar=False)
 
         optuna_elapsed = (time.time() - t_optuna) / 60
 
@@ -3655,7 +3821,8 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
         print(f"  Horizon:    {best_trial.params['horizon']}h")
         print(f"  Combo:      {best_trial.params['combo']}")
         print(f"  Window:     {best_trial.params['window']}h")
-        print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
+        print(f"  Data_months:{best_trial.params['data_months']}mo")
+        print(f"  Gamma:      1.0 (fixed)")
         print(f"  N_features: {best_trial.params['n_features']}")
 
         completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
@@ -3665,12 +3832,12 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
         n_pruned = len(study.trials) - n_completed
         print(f"\n  Trials: {n_completed} completed, {n_pruned} pruned ({100*n_pruned//len(study.trials) if study.trials else 0}% pruned)")
 
-        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}  {'H':>3s}")
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'DM':>4s}  {'Feats':>5s}  {'H':>3s}")
         print(f"  {'-'*65}")
         for i, t in enumerate(completed_trials[:10], 1):
             marker = " <-- BEST" if i == 1 else ""
             print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
-                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}  {t.params['horizon']:2d}h{marker}")
+                  f"{t.params['data_months']:3d}m  {t.params['n_features']:5d}  {t.params['horizon']:2d}h{marker}")
 
         # Horizon distribution
         from collections import Counter
@@ -3726,10 +3893,9 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             for ci, trial in enumerate(candidates):
                 c_combo = trial.params['combo'].split('+')
                 c_window = trial.params['window']
-                c_gamma = trial.params['gamma']
+                c_gamma = 1.0  # fixed
                 c_n_feat = trial.params['n_features']
                 c_horizon = trial.params['horizon']
-
                 fold_scores = []
                 fold_rets = []
                 fold_accs = []
@@ -3775,7 +3941,7 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
             holdout_results.sort(key=lambda x: -x[1])
 
             print(f"\n  {'Rank':>4s}  {'AVG_'+OPTUNA_METRIC.upper():>8s}  {'AVG_Ret':>8s}  {'AVG_Acc':>7s}  {'Tr':>4s}  "
-                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}  {'H':>3s}")
+                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'DM':>4s}  {'F':>3s}  {'H':>3s}")
             print(f"  {'-'*132}")
             for i, (trial, avg_sc, avg_ret, avg_acc, tot_tr, avg_rpf, f_scores, f_rets) in enumerate(holdout_results[:10], 1):
                 is_score = trial.value
@@ -3784,7 +3950,7 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
                 f_str = "  ".join(f"{s:+5.1f}" for s in f_rets)
                 print(f"  {i:4d}  {avg_sc:8.3f}  {avg_ret:+7.1f}%  {avg_acc*100:6.1f}%  {tot_tr:4d}  "
                       f"{f_str}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  "
-                      f"{trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}  {trial.params['horizon']:2d}h{marker}")
+                      f"{trial.params['data_months']:3d}m  {trial.params['n_features']:3d}  {gen}  {trial.params['horizon']:2d}h{marker}")
         else:
             print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
 
@@ -3815,8 +3981,9 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
 
             best_combo = winner_trial.params['combo'].split('+')
             best_window = winner_trial.params['window']
-            best_gamma = winner_trial.params['gamma']
+            best_gamma = 1.0  # fixed
             best_n_feat = winner_trial.params['n_features']
+            best_data_months = winner_trial.params['data_months']
             best_features = ranked_features[:best_n_feat]
 
             # Re-run winner for in-sample metrics
@@ -3853,16 +4020,54 @@ def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
                     'n_features': best_n_feat,
                     'optimal_features': ','.join(best_features),
                     'horizon': h,
-                    'gamma': round(best_gamma, 4),
+                    'gamma': 1.0,
+                    'data_months': best_data_months,
                 }
                 best_models.append(best_config)
 
                 gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
-                print(f"\n  WINNER {h}h: {winner_trial.params['combo']}  w={best_window}h  g={best_gamma:.4f}  f={best_n_feat}  {gen_icon}")
+                print(f"\n  WINNER {h}h: {winner_trial.params['combo']}  w={best_window}h  dm={best_data_months}mo  f={best_n_feat}  {gen_icon}")
                 print(f"    In-sample:  {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}")
                 if winner_ho and len(ho_fold_rets) > 0:
                     fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets)
                     print(f"    Holdout:    {OPTUNA_METRIC}={ho_score:.3f}  avg_ret={ho_ret:+.1f}%  [{fold_str}]")
+
+        # ── Calibration summary ──
+        completed_trials = [t for t in study.trials if t.value is not None and t.value > 0]
+        top_trials = sorted(completed_trials, key=lambda t: t.value, reverse=True)[:20]
+
+        if top_trials:
+            from collections import Counter
+            print(f"\n  {'═'*70}")
+            print(f"  CALIBRATION SUMMARY: {asset_name} horizon search (Mode H)")
+            print(f"  {'═'*70}")
+
+            print(f"  Top 10 trials by {OPTUNA_METRIC}:")
+            for rank, t in enumerate(top_trials[:10], 1):
+                p = t.params
+                print(f"    #{rank:2d}  combo={p['combo']:22s}  w={p['window']:4d}h  "
+                      f"dm={p['data_months']}mo  feats={p['n_features']:3d}  "
+                      f"{OPTUNA_METRIC}={t.value:.4f}")
+
+            combo_counts = Counter(t.params['combo'] for t in top_trials)
+            combo_str = ' | '.join(f"{c}: {n}x" for c, n in combo_counts.most_common())
+            print(f"\n  Combo frequency (top {len(top_trials)} trials):")
+            print(f"    {combo_str}")
+
+            window_counts = Counter(t.params['window'] for t in top_trials)
+            window_str = ' | '.join(f"{w}h: {n}x" for w, n in sorted(window_counts.most_common(), key=lambda x: -x[1]))
+            print(f"\n  Window frequency (top {len(top_trials)} trials):")
+            print(f"    {window_str}")
+
+            dm_counts = Counter(t.params['data_months'] for t in top_trials)
+            dm_str = ' | '.join(f"{d}mo: {n}x" for d, n in sorted(dm_counts.most_common(), key=lambda x: -x[1]))
+            print(f"\n  Data_months frequency (top {len(top_trials)} trials):")
+            print(f"    {dm_str}")
+
+            feats = [t.params['n_features'] for t in top_trials]
+            print(f"  Feature range (top {len(top_trials)} trials): "
+                  f"{min(feats)} – {max(feats)} (median: {sorted(feats)[len(feats)//2]})")
+            print(f"  {'═'*70}")
 
         print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
 
@@ -5535,7 +5740,18 @@ def main():
     #   python crypto_trading_system_deku.py B BTC 8h
     #   python crypto_trading_system_deku.py F BTC 4,8h
     # ================================================================
-    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    # Filter out --flag and their values (--trials N, --metric X)
+    _skip_next = False
+    cli_args = []
+    for a in sys.argv[1:]:
+        if _skip_next:
+            _skip_next = False
+            continue
+        if a.startswith('--'):
+            if a in ('--trials', '--metric'):
+                _skip_next = True  # skip the next arg (the value)
+            continue
+        cli_args.append(a)
     flag_resume = '--resume' in sys.argv
 
     # Parse --trials N
@@ -5594,21 +5810,22 @@ def main():
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'H', 'HF') else ""
         h_str = f"search {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h" if mode in ('H', 'HF') else ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DEKU: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
+        print(f"  DEKU V1.4: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
         print("=" * 60)
 
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DEKU")
-        print("  Optuna TPE + Hyperband | 5 models (RF+GB+XGB+LR+LGBM)")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DEKU V1.4")
+        print(f"  Random Optuna + Adaptive CPCV | gamma=1.0 (fixed)")
+        print(f"  5 models (RF+GB+XGB+LR+LGBM) | data_months: {DATA_MONTHS_OPTIONS}")
         print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
         print("=" * 60)
 
         print("\nChoose mode:")
         print("  B.  Quick run (saved models + signals + chart)")
-        print("  D.  OPTUNA OPTIMIZATION (joint combo × window × gamma × features)")
+        print("  D.  OPTUNA OPTIMIZATION (joint combo × window × data_months × features)")
         print("  DF. D then F (optimize + strategy comparison)")
         print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
         print(f"  H.  HORIZON SEARCH (Optuna sweeps {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h)")

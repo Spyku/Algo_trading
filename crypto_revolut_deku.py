@@ -854,22 +854,20 @@ STRATEGIES = ['both_agree', 'either_agree', f'{HORIZON_SHORT}h_only', f'{HORIZON
 # ---- Simple command handlers ----
 
 def _handle_config_command():
-    """Show current trading config for all assets."""
+    """Show current trading config for all assets with setup button."""
     trading_cfg = load_trading_config()
     lines = ["⚙️ <b>Config</b>\n"]
     for asset, cfg in trading_cfg.items():
-        enabled = "ON" if cfg.get('enabled') else "OFF"
+        enabled = "🔵" if cfg.get('enabled') else "🔴"
         pos = load_position(asset)
         auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
         lines.append(
-            f"<b>{asset}</b> [{enabled}]\n"
-            f"  Strategy: {cfg.get('strategy', '?')}\n"
-            f"  Min confidence: {cfg.get('min_confidence', MIN_CONFIDENCE)}%\n"
-            f"  Max position: ${cfg.get('max_position_usd', 0):,.0f}\n"
-            f"  Trade mode: {auto}"
+            f"{enabled} <b>{asset}</b> | {cfg.get('strategy', '?')} | "
+            f"{cfg.get('min_confidence', MIN_CONFIDENCE)}% | "
+            f"${cfg.get('max_position_usd', 0):,.0f} | {auto}"
         )
-    lines.append("\n/setup to change config")
-    send_telegram("\n".join(lines))
+    buttons = [[('⚙️ Edit Config', '/setup')]]
+    send_telegram_with_buttons("\n".join(lines), buttons)
 
 def _handle_summary_command():
     """Full summary: status + balance + charts for all enabled assets."""
@@ -882,10 +880,10 @@ def _handle_help_command():
         "📱 <b>Commands</b>\n\n"
         "/status — Positions, prices, P&L + balance\n"
         "/summary — Status + balance + charts\n"
-        "/chart — 24h charts (all active assets)\n"
-        "/chart BTC — 24h chart for single asset\n"
-        "/conf — Show current config\n"
-        "/setup — Interactive config editor\n"
+        "/chart — 48h candlestick charts (all active)\n"
+        "/chart BTC — 48h chart for single asset\n"
+        "/conf — Show config\n"
+        "/setup — Edit config (inline buttons)\n"
         "/sync — Sync positions from exchange\n"
         "/optimize BTC — Re-run Mode D optimization\n"
         "/pause — Pause trading (signals only)\n"
@@ -1099,8 +1097,7 @@ def _handle_chart_command(msg, trading_cfg):
 
 
 def _generate_and_send_chart(asset):
-    """Generate and send a single 24h chart for one asset."""
-    # Load price data (last 24h)
+    """Generate and send a 48h candlestick chart with signal overlays."""
     try:
         df_raw = load_data(asset)
         if df_raw is None:
@@ -1110,134 +1107,177 @@ def _generate_and_send_chart(asset):
         send_telegram(f"Error loading {asset} data: {e}")
         return
 
-    df_price = df_raw.tail(24).copy()
-    if len(df_price) < 2:
+    df_price = df_raw.tail(48).copy()
+    if len(df_price) < 4:
         send_telegram(f"Not enough data for {asset}")
         return
 
-    # Load signal log
+    # Load signal log (last 49h to catch signals at boundaries)
     signals = []
     if os.path.exists(SIGNAL_LOG_FILE):
         try:
             import csv
             with open(SIGNAL_LOG_FILE, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime('%Y-%m-%d %H:%M:%S')
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=49)).strftime('%Y-%m-%d %H:%M:%S')
                 for row in reader:
                     if row['asset'] == asset and row['timestamp'] >= cutoff:
                         signals.append(row)
         except Exception:
             pass
 
-    # Generate chart
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
+        from matplotlib.lines import Line2D
 
-        # Colors (match backtest dark theme)
-        c_bg     = '#0b1120'
-        c_card   = '#111b2e'
-        c_buy    = '#3b82f6'  # blue for BUY
-        c_sell   = '#ef4444'  # red for SELL
-        c_price  = '#94a3b8'  # gray for price line
-        c_gold   = '#eab308'  # yellow for pending
-        c_text   = '#e0e6f0'
-        c_muted  = '#6b7a94'
-        c_grid   = '#1e2d4a'
-        c_green  = '#22c55e'  # green for correct
+        # Colors
+        c_bg     = '#0e1117'
+        c_card   = '#141922'
+        c_buy    = '#3b82f6'
+        c_sell   = '#ef4444'
+        c_green  = '#3b82f6'   # blue — user is colorblind
+        c_red    = '#ef4444'
+        c_gold   = '#eab308'
+        c_text   = '#e2e8f0'
+        c_muted  = '#64748b'
+        c_grid   = '#1e293b'
+        c_wick   = '#475569'
 
-        fig, ax = plt.subplots(figsize=(10, 5), facecolor=c_bg)
+        times = pd.to_datetime(df_price['datetime'])
+        opens = df_price['open'].values
+        highs = df_price['high'].values
+        lows = df_price['low'].values
+        closes = df_price['close'].values
+
+        fig, ax = plt.subplots(figsize=(12, 6), facecolor=c_bg)
         ax.set_facecolor(c_card)
 
-        # Price line
-        times = pd.to_datetime(df_price['datetime'])
-        prices = df_price['close'].values
-        ax.plot(times, prices, color=c_price, linewidth=1.5, label=f'{asset} Price')
-        ax.fill_between(times, prices.min() * 0.999, prices, alpha=0.1, color=c_price)
+        # Candlesticks
+        bar_width = timedelta(minutes=40)
+        for i in range(len(times)):
+            t = times.iloc[i]
+            o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+            color = c_green if c >= o else c_red
+            # Wick
+            ax.plot([t, t], [l, h], color=c_wick, linewidth=0.8, zorder=2)
+            # Body
+            body_bottom = min(o, c)
+            body_height = abs(c - o)
+            if body_height < (highs.max() - lows.min()) * 0.001:
+                body_height = (highs.max() - lows.min()) * 0.001  # doji minimum
+            ax.bar(t, body_height, bottom=body_bottom, width=bar_width,
+                   color=color, edgecolor=color, linewidth=0.5, zorder=3, alpha=0.85)
 
-        # Overlay signals
+        # Only show signals where action CHANGED (transitions, not repeated hourly)
+        price_range = highs.max() - lows.min()
+        offset_y = price_range * 0.03
+
+        # Filter to transitions only (action changed from previous signal)
+        transition_signals = []
+        prev_action = None
         for sig in signals:
+            action = sig['action']
+            if action == 'HOLD':
+                prev_action = action
+                continue
+            if action != prev_action:
+                transition_signals.append(sig)
+            prev_action = action
+
+        for sig in transition_signals:
             try:
                 sig_time = pd.to_datetime(sig['timestamp'])
-                sig_price = float(sig['price'])
                 action = sig['action']
 
-                # Check if prediction was correct by comparing with next available price
-                future_prices = df_price[pd.to_datetime(df_price['datetime']) > sig_time]['close']
-                if len(future_prices) >= 4:
-                    future_price = future_prices.iloc[3]  # ~4h later
-                    if action == 'BUY':
-                        correct = future_price > sig_price
-                    elif action == 'SELL':
-                        correct = future_price < sig_price
-                    else:
-                        correct = None  # HOLD — no right/wrong
-                else:
-                    correct = None  # not enough future data yet
+                # Find nearest candle
+                time_diffs = abs(times - sig_time)
+                nearest_idx = time_diffs.argmin()
+                snap_time = times.iloc[nearest_idx]
+                snap_price = closes[nearest_idx]
 
+                # Validate prediction: did price move in predicted direction?
+                future_closes = closes[nearest_idx + 1:nearest_idx + 5]
+                if len(future_closes) >= 4:
+                    future_price = future_closes[-1]
+                    correct = (future_price > snap_price) if action == 'BUY' else (future_price < snap_price)
+                else:
+                    correct = None
+
+                color = c_green if correct else c_red if correct is not None else c_gold
                 if action == 'BUY':
-                    color = c_green if correct else c_sell if correct is not None else c_gold
-                    marker = '^'
-                    label_txt = f"BUY {sig.get(f'conf_{HORIZON_SHORT}h', '')}%/{sig.get(f'conf_{HORIZON_LONG}h', '')}%"
-                elif action == 'SELL':
-                    color = c_green if correct else c_sell if correct is not None else c_gold
-                    marker = 'v'
-                    label_txt = f"SELL"
+                    marker, y_pos = '^', lows[nearest_idx] - offset_y
                 else:
-                    continue  # skip HOLD signals on chart
+                    marker, y_pos = 'v', highs[nearest_idx] + offset_y
 
-                ax.scatter(sig_time, sig_price, color=color, marker=marker,
-                          s=120, zorder=5, edgecolors='white', linewidth=0.5)
-
-                # Annotate
-                offset_y = (prices.max() - prices.min()) * 0.03
-                if action == 'BUY':
-                    ax.annotate(label_txt, (sig_time, sig_price - offset_y),
-                               fontsize=7, ha='center', va='top', color=color)
-                else:
-                    ax.annotate(label_txt, (sig_time, sig_price + offset_y),
-                               fontsize=7, ha='center', va='bottom', color=color)
+                ax.scatter(snap_time, y_pos, color=color, marker=marker,
+                           s=200, zorder=6, edgecolors='white', linewidth=0.8)
             except Exception:
                 continue
 
-        # Formatting
-        ax.set_title(f'{asset}/USD — Last 24h', fontsize=14, fontweight='bold',
-                     color=c_text, fontfamily='monospace')
-        ax.set_ylabel('Price (USD)', fontsize=11, color=c_muted)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax.tick_params(axis='x', rotation=45, colors=c_muted)
-        ax.tick_params(axis='y', colors=c_muted)
-        ax.grid(True, alpha=0.3, color=c_grid)
-        for spine in ax.spines.values():
-            spine.set_color(c_grid)
+        # Current price line
+        last_price = closes[-1]
+        ax.axhline(y=last_price, color=c_muted, linewidth=0.6, linestyle='--', alpha=0.5, zorder=1)
+        ax.annotate(f'${last_price:,.2f}', xy=(times.iloc[-1], last_price),
+                    fontsize=8, color=c_text, fontweight='bold',
+                    xytext=(10, 0), textcoords='offset points', va='center')
 
-        # Legend
-        from matplotlib.lines import Line2D
-        legend_elements = [
-            Line2D([0], [0], marker='^', color='w', markerfacecolor=c_buy,
-                   markersize=10, label='BUY'),
-            Line2D([0], [0], marker='v', color='w', markerfacecolor=c_sell,
-                   markersize=10, label='SELL'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_green,
-                   markersize=10, label='Correct'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_sell,
-                   markersize=10, label='Wrong'),
-            Line2D([0], [0], marker='o', color='w', markerfacecolor=c_gold,
-                   markersize=10, label='Pending'),
-        ]
-        ax.legend(handles=legend_elements, loc='upper left', fontsize=8,
-                  facecolor=c_card, edgecolor=c_grid, labelcolor=c_text)
+        # 24h change
+        price_24h_ago = closes[0] if len(closes) >= 24 else closes[0]
+        pct_change = (last_price / price_24h_ago - 1) * 100
+        change_color = c_green if pct_change >= 0 else c_red
+
+        ax.set_title(f'{asset}/USD  ${last_price:,.2f}  ({pct_change:+.1f}%)',
+                     fontsize=14, fontweight='bold', color=c_text, loc='left')
+        ax.text(0.99, 1.02, '48h', transform=ax.transAxes, fontsize=10,
+                color=c_muted, ha='right', va='bottom')
+
+        # X axis: show date + time
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b\n%H:%M'))
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        ax.tick_params(axis='x', colors=c_muted, labelsize=8)
+        ax.tick_params(axis='y', colors=c_muted, labelsize=9)
+        # Smart y-axis: decimal places for low-price assets
+        if price_range < 1:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.4f}'))
+        elif price_range < 10:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.2f}'))
+        elif price_range < 100:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.1f}'))
+        else:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+        ax.grid(True, alpha=0.15, color=c_grid, linewidth=0.5)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # Y padding
+        ax.set_ylim(lows.min() - price_range * 0.08, highs.max() + price_range * 0.08)
+
+        # Legend — only show if there are signals
+        if transition_signals:
+            legend_elements = [
+                Line2D([0], [0], marker='^', color='w', markerfacecolor=c_green,
+                       markersize=9, label='BUY ✓', linestyle='None'),
+                Line2D([0], [0], marker='v', color='w', markerfacecolor=c_red,
+                       markersize=9, label='SELL ✗', linestyle='None'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor=c_gold,
+                       markersize=8, label='Pending', linestyle='None'),
+            ]
+            ax.legend(handles=legend_elements, loc='upper right', fontsize=8,
+                      facecolor=c_card, edgecolor=c_grid, labelcolor=c_text,
+                      framealpha=0.9, ncol=3, columnspacing=1.0,
+                      bbox_to_anchor=(1.0, -0.08))
 
         plt.tight_layout()
         chart_path = os.path.join('charts', f'{asset}_telegram_24h.png')
         os.makedirs('charts', exist_ok=True)
-        fig.savefig(chart_path, dpi=120, facecolor=c_bg)
+        fig.savefig(chart_path, dpi=150, facecolor=c_bg, bbox_inches='tight')
         plt.close(fig)
 
-        # Send
-        caption = f"{asset}/USD 24h — Green=correct, Red=wrong, Yellow=pending"
+        n_transitions = len(transition_signals)
+        caption = f"{asset}/USD 48h | {n_transitions} signals | {pct_change:+.1f}%"
         send_telegram_photo(chart_path, caption=caption)
         print(f"  Chart sent for {asset}")
 
@@ -1246,71 +1286,110 @@ def _generate_and_send_chart(asset):
         print(f"  [!] Chart error: {e}")
 
 
-# ---- Interactive setup wizard ----
+# ---- Interactive setup wizard (inline buttons) ----
 _setup_state = {'active': False}
 
-def _setup_send_ask(asset, cfg):
-    """Ask if user wants to change this asset."""
-    enabled = "ON" if cfg.get('enabled') else "OFF"
-    pos = load_position(asset)
-    auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
-    send_telegram(
-        f"⚙️ <b>Setup — {asset}</b>\n\n"
-        f"Enabled: {enabled}\n"
-        f"Strategy: {cfg.get('strategy', '?')}\n"
-        f"Confidence: {cfg.get('min_confidence', MIN_CONFIDENCE)}%\n"
-        f"Max position: ${cfg.get('max_position_usd', 0):,.0f}\n"
-        f"Auto-trade: {auto}\n\n"
-        f"Change {asset}?  <b>yes</b> / <b>no</b>"
-    )
+def _setup_send_asset_picker(cfg):
+    """Show asset picker with inline buttons."""
+    buttons = []
+    row = []
+    for asset in cfg:
+        enabled = cfg[asset].get('enabled', False)
+        icon = '🔵' if enabled else '🔴'
+        row.append((f"{icon} {asset}", f"/cfg_{asset}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([('✅ Save & Close', '/cfg_save')])
+    send_telegram_with_buttons("⚙️ <b>Config</b> — Pick an asset to configure:", buttons)
 
 def _setup_send_menu(asset, cfg):
-    """Show settings menu for an asset."""
-    enabled = "ON" if cfg.get('enabled') else "OFF"
+    """Show settings menu for an asset with inline buttons."""
+    enabled = cfg.get('enabled', False)
     pos = load_position(asset)
-    auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
-    send_telegram(
+    auto = pos.get('auto_trade', False)
+    strategy = cfg.get('strategy', '?')
+    confidence = cfg.get('min_confidence', MIN_CONFIDENCE)
+    max_pos = cfg.get('max_position_usd', 0)
+
+    text = (
         f"⚙️ <b>{asset} Settings</b>\n\n"
-        f"1. Toggle enabled ({enabled})\n"
-        f"2. Max position (${cfg.get('max_position_usd', 0):,.0f})\n"
-        f"3. Strategy ({cfg.get('strategy', '?')})\n"
-        f"4. Min confidence ({cfg.get('min_confidence', MIN_CONFIDENCE)}%)\n"
-        f"5. Toggle auto-trade ({auto})\n"
-        f"6. Done with {asset}"
+        f"Enabled: {'🔵 ON' if enabled else '🔴 OFF'}\n"
+        f"Strategy: {strategy}\n"
+        f"Confidence: {confidence}%\n"
+        f"Max position: ${max_pos:,.0f}\n"
+        f"Auto-trade: {'🔵 ON' if auto else '🔴 OFF'}"
     )
+    buttons = [
+        [('🔀 Toggle ON/OFF', f'/cfg_{asset}_toggle'),
+         ('🔀 Auto-trade', f'/cfg_{asset}_auto')],
+        [('📐 Strategy', f'/cfg_{asset}_strategy')],
+        [('📊 Confidence', f'/cfg_{asset}_conf'),
+         ('💰 Max Position', f'/cfg_{asset}_max')],
+        [('⬅️ Back', '/cfg_back')],
+    ]
+    send_telegram_with_buttons(text, buttons)
+
+def _setup_send_strategy_picker(asset, cfg):
+    """Show strategy picker with inline buttons."""
+    current = cfg.get('strategy', '')
+    buttons = []
+    for s in STRATEGIES:
+        label = f"{'✅ ' if s == current else ''}{s}"
+        buttons.append([(label, f'/cfg_{asset}_strat_{s}')])
+    buttons.append([('⬅️ Back', f'/cfg_{asset}')])
+    send_telegram_with_buttons(f"📐 Strategy for <b>{asset}</b>:", buttons)
+
+def _setup_send_confidence_picker(asset, cfg):
+    """Show confidence picker with inline buttons."""
+    current = cfg.get('min_confidence', MIN_CONFIDENCE)
+    values = [60, 65, 70, 75, 80, 85, 90]
+    buttons = []
+    row = []
+    for v in values:
+        label = f"{'✅ ' if v == current else ''}{v}%"
+        row.append((label, f'/cfg_{asset}_confv_{v}'))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([('⬅️ Back', f'/cfg_{asset}')])
+    send_telegram_with_buttons(f"📊 Min confidence for <b>{asset}</b>:", buttons)
+
+def _setup_send_max_picker(asset, cfg):
+    """Show max position picker with inline buttons."""
+    current = cfg.get('max_position_usd', 0)
+    values = [0, 1000, 5000, 10000]
+    buttons = []
+    row = []
+    for v in values:
+        label = f"{'✅ ' if v == current else ''}${v:,}"
+        row.append((label, f'/cfg_{asset}_maxv_{v}'))
+    buttons.append(row)
+    # Custom input button + current value display
+    custom_label = f"✏️ Custom (now ${current:,})" if current not in values else "✏️ Custom"
+    buttons.append([(custom_label, f'/cfg_{asset}_maxcustom')])
+    buttons.append([('⬅️ Back', f'/cfg_{asset}')])
+    send_telegram_with_buttons(f"💰 Max position for <b>{asset}</b>:", buttons)
 
 def _setup_start(trading_cfg):
-    """Begin interactive setup wizard."""
+    """Begin interactive setup — show asset picker."""
     global _setup_state
     cfg_copy = json.loads(json.dumps(trading_cfg))
-    assets = list(cfg_copy.keys())
     _setup_state = {
         'active': True,
-        'phase': 'ask_change',
-        'assets': assets,
-        'asset_idx': 0,
         'cfg': cfg_copy,
     }
-    send_telegram("⚙️ <b>Config Setup</b>\n\nWalk through each asset. /cancel to abort.")
-    _setup_send_ask(assets[0], cfg_copy[assets[0]])
-
-def _setup_next_asset(trading_cfg):
-    """Advance to next asset or finish."""
-    global _setup_state
-    _setup_state['asset_idx'] += 1
-    if _setup_state['asset_idx'] >= len(_setup_state['assets']):
-        _setup_finish(trading_cfg)
-    else:
-        _setup_state['phase'] = 'ask_change'
-        asset = _setup_state['assets'][_setup_state['asset_idx']]
-        _setup_send_ask(asset, _setup_state['cfg'][asset])
+    _setup_send_asset_picker(cfg_copy)
 
 def _setup_finish(trading_cfg):
     """Save config and trigger signal re-run."""
     global _setup_state
     cfg = _setup_state['cfg']
     save_trading_config(cfg)
-    # Update live trading_cfg dict
     for asset in cfg:
         trading_cfg[asset] = cfg[asset]
     _setup_state = {'active': False}
@@ -1320,105 +1399,119 @@ def _setup_finish(trading_cfg):
     _rerun_event.set()
 
 def _setup_handle(text, trading_cfg):
-    """Process one message during interactive setup."""
+    """Process button callbacks during interactive setup."""
     global _setup_state
-    text_l = text.lower().strip()
+    text_l = text.strip()
 
     if text_l == '/cancel':
         _setup_state = {'active': False}
         send_telegram("❌ Setup cancelled")
         return
 
-    phase = _setup_state['phase']
-    assets = _setup_state['assets']
-    idx = _setup_state['asset_idx']
+    if not _setup_state.get('active'):
+        return
+
     cfg = _setup_state['cfg']
-    asset = assets[idx]
 
-    if phase == 'ask_change':
-        if text_l in ('yes', 'y'):
-            _setup_state['phase'] = 'menu'
+    # Handle custom max amount input (user typed a number)
+    awaiting_asset = _setup_state.get('awaiting_custom_max')
+    if awaiting_asset and awaiting_asset in cfg:
+        try:
+            val = int(text_l.strip().replace('$', '').replace(',', ''))
+            if 0 <= val <= 100000:
+                cfg[awaiting_asset]['max_position_usd'] = val
+                _setup_state.pop('awaiting_custom_max', None)
+                send_telegram(f"✅ {awaiting_asset} max position → ${val:,}")
+                _setup_send_menu(awaiting_asset, cfg[awaiting_asset])
+                return
+        except ValueError:
+            # Not a number — clear awaiting state and continue normal routing
+            _setup_state.pop('awaiting_custom_max', None)
+
+    # /cfg_save — save and close
+    if text_l == '/cfg_save':
+        _setup_finish(trading_cfg)
+        return
+
+    # /cfg_back — back to asset picker
+    if text_l == '/cfg_back':
+        _setup_send_asset_picker(cfg)
+        return
+
+    # /cfg_{ASSET} — show asset menu
+    for asset in cfg:
+        if text_l == f'/cfg_{asset}':
             _setup_send_menu(asset, cfg[asset])
-        elif text_l in ('no', 'n', 'skip'):
-            _setup_next_asset(trading_cfg)
-        else:
-            send_telegram("Reply <b>yes</b> or <b>no</b>")
+            return
 
-    elif phase == 'menu':
-        if text_l == '1':
+        # /cfg_{ASSET}_toggle — toggle enabled
+        if text_l == f'/cfg_{asset}_toggle':
             cfg[asset]['enabled'] = not cfg[asset].get('enabled', False)
-            st = "ON" if cfg[asset]['enabled'] else "OFF"
-            send_telegram(f"✅ {asset} enabled -> {st}")
+            st = "🔵 ON" if cfg[asset]['enabled'] else "🔴 OFF"
+            send_telegram(f"✅ {asset} → {st}")
             _setup_send_menu(asset, cfg[asset])
-        elif text_l == '2':
-            _setup_state['phase'] = 'set_max'
-            send_telegram(f"Enter max position for <b>{asset}</b> (USD):")
-        elif text_l == '3':
-            _setup_state['phase'] = 'set_strategy'
-            lines = [f"Choose strategy for <b>{asset}</b>:\n"]
-            for i, s in enumerate(STRATEGIES, 1):
-                cur = " (current)" if s == cfg[asset].get('strategy') else ""
-                lines.append(f"{i}. {s}{cur}")
-            send_telegram("\n".join(lines))
-        elif text_l == '4':
-            _setup_state['phase'] = 'set_confidence'
-            send_telegram(f"Enter min confidence for <b>{asset}</b> (50-99):")
-        elif text_l == '5':
+            return
+
+        # /cfg_{ASSET}_auto — toggle auto-trade
+        if text_l == f'/cfg_{asset}_auto':
             pos = load_position(asset)
             pos['auto_trade'] = not pos.get('auto_trade', False)
             save_position(asset, pos)
-            st = "ON" if pos['auto_trade'] else "OFF"
-            send_telegram(f"✅ {asset} auto-trade -> {st}")
+            st = "🔵 ON" if pos['auto_trade'] else "🔴 OFF"
+            send_telegram(f"✅ {asset} auto-trade → {st}")
             _setup_send_menu(asset, cfg[asset])
-        elif text_l in ('6', 'done'):
-            _setup_next_asset(trading_cfg)
-        else:
-            send_telegram("Reply <b>1-6</b>")
+            return
 
-    elif phase == 'set_max':
-        try:
-            val = float(text_l.replace('$', '').replace(',', '').replace('k', '000'))
-            if val < 0:
-                send_telegram("Must be >= 0")
-                return
-            cfg[asset]['max_position_usd'] = val
-            send_telegram(f"✅ {asset} max position -> ${val:,.0f}")
-            _setup_state['phase'] = 'menu'
-            _setup_send_menu(asset, cfg[asset])
-        except ValueError:
-            send_telegram("Enter a number (e.g. 6000)")
+        # /cfg_{ASSET}_strategy — show strategy picker
+        if text_l == f'/cfg_{asset}_strategy':
+            _setup_send_strategy_picker(asset, cfg[asset])
+            return
 
-    elif phase == 'set_confidence':
-        try:
-            val = int(text_l.replace('%', ''))
-            if val < 50 or val > 99:
-                send_telegram("Must be 50-99")
-                return
-            cfg[asset]['min_confidence'] = val
-            send_telegram(f"✅ {asset} min confidence -> {val}%")
-            _setup_state['phase'] = 'menu'
-            _setup_send_menu(asset, cfg[asset])
-        except ValueError:
-            send_telegram("Enter a number (e.g. 75)")
-
-    elif phase == 'set_strategy':
-        try:
-            choice = int(text_l) - 1
-            if 0 <= choice < len(STRATEGIES):
-                cfg[asset]['strategy'] = STRATEGIES[choice]
-                send_telegram(f"✅ {asset} strategy -> {STRATEGIES[choice]}")
-                _setup_state['phase'] = 'menu'
+        # /cfg_{ASSET}_strat_{strategy} — set strategy
+        for s in STRATEGIES:
+            if text_l == f'/cfg_{asset}_strat_{s}':
+                cfg[asset]['strategy'] = s
+                send_telegram(f"✅ {asset} strategy → {s}")
                 _setup_send_menu(asset, cfg[asset])
-            else:
-                send_telegram(f"Reply 1-{len(STRATEGIES)}")
-        except ValueError:
-            if text_l in STRATEGIES:
-                cfg[asset]['strategy'] = text_l
-                send_telegram(f"✅ {asset} strategy -> {text_l}")
-                _setup_state['phase'] = 'menu'
+                return
+
+        # /cfg_{ASSET}_conf — show confidence picker
+        if text_l == f'/cfg_{asset}_conf':
+            _setup_send_confidence_picker(asset, cfg[asset])
+            return
+
+        # /cfg_{ASSET}_confv_{value} — set confidence
+        if text_l.startswith(f'/cfg_{asset}_confv_'):
+            try:
+                val = int(text_l.split('_')[-1])
+                cfg[asset]['min_confidence'] = val
+                send_telegram(f"✅ {asset} confidence → {val}%")
                 _setup_send_menu(asset, cfg[asset])
-            else:
-                send_telegram(f"Reply 1-{len(STRATEGIES)}")
+            except ValueError:
+                pass
+            return
+
+        # /cfg_{ASSET}_max — show max position picker
+        if text_l == f'/cfg_{asset}_max':
+            _setup_send_max_picker(asset, cfg[asset])
+            return
+
+        # /cfg_{ASSET}_maxv_{value} — set max position
+        if text_l.startswith(f'/cfg_{asset}_maxv_'):
+            try:
+                val = int(text_l.split('_')[-1])
+                cfg[asset]['max_position_usd'] = val
+                send_telegram(f"✅ {asset} max position → ${val:,}")
+                _setup_send_menu(asset, cfg[asset])
+            except ValueError:
+                pass
+            return
+
+        # /cfg_{ASSET}_maxcustom — prompt for custom amount
+        if text_l == f'/cfg_{asset}_maxcustom':
+            _setup_state['awaiting_custom_max'] = asset
+            send_telegram(f"💰 Type the max position amount in USD for <b>{asset}</b> (e.g. 2500):")
+            return
 
 # ---- Command loop ----
 
@@ -1466,8 +1559,11 @@ def _telegram_command_loop(trading_cfg):
                     _handle_config_command()
                 elif cmd.startswith('/chart'):
                     _handle_chart_command(msg, trading_cfg)
-                elif cmd == '/setup':
-                    _setup_start(trading_cfg)
+                elif cmd == '/setup' or cmd.startswith('/cfg_'):
+                    if not _setup_state.get('active'):
+                        _setup_start(trading_cfg)
+                    if cmd.startswith('/cfg_'):
+                        _setup_handle(msg, trading_cfg)
                 elif cmd.startswith('/optimize'):
                     _handle_optimize_command(msg)
                 elif cmd == '/optstatus':

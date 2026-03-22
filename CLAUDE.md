@@ -173,6 +173,10 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | File | Status | Notes |
 |------|--------|-------|
 | `crypto_trading_system_deku.py` | **Deku Production** | Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. 3-fold holdout. Auto-extend trials. `--metric` flag. Writes to `models/crypto_deku_best_models.csv`. |
+| `crypto_trading_system_deku_v1_5.py` | **Testing** | V1.5: Dynamic data cap (99% gamma weight), 3 holdout variants (current/A/B). Tests non-overlapping folds. |
+| `crypto_trading_system_deku_v1_4_cpcv_gamma1_failed.py` | **Archived** | V1.4: Gamma=1.0 + CPCV. Failed — killed returns and trade count. |
+| `crypto_trading_system_deku_v1_3_2.py` | **Testing** | V1.3.2: Narrowed A/B comparison. LR+LGBM combos only (8), gamma 0.995–0.998, features 5–30. |
+| `crypto_trading_system_deku_v1_3_1.py` | **Testing** | V1.3.1: A/B/C mode comparison. CPCV calibration. Found 4h overfits (PBO=1.0), 8h is real edge. |
 | `crypto_trading_system_deku_15m.py` | **Deku V15** | Deku with 15-min candles. s4=60', s8=120'. 4320-candle cap (~45 days). |
 | `crypto_revolut_deku.py` | **Live** | Deku auto-trader + Telegram inline buttons + `/optimize` `/optstatus` |
 | `crypto_live_trader_deku.py` | **Live** | Deku signal generation library — NOT run directly |
@@ -199,7 +203,7 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | Asset | Horizon | Models | Window | Return | APF | Features | Gamma | Trades |
 |-------|---------|--------|--------|--------|-----|----------|-------|--------|
 | BTC | 4h | GB+XGB+LR | 150h | +1.9% | 1.82 | 4 | 0.9962 | 16 |
-| BTC | 8h | RF+XGB | 150h | +10.6% | 7.73 | 48 | 0.9956 | 15 |
+| BTC | 8h | **XGB+LR+LGBM** | 200h | +11.3% | 1.47 | 13 | 0.9956 | 22 |
 | ETH | 4h | RF+GB+XGB+LGBM | 36h | +4.6% | 4.16 | 5 | 0.9944 | 14 |
 | ETH | 8h | RF+GB+XGB+LGBM | 48h | +6.5% | 2.41 | 21 | 0.9957 | 14 |
 | XRP | 4h | RF+XGB+LR+LGBM | 36h | +0.5% | 2.49 | 34 | 0.9941 | 8 |
@@ -209,7 +213,7 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | SOL | 4h | RF+XGB+LR+LGBM | 72h | -0.7% | 1.98 | 13 | 0.9972 | 12 |
 | SOL | 8h | RF+GB+XGB | 48h | +5.4% | 2.18 | 17 | 0.9971 | 17 |
 | LINK | 4h | XGB+LGBM | 150h | +5.3% | 2.15 | 6 | 0.9972 | 17 |
-| LINK | 8h | RF+LGBM | 150h | +16.4% | 5.31 | 73 | 0.9993 | 16 |
+| LINK | 8h | **RF+GB+LR+LGBM** | 200h | +23.5% | 1.71 | 20 | 0.9963 | 31 |
 | ADA | 4h | RF+GB+XGB+LR+LGBM | 150h | +3.6% | 1.78 | 24 | 0.9967 | 14 |
 | ADA | 8h | RF+GB+XGB+LGBM | 24h | +21.3% | 7.94 | 26 | 0.9996 | 8 |
 | AVAX | 4h | RF+XGB+LR+LGBM | 100h | +6.5% | 1.97 | 20 | 1.0 | 11 |
@@ -217,19 +221,21 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | DOT | 4h | RF+XGB+LGBM | 100h | +12.5% | 2.83 | 27 | 0.9954 | 16 |
 | DOT | 8h | XGB+LR | 150h | +9.3% | 8.47 | 41 | 0.999 | 17 |
 
+BTC 8h and LINK 8h updated with CPCV-validated configs from V1.3.1 (2026-03-22). Other assets unchanged.
+
 ## Current Trading Config (Deku)
 
 ```json
 {
-  "BTC": { "strategy": "4h_only", "min_confidence": 75, "max_position_usd": 1000, "enabled": true },
-  "ETH": { "strategy": "4h_only", "min_confidence": 60, "max_position_usd": 1000, "enabled": false },
-  "XRP": { "strategy": "either_agree", "min_confidence": 60, "enabled": true },
+  "BTC": { "strategy": "8h_only", "min_confidence": 70, "max_position_usd": 1000, "enabled": true },
+  "ETH": { "strategy": "8h_only", "min_confidence": 70, "max_position_usd": 1000, "enabled": false },
+  "XRP": { "strategy": "either_agree", "min_confidence": 60, "enabled": false },
   "DOGE": { "strategy": "8h_only", "min_confidence": 75, "enabled": false },
   "SOL": { "strategy": "4h_only", "min_confidence": 75, "enabled": false },
-  "LINK": { "strategy": "8h_only", "min_confidence": 85, "max_position_usd": 1000, "enabled": true },
-  "ADA": { "strategy": "4h_only", "min_confidence": 75, "enabled": true },
-  "AVAX": { "strategy": "4h_only", "min_confidence": 60, "enabled": true },
-  "DOT": { "strategy": "8h_only", "min_confidence": 80, "enabled": true }
+  "LINK": { "strategy": "8h_only", "min_confidence": 75, "max_position_usd": 1000, "enabled": true },
+  "ADA": { "strategy": "4h_only", "min_confidence": 75, "enabled": false },
+  "AVAX": { "strategy": "4h_only", "min_confidence": 60, "enabled": false },
+  "DOT": { "strategy": "8h_only", "min_confidence": 80, "enabled": false }
 }
 ```
 
@@ -249,18 +255,25 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 ## Pending Work
 
 ### Active
-1. **Enhancement A/B test** — Compare `--enhancements` vs baseline across assets to decide keep/drop
+1. **V1.5 — Dynamic data cap + holdout comparison.** Tests 3 holdout strategies with gamma-aware data sizing. Dynamic cap = `log(0.01)/log(gamma)` hours (gamma=0.996 → 48 days, gamma=0.999 → 6 months). BTC 8h only.
+   - `python crypto_trading_system_deku_v1_5.py D BTC 8h --holdout all --trials 150`
+   - Holdout modes: `current` (overlapping, production baseline), `A` (non-overlapping sequential), `B` (expanding window)
 
-### Lower Priority
-2. **Weekly F re-runs** — re-run Deku `F` for all active assets weekly
-3. **CPCV validation** — Combinatorial Purged Cross-Validation (López de Prado) as upgrade to 3-fold holdout
+### Completed (Recent — continued)
+- **CPCV investigation complete** — DONE (2026-03-22). V1.3.1 (gamma search + CPCV) and V1.4 (gamma=1.0 + CPCV) both tested. 1-week backtest proved gamma models outperform (BTC +7.4%, LINK +12.1% vs gamma=1.0 +4.4%, LINK 0 signals). CPCV dropped as validation method. Key finding: 4h overfits everywhere (PBO=1.0), 8h is where real alpha lives.
+- **Telegram UX overhaul** — DONE (2026-03-22). `/chart` now shows 48h candlestick chart with signal transitions only (no hourly repeats), blue/red color scheme for colorblind accessibility. `/setup` replaced with inline button navigation (asset picker, toggle, strategy, confidence, max position with $0/$1K/$5K/$10K presets + custom). All green indicators changed to blue. Fixed last 4h prices bug (now reads from df_raw).
+- **V1.3.1 CPCV A/B/C test** — DONE (2026-03-22). All 9 runs complete. Key finding: LR+LGBM core required for PBO ≤ 0.33. 4h overfits everywhere. Mode C weakest, dropped.
+- **Enhancement code stripped** — DONE (2026-03-22). Removed from production deku.py, V1.3.1, V1.3.2.
+- **Weekly F re-runs** — DONE (2026-03-21). Re-ran Deku F for all active assets.
 
 ### Dropped
+- ~~Enhancement A/B test~~ — Both enhancement sets dropped. Original 11 features + 2 toggles failed (-62.2%). Lighter `--enhancements` (3 Optuna toggles) also dropped.
 - ~~Fold weighting~~ — Gamma already handles recency at sample level. Literature doesn't support fold weighting; CPCV is the proper next step.
 - ~~Mode A gamma optimization~~ — Replaced by Optuna continuous gamma search
 - ~~V15/V30 gamma optimization~~ — Multi-timeframe fusion gave bad results
 - ~~Multi-timeframe fusion~~ — Cross-TF fusion worse than single-timeframe (tested 2026-03-19)
-- ~~Dynamic data cap~~ — Not worth it
+- ~~V1.4 CPCV gamma=1.0~~ — Gamma=1.0 made CPCV valid but killed returns (+4.4% vs +7.4% BTC) and LINK generated 0 signals. Gamma is genuinely needed. Archived.
+- ~~CPCV as production gatekeeper~~ — CPCV with gamma is "sloppy" (temporal weights leak across folds). Without gamma, returns collapse. Key finding preserved: 4h models overfit (PBO=1.0), 8h is reliable.
 - ~~Deku enhancements~~ — 11 features + 2 toggles tested and all FAILED (2026-03-20). Wavelet overfitting, tristate broke confidence. All code deleted.
 - ~~V6 A/B tests~~ — Superseded by Deku enhancement testing
 - ~~3h/7h horizons~~ — Performed well in bullish market but poorly in bearish (2026-03-20). Reverted to 4h/8h.

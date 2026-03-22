@@ -227,7 +227,7 @@ Mode F backtests all strategies with a confidence sweep (60–90%) and writes th
 | `/pause` / `/resume` | Pause/resume trading |
 | `/sync` | Force position sync |
 | `/conf` / `/config` | Show current config |
-| `/setup` | Interactive config editor |
+| `/setup` | Inline button config editor (asset picker, toggle, strategy, confidence, max position) |
 | `/help` | List all commands |
 | `/chart BTC` | Generate and send chart |
 | `/optimize BTC` | Launch Mode D in background (Deku only) |
@@ -241,12 +241,12 @@ Asymmetric Ed25519 signature: `timestamp + method + path + body → base64 signa
 
 ## Current Models
 
-### Deku (Production — 3-fold holdout, DIAG_STEP=36)
+### Deku (Production — 3-fold holdout validation)
 
 | Asset | Horizon | Models | Window | Return | APF | Features | Gamma | Trades |
 |-------|---------|--------|--------|--------|-----|----------|-------|--------|
 | BTC | 4h | GB+XGB+LR | 150h | +1.9% | 1.82 | 4 | 0.9962 | 16 |
-| BTC | 8h | RF+XGB | 150h | +10.6% | 7.73 | 48 | 0.9956 | 15 |
+| BTC | 8h | XGB+LR+LGBM | 200h | +11.3% | 1.47 | 13 | 0.9956 | 22 |
 | ETH | 4h | RF+GB+XGB+LGBM | 36h | +4.6% | 4.16 | 5 | 0.9944 | 14 |
 | ETH | 8h | RF+GB+XGB+LGBM | 48h | +6.5% | 2.41 | 21 | 0.9957 | 14 |
 | XRP | 4h | RF+XGB+LR+LGBM | 36h | +0.5% | 2.49 | 34 | 0.9941 | 8 |
@@ -256,7 +256,7 @@ Asymmetric Ed25519 signature: `timestamp + method + path + body → base64 signa
 | SOL | 4h | RF+XGB+LR+LGBM | 72h | -0.7% | 1.98 | 13 | 0.9972 | 12 |
 | SOL | 8h | RF+GB+XGB | 48h | +5.4% | 2.18 | 17 | 0.9971 | 17 |
 | LINK | 4h | XGB+LGBM | 150h | +5.3% | 2.15 | 6 | 0.9972 | 17 |
-| LINK | 8h | RF+LGBM | 150h | +16.4% | 5.31 | 73 | 0.9993 | 16 |
+| LINK | 8h | RF+GB+LR+LGBM | 200h | +23.5% | 1.71 | 20 | 0.9963 | 31 |
 | ADA | 4h | RF+GB+XGB+LR+LGBM | 150h | +3.6% | 1.78 | 24 | 0.9967 | 14 |
 | ADA | 8h | RF+GB+XGB+LGBM | 24h | +21.3% | 7.94 | 26 | 0.9996 | 8 |
 | AVAX | 4h | RF+XGB+LR+LGBM | 100h | +6.5% | 1.97 | 20 | 1.0 | 11 |
@@ -267,15 +267,15 @@ Asymmetric Ed25519 signature: `timestamp + method + path + body → base64 signa
 ### Trading Config
 
 ```
-BTC:  4h_only      @75%  ($1,000 max)  enabled
-ETH:  4h_only      @60%  ($1,000 max)  disabled
-XRP:  either_agree @60%                 enabled
+BTC:  8h_only      @70%  ($1,000 max)  enabled
+ETH:  8h_only      @70%  ($1,000 max)  disabled
+XRP:  either_agree @60%                 disabled
 DOGE: 8h_only      @75%                 disabled
 SOL:  4h_only      @75%                 disabled
-LINK: 8h_only      @85%  ($1,000 max)  enabled
-ADA:  4h_only      @75%                 enabled
-AVAX: 4h_only      @60%                 enabled
-DOT:  8h_only      @80%                 enabled
+LINK: 8h_only      @75%  ($1,000 max)  enabled
+ADA:  4h_only      @75%                 disabled
+AVAX: 4h_only      @60%                 disabled
+DOT:  8h_only      @80%                 disabled
 ```
 
 ---
@@ -417,10 +417,38 @@ REPLAY_HOURS_F = 400            # Mode F — longer for more trades
 
 ---
 
+## Pending Work
+
+### Active
+1. **V1.5 — Dynamic data cap + holdout comparison.** Tests 3 holdout strategies with gamma-aware data sizing. Dynamic cap = `log(0.01)/log(gamma)` hours. BTC 8h only.
+   - `python crypto_trading_system_deku_v1_5.py D BTC 8h --holdout all --trials 150`
+   - Holdout modes: `current` (overlapping baseline), `A` (non-overlapping sequential), `B` (expanding window)
+
+### CPCV Investigation Summary (2026-03-22) — Completed
+
+CPCV tested via V1.3.1 (gamma search) and V1.4 (gamma=1.0). Key findings:
+- **4h models overfit everywhere** — PBO=1.0 across all assets. 4h returns are noise.
+- **8h models are reliable** — PBO 0.0–0.33. Real alpha confirmed by 1-week live backtest.
+- **Gamma is essential** — V1.4 (gamma=1.0) killed returns: BTC +4.4% vs +7.4%, LINK 0 signals. Gamma genuinely helps recency-weight crypto data.
+- **CPCV dropped as validation** — With gamma, CPCV folds leak temporal info. Without gamma, returns collapse. 3-fold holdout kept as production validation.
+- **LR+LGBM core required** — All CPCV-passing configs contain both. LR anchors linearly, LGBM captures nonlinear interactions.
+
+### Completed
+- **CPCV investigation** — DONE (2026-03-22). V1.3.1 + V1.4 tested. Gamma=1.0 failed (BTC +4.4% vs +7.4%, LINK 0 signals). CPCV dropped. Finding: 4h overfits (PBO=1.0), 8h reliable, LR+LGBM core required.
+- **V1.4 gamma=1.0 + CPCV** — FAILED (2026-03-22). Archived as `_cpcv_gamma1_failed`. Gamma is essential for crypto recency.
+- **1-week live backtest** — DONE (2026-03-22). Compared V1.3 Prod vs V1.3.1-A vs V1.4 on BTC+LINK 8h. Gamma models outperform: BTC +7.4%, LINK +12.1% in -4.6% market.
+- **Telegram UX overhaul** — DONE (2026-03-22). Candlestick charts (48h, signal transitions only, blue/red colorblind scheme). Inline button config editor replaces text `/setup`. Max position presets ($0/$1K/$5K/$10K + custom). All green indicators changed to blue. Fixed last 4h prices bug.
+- **V1.3.1 CPCV A/B/C test** — DONE (2026-03-22). All 9 runs. Mode C dropped (consistently weakest).
+- **Enhancement A/B test** — Dropped (2026-03-22). Both enhancement sets failed. Code stripped from production deku.py.
+- **Weekly F re-runs** — DONE (2026-03-21). Re-ran Deku F for all active assets.
+
+---
+
 ## Version History
 
 | Date | Milestone |
 |------|-----------|
+| **2026-03-22** | **CPCV investigation concluded.** V1.3.1 CPCV + V1.4 gamma=1.0 tested. CPCV dropped — gamma essential, 4h unreliable. V1.5 started (dynamic data cap + holdout comparison). Telegram UX overhaul (candlestick charts, inline buttons, colorblind blue scheme). |
 | **2026-03-21** | **Multi-asset expansion.** Added SOL, LINK, ADA, AVAX, DOT. All 9 assets optimized. Per-asset DF pipeline. 150 default trials. Diversity-aware holdout. Optional enhancements. BTC+LINK activated for live trading. Top: LINK 8h +16.4%, ADA 8h +21.3%, AVAX 8h +19.6%. |
 | **2026-03-20** | **Deku promoted to production.** 3-fold holdout validation. Enhancements tested and rejected. Auto-extend trials. |
 | **2026-03-19** | Deku tuning: DIAG_STEP=36, expanded search space, `--metric` flag. Deku trader + `/optimize` Telegram. ETH DF: 4h +79.8%, 8h +77.1%. |
