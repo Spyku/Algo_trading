@@ -420,9 +420,13 @@ REPLAY_HOURS_F = 400            # Mode F — longer for more trades
 ## Pending Work
 
 ### Active
-1. **V1.5 — Dynamic data cap + holdout comparison.** Tests 3 holdout strategies with gamma-aware data sizing. Dynamic cap = `log(0.01)/log(gamma)` hours. BTC 8h only.
-   - `python crypto_trading_system_deku_v1_5.py D BTC 8h --holdout all --trials 150`
-   - Holdout modes: `current` (overlapping baseline), `A` (non-overlapping sequential), `B` (expanding window)
+1. **Doohan V1.3 — Multi-seed Optuna pipeline.** 3 seeds × 150 trials, saves top 6 holdout candidates, live backtest picks best.
+   - Re-run BTC Mode D (CSV format changed to save top 6 with `rank` column)
+   - Run ETH Mode D: `python crypto_trading_system_doohan_v1_3.py D ETH 8h`
+   - Run LINK Mode D: `python crypto_trading_system_doohan_v1_3.py D LINK 8h`
+   - Run `python backtest_doohan_v1_3.py` for each asset after Mode D
+   - Decide: promote Doohan V1.3 to production or wire to live trader
+   - **BTC 8h results (2026-03-23):** V1.3 #2 beats Deku at conf>=90% (+8.40% vs +4.77%). Better signal calibration across confidence thresholds.
 
 ### CPCV Investigation Summary (2026-03-22) — Completed
 

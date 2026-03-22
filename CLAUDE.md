@@ -58,6 +58,12 @@ python crypto_trading_system_deku.py DF BTC 4,8h --metric all    # Run all 5 met
 python crypto_trading_system_deku_15m.py D BTC 4,8h      # Deku V15 — 15-min candles
 python crypto_trading_system_deku_15m.py DF BTC,ETH 4,8h # Deku V15 — D then F
 
+# === DOOHAN V1.3 (testing — multi-seed Optuna) ===
+python crypto_trading_system_doohan_v1_3.py D BTC 8h      # Mode D — 3×150 trials, saves top 6
+python crypto_trading_system_doohan_v1_3.py D BTC 8h --trials 200  # Custom trial count per seed
+python backtest_doohan_v1_3.py                             # Backtest top 6 vs Deku, save best
+python backtest_doohan_v1_3.py --no-save                   # Backtest only, don't save
+
 # === CASCA (standby — profit factor scoring) ===
 python crypto_trading_system_casca.py D BTC 4,8h     # Mode D — full pipeline with PF scoring
 python crypto_trading_system_casca.py A BTC 4,8h     # Mode A — gamma optimization (6 gammas × horizons)
@@ -121,6 +127,8 @@ data/{asset}_hourly_data.csv           <- price data (Binance via ccxt)
 data/{asset}_15m_data.csv              <- 15-min price data (Binance via ccxt)
 data/macro_data/*.csv                  <- VIX, DXY, S&P500, Fear&Greed, etc. (yfinance)
 models/crypto_deku_best_models.csv     <- Deku production: best model per (asset, horizon) — APF scored
+models/crypto_doohan_v1_3_best_models.csv <- Doohan V1.3: top 6 candidates per (asset, horizon) with rank
+models/crypto_doohan_v1_3_production.csv  <- Doohan V1.3: live-validated best (written by backtest)
 models/crypto_casca_best_models.csv    <- CASCA standby: best model per (asset, horizon) — PF scored
 models/crypto_deku_best_models_{metric}.csv <- Deku metric-specific models (rawpf, calmar, return, rpf_sqrt)
 models/crypto_deku_15m_best_models.csv <- Deku V15: 15-min candle models — APF scored
@@ -173,10 +181,14 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | File | Status | Notes |
 |------|--------|-------|
 | `crypto_trading_system_deku.py` | **Deku Production** | Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. 3-fold holdout. Auto-extend trials. `--metric` flag. Writes to `models/crypto_deku_best_models.csv`. |
-| `crypto_trading_system_deku_v1_5.py` | **Testing** | V1.5: Dynamic data cap (99% gamma weight), 3 holdout variants (current/A/B). Tests non-overlapping folds. |
+| `crypto_trading_system_doohan_v1_3.py` | **Testing** | Doohan V1.3: Multi-seed Optuna (3×150 trials). Saves top 6 holdout candidates. LGBM-required combos, min window 72h. |
+| `crypto_trading_system_doohan_v1_2.py` | **Archived** | Doohan V1.2: Single-seed Optuna, discrete search, min window 72h. Superseded by V1.3. |
+| `backtest_doohan_v1_3.py` | **Testing** | Backtests V1.3 top 6 candidates vs Deku over 1 week. Saves best to production CSV. |
+| `crypto_trading_system_deku_v1_5_1.py` | **Archived** | V1.5.1: Discrete features + gamma. Superseded by Doohan approach. |
+| `crypto_trading_system_deku_v1_5.py` | **Archived** | V1.5: Dynamic data cap. Feature bloat concern (58-72 features). |
 | `crypto_trading_system_deku_v1_4_cpcv_gamma1_failed.py` | **Archived** | V1.4: Gamma=1.0 + CPCV. Failed — killed returns and trade count. |
-| `crypto_trading_system_deku_v1_3_2.py` | **Testing** | V1.3.2: Narrowed A/B comparison. LR+LGBM combos only (8), gamma 0.995–0.998, features 5–30. |
-| `crypto_trading_system_deku_v1_3_1.py` | **Testing** | V1.3.1: A/B/C mode comparison. CPCV calibration. Found 4h overfits (PBO=1.0), 8h is real edge. |
+| `crypto_trading_system_deku_v1_3_2.py` | **Archived** | V1.3.2: Narrowed A/B comparison. Superseded. |
+| `crypto_trading_system_deku_v1_3_1.py` | **Archived** | V1.3.1: CPCV calibration. Found 4h overfits (PBO=1.0), 8h is real edge. |
 | `crypto_trading_system_deku_15m.py` | **Deku V15** | Deku with 15-min candles. s4=60', s8=120'. 4320-candle cap (~45 days). |
 | `crypto_revolut_deku.py` | **Live** | Deku auto-trader + Telegram inline buttons + `/optimize` `/optstatus` |
 | `crypto_live_trader_deku.py` | **Live** | Deku signal generation library — NOT run directly |
@@ -255,11 +267,15 @@ BTC 8h and LINK 8h updated with CPCV-validated configs from V1.3.1 (2026-03-22).
 ## Pending Work
 
 ### Active
-1. **V1.5 — Dynamic data cap + holdout comparison.** Tests 3 holdout strategies with gamma-aware data sizing. Dynamic cap = `log(0.01)/log(gamma)` hours (gamma=0.996 → 48 days, gamma=0.999 → 6 months). BTC 8h only.
-   - `python crypto_trading_system_deku_v1_5.py D BTC 8h --holdout all --trials 150`
-   - Holdout modes: `current` (overlapping, production baseline), `A` (non-overlapping sequential), `B` (expanding window)
+1. **Doohan V1.3 — Multi-seed Optuna pipeline.** 3 seeds × 150 trials, saves top 6 holdout candidates, live backtest picks best.
+   - Re-run BTC Mode D (CSV format changed to save top 6 with `rank` column)
+   - Run ETH Mode D: `python crypto_trading_system_doohan_v1_3.py D ETH 8h`
+   - Run LINK Mode D: `python crypto_trading_system_doohan_v1_3.py D LINK 8h`
+   - Run `python backtest_doohan_v1_3.py` for each asset after Mode D
+   - Decide: promote Doohan V1.3 to production or wire to live trader
 
 ### Completed (Recent — continued)
+- **Doohan V1.3 BTC 8h Mode D** — DONE (2026-03-23). Multi-seed Optuna (3×150 trials). V1.3 #2 beats Deku at conf>=90% (+8.40% vs +4.77%). Better signal calibration across confidence thresholds. Top 6 candidates saved.
 - **CPCV investigation complete** — DONE (2026-03-22). V1.3.1 (gamma search + CPCV) and V1.4 (gamma=1.0 + CPCV) both tested. 1-week backtest proved gamma models outperform (BTC +7.4%, LINK +12.1% vs gamma=1.0 +4.4%, LINK 0 signals). CPCV dropped as validation method. Key finding: 4h overfits everywhere (PBO=1.0), 8h is where real alpha lives.
 - **Telegram UX overhaul** — DONE (2026-03-22). `/chart` now shows 48h candlestick chart with signal transitions only (no hourly repeats), blue/red color scheme for colorblind accessibility. `/setup` replaced with inline button navigation (asset picker, toggle, strategy, confidence, max position with $0/$1K/$5K/$10K presets + custom). All green indicators changed to blue. Fixed last 4h prices bug (now reads from df_raw).
 - **V1.3.1 CPCV A/B/C test** — DONE (2026-03-22). All 9 runs complete. Key finding: LR+LGBM core required for PBO ≤ 0.33. 4h overfits everywhere. Mode C weakest, dropped.
@@ -267,6 +283,7 @@ BTC 8h and LINK 8h updated with CPCV-validated configs from V1.3.1 (2026-03-22).
 - **Weekly F re-runs** — DONE (2026-03-21). Re-ran Deku F for all active assets.
 
 ### Dropped
+- ~~V1.5.1 / V1.5~~ — Superseded by Doohan V1.3 multi-seed approach. V1.5 had feature bloat (58-72 features), V1.5.1 tried discrete fix but Doohan approach is strictly better.
 - ~~Enhancement A/B test~~ — Both enhancement sets dropped. Original 11 features + 2 toggles failed (-62.2%). Lighter `--enhancements` (3 Optuna toggles) also dropped.
 - ~~Fold weighting~~ — Gamma already handles recency at sample level. Literature doesn't support fold weighting; CPCV is the proper next step.
 - ~~Mode A gamma optimization~~ — Replaced by Optuna continuous gamma search
