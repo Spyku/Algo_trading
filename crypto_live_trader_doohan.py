@@ -221,7 +221,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             signal = 'HOLD'
 
     avg_proba = np.mean(probas)
-    confidence = avg_proba * 100 if signal != 'SELL' else (1 - avg_proba) * 100
+    confidence = round(avg_proba * 100) if signal != 'SELL' else round((1 - avg_proba) * 100)
 
     # Use raw data (df_raw) for last 4h — df drops last `horizon` rows due to label shift
     last_4h = []

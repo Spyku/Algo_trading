@@ -1,11 +1,16 @@
 """
-Doohan V1.3 — Multi-seed Optuna (3 seeds × 150 trials) + discrete search + min window 72h
+Doohan V1.4 — Multi-sampler Optuna (TPE + CmaEs + QMC × 150 trials) + discrete search + min window 72h
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
 Doohan — Optuna-based joint optimization + XGBoost:
   Based on CASCA V1.4 (APF scoring), replaces grid search with Bayesian optimization.
+
+  V1.4 changes vs V1.3:
+  - 3 different samplers instead of 3 TPE seeds: TPE (exploit), CmaEs (evolution), QMC (quasi-random)
+  - Diversity-aware top-6 save: requires different (window OR gamma-band OR feature-band)
+  - Each sampler tagged in results for comparison
 
   Key changes vs CASCA:
   1. Optuna TPE + Hyperband: joint optimization of (combo, window, gamma, n_features)
@@ -33,16 +38,16 @@ Modes:
   5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage:
-  python crypto_trading_system_doohan_v1_3.py D BTC 8h
-  python crypto_trading_system_doohan_v1_3.py DG BTC 8h
-  python crypto_trading_system_doohan_v1_3.py G BTC 8h
-  python crypto_trading_system_doohan_v1_3.py DF BTC,ETH 4,8h
-  python crypto_trading_system_doohan_v1_3.py B BTC
+  python crypto_trading_system_doohan_v1_4.py D BTC 8h
+  python crypto_trading_system_doohan_v1_4.py DG BTC 8h
+  python crypto_trading_system_doohan_v1_4.py G BTC 8h
+  python crypto_trading_system_doohan_v1_4.py DF BTC,ETH 4,8h
+  python crypto_trading_system_doohan_v1_4.py B BTC
 
 Outputs:
   charts/{ASSET}_backtest.png
-  models/crypto_doohan_v1_3_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_3_production.csv         (best live performer from Mode G)
+  models/crypto_doohan_v1_4_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_doohan_v1_4_production.csv         (best live performer from Mode G)
   models/crypto_hourly_chart_data.json
 """
 
@@ -284,7 +289,7 @@ LABEL_MODE = 'fee_aware'
 MODE_G_REPLAY_HOURS = 168       # 1 full week
 MODE_G_CONF_THRESHOLDS = [70, 80, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_doohan_v1_3_production.csv'
+PRODUCTION_CSV = 'models/crypto_doohan_v1_4_production.csv'
 DEKU_CSV = 'models/crypto_deku_best_models.csv'
 
 
@@ -732,16 +737,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_doohan_v1_3_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_doohan_v1_3_best_models.csv'
+        return f'{MODELS_DIR}/crypto_doohan_v1_4_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_doohan_v1_4_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_doohan_v1_3_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_doohan_v1_4_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_doohan_v1_3_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_doohan_v1_4_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -2843,8 +2848,13 @@ DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 DOOHAN_FEATURE_COUNTS = [10, 13, 17, 20, 25, 30, 40]
 DOOHAN_GAMMA_VALUES = [0.995, 0.996, 0.997, 0.998, 0.999]
 
-# Doohan V1.3: Multi-seed — run N independent Optuna studies to reduce randomness
-DOOHAN_SEEDS = [42, 123, 456]
+# Doohan V1.4: Multi-sampler — TPE (exploit) + 2× Random (explore)
+# CmaEs/QMC don't support categorical params → fall back to random anyway
+DOOHAN_SAMPLERS = [
+    ('TPE', lambda: optuna.samplers.TPESampler(seed=42)),
+    ('Random1', lambda: optuna.samplers.RandomSampler(seed=123)),
+    ('Random2', lambda: optuna.samplers.RandomSampler(seed=456)),
+]
 
 
 def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
@@ -3030,11 +3040,12 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
     combo_options = _build_combo_list()
 
-    n_seeds = len(DOOHAN_SEEDS)
+    n_samplers = len(DOOHAN_SAMPLERS)
+    sampler_names = [s[0] for s in DOOHAN_SAMPLERS]
     print("\n" + "=" * 70)
-    print(f"  DOOHAN V1.3 MODE D: MULTI-SEED OPTUNA -- {horizon}h HORIZON")
+    print(f"  DOOHAN V1.4 MODE D: MULTI-SAMPLER OPTUNA -- {horizon}h HORIZON")
     print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
-    print(f"  Seeds: {n_seeds} × {n_trials} trials = {n_seeds*n_trials} total (TPE + Hyperband)")
+    print(f"  Samplers: {' + '.join(sampler_names)} × {n_trials} trials = {n_samplers*n_trials} total")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Search: combo × window × gamma × n_features{metric_label}")
     print("=" * 70)
@@ -3130,38 +3141,40 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         min_n_features = feat_min
         max_n_features = min(len(ranked_features), feat_max)
 
-        # Step 3: Multi-seed Optuna studies (V1.3)
-        n_seeds = len(DOOHAN_SEEDS)
+        # Step 3: Multi-sampler Optuna studies (V1.4)
+        n_samplers = len(DOOHAN_SAMPLERS)
         feat_counts_available = [f for f in DOOHAN_FEATURE_COUNTS if f <= max_n_features]
 
         print(f"\n{'='*70}")
-        print(f"  MULTI-SEED OPTUNA: {asset_name} {horizon}h ({n_seeds} seeds × {n_trials} trials)")
+        sampler_names = [s[0] for s in DOOHAN_SAMPLERS]
+        print(f"  MULTI-SAMPLER OPTUNA: {asset_name} {horizon}h ({' + '.join(sampler_names)} × {n_trials} trials)")
         print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × {len(DOOHAN_GAMMA_VALUES)} gammas × {len(feat_counts_available)} feat counts")
-        print(f"  Trials: {n_seeds}×{n_trials} = {n_seeds*n_trials} total | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
+        print(f"  Trials: {n_samplers}×{n_trials} = {n_samplers*n_trials} total | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo={EMBARGO_CANDLES}")
         print(f"{'='*70}")
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         model_factories = _get_deku_diagnostic_models()
 
-        all_completed_trials = []  # Pool from all seeds
+        all_completed_trials = []  # Pool from all samplers
+        sampler_results = {}  # Track per-sampler stats
         total_pruned = 0
         total_complete = 0
         t_optuna = time.time()
 
-        for seed_idx, seed in enumerate(DOOHAN_SEEDS):
+        for samp_idx, (samp_name, samp_factory) in enumerate(DOOHAN_SAMPLERS):
             print(f"\n  {'─'*60}")
-            print(f"  Seed {seed_idx+1}/{n_seeds} (seed={seed})")
+            print(f"  Sampler {samp_idx+1}/{n_samplers}: {samp_name}")
             print(f"  {'─'*60}")
 
             study = optuna.create_study(
                 direction='maximize',
-                sampler=optuna.samplers.TPESampler(seed=seed),
+                sampler=samp_factory(),
                 pruner=optuna.pruners.HyperbandPruner(
                     min_resource=DEKU_PRUNING_WARMUP,
                     max_resource=n // DIAG_STEP,
                     reduction_factor=3,
                 ),
-                study_name=f'doohan_{asset_name}_{horizon}h_s{seed}',
+                study_name=f'doohan_{asset_name}_{horizon}h_{samp_name}',
             )
 
             best_apf_so_far = 0.0
@@ -3177,7 +3190,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 gamma = trial.suggest_categorical('gamma', DOOHAN_GAMMA_VALUES)
                 n_feat = trial.suggest_categorical('n_features', feat_counts_available)
 
-                # Prune duplicate param combos within this seed
+                # Prune duplicate param combos within this sampler
                 param_key = (combo_name, window, gamma, n_feat)
                 if param_key in seen_params:
                     raise optuna.TrialPruned(f"Duplicate: {param_key}")
@@ -3205,11 +3218,11 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
                 if score > best_apf_so_far:
                     best_apf_so_far = score
-                    print(f"    #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
+                    print(f"    #{trial_count:3d} NEW BEST [{samp_name}]: {combo_name:22s} w={window:4d}h "
                           f"g={gamma:.4f} f={n_feat:3d} | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
                           f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
                 elif trial_count % 40 == 0:
-                    print(f"    #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
+                    print(f"    #{trial_count:3d} progress [{samp_name}]: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
 
                 return score
 
@@ -3228,21 +3241,28 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                     print(f"    Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} (+{extra})...")
                     study.optimize(objective, n_trials=extra, show_progress_bar=False)
 
-            # Collect from this seed
-            seed_pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
-            seed_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
-            total_pruned += seed_pruned
-            total_complete += seed_complete
+            # Collect from this sampler
+            samp_pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
+            samp_complete = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            total_pruned += samp_pruned
+            total_complete += samp_complete
 
-            seed_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
-            all_completed_trials.extend(seed_completed)
+            samp_completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
+            # Tag each trial with its sampler name for tracking
+            for t in samp_completed:
+                t.set_user_attr('sampler', samp_name)
+            all_completed_trials.extend(samp_completed)
 
-            seed_best = max((t.value for t in seed_completed), default=0)
-            print(f"    → {seed_complete} completed, {seed_pruned} pruned, best {OPTUNA_METRIC}={seed_best:.3f}")
+            samp_best = max((t.value for t in samp_completed), default=0)
+            sampler_results[samp_name] = {
+                'completed': samp_complete, 'pruned': samp_pruned,
+                'best_apf': samp_best, 'n_valid': len(samp_completed),
+            }
+            print(f"    → {samp_complete} completed, {samp_pruned} pruned, best {OPTUNA_METRIC}={samp_best:.3f}")
 
         optuna_elapsed = (time.time() - t_optuna) / 60
 
-        # Pool and sort all trials across seeds
+        # Pool and sort all trials across samplers
         all_completed_trials.sort(key=lambda t: -t.value)
 
         # Deduplicate by (score, combo, window, gamma, n_features)
@@ -3256,11 +3276,14 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 unique_top.append(t)
         completed_trials = unique_top
 
-        # Multi-seed summary
+        # Multi-sampler summary
         print(f"\n  {'='*70}")
-        print(f"  MULTI-SEED RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min, {n_seeds} seeds)")
+        print(f"  MULTI-SAMPLER RESULTS: {asset_name} {horizon}h ({optuna_elapsed:.1f} min)")
         print(f"  {'='*70}")
-        print(f"  Total: {total_complete} completed, {total_pruned} pruned across {n_seeds} seeds")
+        for sname, sres in sampler_results.items():
+            print(f"  {sname:6s}: {sres['completed']:3d} completed, {sres['pruned']:3d} pruned, "
+                  f"best {OPTUNA_METRIC}={sres['best_apf']:.3f}, valid={sres['n_valid']}")
+        print(f"  Total: {total_complete} completed, {total_pruned} pruned across {n_samplers} samplers")
         print(f"  Unique candidates after dedup: {len(completed_trials)}")
 
         if completed_trials:
@@ -3269,12 +3292,13 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                   f"g={best_t.params['gamma']:.4f} f={best_t.params['n_features']} "
                   f"{OPTUNA_METRIC}={best_t.value:.3f}")
 
-        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}")
-        print(f"  {'-'*60}")
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}  {'Sampler':>7s}")
+        print(f"  {'-'*70}")
         for i, t in enumerate(completed_trials[:15], 1):
             marker = " <-- BEST" if i == 1 else ""
+            samp_tag = t.user_attrs.get('sampler', '?')
             print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
-                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}{marker}")
+                  f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}  {samp_tag:>7s}{marker}")
 
         # ── 3-FOLD ROLLING HOLDOUT: re-evaluate top candidates on unseen data ──
         # Diversity-aware selection: best per (combo,window), then ensure every
@@ -3375,9 +3399,40 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         else:
             print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
 
-        # Save top N holdout candidates (not just winner) for live backtest validation
+        # Save top N holdout candidates with DIVERSITY constraint (V1.4)
+        # Bucket params to ensure saved candidates explore different regions:
+        #   gamma bands: [0.994-0.996], [0.996-0.998], [0.998-1.0]
+        #   feature bands: [5-15], [16-30], [31+]
+        # Two candidates are "same region" if window AND gamma-band AND feature-band all match.
+        # Always save #1, then skip candidates from an already-saved region.
+        def _diversity_key(trial):
+            g = trial.params['gamma']
+            f = trial.params['n_features']
+            w = trial.params['window']
+            g_band = 0 if g < 0.996 else (1 if g < 0.998 else 2)
+            f_band = 0 if f <= 15 else (1 if f <= 30 else 2)
+            return (w, g_band, f_band)
+
         DOOHAN_SAVE_TOP_N = 6
-        candidates_to_save = holdout_results[:DOOHAN_SAVE_TOP_N] if holdout_results else []
+        candidates_to_save = []
+        seen_regions = set()
+        if holdout_results:
+            for ho_entry in holdout_results:
+                if len(candidates_to_save) >= DOOHAN_SAVE_TOP_N:
+                    break
+                trial = ho_entry[0]
+                region = _diversity_key(trial)
+                if region in seen_regions and len(candidates_to_save) >= 1:
+                    continue  # skip same region (always keep #1)
+                seen_regions.add(region)
+                candidates_to_save.append(ho_entry)
+            # If diversity filter was too strict, fill remaining slots from holdout
+            if len(candidates_to_save) < DOOHAN_SAVE_TOP_N:
+                for ho_entry in holdout_results:
+                    if len(candidates_to_save) >= DOOHAN_SAVE_TOP_N:
+                        break
+                    if ho_entry not in candidates_to_save:
+                        candidates_to_save.append(ho_entry)
 
         if not candidates_to_save and completed_trials:
             # Fallback: save top N in-sample if holdout failed
@@ -3400,11 +3455,12 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             c_n_feat = trial.params['n_features']
             c_features = ranked_features[:c_n_feat]
 
+            c_sampler = trial.user_attrs.get('sampler', '?')
             gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
             fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets) if ho_fold_rets else "n/a"
             marker = " <-- BEST" if rank_i == 1 else ""
             print(f"  #{rank_i}: {c_combo}  w={c_window}h  g={c_gamma:.4f}  f={c_n_feat}  "
-                  f"ho_apf={ho_score:.3f}  ho_ret={ho_ret:+.1f}%  [{fold_str}]  {gen_icon}{marker}")
+                  f"ho_apf={ho_score:.3f}  ho_ret={ho_ret:+.1f}%  [{fold_str}]  {c_sampler}  {gen_icon}{marker}")
 
             best_config = {
                 'coin': asset_name,
@@ -3419,6 +3475,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 'horizon': horizon,
                 'gamma': round(c_gamma, 4),
                 'rank': rank_i,
+                'sampler': c_sampler,
             }
             best_models.append(best_config)
 
@@ -5923,8 +5980,8 @@ def main():
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DOOHAN")
-        print("  Optuna TPE + Hyperband | 5 models (RF+GB+XGB+LR+LGBM)")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DOOHAN V1.4")
+        print("  Optuna TPE + CmaEs + QMC | 5 models (RF+GB+XGB+LR+LGBM)")
         print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
         print("=" * 60)

@@ -1514,9 +1514,9 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
 
         avg_proba = np.mean(probas)
         if signal == 'SELL':
-            confidence = (1 - avg_proba) * 100
+            confidence = round((1 - avg_proba) * 100)
         else:
-            confidence = avg_proba * 100
+            confidence = round(avg_proba * 100)
 
         actual = None
         if i + horizon < n:

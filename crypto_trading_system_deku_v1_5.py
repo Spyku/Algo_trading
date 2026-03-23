@@ -42,7 +42,7 @@ from crypto_trading_system_deku import (
 # V1.5 constants
 V15_DEFAULT_TRIALS = 150
 V15_PRUNING_WARMUP = 8
-V15_CSV = os.path.join('models', 'crypto_deku_v15_best_models_{holdout}.csv')
+V15_CSV = os.path.join('models', 'crypto_deku_v1_5_best_models_{holdout}.csv')
 N_HOLDOUT_FOLDS = 3
 
 # Max data cap — even for gamma=0.999+, never exceed 6 months

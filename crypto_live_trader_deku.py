@@ -221,7 +221,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             signal = 'HOLD'
 
     avg_proba = np.mean(probas)
-    confidence = avg_proba * 100 if signal != 'SELL' else (1 - avg_proba) * 100
+    confidence = round(avg_proba * 100) if signal != 'SELL' else round((1 - avg_proba) * 100)
 
     # Use raw data (df_raw) for last 4h — df drops last `horizon` rows due to label shift
     last_4h = []
@@ -233,10 +233,13 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             'close': float(r['close']),
         })
 
+    # Use latest raw price, not label-shifted df price (which is horizon hours behind)
+    current_price = float(df_raw.iloc[-1]['close']) if df_raw is not None and len(df_raw) > 0 else float(row['close'])
+
     return {
         'asset': asset_name, 'signal': signal,
         'confidence': round(float(confidence), 1),
-        'close': float(row['close']),
+        'close': current_price,
         'buy_votes': int(buy_votes), 'total_votes': len(votes),
         'rsi': round(float(row.get('rsi_14h', 0)), 1),
         'datetime': _to_local(row['datetime']).strftime('%Y-%m-%d %H:%M') if hasattr(row['datetime'], 'strftime') else str(row['datetime']),
