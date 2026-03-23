@@ -2,7 +2,7 @@
 Crypto Live Trader (Doohan) — Signal Generation for Doohan Models
 =============================================================
 Same as crypto_live_trader.py but imports from crypto_trading_system_doohan
-and reads models/crypto_doohan_best_models.csv.
+and reads models/crypto_doohan_v1_6_production.csv.
 
 Usage:
   python crypto_live_trader_doohan.py                  # Run once (BTC default)
@@ -99,7 +99,7 @@ def send_telegram(message, parse_mode='HTML'):
 # ============================================================
 # LOAD MODEL CONFIG
 # ============================================================
-MODELS_CSV = 'models/crypto_doohan_best_models.csv'
+MODELS_CSV = 'models/crypto_doohan_v1_6_production.csv'
 
 def load_best_config(asset_name, horizon=None):
     if not os.path.exists(MODELS_CSV):

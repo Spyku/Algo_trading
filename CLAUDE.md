@@ -58,11 +58,12 @@ python crypto_trading_system_deku.py DF BTC 4,8h --metric all    # Run all 5 met
 python crypto_trading_system_deku_15m.py D BTC 4,8h      # Deku V15 — 15-min candles
 python crypto_trading_system_deku_15m.py DF BTC,ETH 4,8h # Deku V15 — D then F
 
-# === DOOHAN V1.3 (testing — multi-seed Optuna) ===
-python crypto_trading_system_doohan_v1_3.py D BTC 8h      # Mode D — 3×150 trials, saves top 6
-python crypto_trading_system_doohan_v1_3.py D BTC 8h --trials 200  # Custom trial count per seed
-python backtest_doohan_v1_3.py                             # Backtest top 6 vs Deku, save best
-python backtest_doohan_v1_3.py --no-save                   # Backtest only, don't save
+# === DOOHAN V1.6 (production — exhaustive grid + Optuna refine) ===
+python crypto_trading_system_doohan_v1_6.py D BTC 8h       # Mode D — 432-eval grid, saves top 6
+python crypto_trading_system_doohan_v1_6.py DGF BTC 8h     # Full pipeline: grid → backtest → refine → strategy
+python crypto_trading_system_doohan_v1_6.py DGF BTC,ETH,LINK 8h  # Multi-asset full pipeline
+python crypto_trading_system_doohan_v1_6.py G BTC 8h       # Backtest top 6 vs Deku
+python backtest_doohan_v1_6.py                             # Standalone backtest (legacy)
 
 # === CASCA (standby — profit factor scoring) ===
 python crypto_trading_system_casca.py D BTC 4,8h     # Mode D — full pipeline with PF scoring
@@ -73,6 +74,11 @@ python crypto_trading_system_casca.py DF BTC,ETH 4,8h  # Mode DF — D then F
 python crypto_revolut_deku.py --loop              # Live trading loop
 python crypto_revolut_deku.py --dry-run --loop    # Signals only, no trades
 python crypto_revolut_deku.py --status            # Show positions
+
+# === Auto-trader (Doohan — production) ===
+python crypto_revolut_doohan.py --loop            # Live trading loop
+python crypto_revolut_doohan.py --dry-run --loop  # Signals only, no trades
+python crypto_revolut_doohan.py --status          # Show positions
 
 # === Auto-trader (CASCA — standby) ===
 python crypto_revolut_trader.py --loop            # Live trading loop
@@ -90,15 +96,22 @@ python crypto_revolut_trader.py --dry-run --loop  # Signals only, no trades
 ### Production File Chain
 
 ```
-crypto_trading_system_deku.py  (Deku 1.3 production — Modes B/D/F/DF, Optuna + APF scoring)
+# Deku (production)
+crypto_trading_system_deku.py  (Deku 1.3 — Modes B/D/F/DF, Optuna + APF scoring)
   └── hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
-
 crypto_revolut_deku.py  (Deku auto-trader — reads trading_config_deku.json)
-  └── crypto_live_trader_deku.py  (signal generation library — NOT run directly)
-        └── crypto_trading_system_deku.py  (imports ASSETS, features, models, download/load/build)
+  └── crypto_live_trader_deku.py  (signal generation library)
+        └── crypto_trading_system_deku.py  (imports ASSETS, features, models)
+
+# Doohan V1.6 (production)
+crypto_trading_system_doohan_v1_6.py  (Exhaustive grid + Optuna refine, DGF pipeline)
+  └── hardware_config.py
+crypto_revolut_doohan.py  (Doohan auto-trader — reads trading_config_doohan.json)
+  └── crypto_live_trader_doohan.py  (signal generation library)
+        └── crypto_trading_system_doohan.py  (imports ASSETS, features, models — shared base)
 ```
 
-CASCA and all legacy systems (V15/V30 Cacarot, V6) archived — Deku strictly superior.
+CASCA and all legacy systems (V15/V30 Cacarot, V6, Doohan V1.1-V1.5) archived.
 
 ### Key Concepts
 
@@ -127,12 +140,14 @@ data/{asset}_hourly_data.csv           <- price data (Binance via ccxt)
 data/{asset}_15m_data.csv              <- 15-min price data (Binance via ccxt)
 data/macro_data/*.csv                  <- VIX, DXY, S&P500, Fear&Greed, etc. (yfinance)
 models/crypto_deku_best_models.csv     <- Deku production: best model per (asset, horizon) — APF scored
-models/crypto_doohan_v1_3_best_models.csv <- Doohan V1.3: top 6 candidates per (asset, horizon) with rank
-models/crypto_doohan_v1_3_production.csv  <- Doohan V1.3: live-validated best (written by backtest)
+models/crypto_doohan_v1_6_best_models.csv <- Doohan V1.6: top 6 candidates per (asset, horizon) with rank
+models/crypto_doohan_v1_6_production.csv  <- Doohan V1.6: live-validated best (written by Mode G/Refine)
+models/crypto_doohan_v1_6_grid_{ASSET}_{H}h.csv <- Doohan V1.6: full grid results (720 evals)
 models/crypto_casca_best_models.csv    <- CASCA standby: best model per (asset, horizon) — PF scored
 models/crypto_deku_best_models_{metric}.csv <- Deku metric-specific models (rawpf, calmar, return, rpf_sqrt)
 models/crypto_deku_15m_best_models.csv <- Deku V15: 15-min candle models — APF scored
 config/trading_config_deku.json        <- Deku per-asset strategy + min_confidence (written by Mode F)
+config/trading_config_doohan.json      <- Doohan per-asset strategy + min_confidence (written by V1.6 Mode F)
 config/trading_config.json             <- CASCA per-asset strategy + min_confidence (written by Mode F)
 config/position_{ASSET}.json           <- position tracking
 config/revolut_x_config.json           <- Revolut X API key
@@ -181,9 +196,11 @@ DIAG_WINDOWS_SHORT = [24, 48, 72, 100, 150]        # CASCA only — horizons 1-4
 | File | Status | Notes |
 |------|--------|-------|
 | `crypto_trading_system_deku.py` | **Deku Production** | Optuna TPE+Hyperband. 5 models (RF, GB, XGB, LR, LGBM), 26 combos. 3-fold holdout. Auto-extend trials. `--metric` flag. Writes to `models/crypto_deku_best_models.csv`. |
-| `crypto_trading_system_doohan_v1_3.py` | **Testing** | Doohan V1.3: Multi-seed Optuna (3×150 trials). Saves top 6 holdout candidates. LGBM-required combos, min window 72h. |
-| `crypto_trading_system_doohan_v1_2.py` | **Archived** | Doohan V1.2: Single-seed Optuna, discrete search, min window 72h. Superseded by V1.3. |
-| `backtest_doohan_v1_3.py` | **Testing** | Backtests V1.3 top 6 candidates vs Deku over 1 week. Saves best to production CSV. |
+| `crypto_trading_system_doohan_v1_6.py` | **Doohan Production** | Doohan V1.6: Exhaustive grid (6 combos × 4 windows × 6 features × 3 gammas = 432 evals) + Optuna refine (±20h/±0.020γ/±5f). DGF pipeline: grid → backtest → refine → strategy. LGBM dominates all combos it's in; 6 distinct signal groups. |
+| `backtest_doohan_v1_6.py` | **Doohan Production** | Standalone backtest for V1.6 top 6 candidates vs Deku. |
+| `crypto_revolut_doohan.py` | **Live** | Doohan auto-trader — reads `crypto_doohan_v1_6_production.csv` + `trading_config_doohan.json` |
+| `crypto_live_trader_doohan.py` | **Live** | Doohan signal generation library — NOT run directly |
+| `crypto_trading_system_doohan_v1_[1-5].py` | **Archived** | Doohan V1.1–V1.5: Superseded by V1.6 exhaustive grid approach. |
 | `crypto_trading_system_deku_v1_5_1.py` | **Archived** | V1.5.1: Discrete features + gamma. Superseded by Doohan approach. |
 | `crypto_trading_system_deku_v1_5.py` | **Archived** | V1.5: Dynamic data cap. Feature bloat concern (58-72 features). |
 | `crypto_trading_system_deku_v1_4_cpcv_gamma1_failed.py` | **Archived** | V1.4: Gamma=1.0 + CPCV. Failed — killed returns and trade count. |
@@ -267,14 +284,11 @@ BTC 8h and LINK 8h updated with CPCV-validated configs from V1.3.1 (2026-03-22).
 ## Pending Work
 
 ### Active
-1. **Doohan V1.3 — Multi-seed Optuna pipeline.** 3 seeds × 150 trials, saves top 6 holdout candidates, live backtest picks best.
-   - Re-run BTC Mode D (CSV format changed to save top 6 with `rank` column)
-   - Run ETH Mode D: `python crypto_trading_system_doohan_v1_3.py D ETH 8h`
-   - Run LINK Mode D: `python crypto_trading_system_doohan_v1_3.py D LINK 8h`
-   - Run `python backtest_doohan_v1_3.py` for each asset after Mode D
-   - Decide: promote Doohan V1.3 to production or wire to live trader
+1. **Doohan V1.6 — Running DGF for BTC, ETH, LINK 8h** (started 2026-03-24 overnight). Exhaustive grid + Optuna refine. Once complete, enable Doohan trader alongside Deku.
 
 ### Completed (Recent — continued)
+- **Doohan V1.6 promoted to production** — DONE (2026-03-24). Exhaustive grid (432 evals: 6 combos × 4 windows × 6 features × 3 gammas) + Optuna refine (30 trials per top 3 live configs). DGF pipeline wired. Key findings: LGBM dominates all combos it's in; XGB dominates RF/GB/LR; only 3 viable combos (XGB+LGBM, RF+XGB, RF+LGBM) + 3 non-viable (RF+GB, RF+LR, GB+LR always fail). Gamma insensitive in 0.995-0.999 range. Doohan V1.1-V1.5 archived.
+- **Doohan V1.6 BTC 8h grid** — DONE (2026-03-24). 720-eval grid found XGB+LGBM w=200 f=25 g=0.995 APF=4.58 as best. Converged to same optimum as Deku production, validating both approaches.
 - **Doohan V1.3 BTC 8h Mode D** — DONE (2026-03-23). Multi-seed Optuna (3×150 trials). V1.3 #2 beats Deku at conf>=90% (+8.40% vs +4.77%). Better signal calibration across confidence thresholds. Top 6 candidates saved.
 - **CPCV investigation complete** — DONE (2026-03-22). V1.3.1 (gamma search + CPCV) and V1.4 (gamma=1.0 + CPCV) both tested. 1-week backtest proved gamma models outperform (BTC +7.4%, LINK +12.1% vs gamma=1.0 +4.4%, LINK 0 signals). CPCV dropped as validation method. Key finding: 4h overfits everywhere (PBO=1.0), 8h is where real alpha lives.
 - **Telegram UX overhaul** — DONE (2026-03-22). `/chart` now shows 48h candlestick chart with signal transitions only (no hourly repeats), blue/red color scheme for colorblind accessibility. `/setup` replaced with inline button navigation (asset picker, toggle, strategy, confidence, max position with $0/$1K/$5K/$10K presets + custom). All green indicators changed to blue. Fixed last 4h prices bug (now reads from df_raw).
@@ -283,6 +297,7 @@ BTC 8h and LINK 8h updated with CPCV-validated configs from V1.3.1 (2026-03-22).
 - **Weekly F re-runs** — DONE (2026-03-21). Re-ran Deku F for all active assets.
 
 ### Dropped
+- ~~Doohan V1.1–V1.5~~ — All superseded by V1.6 exhaustive grid. V1.3 multi-seed Optuna was promising but V1.6 grid search is more thorough and found same optimum. V1.5 had feature bloat (58-72 features). All archived 2026-03-24.
 - ~~V1.5.1 / V1.5~~ — Superseded by Doohan V1.3 multi-seed approach. V1.5 had feature bloat (58-72 features), V1.5.1 tried discrete fix but Doohan approach is strictly better.
 - ~~Enhancement A/B test~~ — Both enhancement sets dropped. Original 11 features + 2 toggles failed (-62.2%). Lighter `--enhancements` (3 Optuna toggles) also dropped.
 - ~~Fold weighting~~ — Gamma already handles recency at sample level. Literature doesn't support fold weighting; CPCV is the proper next step.

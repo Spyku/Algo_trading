@@ -4,30 +4,20 @@ Doohan V1.6 — Staged hierarchical search
 ML trading system for BTC, ETH, XRP, DOGE with 4h and 8h horizons.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
-Doohan V1.6 — Three-phase hierarchical optimization:
-  Insight: window > gamma > combo in importance. Search in that order.
-  XGB+LGBM locked as core (proven best calibration across all prior tests).
+Doohan V1.6 — Exhaustive grid search:
+  Insight: LGBM dominates all combos it's in. XGB hurts LGBM.
+  6 distinct signal groups identified: RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR.
 
-  Phase 1: WINDOW SWEEP (deterministic, ~4 evals)
-     - Combo: XGB+LGBM (fixed)
-     - Gamma: 0.996 (fixed default)
-     - Features: 15 (fixed, from LGBM ranking)
-     - Windows: [72, 100, 150, 200]
-     - Rank by APF → select top 3 windows
+  Grid: 6 combos × 4 windows × 6 features × 3 gammas = 432 evals (~45 min)
+     - Combos: RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
+     - Windows: 72, 100, 150, 200
+     - Features: 10, 13, 17, 20, 25, 30
+     - Gammas: 0.999, 0.997, 0.995 (adjacent values produce identical results)
 
-  Phase 2: GAMMA + FEATURES (Optuna, ~30 trials per window)
-     - For each top window from Phase 1
-     - Combo: XGB+LGBM (fixed)
-     - Gamma: continuous [0.994, 1.0]
-     - Features: continuous [10, 40]
-     - Independent Optuna study per window
+  Saves full grid to CSV for manual analysis.
+  Then: 3-fold holdout → top 6 → Mode G backtest → Refine top 3 → Mode F strategy.
 
-  Phase 3: COMBO AUGMENTATION (deterministic grid)
-     - For top configs from Phase 2
-     - Test adding RF, GB, LR to XGB+LGBM core → 8 combos
-     - Deterministic eval with locked hyperparams
-
-  Then: 3-fold holdout ranking → save top 6 diverse candidates → Mode G backtest.
+  DGF pipeline: D (grid) → G (backtest) → R (Optuna refine ±20h/±0.020γ/±5f) → F (strategy)
 
   APF scoring:
   - Adjusted PF = raw_PF / buyhold_PF (measures skill vs passive holding)
@@ -37,6 +27,7 @@ Doohan V1.6 — Three-phase hierarchical optimization:
 Modes:
   B. Quick run (saved models)    D. Staged optimization
   DF. D then F                   DG. D then G
+  DGF. D then G then F
   F. Strategy comparison         G. Live backtest validation (top 6 → pick best)
   H. Horizon search              HF. H then F
   5/6/7. Quick BTC/ETH/XRP
@@ -2850,32 +2841,28 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
 DEKU_DEFAULT_TRIALS = 150
 DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 
-# Doohan V1.6: Staged hierarchical search
-# Phase 1: Window sweep — deterministic, XGB+LGBM fixed
-P1_CORE_COMBO = 'XGB+LGBM'         # proven best-calibrated core
-P1_DEFAULT_GAMMA = 0.996            # reasonable middle-ground default
-P1_DEFAULT_FEATURES = 15            # sweet spot from V1.5 exhaustive search
-P1_TOP_WINDOWS = 3                  # how many windows to promote to Phase 2
-
-# Phase 2: Gamma + features Optuna per window
-P2_GAMMA_MIN = 0.994
-P2_GAMMA_MAX = 1.0
-P2_FEAT_MIN = 10
-P2_FEAT_MAX = 40
-P2_TRIALS_PER_WINDOW = 30           # Optuna trials per window
-
-# Phase 3: Combo augmentation — test adding RF/GB/LR to XGB+LGBM
-P3_AUGMENT_COMBOS = [
-    'XGB+LGBM',                     # base (already evaluated)
-    'RF+XGB+LGBM',
-    'GB+XGB+LGBM',
-    'XGB+LR+LGBM',                  # Deku's production winner
-    'RF+XGB+LR+LGBM',
-    'GB+XGB+LR+LGBM',
-    'RF+GB+XGB+LGBM',
-    'RF+GB+XGB+LR+LGBM',
+# Doohan V1.6: Exhaustive grid search
+# 6 combos × 4 windows × 6 feature counts × 5 gammas = 720 evals
+# LGBM dominates all combos it's in; XGB dominates RF/GB/LR.
+# 6 distinct signal groups identified from prior testing.
+GRID_COMBOS = [
+    'RF+LGBM',    # LGBM without XGB (best group — XGB hurts LGBM)
+    'XGB+LGBM',   # LGBM with XGB
+    'RF+XGB',     # XGB without LGBM
+    'RF+GB',      # no dominant model
+    'RF+LR',      # no dominant model
+    'GB+LR',      # no dominant model
 ]
-P3_TOP_CONFIGS = 3                  # how many (window, gamma, features) to augment
+GRID_WINDOWS = [72, 100, 150, 200]
+GRID_FEATURES = [10, 13, 17, 20, 25, 30]
+GRID_GAMMAS = [0.999, 0.997, 0.995]
+
+# Refine step: Optuna fine-tuning around top 3 live-validated configs
+REFINE_TOP_N = 3                   # how many configs to refine from Mode G
+REFINE_TRIALS = 30                 # Optuna trials per config
+REFINE_GAMMA_RANGE = 0.020         # +/- around grid winner's gamma
+REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
+REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window
 
 
 def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
@@ -3043,27 +3030,21 @@ def _build_combo_list():
 
 def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False):
     """
-    DOOHAN V1.6 Mode D: Three-phase staged hierarchical optimization.
+    DOOHAN V1.6 Mode D: Exhaustive grid search.
 
     Pipeline:
     1. Download fresh data + LGBM importance ranking
-    2. Phase 1: Window sweep (deterministic) — XGB+LGBM, fixed gamma/features
-    3. Phase 2: Gamma + features Optuna per top window
-    4. Phase 3: Combo augmentation — test RF/GB/LR additions
-    5. 3-fold holdout ranking → save top 6 → Mode G backtest
+    2. Exhaustive grid: 6 combos × 4 windows × 6 features × 5 gammas = 720 evals
+    3. Save full grid to CSV for analysis
+    4. 3-fold holdout ranking → save top 6 → Mode G backtest
     """
     t_mode_start = time.time()
     _kill_orphan_workers()
 
-    n_p1_evals = len(DIAG_WINDOWS)
-    n_p2_evals = P1_TOP_WINDOWS * P2_TRIALS_PER_WINDOW
-    n_p3_evals = P3_TOP_CONFIGS * len(P3_AUGMENT_COMBOS)
+    n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
     print("\n" + "=" * 70)
-    print(f"  DOOHAN V1.6 MODE D: STAGED HIERARCHICAL -- {horizon}h HORIZON")
-    print(f"  Core: {P1_CORE_COMBO} (XGB+LGBM locked)")
-    print(f"  Phase 1: {n_p1_evals} window evals (deterministic)")
-    print(f"  Phase 2: {P1_TOP_WINDOWS} windows × {P2_TRIALS_PER_WINDOW} Optuna trials (gamma + features)")
-    print(f"  Phase 3: {P3_TOP_CONFIGS} configs × {len(P3_AUGMENT_COMBOS)} combos = {n_p3_evals} evals")
+    print(f"  DOOHAN V1.6 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
+    print(f"  {len(GRID_COMBOS)} combos × {len(GRID_WINDOWS)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
     print("=" * 70)
@@ -3160,72 +3141,19 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         max_n_features = min(len(ranked_features), feat_max)
 
         # ══════════════════════════════════════════════════════════════
-        # Step 3: THREE-PHASE STAGED HIERARCHICAL SEARCH (V1.6)
+        # Step 3: EXHAUSTIVE GRID SEARCH (V1.6)
+        # 6 combos × 4 windows × 6 features × 5 gammas = 720 evals
         # ══════════════════════════════════════════════════════════════
-        feat_max_actual = min(P2_FEAT_MAX, len(ranked_features))
-        core_combo = P1_CORE_COMBO.split('+')
-
         model_factories = _get_deku_diagnostic_models()
 
-        # ── PHASE 1: WINDOW SWEEP (deterministic) ─────────────────
+        n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
         print(f"\n{'='*70}")
-        print(f"  PHASE 1: WINDOW SWEEP — {asset_name} {horizon}h")
-        print(f"  Core: {P1_CORE_COMBO} | gamma={P1_DEFAULT_GAMMA} | features={P1_DEFAULT_FEATURES}")
-        print(f"  Windows: {DIAG_WINDOWS} ({len(DIAG_WINDOWS)} evals)")
+        print(f"  EXHAUSTIVE GRID: {asset_name} {horizon}h — {n_grid} evals")
+        print(f"  Combos:   {GRID_COMBOS}")
+        print(f"  Windows:  {GRID_WINDOWS}")
+        print(f"  Features: {GRID_FEATURES}")
+        print(f"  Gammas:   {GRID_GAMMAS}")
         print(f"{'='*70}")
-
-        t_phase1 = time.time()
-        p1_results = []
-
-        for window in DIAG_WINDOWS:
-            feat_np = features_np[:, :P1_DEFAULT_FEATURES]
-            result = _deku_eval_with_pruning(
-                feat_np, labels_np, closes_np, core_combo, window, n,
-                DIAG_STEP, model_factories, gamma=P1_DEFAULT_GAMMA, trial=None,
-                horizon=horizon
-            )
-
-            if result is None:
-                print(f"    w={window:4d}h: FAILED (no result)")
-                continue
-
-            trades = result[6]
-            score = _compute_optuna_score(result)
-            ret = result[4]
-
-            p1_results.append({
-                'window': window, 'apf': score, 'return': ret,
-                'trades': trades, 'raw_pf': result[11], 'acc': result[2],
-            })
-
-            status = "VALID" if trades >= 8 else f"LOW TRADES ({trades})"
-            print(f"    w={window:4d}h: apf={score:.3f}  ret={ret:+.1f}%  trades={trades}  [{status}]")
-
-        phase1_elapsed = (time.time() - t_phase1) / 60
-
-        # Filter and rank Phase 1 results
-        p1_valid = [r for r in p1_results if r['trades'] >= 8]
-        p1_valid.sort(key=lambda x: -x['apf'])
-
-        if not p1_valid:
-            print(f"  No valid windows for {asset_name} {horizon}h. Trying all windows anyway.")
-            p1_valid = sorted(p1_results, key=lambda x: -x['apf'])
-
-        top_windows = [r['window'] for r in p1_valid[:P1_TOP_WINDOWS]]
-
-        print(f"\n  Phase 1 done ({phase1_elapsed:.1f} min)")
-        print(f"  Window ranking: {' > '.join(f'{r['window']}h (apf={r['apf']:.3f})' for r in p1_valid)}")
-        print(f"  Promoting to Phase 2: {top_windows}")
-
-        # ── PHASE 2: GAMMA + FEATURES per window (Optuna) ─────────
-        print(f"\n{'='*70}")
-        print(f"  PHASE 2: GAMMA + FEATURES — {asset_name} {horizon}h")
-        print(f"  {len(top_windows)} windows × {P2_TRIALS_PER_WINDOW} Optuna trials")
-        print(f"  gamma[{P2_GAMMA_MIN}-{P2_GAMMA_MAX}] × features[{P2_FEAT_MIN}-{feat_max_actual}]")
-        print(f"{'='*70}")
-
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-        t_phase2 = time.time()
 
         class _FakeTrial:
             def __init__(self, params, value, source=''):
@@ -3238,141 +3166,86 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             def set_user_attr(self, k, v):
                 self._user_attrs[k] = v
 
-        p2_best_per_window = []  # (window, best_gamma, best_features, best_apf)
+        t_grid = time.time()
+        grid_rows = []  # for CSV export
+        all_candidates = []  # _FakeTrial objects for holdout
+        best_apf = 0.0
+        eval_count = 0
 
-        for w_idx, locked_window in enumerate(top_windows):
-            p1_apf = next((r['apf'] for r in p1_valid if r['window'] == locked_window), 0)
-
+        for combo_name in GRID_COMBOS:
+            combo = combo_name.split('+')
             print(f"\n  {'─'*60}")
-            print(f"  Window {w_idx+1}/{len(top_windows)}: {locked_window}h (Phase 1 apf={p1_apf:.3f})")
+            print(f"  {combo_name}")
             print(f"  {'─'*60}")
 
-            study = optuna.create_study(
-                direction='maximize',
-                sampler=optuna.samplers.TPESampler(seed=42),
-                study_name=f'doohan_v16_p2_{asset_name}_{horizon}h_w{locked_window}',
-            )
+            for window in GRID_WINDOWS:
+                for n_feat in GRID_FEATURES:
+                    if n_feat > len(ranked_features):
+                        continue
+                    feat_np = features_np[:, :n_feat]
 
-            best_p2_apf = p1_apf
-            p2_count = 0
+                    for gamma in GRID_GAMMAS:
+                        eval_count += 1
 
-            def p2_objective(trial, _window=locked_window):
-                nonlocal best_p2_apf, p2_count
-                p2_count += 1
+                        result = _deku_eval_with_pruning(
+                            feat_np, labels_np, closes_np, combo, window, n,
+                            DIAG_STEP, model_factories, gamma=gamma, trial=None,
+                            horizon=horizon
+                        )
 
-                gamma = trial.suggest_float('gamma', P2_GAMMA_MIN, P2_GAMMA_MAX)
-                n_feat = trial.suggest_int('n_features', P2_FEAT_MIN, feat_max_actual)
+                        if result is None:
+                            grid_rows.append({
+                                'combo': combo_name, 'window': window,
+                                'n_features': n_feat, 'gamma': gamma,
+                                'apf': 0, 'return_pct': 0, 'trades': 0,
+                                'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
+                                'status': 'FAILED',
+                            })
+                            continue
 
-                feat_np = features_np[:, :n_feat]
-                result = _deku_eval_with_pruning(
-                    feat_np, labels_np, closes_np, core_combo, _window, n,
-                    DIAG_STEP, model_factories, gamma=gamma, trial=None,
-                    horizon=horizon
-                )
+                        trades = result[6]
+                        score = _compute_optuna_score(result) if trades >= 3 else 0.0
+                        ret = result[4]
+                        acc = result[2]
+                        win_rate = result[5]
+                        raw_pf = result[11]
 
-                if result is None:
-                    return 0.0
-                if result[6] < 8:
-                    return 0.0
+                        grid_rows.append({
+                            'combo': combo_name, 'window': window,
+                            'n_features': n_feat, 'gamma': gamma,
+                            'apf': round(score, 4), 'return_pct': round(ret, 2),
+                            'trades': trades, 'win_rate': round(win_rate, 2),
+                            'accuracy': round(acc, 4), 'raw_pf': round(raw_pf, 4),
+                            'status': 'OK' if trades >= 8 else f'LOW_TR({trades})',
+                        })
 
-                score = _compute_optuna_score(result)
-                ret = result[4]
+                        if trades >= 8:
+                            all_candidates.append(_FakeTrial(
+                                {'combo': combo_name, 'window': window,
+                                 'gamma': gamma, 'n_features': n_feat},
+                                score, source='Grid'
+                            ))
 
-                if score > best_p2_apf:
-                    best_p2_apf = score
-                    print(f"    #{p2_count:3d} NEW BEST: g={gamma:.4f} f={n_feat:3d} | "
-                          f"apf={score:.3f} ret={ret:+.1f}% trades={result[6]}")
+                        marker = ""
+                        if score > best_apf and trades >= 8:
+                            best_apf = score
+                            marker = " <-- BEST"
 
-                return score
+                        # Progress: print every 60 evals + any new best
+                        if marker or eval_count % 60 == 0:
+                            elapsed = (time.time() - t_grid) / 60
+                            print(f"    [{eval_count:3d}/{n_grid}] {combo_name:10s} w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
+                                  f"apf={score:.3f} ret={ret:+.1f}% tr={trades}  ({elapsed:.1f}min){marker}")
 
-            study.optimize(p2_objective, n_trials=P2_TRIALS_PER_WINDOW, show_progress_bar=False)
+        grid_elapsed = (time.time() - t_grid) / 60
 
-            # Get best trial for this window
-            p2_completed = [t for t in study.trials
-                           if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
-            if p2_completed:
-                best_trial = max(p2_completed, key=lambda t: t.value)
-                best_gamma = best_trial.params['gamma']
-                best_feats = best_trial.params['n_features']
-                best_val = best_trial.value
-            else:
-                best_gamma = P1_DEFAULT_GAMMA
-                best_feats = P1_DEFAULT_FEATURES
-                best_val = p1_apf
+        # Save full grid to CSV
+        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_6_grid_{asset_name}_{horizon}h.csv')
+        df_grid = pd.DataFrame(grid_rows)
+        df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
+        df_grid.to_csv(grid_csv_path, index=False)
 
-            improvement = best_val - p1_apf
-            print(f"    → Best: g={best_gamma:.4f} f={best_feats} apf={best_val:.3f} "
-                  f"(Δ={improvement:+.3f} vs Phase 1)")
-
-            p2_best_per_window.append({
-                'window': locked_window, 'gamma': best_gamma,
-                'n_features': best_feats, 'apf': best_val,
-            })
-
-        phase2_elapsed = (time.time() - t_phase2) / 60
-
-        # Sort Phase 2 results by APF
-        p2_best_per_window.sort(key=lambda x: -x['apf'])
-
-        print(f"\n  Phase 2 done ({phase2_elapsed:.1f} min)")
-        for i, r in enumerate(p2_best_per_window, 1):
-            print(f"    #{i}: w={r['window']}h  g={r['gamma']:.4f}  f={r['n_features']}  apf={r['apf']:.3f}")
-
-        # ── PHASE 3: COMBO AUGMENTATION (deterministic) ──────────
-        # Take top P3_TOP_CONFIGS hyperparams, test all XGB+LGBM-based combos
-        p3_configs = p2_best_per_window[:P3_TOP_CONFIGS]
-
-        n_p3_total = len(p3_configs) * len(P3_AUGMENT_COMBOS)
-        print(f"\n{'='*70}")
-        print(f"  PHASE 3: COMBO AUGMENTATION — {asset_name} {horizon}h")
-        print(f"  {len(p3_configs)} configs × {len(P3_AUGMENT_COMBOS)} combos = {n_p3_total} evals")
-        print(f"{'='*70}")
-
-        t_phase3 = time.time()
-        all_candidates = []  # list of _FakeTrial objects
-        best_p3_apf = 0.0
-
-        for cfg_idx, cfg in enumerate(p3_configs):
-            locked_window = cfg['window']
-            locked_gamma = cfg['gamma']
-            locked_feats = cfg['n_features']
-
-            print(f"\n  Config {cfg_idx+1}/{len(p3_configs)}: w={locked_window}h g={locked_gamma:.4f} f={locked_feats}")
-
-            for combo_name in P3_AUGMENT_COMBOS:
-                combo = combo_name.split('+')
-                feat_np = features_np[:, :locked_feats]
-
-                result = _deku_eval_with_pruning(
-                    feat_np, labels_np, closes_np, combo, locked_window, n,
-                    DIAG_STEP, model_factories, gamma=locked_gamma, trial=None,
-                    horizon=horizon
-                )
-
-                if result is None:
-                    continue
-                trades = result[6]
-                if trades < 8:
-                    continue
-
-                score = _compute_optuna_score(result)
-                ret = result[4]
-
-                all_candidates.append(_FakeTrial(
-                    {'combo': combo_name, 'window': locked_window,
-                     'gamma': locked_gamma, 'n_features': locked_feats},
-                    score, source='Phase3'
-                ))
-
-                marker = ""
-                if score > best_p3_apf:
-                    best_p3_apf = score
-                    marker = " <-- BEST"
-                print(f"    {combo_name:22s} apf={score:.3f} ret={ret:+.1f}% trades={trades}{marker}")
-
-        phase3_elapsed = (time.time() - t_phase3) / 60
-
-        # Sort all candidates
+        # Sort candidates
         all_candidates.sort(key=lambda t: -t.value)
 
         # Deduplicate
@@ -3385,14 +3258,15 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 seen_scores.add(score_key)
                 completed_trials.append(t)
 
-        total_elapsed = phase1_elapsed + phase2_elapsed + phase3_elapsed
+        n_valid = sum(1 for r in grid_rows if r['status'] == 'OK')
+        n_failed = sum(1 for r in grid_rows if r['status'] == 'FAILED')
+        n_low_tr = n_grid - n_valid - n_failed
         print(f"\n  {'='*70}")
-        print(f"  THREE-PHASE RESULTS: {asset_name} {horizon}h ({total_elapsed:.1f} min)")
+        print(f"  GRID RESULTS: {asset_name} {horizon}h ({grid_elapsed:.1f} min)")
         print(f"  {'='*70}")
-        print(f"  Phase 1: {len(DIAG_WINDOWS)} window evals ({phase1_elapsed:.1f} min)")
-        print(f"  Phase 2: {len(top_windows)}×{P2_TRIALS_PER_WINDOW} Optuna trials ({phase2_elapsed:.1f} min)")
-        print(f"  Phase 3: {n_p3_total} combo evals ({phase3_elapsed:.1f} min)")
+        print(f"  Total evals: {n_grid} | Valid (≥8 trades): {n_valid} | Low trades: {n_low_tr} | Failed: {n_failed}")
         print(f"  Unique candidates: {len(completed_trials)}")
+        print(f"  Grid CSV: {grid_csv_path}")
 
         if completed_trials:
             best_t = completed_trials[0]
@@ -5007,6 +4881,292 @@ def run_mode_g(assets_list, horizons=None):
 
     print(f"\n{'=' * 80}")
 
+    # Return all live-tested Doohan results for downstream use (e.g. refine step)
+    return all_results
+
+
+# ============================================================
+# MODE R: REFINE — Optuna fine-tuning around top 3 live-validated configs
+# ============================================================
+def run_mode_refine(assets_list, horizons=None, g_results=None):
+    """
+    Refine top 3 configs from Mode G using Optuna.
+    Searches gamma +/-0.020, features +/-5, window +/-20h around each config.
+    30 trials per config. Saves the overall best to production CSV.
+    """
+    if horizons is None:
+        horizons = list(AVAILABLE_HORIZONS)
+
+    candidates_csv = _get_models_csv_path()
+    if not os.path.exists(candidates_csv):
+        print(f"  ERROR: {candidates_csv} not found. Run Mode D first.")
+        return
+
+    df_candidates = pd.read_csv(candidates_csv)
+
+    print("\n" + "=" * 80)
+    print(f"  MODE R: REFINE — Optuna fine-tuning around top {REFINE_TOP_N} live configs")
+    print(f"  {REFINE_TRIALS} trials per config | gamma ±{REFINE_GAMMA_RANGE} | features ±{REFINE_FEAT_RANGE} | window ±{REFINE_WINDOW_RANGE}h")
+    print("=" * 80)
+
+    production_models = []
+
+    for asset in assets_list:
+        for horizon in horizons:
+            key = f"{asset}_{horizon}h"
+
+            # Get top 3 from Mode G results (ranked by conf>=80% return)
+            top_configs = []
+            if g_results and key in g_results:
+                doohan_results = [(lbl, r) for lbl, r in g_results[key].items()
+                                  if r['cfg'].get('source') == 'doohan_v1.6'
+                                  and f'conf_{MODE_G_PRIMARY_CONF}' in r]
+                doohan_results.sort(key=lambda x: -x[1][f'conf_{MODE_G_PRIMARY_CONF}']['return_pct'])
+                for lbl, r in doohan_results[:REFINE_TOP_N]:
+                    cfg = r['cfg']
+                    live_ret = r[f'conf_{MODE_G_PRIMARY_CONF}']['return_pct']
+                    top_configs.append({
+                        'combo': cfg['combo'],
+                        'window': cfg['window'],
+                        'gamma': cfg['gamma'],
+                        'n_features': cfg['n_features'],
+                        'features': cfg['features'],
+                        'live_ret': live_ret,
+                        'csv_row': cfg.get('csv_row', {}),
+                    })
+            else:
+                # Fallback: use top 3 from candidates CSV by holdout score
+                mask = (df_candidates['coin'] == asset) & (df_candidates['horizon'] == horizon)
+                asset_cands = df_candidates[mask].sort_values(
+                    'rank' if 'rank' in df_candidates.columns else 'combined_score',
+                    ascending='rank' in df_candidates.columns).head(REFINE_TOP_N)
+                for _, row in asset_cands.iterrows():
+                    top_configs.append({
+                        'combo': row['best_combo'],
+                        'window': int(row['best_window']),
+                        'gamma': float(row['gamma']),
+                        'n_features': int(row['n_features']),
+                        'features': row['optimal_features'].split(',') if pd.notna(row.get('optimal_features')) else [],
+                        'live_ret': 0,
+                        'csv_row': row.to_dict(),
+                    })
+
+            if not top_configs:
+                print(f"\n  No configs to refine for {asset} {horizon}h — skipping")
+                continue
+
+            print(f"\n{'#' * 70}")
+            print(f"  REFINE: {asset} {horizon}h — top {len(top_configs)} configs")
+            print(f"{'#' * 70}")
+
+            for i, cfg in enumerate(top_configs, 1):
+                print(f"  #{i}: {cfg['combo']}  w={cfg['window']}h  g={cfg['gamma']:.4f}  "
+                      f"f={cfg['n_features']}  live_ret={cfg['live_ret']:+.2f}%")
+
+            # Load data for Optuna evaluation
+            df_raw = load_data(asset)
+            if df_raw is None:
+                continue
+
+            MAX_DIAG_HOURS = 6 * 30 * 24
+            df_full, all_cols = build_all_features(df_raw, asset_name=asset, horizon=horizon)
+            total_rows = len(df_full)
+            if total_rows > MAX_DIAG_HOURS:
+                df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+
+            df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+
+            # LGBM ranking
+            print(f"\n  LGBM feature ranking...")
+            t0 = time.time()
+            importance_df = _test_lgbm_importance(df_clean, all_cols, gamma=1.0)
+            ranked_features = importance_df['feature'].tolist()
+            print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features")
+
+            # Prepare fold 1 data (same as Mode D)
+            df_optuna = df_clean.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
+            features_np_all = df_optuna[ranked_features].values.astype(np.float64)
+            labels_np_all = df_optuna['label'].values.astype(np.int32)
+            closes_np_all = df_optuna['close'].values.astype(np.float64)
+            n_total = len(df_optuna)
+
+            fold_train_frac = 0.60
+            fold_test_frac = 0.20
+            fold_stride = 0.10
+            holdout_folds = []
+            for fi in range(N_HOLDOUT_FOLDS):
+                train_s = int(n_total * fi * fold_stride)
+                train_e = int(n_total * (fi * fold_stride + fold_train_frac))
+                test_s = train_e
+                test_e = int(n_total * (fi * fold_stride + fold_train_frac + fold_test_frac))
+                test_e = min(test_e, n_total)
+                holdout_folds.append((train_s, train_e, test_s, test_e))
+
+            f1_train_s, f1_train_e, _, _ = holdout_folds[0]
+            features_np = features_np_all[f1_train_s:f1_train_e]
+            labels_np = labels_np_all[f1_train_s:f1_train_e]
+            closes_np = closes_np_all[f1_train_s:f1_train_e]
+            n = len(features_np)
+
+            model_factories = _get_deku_diagnostic_models()
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+            # Run Optuna for each top config
+            all_refined = []  # (combo, window, gamma, n_features, apf)
+            t_refine = time.time()
+
+            for cfg_idx, cfg in enumerate(top_configs):
+                combo_name = cfg['combo']
+                combo = combo_name.split('+')
+                base_window = cfg['window']
+                base_gamma = cfg['gamma']
+                base_feats = cfg['n_features']
+
+                # Search ranges
+                gamma_lo = max(base_gamma - REFINE_GAMMA_RANGE, 0.970)
+                gamma_hi = min(base_gamma + REFINE_GAMMA_RANGE, 1.0)
+                feat_lo = max(base_feats - REFINE_FEAT_RANGE, 5)
+                feat_hi = min(base_feats + REFINE_FEAT_RANGE, len(ranked_features))
+                win_lo = max(base_window - REFINE_WINDOW_RANGE, 24)
+                win_hi = base_window + REFINE_WINDOW_RANGE
+
+                print(f"\n  {'─'*60}")
+                print(f"  Refining #{cfg_idx+1}: {combo_name}  w={base_window}h  g={base_gamma:.4f}  f={base_feats}")
+                print(f"  Ranges: gamma[{gamma_lo:.3f}-{gamma_hi:.3f}] features[{feat_lo}-{feat_hi}] window[{win_lo}-{win_hi}]")
+                print(f"  {'─'*60}")
+
+                study = optuna.create_study(
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(seed=42),
+                    study_name=f'doohan_v16_refine_{asset}_{horizon}h_{cfg_idx}',
+                )
+
+                best_refine_apf = 0.0
+                r_count = 0
+
+                def refine_objective(trial, _combo=combo, _win_lo=win_lo, _win_hi=win_hi,
+                                     _gamma_lo=gamma_lo, _gamma_hi=gamma_hi,
+                                     _feat_lo=feat_lo, _feat_hi=feat_hi):
+                    nonlocal best_refine_apf, r_count
+                    r_count += 1
+
+                    t_window = trial.suggest_int('window', _win_lo, _win_hi)
+                    t_gamma = trial.suggest_float('gamma', _gamma_lo, _gamma_hi)
+                    t_feats = trial.suggest_int('n_features', _feat_lo, _feat_hi)
+
+                    feat_np = features_np[:, :t_feats]
+                    result = _deku_eval_with_pruning(
+                        feat_np, labels_np, closes_np, _combo, t_window, n,
+                        DIAG_STEP, model_factories, gamma=t_gamma, trial=None,
+                        horizon=horizon
+                    )
+
+                    if result is None:
+                        return 0.0
+                    if result[6] < 8:
+                        return 0.0
+
+                    score = _compute_optuna_score(result)
+                    ret = result[4]
+
+                    if score > best_refine_apf:
+                        best_refine_apf = score
+                        print(f"    #{r_count:3d} NEW BEST: w={t_window} g={t_gamma:.4f} f={t_feats} | "
+                              f"apf={score:.3f} ret={ret:+.1f}% trades={result[6]}")
+
+                    return score
+
+                study.optimize(refine_objective, n_trials=REFINE_TRIALS, show_progress_bar=False)
+
+                # Get best
+                completed = [t for t in study.trials
+                            if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
+                if completed:
+                    best = max(completed, key=lambda t: t.value)
+                    print(f"    → Best: w={best.params['window']}h g={best.params['gamma']:.4f} "
+                          f"f={best.params['n_features']} apf={best.value:.3f}")
+                    all_refined.append({
+                        'combo': combo_name,
+                        'window': best.params['window'],
+                        'gamma': best.params['gamma'],
+                        'n_features': best.params['n_features'],
+                        'apf': best.value,
+                        'features': ranked_features[:best.params['n_features']],
+                    })
+
+            refine_elapsed = (time.time() - t_refine) / 60
+
+            if not all_refined:
+                print(f"\n  No valid refined configs for {asset} {horizon}h")
+                continue
+
+            # Pick overall best refined config
+            all_refined.sort(key=lambda x: -x['apf'])
+            best = all_refined[0]
+
+            print(f"\n  {'='*70}")
+            print(f"  REFINE RESULTS: {asset} {horizon}h ({refine_elapsed:.1f} min)")
+            print(f"  {'='*70}")
+            for i, r in enumerate(all_refined, 1):
+                marker = " <-- BEST" if i == 1 else ""
+                print(f"  #{i}: {r['combo']}  w={r['window']}h  g={r['gamma']:.4f}  "
+                      f"f={r['n_features']}  apf={r['apf']:.3f}{marker}")
+
+            # Save best refined to production CSV
+            prod_row = {
+                'coin': asset,
+                'best_window': best['window'],
+                'best_combo': best['combo'],
+                'models': best['combo'],
+                'return_pct': 0,
+                'accuracy': 0,
+                'combined_score': round(best['apf'], 4),
+                'feature_set': 'D',
+                'n_features': best['n_features'],
+                'optimal_features': ','.join(best['features']),
+                'horizon': horizon,
+                'gamma': round(best['gamma'], 4),
+                'sampler': 'Refine',
+            }
+            production_models.append((prod_row, horizon))
+
+    # Save refined models to both production CSV and best_models CSV (for Mode F)
+    if production_models:
+        prod_rows = [row for row, _ in production_models]
+        df_prod = pd.DataFrame(prod_rows)
+
+        # Save to production CSV
+        if os.path.exists(PRODUCTION_CSV):
+            df_existing = pd.read_csv(PRODUCTION_CSV)
+            for prod_row, h in production_models:
+                mask = (df_existing['coin'] == prod_row['coin']) & (df_existing['horizon'] == h)
+                df_existing = df_existing[~mask]
+            df_prod_merged = pd.concat([df_existing, df_prod], ignore_index=True)
+        else:
+            df_prod_merged = df_prod
+        df_prod_merged.to_csv(PRODUCTION_CSV, index=False)
+
+        # Also update best_models CSV so Mode F picks up the refined config
+        csv_path = _get_models_csv_path()
+        if os.path.exists(csv_path):
+            df_best = pd.read_csv(csv_path)
+            for prod_row, h in production_models:
+                mask = (df_best['coin'] == prod_row['coin']) & (df_best['horizon'] == h)
+                df_best = df_best[~mask]
+            # Add refined as rank 1
+            for row in prod_rows:
+                row['rank'] = 1
+            df_refined = pd.DataFrame(prod_rows)
+            df_best = pd.concat([df_refined, df_best], ignore_index=True)
+            df_best.to_csv(csv_path, index=False)
+
+        print(f"\n  Refined model saved: {PRODUCTION_CSV} + {csv_path}")
+        for row, h in production_models:
+            print(f"    {row['coin']} {h}h: {row['best_combo']}  w={row['best_window']}h  "
+                  f"g={row['gamma']}  f={row['n_features']}")
+
+    print(f"\n{'=' * 80}")
+
 
 # ============================================================
 # MODE F: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
@@ -5034,7 +5194,7 @@ def run_strategy_comparison(assets_list, horizons=None):
 
     # Load trading config for updates
     metric_suffix = f'_{OPTUNA_METRIC}' if OPTUNA_METRIC != 'apf' else ''
-    tcfg_path = f'{CONFIG_DIR}/trading_config_doohan_v1_6{metric_suffix}.json'
+    tcfg_path = f'{CONFIG_DIR}/trading_config_doohan{metric_suffix}.json'
     try:
         with open(tcfg_path) as f:
             trading_config = json.load(f)
@@ -6013,7 +6173,7 @@ def main():
                 print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
                 return
 
-    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'DG', 'F', 'G', 'H', 'HF', '5', '6', '7'):
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', 'HF', '5', '6', '7'):
         mode = cli_args[0].upper()
 
         # Shortcuts 5/6/7 from CLI
@@ -6032,7 +6192,7 @@ def main():
 
         # Parse horizon (default: both for Mode B and DF, short for others)
         # Mode H/HF ignores horizon args (searches 3-8h automatically)
-        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG') else [HORIZON_SHORT]
+        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
         for a in cli_args:
             if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
                 horizons = [int(h) for h in a[:-1].split(',')]
@@ -6041,7 +6201,7 @@ def main():
         if mode in ('H', 'HF') and n_trials == DEKU_DEFAULT_TRIALS:
             n_trials = MODE_H_DEFAULT_TRIALS
 
-        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'H', 'HF') else ""
+        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H', 'HF') else ""
         h_str = f"search {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h" if mode in ('H', 'HF') else ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
         print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
@@ -6061,6 +6221,7 @@ def main():
         print("  D.  OPTUNA OPTIMIZATION (joint combo × window × gamma × features)")
         print("  DF. D then F (optimize + strategy comparison)")
         print("  DG. D then G (optimize + live backtest validation)")
+        print("  DGF. D then G then Refine then F (grid + backtest + Optuna refine + strategy)")
         print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
         print("  G.  LIVE BACKTEST (top 6 candidates from Mode D, pick best)")
         print(f"  H.  HORIZON SEARCH (Optuna sweeps {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h)")
@@ -6069,7 +6230,7 @@ def main():
         print(f"  5. Quick BTC (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  6. Quick ETH (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  7. Quick XRP (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        mode = input("\nEnter B/D/DF/DG/F/G/H/HF or 5-7: ").strip().upper()
+        mode = input("\nEnter B/D/DF/DG/DGF/F/G/H/HF or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
         if mode in ('5', '6', '7'):
@@ -6077,7 +6238,7 @@ def main():
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('B', 'D', 'DF', 'DG', 'F', 'G', 'H', 'HF'):
+        if mode not in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', 'HF'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
@@ -6115,7 +6276,7 @@ def main():
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DF', 'DG'):
+        if mode in ('D', 'DF', 'DG', 'DGF'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -6142,7 +6303,7 @@ def main():
 
             # Read the trading config that Mode F just wrote
             metric_suffix = f'_{metric}' if metric != 'apf' else ''
-            tcfg_path = f'{CONFIG_DIR}/trading_config_doohan_v1_6{metric_suffix}.json'
+            tcfg_path = f'{CONFIG_DIR}/trading_config_doohan{metric_suffix}.json'
             csv_path = _get_models_csv_path()
             try:
                 with open(tcfg_path) as f:
@@ -6205,8 +6366,8 @@ def main():
             print(f"  >>> BEST METRIC for {asset}: {best_metric.upper()} (combined return: {best_total:+.1f}%)")
     elif mode == 'B':
         run_mode_b(assets_list, horizon_filter=horizons[0] if len(horizons) == 1 else None)
-    elif mode in ('D', 'DF', 'DG'):
-        # Per-asset pipeline: D (all horizons) then F or G for each asset before moving to the next
+    elif mode in ('D', 'DF', 'DG', 'DGF'):
+        # Per-asset pipeline: D (all horizons) then G and/or F for each asset
         for asset in assets_list:
             print(f"\n{'='*60}")
             print(f"  ASSET: {asset}")
@@ -6218,8 +6379,12 @@ def main():
                     print(f"{'#'*60}")
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
 
-            # Run strategy comparison or live backtest after D for this asset
-            if mode == 'DF' or (mode == 'D' and len(horizons) == 2):
+            # Run backtest and/or strategy comparison after D
+            if mode == 'DGF':
+                g_results = run_mode_g([asset], horizons)
+                run_mode_refine([asset], horizons, g_results=g_results)
+                run_strategy_comparison([asset], horizons)
+            elif mode == 'DF' or (mode == 'D' and len(horizons) == 2):
                 run_strategy_comparison([asset], horizons)
             elif mode == 'DG':
                 run_mode_g([asset], horizons)
