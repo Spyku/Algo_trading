@@ -1,9 +1,24 @@
 """
-Doohan — Production ML Trading System
+Doohan V1.7.2 — Regularization in Optuna refine
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 Variable horizon per asset (5h, 6h, 7h, 8h etc.)
+
+V1.7.2 changes from V1.7.1:
+  - Optuna refine now searches 4 regularization params for XGB and LGBM:
+      reg_alpha      (L1): [0, 0.01, 0.1, 0.5, 1.0, 2.0]   — pushes weak leaves to 0
+      reg_lambda     (L2): [0, 0.1, 0.5, 1.0, 2.0, 5.0]     — shrinks all predictions toward 0
+      colsample_bytree:    [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   — random feature subset per tree
+      subsample:           [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   — random row subset per tree
+  - Mode D grid runs WITHOUT regularization (baseline, same as V1.7.1)
+  - Refine adds regularization on top of best D configs → direct A/B vs V1.7.1
+  - Regularization params stored in production CSV (reg_alpha, reg_lambda, colsample, subsample)
+  - Backtest and generate_signals pass reg_params through to model construction
+  - RF uses max_features (equivalent of colsample) but not reg_alpha/lambda (not applicable)
+
+  Test: python crypto_trading_system_doohan_v1_7_2.py DG BTC 6h
+  Compare Refined results to V1.7.1 Refined #1 (+3.47% at 80%, +3.74% at 90%)
 
 Exhaustive grid search:
   Grid: 3 combos × 6 windows × 6 features × 3 gammas = 324 evals (~20 min)
@@ -15,109 +30,24 @@ Exhaustive grid search:
 Modes:
   B.   Quick run (saved models + signals + chart)
   D.   Grid optimization (combo × window × gamma × features)
-  DG.  D then G (grid + backtest + refine + pick best)
+  DG.  D then G (grid + backtest + refine with regularization + pick best)
   DGF. DG then F (full pipeline + strategy comparison)
   DF.  D then F (optimize + strategy comparison)
   F.   Strategy comparison (both_agree / either_agree / Xh_only)
-  G.   Live backtest (top 6 → refine top 3 → pick best, write trading config)
+  G.   Live backtest (top 6 → refine top 3 with regularization → pick best)
   H.   Horizon sweep (D+G per horizon → compare → save best)
   5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage:
-  python crypto_trading_system_doohan.py DG BTC 8h
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h
-  python crypto_trading_system_doohan.py H BTC,ETH,LINK 5,6,7,8h
-  python crypto_trading_system_doohan.py D BTC,ETH 6,7h
+  python crypto_trading_system_doohan_v1_7_2.py DG BTC 6h
+  python crypto_trading_system_doohan_v1_7_2.py H BTC 5,6,7,8h
+  python crypto_trading_system_doohan_v1_7_2.py D BTC,ETH 6,7h
 
 Outputs:
-  models/crypto_doohan_v1_7_1_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode G)
+  models/crypto_doohan_v1_7_2_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_doohan_v1_7_2_production.csv         (best live performer from Mode G)
   config/trading_config_doohan.json                  (horizon + min_confidence per asset)
-  logs/doohan_v171_*.log                             (auto-saved terminal output)
-
-============================================================
-TODO (V1.7.1 → production readiness):
-============================================================
-  1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode G should select the production model
-     from refined configs only (not raw D candidates). D candidates are still used
-     for diagnostics and as input to pick top 3 for refinement.
-
-  2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 7h
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 8h
-     Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
-
-  3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode F for strategy selection, expand to all 9 assets.
-
-  4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
-     for all horizons. Should use train_end = i - horizon like V1.7.1.
-
-  5. WIRE INTO LIVE TRADER — Once winner is validated:
-       - Update crypto_live_trader_doohan.py to read V1.7.1 production CSV
-       - Update crypto_revolut_doohan.py to point to V1.7.1 configs
-       - Or promote V1.7.1 as new Doohan production version
-
-============================================================
-Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
-============================================================
-
-  EMBARGO (most critical difference):
-    V1.7.1:  train_end = i - horizon          (dynamic, scales with prediction horizon)
-    V1.6:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Deku:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Impact:  Pre-embargo APFs were inflated 5-26×. Post-embargo realistic range is 1.0-3.0.
-             V1.6 and Deku results are NOT comparable to V1.7.1 due to label overlap leakage.
-
-  SEARCH METHOD:
-    V1.7.1:  Exhaustive grid (324 evals) + 50-trial Optuna refine per top 3
-    V1.6:    Exhaustive grid (432 evals) + 30-trial Optuna refine per top 3
-    Deku:    Optuna TPE+Hyperband (150 trials, auto-extend to 200/250)
-
-  COMBOS:
-    V1.7.1:  3 combos — RF+LGBM, XGB+LGBM, RF+XGB (dead combos dropped)
-    V1.6:    6 combos — RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
-    Deku:    26 combos — all pairs + triples + quads + quint of RF/GB/XGB/LR/LGBM
-
-  WINDOWS:
-    V1.7.1:  [72, 100, 150, 200, 250, 300]  (36/48 dropped — embargo eats too much)
-    V1.6:    [72, 100, 150, 200]
-    Deku:    [24, 36, 48, 72, 100, 150, 200]  (Optuna picks from these)
-
-  REFINE:
-    V1.7.1:  50 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    V1.6:    30 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    Deku:    N/A (Optuna does continuous search, no separate refine phase)
-
-  BACKTEST:
-    V1.7.1:  336h (2 weeks)
-    V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode F replay)
-
-  SCORING:
-    V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
-    V1.6:    APF (same formula)
-    Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
-
-  HOLDOUT:
-    V1.7.1:  N/A (uses Mode G live backtest instead)
-    V1.6:    N/A (uses Mode G live backtest instead)
-    Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
-
-  FEATURES:
-    V1.7.1:  Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    V1.6:    Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    Deku:    Optuna picks n_features from LGBM-ranked list (continuous range)
-
-  GAMMAS:
-    V1.7.1:  Grid tests [0.995, 0.997, 0.999]
-    V1.6:    Grid tests [0.995, 0.997, 0.999]
-    Deku:    Optuna continuous (0.994, 1.0)
-
-  MODELS:
-    V1.7.1:  RF, XGB, LGBM (GB/LR only in combos that include them — but none do)
-    V1.6:    RF, GB, XGB, LR, LGBM (all 5 available in combos)
+  logs/doohan_v172_*.log                             (auto-saved terminal output)
     Deku:    RF, GB, XGB, LR, LGBM (all 5, 26 ensemble combinations)
 
   WALK-FORWARD STEP:
@@ -183,7 +113,7 @@ class _TeeWriter:
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"doohan_v171_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+_log_path = os.path.join(_LOG_DIR, f"doohan_v172_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
 _log_fh = open(_log_path, 'w', encoding='utf-8')
 sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
 sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
@@ -393,7 +323,7 @@ LABEL_MODE = 'fee_aware'
 MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_doohan_v1_7_1_production.csv'
+PRODUCTION_CSV = 'models/crypto_doohan_v1_7_2_production.csv'
 
 
 
@@ -840,16 +770,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+        return f'{MODELS_DIR}/crypto_doohan_v1_7_2_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_doohan_v1_7_2_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_doohan_v1_7_2_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_2_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -1040,6 +970,37 @@ def _get_deku_diagnostic_models():
     }
 
 ALL_MODELS = _get_deku_models()
+
+
+def _make_regularized_models(reg_params, n_estimators=100):
+    """Build model factories with regularization overrides for XGB and LGBM.
+    reg_params dict keys: reg_alpha, reg_lambda, colsample_bytree, subsample.
+    RF gets max_features (equivalent of colsample). GB/LR unchanged."""
+    from lightgbm import LGBMClassifier
+    ra = reg_params.get('reg_alpha', 0)
+    rl = reg_params.get('reg_lambda', 0)
+    cs = reg_params.get('colsample_bytree', 1.0)
+    ss = reg_params.get('subsample', 1.0)
+    return {
+        'RF':   lambda _cs=cs: RandomForestClassifier(
+                    n_estimators=n_estimators, max_depth=4, class_weight='balanced',
+                    max_features=_cs if _cs < 1.0 else 'sqrt',
+                    random_state=42, n_jobs=1),
+        'GB':   lambda: GradientBoostingClassifier(
+                    n_estimators=n_estimators, max_depth=3,
+                    subsample=ss, random_state=42),
+        'XGB':  lambda _ra=ra, _rl=rl, _cs=cs, _ss=ss: XGBClassifier(
+                    n_estimators=n_estimators, max_depth=3, learning_rate=0.05,
+                    reg_alpha=_ra, reg_lambda=_rl,
+                    colsample_bytree=_cs, subsample=_ss,
+                    random_state=42, tree_method='hist', verbosity=0, n_jobs=1),
+        'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42),
+        'LGBM': lambda _ra=ra, _rl=rl, _cs=cs, _ss=ss: LGBMClassifier(
+                    n_estimators=n_estimators, max_depth=4, learning_rate=0.05,
+                    reg_alpha=_ra, reg_lambda=_rl,
+                    colsample_bytree=_cs, subsample=_ss,
+                    class_weight='balanced', verbose=-1, random_state=42, device='gpu'),
+    }
 
 
 # ============================================================
@@ -1568,13 +1529,18 @@ def _print_bootstrap_ci(signals, label=''):
 
 
 def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_HOURS,
-                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0):
+                     feature_override=None, horizon=PREDICTION_HORIZON, gamma=1.0,
+                     reg_params=None):
     warnings.filterwarnings('ignore')
     set_label = _get_set_label() if feature_override is None else f"custom ({len(feature_override)} features)"
     gamma_str = f", gamma={gamma}" if gamma < 1.0 else ""
+    reg_str = ""
+    if reg_params:
+        reg_str = (f", reg: ra={reg_params.get('reg_alpha',0)} rl={reg_params.get('reg_lambda',0)} "
+                   f"cs={reg_params.get('colsample_bytree',1.0)} ss={reg_params.get('subsample',1.0)}")
     print(f"\n  Generating {horizon}h-ahead signals for {asset_name} "
           f"(models={'+'.join(model_names)}, window={window_size}h, "
-          f"replay={replay_hours}h, {set_label}{gamma_str})...")
+          f"replay={replay_hours}h, {set_label}{gamma_str}{reg_str})...")
 
     df_raw = load_data(asset_name)
     if df_raw is None:
@@ -1583,6 +1549,9 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
     df_features, feature_cols = _build_features(df_raw, asset_name, feature_override=feature_override, horizon=horizon)
     n = len(df_features)
     start_idx = max(window_size + 50, n - replay_hours)
+
+    # Use regularized models if reg_params provided (V1.7.2)
+    active_models = _make_regularized_models(reg_params, n_estimators=300) if reg_params else ALL_MODELS
 
     signals = []
     count = 0
@@ -1615,7 +1584,7 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    model = ALL_MODELS[model_name]()
+                    model = active_models[model_name]()
                     model.fit(X_train_s, y_train, sample_weight=sw)
                     pred = model.predict(X_test_s)[0]
                     proba = model.predict_proba(X_test_s)[0]
@@ -2974,10 +2943,14 @@ REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window
 
 def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                              step, model_factories, gamma=1.0, trial=None,
-                             horizon=PREDICTION_HORIZON):
+                             horizon=PREDICTION_HORIZON, reg_params=None):
     """Walk-forward evaluation with optional Optuna pruning.
+    If reg_params is provided, overrides model_factories with regularized versions.
     Same logic as _eval_one_config but reports intermediate scores for Hyperband.
     Runs in the main process (not joblib worker) so models can use all cores."""
+    if reg_params:
+        model_factories = _make_regularized_models(reg_params, n_estimators=100)
+
     min_start = window + 50
     if n < min_start + 50:
         return None
@@ -3150,7 +3123,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
     n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
     print("\n" + "=" * 70)
-    print(f"  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
+    print(f"  DOOHAN V1.7.2 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
     print(f"  {len(GRID_COMBOS)} combos × {len(GRID_WINDOWS)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
@@ -3347,7 +3320,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_elapsed = (time.time() - t_grid) / 60
 
         # Save full grid to CSV
-        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_1_grid_{asset_name}_{horizon}h.csv')
+        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_2_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -3729,6 +3702,7 @@ def run_mode_g(assets_list, horizons=None):
                 print(f"  STEP 2: OPTUNA REFINE — top {len(top3_for_refine)} live performers")
                 print(f"  {REFINE_TRIALS} trials per config | gamma ±{REFINE_GAMMA_RANGE} | "
                       f"features ±{REFINE_FEAT_RANGE} | window ±{REFINE_WINDOW_RANGE}h")
+                print(f"  + Regularization search: reg_alpha, reg_lambda, colsample_bytree, subsample")
                 print(f"{'='*70}")
 
                 for i, (lbl, r) in enumerate(top3_for_refine, 1):
@@ -3756,48 +3730,39 @@ def run_mode_g(assets_list, horizons=None):
                             'features': rcfg['features'],
                             'n_features': rcfg['n_features'],
                             'source': 'refined',
+                            'reg_params': rcfg.get('reg_params', None),
                         }
                         results[label] = _backtest_one_config(asset, horizon, label, cfg)
 
             all_results[key] = results
 
-            # ── Find overall best across ALL configs and confidence thresholds ──
-            # All candidates (D + refined) compete on equal footing via return × win_rate scoring
-            all_candidates = [(lbl, r) for lbl, r in results.items() if r]
+            # ── Find overall best (D or refined) across ALL confidence thresholds ──
+            all_doohan = [(lbl, r) for lbl, r in results.items()
+                          if r and r['cfg'].get('source') in ('doohan', 'refined')]
 
-            if all_candidates:
-                # Find best (config, confidence) combination
-                # Scoring: negative returns rank below all positives;
-                # among positives, return × win_rate favors consistency
+            if all_doohan:
+                # Find best (config, confidence) combination by return
                 best_label, best_r, best_conf = None, None, MODE_G_PRIMARY_CONF
-                best_score = -999
-                for lbl, r in all_candidates:
+                best_return = -999
+                for lbl, r in all_doohan:
                     for conf in MODE_G_CONF_THRESHOLDS:
                         if f'conf_{conf}' not in r:
                             continue
                         sim = r[f'conf_{conf}']
                         # Require at least 5 trades for the confidence to be valid
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
+                        if sim['trades'] >= 5 and sim['return_pct'] > best_return:
+                            best_return = sim['return_pct']
                             best_label = lbl
                             best_r = r
                             best_conf = conf
 
                 if best_r is None:
                     # Fallback to PRIMARY_CONF
-                    for lbl, r in all_candidates:
+                    for lbl, r in all_doohan:
                         if f'conf_{MODE_G_PRIMARY_CONF}' in r:
                             sim = r[f'conf_{MODE_G_PRIMARY_CONF}']
-                            ret = sim['return_pct']
-                            wr = sim['win_rate'] / 100.0
-                            score = ret * wr if ret > 0 else ret
-                            if score > best_score:
-                                best_score = score
+                            if sim['return_pct'] > best_return:
+                                best_return = sim['return_pct']
                                 best_label = lbl
                                 best_r = r
                                 best_conf = MODE_G_PRIMARY_CONF
@@ -3809,6 +3774,10 @@ def run_mode_g(assets_list, horizons=None):
                     print(f"\n  {'='*70}")
                     print(f"  OVERALL BEST: {best_label}  →  {asset} {horizon}h")
                     print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  f={best_cfg['n_features']}")
+                    rp = best_cfg.get('reg_params') or {}
+                    if rp:
+                        print(f"  Regularization: ra={rp.get('reg_alpha',0)} rl={rp.get('reg_lambda',0)} "
+                              f"cs={rp.get('colsample_bytree',1.0)} ss={rp.get('subsample',1.0)}")
                     print(f"  Return (conf>={best_conf}%): {best_sim['return_pct']:+.2f}%  "
                           f"WR={best_sim['win_rate']:.0f}%  trades={best_sim['trades']}")
                     print(f"  {'='*70}")
@@ -3818,6 +3787,7 @@ def run_mode_g(assets_list, horizons=None):
                         prod_row = best_cfg['csv_row'].copy()
                     else:
                         # Refined config — build row from scratch
+                        rp = best_cfg.get('reg_params', {}) or {}
                         prod_row = {
                             'coin': asset,
                             'best_window': best_cfg['window'],
@@ -3832,12 +3802,16 @@ def run_mode_g(assets_list, horizons=None):
                             'horizon': horizon,
                             'gamma': round(best_cfg['gamma'], 4),
                             'sampler': 'Refined',
+                            'reg_alpha': rp.get('reg_alpha', 0),
+                            'reg_lambda': rp.get('reg_lambda', 0),
+                            'colsample_bytree': rp.get('colsample_bytree', 1.0),
+                            'subsample': rp.get('subsample', 1.0),
                         }
                     production_models.append((prod_row, horizon, best_conf))
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE G — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE G — D candidates + Refined — Last {MODE_G_REPLAY_HOURS//24} days")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -3848,7 +3822,7 @@ def run_mode_g(assets_list, horizons=None):
             print(f"\n  {key} — Buy & Hold: {first['buy_hold']:+.2f}%\n")
 
         header = (f"  {'Model':<25} | {'Combo':14s} | {'W':>4} | {'G':>6} | {'F':>3} | "
-                  f"{'Conf':>4} | {'Return':>8} | {'Tr':>3} | {'RT':>3} | {'WR':>4}")
+                  f"{'Conf':>4} | {'Return':>8} | {'Tr':>3} | {'RT':>3} | {'WR':>4} | {'Reg':>20}")
         print(header)
         print(f"  {'─' * len(header)}")
 
@@ -3861,9 +3835,14 @@ def run_mode_g(assets_list, horizons=None):
                     continue
                 sim = r[f'conf_{conf}']
                 inv = '*' if sim['still_invested'] else ' '
+                rp = cfg.get('reg_params') or {}
+                if rp:
+                    reg_col = f"ra={rp.get('reg_alpha',0)} rl={rp.get('reg_lambda',0)} cs={rp.get('colsample_bytree',1.0)} ss={rp.get('subsample',1.0)}"
+                else:
+                    reg_col = "none"
                 print(f"  {label:<25} | {cfg['combo']:14s} | {cfg['window']:>3}h | {cfg['gamma']:>.3f} | "
                       f"{cfg['n_features']:>3} | {conf:>3}% | {sim['return_pct']:>+7.2f}% | "
-                      f"{sim['trades']:>3} | {sim['round_trips']:>3} | {sim['win_rate']:>3.0f}%{inv}")
+                      f"{sim['trades']:>3} | {sim['round_trips']:>3} | {sim['win_rate']:>3.0f}%{inv} | {reg_col}")
 
     print(f"\n  * = still invested at end of period")
 
@@ -3929,10 +3908,15 @@ def _backtest_one_config(asset, horizon, label, cfg):
     features = cfg['features']
     window = cfg['window']
     gamma = cfg['gamma']
+    reg_params = cfg.get('reg_params', None)
 
     print(f"\n{'─' * 70}")
     print(f"  {label}: {asset}")
-    print(f"  {cfg['combo']}  w={window}h  g={gamma:.4f}  f={len(features)}")
+    reg_str = ""
+    if reg_params:
+        reg_str = (f"  ra={reg_params.get('reg_alpha',0)} rl={reg_params.get('reg_lambda',0)} "
+                   f"cs={reg_params.get('colsample_bytree',1.0)} ss={reg_params.get('subsample',1.0)}")
+    print(f"  {cfg['combo']}  w={window}h  g={gamma:.4f}  f={len(features)}{reg_str}")
     print(f"{'─' * 70}")
 
     signals = generate_signals(
@@ -3943,6 +3927,7 @@ def _backtest_one_config(asset, horizon, label, cfg):
         feature_override=features,
         horizon=horizon,
         gamma=gamma,
+        reg_params=reg_params,
     )
 
     if not signals:
@@ -4012,15 +3997,23 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         win_lo = max(base_window - REFINE_WINDOW_RANGE, 24)
         win_hi = base_window + REFINE_WINDOW_RANGE
 
+        # Regularization search space (V1.7.2)
+        REG_ALPHA_CHOICES = [0, 0.01, 0.1, 0.5, 1.0, 2.0]
+        REG_LAMBDA_CHOICES = [0, 0.1, 0.5, 1.0, 2.0, 5.0]
+        COLSAMPLE_CHOICES = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        SUBSAMPLE_CHOICES = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1}: {combo_name}  w={base_window}h  g={base_gamma:.4f}  f={base_feats}")
         print(f"  Ranges: gamma[{gamma_lo:.3f}-{gamma_hi:.3f}] features[{feat_lo}-{feat_hi}] window[{win_lo}-{win_hi}]")
+        print(f"  + Regularization: reg_alpha{REG_ALPHA_CHOICES} reg_lambda{REG_LAMBDA_CHOICES}")
+        print(f"    colsample{COLSAMPLE_CHOICES} subsample{SUBSAMPLE_CHOICES}")
         print(f"  {'─'*60}")
 
         study = optuna.create_study(
             direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=42),
-            study_name=f'doohan_v171_refine_{asset}_{horizon}h_{cfg_idx}',
+            study_name=f'doohan_v172_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
         best_refine_apf = 0.0
@@ -4036,11 +4029,21 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
             t_gamma = trial.suggest_float('gamma', _gamma_lo, _gamma_hi)
             t_feats = trial.suggest_int('n_features', _feat_lo, _feat_hi)
 
+            # Regularization params (V1.7.2)
+            t_reg_alpha = trial.suggest_categorical('reg_alpha', REG_ALPHA_CHOICES)
+            t_reg_lambda = trial.suggest_categorical('reg_lambda', REG_LAMBDA_CHOICES)
+            t_colsample = trial.suggest_categorical('colsample_bytree', COLSAMPLE_CHOICES)
+            t_subsample = trial.suggest_categorical('subsample', SUBSAMPLE_CHOICES)
+            t_reg_params = {
+                'reg_alpha': t_reg_alpha, 'reg_lambda': t_reg_lambda,
+                'colsample_bytree': t_colsample, 'subsample': t_subsample,
+            }
+
             feat_np = features_np[:, :t_feats]
             result = _deku_eval_with_pruning(
                 feat_np, labels_np, closes_np, _combo, t_window, n,
                 DIAG_STEP, model_factories, gamma=t_gamma, trial=None,
-                horizon=horizon
+                horizon=horizon, reg_params=t_reg_params
             )
 
             if result is None:
@@ -4053,8 +4056,9 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
             if score > best_refine_apf:
                 best_refine_apf = score
+                reg_str = f"ra={t_reg_alpha} rl={t_reg_lambda} cs={t_colsample} ss={t_subsample}"
                 print(f"    #{r_count:3d} NEW BEST: w={t_window} g={t_gamma:.4f} f={t_feats} | "
-                      f"apf={score:.3f} ret={ret:+.1f}% trades={result[6]}")
+                      f"apf={score:.3f} ret={ret:+.1f}% trades={result[6]} | {reg_str}")
 
             return score
 
@@ -4065,15 +4069,24 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
                     if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
         if completed:
             best = max(completed, key=lambda t: t.value)
-            print(f"    → Best: w={best.params['window']}h g={best.params['gamma']:.4f} "
-                  f"f={best.params['n_features']} apf={best.value:.3f}")
+            bp = best.params
+            reg_str = (f"ra={bp['reg_alpha']} rl={bp['reg_lambda']} "
+                       f"cs={bp['colsample_bytree']} ss={bp['subsample']}")
+            print(f"    → Best: w={bp['window']}h g={bp['gamma']:.4f} "
+                  f"f={bp['n_features']} apf={best.value:.3f} | {reg_str}")
             all_refined.append({
                 'combo': combo_name,
-                'window': best.params['window'],
-                'gamma': best.params['gamma'],
-                'n_features': best.params['n_features'],
+                'window': bp['window'],
+                'gamma': bp['gamma'],
+                'n_features': bp['n_features'],
                 'apf': best.value,
-                'features': ranked_features[:best.params['n_features']],
+                'features': ranked_features[:bp['n_features']],
+                'reg_params': {
+                    'reg_alpha': bp['reg_alpha'],
+                    'reg_lambda': bp['reg_lambda'],
+                    'colsample_bytree': bp['colsample_bytree'],
+                    'subsample': bp['subsample'],
+                },
             })
 
     refine_elapsed = (time.time() - t_refine) / 60
@@ -4082,8 +4095,10 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
     if all_refined:
         all_refined.sort(key=lambda x: -x['apf'])
         for i, r in enumerate(all_refined, 1):
+            rp = r.get('reg_params', {})
+            reg_str = f"ra={rp.get('reg_alpha',0)} rl={rp.get('reg_lambda',0)} cs={rp.get('colsample_bytree',1.0)} ss={rp.get('subsample',1.0)}"
             print(f"  Refined #{i}: {r['combo']}  w={r['window']}h  g={r['gamma']:.4f}  "
-                  f"f={r['n_features']}  apf={r['apf']:.3f}")
+                  f"f={r['n_features']}  apf={r['apf']:.3f}  | {reg_str}")
 
     return all_refined
 
@@ -4407,17 +4422,17 @@ def run_strategy_comparison(assets_list, horizons=None):
 # ============================================================
 # MODE H: HORIZON SWEEP (D+G per horizon, compare, save best)
 # ============================================================
-def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False):
+def run_mode_h(assets_list, horizons, n_trials=None, resume=False):
     """
     Mode H: Horizon sweep — runs D+G for each specified horizon, then compares
     across horizons to find the best one per asset.
 
     Usage:
-        python crypto_trading_system_doohan.py H BTC 4,5,6,7,8h          # full D+G per horizon
-        python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
+        python crypto_trading_system_doohan.py H BTC 4,5,6,7,8h
+        python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h
 
     Flow per asset:
-        1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode G (backtest + refine)
+        1. For each horizon: run Mode D (grid) → run Mode G (backtest + refine)
         2. Compare best config from each horizon
         3. Save overall winner to production CSV + trading config
     """
@@ -4432,8 +4447,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
     print(f"  MODE H: HORIZON SWEEP")
     print(f"  Assets: {', '.join(assets_list)}")
     print(f"  Horizons: {', '.join(str(h)+'h' for h in horizons)}")
-    skip_label = " (--skip: reuse existing)" if skip_d else ""
-    print(f"  Pipeline: D (grid{skip_label}) → G (backtest + refine) per horizon → compare → save best")
+    print(f"  Pipeline: D (grid) → G (backtest + refine) per horizon → compare → save best")
     print(f"  Trials: {n_trials} per horizon")
     print("=" * 80)
 
@@ -4452,17 +4466,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             print(f"{'=' * 70}")
 
             # Step 1: Run Mode D for this horizon
-            skip_this = False
-            if skip_d:
-                csv_path = _get_models_csv_path()
-                if os.path.exists(csv_path):
-                    df_bm = pd.read_csv(csv_path)
-                    skip_this = len(df_bm[(df_bm['coin'] == asset) & (df_bm['horizon'] == h)]) > 0
-
-            if skip_this:
-                print(f"\n  Mode D results already exist for {asset} {h}h — skipping D (--skip)")
-            else:
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
+            run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
 
             # Step 2: Run Mode G for this horizon
             g_results = run_mode_g([asset], [h])
@@ -4472,26 +4476,20 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             if g_results and key in g_results:
                 results = g_results[key]
                 # Find best across all configs and confidence levels
-                best_score = -999
+                best_return = -999
                 best_label = None
                 best_cfg = None
                 best_conf = MODE_G_PRIMARY_CONF
 
-                # All candidates (D + refined) compete via return × win_rate scoring
-                all_items = {lbl: r for lbl, r in results.items() if r}
-
-                for lbl, r in all_items.items():
+                for lbl, r in results.items():
+                    if not r or r['cfg'].get('source') not in ('doohan', 'refined'):
+                        continue
                     for conf in MODE_G_CONF_THRESHOLDS:
                         if f'conf_{conf}' not in r:
                             continue
                         sim = r[f'conf_{conf}']
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
+                        if sim['trades'] >= 5 and sim['return_pct'] > best_return:
+                            best_return = sim['return_pct']
                             best_label = lbl
                             best_cfg = r['cfg']
                             best_conf = conf
@@ -4502,17 +4500,16 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
                         'label': best_label,
                         'cfg': best_cfg,
                         'conf': best_conf,
-                        'return_pct': best_sim['return_pct'],
+                        'return_pct': best_return,
                         'trades': best_sim['trades'],
                         'win_rate': best_sim['win_rate'],
-                        'score': best_score,
                         'buy_hold': results[best_label].get('buy_hold', 0),
                     }
                     print(f"\n  {asset} {h}h WINNER: {best_label}")
                     print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  "
                           f"f={best_cfg['n_features']}  conf>={best_conf}%")
-                    print(f"  Return: {best_sim['return_pct']:+.2f}%  trades={best_sim['trades']}  "
-                          f"WR={best_sim['win_rate']:.0f}%  score={best_score:.2f}")
+                    print(f"  Return: {best_return:+.2f}%  trades={best_sim['trades']}  "
+                          f"WR={best_sim['win_rate']:.0f}%")
 
         # ── Cross-horizon comparison ──
         if not horizon_results:
@@ -4535,8 +4532,8 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
                   f"{hr['return_pct']:>+7.2f}% | {hr['trades']:>3} | {hr['win_rate']:>3.0f}% | "
                   f"{hr['buy_hold']:>+6.2f}%")
 
-        # Pick overall best horizon (return × win_rate scoring)
-        best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['score'])
+        # Pick overall best horizon
+        best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['return_pct'])
         winner = horizon_results[best_h]
 
         print(f"\n  >>> BEST HORIZON for {asset}: {best_h}h — {winner['return_pct']:+.2f}% "
@@ -4732,20 +4729,16 @@ def main():
 
     # ================================================================
     # CLI: python crypto_trading_system_doohan.py D BTC 4,8h
-    # ================================================================
-    # Order-independent CLI parser
-    # Any order works: MODE ASSETS HORIZONS, ASSETS MODE HORIZONS, etc.
+    # Supports: MODE [ASSETS] [HORIZON] [--trials N]
     # Examples:
     #   python crypto_trading_system_doohan.py D BTC 4,8h
-    #   python crypto_trading_system_doohan.py BTC D 4,8h --trials 150
-    #   python crypto_trading_system_doohan.py H 5,6,7,8h BTC --skip
+    #   python crypto_trading_system_doohan.py D BTC 4,8h --trials 150
     #   python crypto_trading_system_doohan.py DF BTC,ETH 4,8h
+    #   python crypto_trading_system_doohan.py B BTC 8h
+    #   python crypto_trading_system_doohan.py F BTC 4,8h
     # ================================================================
-    VALID_MODES = {'B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
-
-    # Parse flags first
+    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_resume = '--resume' in sys.argv
-    flag_skip = '--skip' in sys.argv
 
     # Parse --trials N
     n_trials = DEKU_DEFAULT_TRIALS
@@ -4755,46 +4748,6 @@ def main():
                 n_trials = int(sys.argv[i + 1])
             except ValueError:
                 pass
-
-    # --help
-    if '--help' in sys.argv or '-h' in sys.argv:
-        print("""
-Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
-
-  Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
-
-Modes:
-  B       Quick run (saved models + signals + chart)
-  D       Grid optimization (combo x window x gamma x features)
-  G       Live backtest (top 6 from D → refine top 3 → pick best)
-  DG      D then G
-  F       Strategy comparison (both_agree / either_agree / Xh_only)
-  DF      D then F
-  DGF     D then G then F (full pipeline)
-  H       Horizon sweep (D+G per horizon → compare → save best)
-
-Assets:
-  BTC,ETH,LINK,...   Comma-separated asset names (default: all)
-
-Horizons:
-  5,6,7,8h           Comma-separated horizons in hours (default: 4,8h)
-
-Options:
-  --trials N          Number of Optuna trials (default: 150)
-  --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
-  --skip              Mode H only: skip Mode D for horizons that already have results
-  --resume            Resume interrupted Optuna study
-  --help, -h          Show this help
-
-Examples:
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
-  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run G only
-  python crypto_trading_system_doohan.py DG ETH 6h               # optimize + backtest ETH 6h
-  python crypto_trading_system_doohan.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_doohan.py G BTC 6h                 # re-backtest existing results
-  python crypto_trading_system_doohan.py BTC D 8h                 # order doesn't matter
-""")
-        return
 
     # Parse --metric NAME or --metric all
     global OPTUNA_METRIC
@@ -4812,54 +4765,34 @@ Examples:
                 print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
                 return
 
-    # Classify positional args (order-independent)
-    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    # Remove values that follow --trials or --metric
-    skip_next = set()
-    for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric') and i < len(sys.argv) - 1:
-            skip_next.add(sys.argv[i + 1])
-    cli_args = [a for a in cli_args if a not in skip_next]
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', '5', '6', '7'):
+        mode = cli_args[0].upper()
 
-    mode = None
-    assets_list = None
-    horizons = None
-
-    for arg in cli_args:
-        upper = arg.upper()
-        # Check if it's a mode
-        if upper in VALID_MODES and mode is None:
-            mode = upper
-        # Check if it's a shortcut (5/6/7)
-        elif upper in ('5', '6', '7') and mode is None:
-            mode = upper
-        # Check if it's horizons (ends with h, contains digits)
-        elif arg.lower().endswith('h') and arg[:-1].replace(',', '').isdigit():
-            horizons = [int(h) for h in arg[:-1].split(',')]
-        # Otherwise treat as asset list
-        else:
-            parsed = [a.strip().upper() for a in arg.split(',') if a.strip().upper() in ASSETS]
-            if parsed:
-                assets_list = parsed
-
-    if mode and mode in VALID_MODES:
         # Shortcuts 5/6/7 from CLI
         if mode in ('5', '6', '7'):
             shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
             _run_quick_asset(shortcut_map[mode])
             return
 
-        # Defaults
-        if assets_list is None:
+        # Parse assets (default: all)
+        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y') and not cli_args[1].endswith('m'):
+            assets_list = [a.strip().upper() for a in cli_args[1].split(',') if a.strip().upper() in ASSETS]
+            if not assets_list:
+                assets_list = list(ASSETS.keys())
+        else:
             assets_list = list(ASSETS.keys())
-        if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+
+        # Parse horizon (default: both for Mode B and DF, short for others)
+        # Mode H requires explicit horizons (e.g., 4,5,6,7,8h)
+        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+        for a in cli_args:
+            if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
+                horizons = [int(h) for h in a[:-1].split(',')]
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H') else ""
-        skip_str = " | --skip" if flag_skip and mode == 'H' else ""
         h_str = ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
         print("=" * 60)
 
     else:
@@ -5043,7 +4976,7 @@ Examples:
     elif mode == 'G':
         run_mode_g(assets_list, horizons)
     elif mode == 'H':
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume)
 
     print("\nDone!")
 

@@ -99,7 +99,7 @@ def send_telegram(message, parse_mode='HTML'):
 # ============================================================
 # LOAD MODEL CONFIG
 # ============================================================
-MODELS_CSV = 'models/crypto_doohan_v1_6_production.csv'
+MODELS_CSV = 'models/crypto_doohan_v1_7_1_production.csv'
 
 def load_best_config(asset_name, horizon=None):
     if not os.path.exists(MODELS_CSV):
@@ -236,7 +236,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     return {
         'asset': asset_name, 'signal': signal,
         'confidence': round(float(confidence), 1),
-        'close': float(row['close']),
+        'close': float(df_raw.iloc[-1]['close']) if df_raw is not None and len(df_raw) > 0 else float(row['close']),
         'buy_votes': int(buy_votes), 'total_votes': len(votes),
         'rsi': round(float(row.get('rsi_14h', 0)), 1),
         'datetime': _to_local(row['datetime']).strftime('%Y-%m-%d %H:%M') if hasattr(row['datetime'], 'strftime') else str(row['datetime']),

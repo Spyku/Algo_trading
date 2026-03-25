@@ -3761,43 +3761,33 @@ def run_mode_g(assets_list, horizons=None):
 
             all_results[key] = results
 
-            # ── Find overall best across ALL configs and confidence thresholds ──
-            # All candidates (D + refined) compete on equal footing via return × win_rate scoring
-            all_candidates = [(lbl, r) for lbl, r in results.items() if r]
+            # ── Find overall best (D or refined) across ALL confidence thresholds ──
+            all_doohan = [(lbl, r) for lbl, r in results.items()
+                          if r and r['cfg'].get('source') in ('doohan', 'refined')]
 
-            if all_candidates:
-                # Find best (config, confidence) combination
-                # Scoring: negative returns rank below all positives;
-                # among positives, return × win_rate favors consistency
+            if all_doohan:
+                # Find best (config, confidence) combination by return
                 best_label, best_r, best_conf = None, None, MODE_G_PRIMARY_CONF
-                best_score = -999
-                for lbl, r in all_candidates:
+                best_return = -999
+                for lbl, r in all_doohan:
                     for conf in MODE_G_CONF_THRESHOLDS:
                         if f'conf_{conf}' not in r:
                             continue
                         sim = r[f'conf_{conf}']
                         # Require at least 5 trades for the confidence to be valid
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
+                        if sim['trades'] >= 5 and sim['return_pct'] > best_return:
+                            best_return = sim['return_pct']
                             best_label = lbl
                             best_r = r
                             best_conf = conf
 
                 if best_r is None:
                     # Fallback to PRIMARY_CONF
-                    for lbl, r in all_candidates:
+                    for lbl, r in all_doohan:
                         if f'conf_{MODE_G_PRIMARY_CONF}' in r:
                             sim = r[f'conf_{MODE_G_PRIMARY_CONF}']
-                            ret = sim['return_pct']
-                            wr = sim['win_rate'] / 100.0
-                            score = ret * wr if ret > 0 else ret
-                            if score > best_score:
-                                best_score = score
+                            if sim['return_pct'] > best_return:
+                                best_return = sim['return_pct']
                                 best_label = lbl
                                 best_r = r
                                 best_conf = MODE_G_PRIMARY_CONF
@@ -3837,7 +3827,7 @@ def run_mode_g(assets_list, horizons=None):
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE G — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE G — D candidates + Refined — Last {MODE_G_REPLAY_HOURS//24} days")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -4407,17 +4397,17 @@ def run_strategy_comparison(assets_list, horizons=None):
 # ============================================================
 # MODE H: HORIZON SWEEP (D+G per horizon, compare, save best)
 # ============================================================
-def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False):
+def run_mode_h(assets_list, horizons, n_trials=None, resume=False):
     """
     Mode H: Horizon sweep — runs D+G for each specified horizon, then compares
     across horizons to find the best one per asset.
 
     Usage:
-        python crypto_trading_system_doohan.py H BTC 4,5,6,7,8h          # full D+G per horizon
-        python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
+        python crypto_trading_system_doohan.py H BTC 4,5,6,7,8h
+        python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h
 
     Flow per asset:
-        1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode G (backtest + refine)
+        1. For each horizon: run Mode D (grid) → run Mode G (backtest + refine)
         2. Compare best config from each horizon
         3. Save overall winner to production CSV + trading config
     """
@@ -4432,8 +4422,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
     print(f"  MODE H: HORIZON SWEEP")
     print(f"  Assets: {', '.join(assets_list)}")
     print(f"  Horizons: {', '.join(str(h)+'h' for h in horizons)}")
-    skip_label = " (--skip: reuse existing)" if skip_d else ""
-    print(f"  Pipeline: D (grid{skip_label}) → G (backtest + refine) per horizon → compare → save best")
+    print(f"  Pipeline: D (grid) → G (backtest + refine) per horizon → compare → save best")
     print(f"  Trials: {n_trials} per horizon")
     print("=" * 80)
 
@@ -4452,17 +4441,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             print(f"{'=' * 70}")
 
             # Step 1: Run Mode D for this horizon
-            skip_this = False
-            if skip_d:
-                csv_path = _get_models_csv_path()
-                if os.path.exists(csv_path):
-                    df_bm = pd.read_csv(csv_path)
-                    skip_this = len(df_bm[(df_bm['coin'] == asset) & (df_bm['horizon'] == h)]) > 0
-
-            if skip_this:
-                print(f"\n  Mode D results already exist for {asset} {h}h — skipping D (--skip)")
-            else:
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
+            run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
 
             # Step 2: Run Mode G for this horizon
             g_results = run_mode_g([asset], [h])
@@ -4472,26 +4451,20 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             if g_results and key in g_results:
                 results = g_results[key]
                 # Find best across all configs and confidence levels
-                best_score = -999
+                best_return = -999
                 best_label = None
                 best_cfg = None
                 best_conf = MODE_G_PRIMARY_CONF
 
-                # All candidates (D + refined) compete via return × win_rate scoring
-                all_items = {lbl: r for lbl, r in results.items() if r}
-
-                for lbl, r in all_items.items():
+                for lbl, r in results.items():
+                    if not r or r['cfg'].get('source') not in ('doohan', 'refined'):
+                        continue
                     for conf in MODE_G_CONF_THRESHOLDS:
                         if f'conf_{conf}' not in r:
                             continue
                         sim = r[f'conf_{conf}']
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
+                        if sim['trades'] >= 5 and sim['return_pct'] > best_return:
+                            best_return = sim['return_pct']
                             best_label = lbl
                             best_cfg = r['cfg']
                             best_conf = conf
@@ -4502,17 +4475,16 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
                         'label': best_label,
                         'cfg': best_cfg,
                         'conf': best_conf,
-                        'return_pct': best_sim['return_pct'],
+                        'return_pct': best_return,
                         'trades': best_sim['trades'],
                         'win_rate': best_sim['win_rate'],
-                        'score': best_score,
                         'buy_hold': results[best_label].get('buy_hold', 0),
                     }
                     print(f"\n  {asset} {h}h WINNER: {best_label}")
                     print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  "
                           f"f={best_cfg['n_features']}  conf>={best_conf}%")
-                    print(f"  Return: {best_sim['return_pct']:+.2f}%  trades={best_sim['trades']}  "
-                          f"WR={best_sim['win_rate']:.0f}%  score={best_score:.2f}")
+                    print(f"  Return: {best_return:+.2f}%  trades={best_sim['trades']}  "
+                          f"WR={best_sim['win_rate']:.0f}%")
 
         # ── Cross-horizon comparison ──
         if not horizon_results:
@@ -4535,8 +4507,8 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
                   f"{hr['return_pct']:>+7.2f}% | {hr['trades']:>3} | {hr['win_rate']:>3.0f}% | "
                   f"{hr['buy_hold']:>+6.2f}%")
 
-        # Pick overall best horizon (return × win_rate scoring)
-        best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['score'])
+        # Pick overall best horizon
+        best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['return_pct'])
         winner = horizon_results[best_h]
 
         print(f"\n  >>> BEST HORIZON for {asset}: {best_h}h — {winner['return_pct']:+.2f}% "
@@ -4732,20 +4704,16 @@ def main():
 
     # ================================================================
     # CLI: python crypto_trading_system_doohan.py D BTC 4,8h
-    # ================================================================
-    # Order-independent CLI parser
-    # Any order works: MODE ASSETS HORIZONS, ASSETS MODE HORIZONS, etc.
+    # Supports: MODE [ASSETS] [HORIZON] [--trials N]
     # Examples:
     #   python crypto_trading_system_doohan.py D BTC 4,8h
-    #   python crypto_trading_system_doohan.py BTC D 4,8h --trials 150
-    #   python crypto_trading_system_doohan.py H 5,6,7,8h BTC --skip
+    #   python crypto_trading_system_doohan.py D BTC 4,8h --trials 150
     #   python crypto_trading_system_doohan.py DF BTC,ETH 4,8h
+    #   python crypto_trading_system_doohan.py B BTC 8h
+    #   python crypto_trading_system_doohan.py F BTC 4,8h
     # ================================================================
-    VALID_MODES = {'B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
-
-    # Parse flags first
+    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_resume = '--resume' in sys.argv
-    flag_skip = '--skip' in sys.argv
 
     # Parse --trials N
     n_trials = DEKU_DEFAULT_TRIALS
@@ -4755,46 +4723,6 @@ def main():
                 n_trials = int(sys.argv[i + 1])
             except ValueError:
                 pass
-
-    # --help
-    if '--help' in sys.argv or '-h' in sys.argv:
-        print("""
-Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
-
-  Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
-
-Modes:
-  B       Quick run (saved models + signals + chart)
-  D       Grid optimization (combo x window x gamma x features)
-  G       Live backtest (top 6 from D → refine top 3 → pick best)
-  DG      D then G
-  F       Strategy comparison (both_agree / either_agree / Xh_only)
-  DF      D then F
-  DGF     D then G then F (full pipeline)
-  H       Horizon sweep (D+G per horizon → compare → save best)
-
-Assets:
-  BTC,ETH,LINK,...   Comma-separated asset names (default: all)
-
-Horizons:
-  5,6,7,8h           Comma-separated horizons in hours (default: 4,8h)
-
-Options:
-  --trials N          Number of Optuna trials (default: 150)
-  --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
-  --skip              Mode H only: skip Mode D for horizons that already have results
-  --resume            Resume interrupted Optuna study
-  --help, -h          Show this help
-
-Examples:
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
-  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run G only
-  python crypto_trading_system_doohan.py DG ETH 6h               # optimize + backtest ETH 6h
-  python crypto_trading_system_doohan.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_doohan.py G BTC 6h                 # re-backtest existing results
-  python crypto_trading_system_doohan.py BTC D 8h                 # order doesn't matter
-""")
-        return
 
     # Parse --metric NAME or --metric all
     global OPTUNA_METRIC
@@ -4812,54 +4740,34 @@ Examples:
                 print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
                 return
 
-    # Classify positional args (order-independent)
-    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    # Remove values that follow --trials or --metric
-    skip_next = set()
-    for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric') and i < len(sys.argv) - 1:
-            skip_next.add(sys.argv[i + 1])
-    cli_args = [a for a in cli_args if a not in skip_next]
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', '5', '6', '7'):
+        mode = cli_args[0].upper()
 
-    mode = None
-    assets_list = None
-    horizons = None
-
-    for arg in cli_args:
-        upper = arg.upper()
-        # Check if it's a mode
-        if upper in VALID_MODES and mode is None:
-            mode = upper
-        # Check if it's a shortcut (5/6/7)
-        elif upper in ('5', '6', '7') and mode is None:
-            mode = upper
-        # Check if it's horizons (ends with h, contains digits)
-        elif arg.lower().endswith('h') and arg[:-1].replace(',', '').isdigit():
-            horizons = [int(h) for h in arg[:-1].split(',')]
-        # Otherwise treat as asset list
-        else:
-            parsed = [a.strip().upper() for a in arg.split(',') if a.strip().upper() in ASSETS]
-            if parsed:
-                assets_list = parsed
-
-    if mode and mode in VALID_MODES:
         # Shortcuts 5/6/7 from CLI
         if mode in ('5', '6', '7'):
             shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
             _run_quick_asset(shortcut_map[mode])
             return
 
-        # Defaults
-        if assets_list is None:
+        # Parse assets (default: all)
+        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y') and not cli_args[1].endswith('m'):
+            assets_list = [a.strip().upper() for a in cli_args[1].split(',') if a.strip().upper() in ASSETS]
+            if not assets_list:
+                assets_list = list(ASSETS.keys())
+        else:
             assets_list = list(ASSETS.keys())
-        if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+
+        # Parse horizon (default: both for Mode B and DF, short for others)
+        # Mode H requires explicit horizons (e.g., 4,5,6,7,8h)
+        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+        for a in cli_args:
+            if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
+                horizons = [int(h) for h in a[:-1].split(',')]
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H') else ""
-        skip_str = " | --skip" if flag_skip and mode == 'H' else ""
         h_str = ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
         print("=" * 60)
 
     else:
@@ -5043,7 +4951,7 @@ Examples:
     elif mode == 'G':
         run_mode_g(assets_list, horizons)
     elif mode == 'H':
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume)
 
     print("\nDone!")
 

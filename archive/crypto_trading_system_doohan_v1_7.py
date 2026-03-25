@@ -1,129 +1,57 @@
 """
-Doohan — Production ML Trading System
+Doohan V1.7 — Embargo-fixed exhaustive grid search
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
+ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT with 8h horizons.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
-Variable horizon per asset (5h, 6h, 7h, 8h etc.)
 
-Exhaustive grid search:
-  Grid: 3 combos × 6 windows × 6 features × 3 gammas = 324 evals (~20 min)
-     - Combos: RF+LGBM, XGB+LGBM, RF+XGB
-     - Windows: 72, 100, 150, 200, 250, 300
+V1.7 changes from V1.6:
+  - EMBARGO fix: all walk-forward paths now use EMBARGO_CANDLES = horizon (was 4 or missing)
+    * _quick_score: added embargo (was leaking — train end = i, no gap)
+    * generate_signals: added embargo (was leaking — train end = i, no gap)
+    * eval_one_config / holdout: fixed embargo from 4 to horizon (was insufficient for 8h)
+  - This eliminates label overlap leakage where the last `horizon` training rows
+    have labels that look into the same future period as the test row.
+
+Doohan V1.7 — Exhaustive grid search:
+  Insight: LGBM dominates all combos it's in. XGB hurts LGBM.
+  6 distinct signal groups identified: RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR.
+
+  Grid: 6 combos × 4 windows × 6 features × 3 gammas = 432 evals (~45 min)
+     - Combos: RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
+     - Windows: 72, 100, 150, 200
      - Features: 10, 13, 17, 20, 25, 30
-     - Gammas: 0.999, 0.997, 0.995
+     - Gammas: 0.999, 0.997, 0.995 (adjacent values produce identical results)
+
+  Saves full grid to CSV for manual analysis.
+  Then: 3-fold holdout → top 6 → Mode G backtest → Refine top 3 → Mode F strategy.
+
+  DGF pipeline: D (grid) → G (backtest top 6 → refine top 3 → backtest refined → pick best)
+
+  APF scoring:
+  - Adjusted PF = raw_PF / buyhold_PF (measures skill vs passive holding)
+  - Eliminates market-regime bias
+  - Raw PF capped at 20.0, minimum 3 trades
 
 Modes:
-  B.   Quick run (saved models + signals + chart)
-  D.   Grid optimization (combo × window × gamma × features)
-  DG.  D then G (grid + backtest + refine + pick best)
-  DGF. DG then F (full pipeline + strategy comparison)
-  DF.  D then F (optimize + strategy comparison)
-  F.   Strategy comparison (both_agree / either_agree / Xh_only)
-  G.   Live backtest (top 6 → refine top 3 → pick best, write trading config)
-  H.   Horizon sweep (D+G per horizon → compare → save best)
+  B. Quick run (saved models)    D. Staged optimization
+  DF. D then F                   DG. D then G
+  DGF. D then G (backtest + refine + backtest refined)
+  F. Strategy comparison         G. Live backtest validation (top 6 → pick best)
+  H. Horizon search              HF. H then F
   5/6/7. Quick BTC/ETH/XRP
 
 CLI Usage:
-  python crypto_trading_system_doohan.py DG BTC 8h
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h
-  python crypto_trading_system_doohan.py H BTC,ETH,LINK 5,6,7,8h
-  python crypto_trading_system_doohan.py D BTC,ETH 6,7h
+  python crypto_trading_system_doohan_v1_7.py D BTC 8h
+  python crypto_trading_system_doohan_v1_7.py DGF BTC,ETH,LINK 8h
+  python crypto_trading_system_doohan_v1_7.py G BTC 8h
+  python crypto_trading_system_doohan_v1_7.py DF BTC,ETH 4,8h
+  python crypto_trading_system_doohan_v1_7.py B BTC
 
 Outputs:
-  models/crypto_doohan_v1_7_1_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode G)
-  config/trading_config_doohan.json                  (horizon + min_confidence per asset)
-  logs/doohan_v171_*.log                             (auto-saved terminal output)
-
-============================================================
-TODO (V1.7.1 → production readiness):
-============================================================
-  1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode G should select the production model
-     from refined configs only (not raw D candidates). D candidates are still used
-     for diagnostics and as input to pick top 3 for refinement.
-
-  2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 7h
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 8h
-     Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
-
-  3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode F for strategy selection, expand to all 9 assets.
-
-  4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
-     for all horizons. Should use train_end = i - horizon like V1.7.1.
-
-  5. WIRE INTO LIVE TRADER — Once winner is validated:
-       - Update crypto_live_trader_doohan.py to read V1.7.1 production CSV
-       - Update crypto_revolut_doohan.py to point to V1.7.1 configs
-       - Or promote V1.7.1 as new Doohan production version
-
-============================================================
-Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
-============================================================
-
-  EMBARGO (most critical difference):
-    V1.7.1:  train_end = i - horizon          (dynamic, scales with prediction horizon)
-    V1.6:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Deku:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Impact:  Pre-embargo APFs were inflated 5-26×. Post-embargo realistic range is 1.0-3.0.
-             V1.6 and Deku results are NOT comparable to V1.7.1 due to label overlap leakage.
-
-  SEARCH METHOD:
-    V1.7.1:  Exhaustive grid (324 evals) + 50-trial Optuna refine per top 3
-    V1.6:    Exhaustive grid (432 evals) + 30-trial Optuna refine per top 3
-    Deku:    Optuna TPE+Hyperband (150 trials, auto-extend to 200/250)
-
-  COMBOS:
-    V1.7.1:  3 combos — RF+LGBM, XGB+LGBM, RF+XGB (dead combos dropped)
-    V1.6:    6 combos — RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
-    Deku:    26 combos — all pairs + triples + quads + quint of RF/GB/XGB/LR/LGBM
-
-  WINDOWS:
-    V1.7.1:  [72, 100, 150, 200, 250, 300]  (36/48 dropped — embargo eats too much)
-    V1.6:    [72, 100, 150, 200]
-    Deku:    [24, 36, 48, 72, 100, 150, 200]  (Optuna picks from these)
-
-  REFINE:
-    V1.7.1:  50 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    V1.6:    30 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    Deku:    N/A (Optuna does continuous search, no separate refine phase)
-
-  BACKTEST:
-    V1.7.1:  336h (2 weeks)
-    V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode F replay)
-
-  SCORING:
-    V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
-    V1.6:    APF (same formula)
-    Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
-
-  HOLDOUT:
-    V1.7.1:  N/A (uses Mode G live backtest instead)
-    V1.6:    N/A (uses Mode G live backtest instead)
-    Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
-
-  FEATURES:
-    V1.7.1:  Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    V1.6:    Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    Deku:    Optuna picks n_features from LGBM-ranked list (continuous range)
-
-  GAMMAS:
-    V1.7.1:  Grid tests [0.995, 0.997, 0.999]
-    V1.6:    Grid tests [0.995, 0.997, 0.999]
-    Deku:    Optuna continuous (0.994, 1.0)
-
-  MODELS:
-    V1.7.1:  RF, XGB, LGBM (GB/LR only in combos that include them — but none do)
-    V1.6:    RF, GB, XGB, LR, LGBM (all 5 available in combos)
-    Deku:    RF, GB, XGB, LR, LGBM (all 5, 26 ensemble combinations)
-
-  WALK-FORWARD STEP:
-    V1.7.1:  DIAG_STEP = 36 (same as Deku)
-    V1.6:    DIAG_STEP = 36
-    Deku:    DIAG_STEP = 36
+  charts/{ASSET}_backtest.png
+  models/crypto_doohan_v1_7_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_doohan_v1_7_production.csv         (best live performer from Mode G)
+  models/crypto_hourly_chart_data.json
 """
 
 import sys
@@ -183,7 +111,7 @@ class _TeeWriter:
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"doohan_v171_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+_log_path = os.path.join(_LOG_DIR, f"doohan_v17_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
 _log_fh = open(_log_path, 'w', encoding='utf-8')
 sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
 sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
@@ -373,6 +301,10 @@ N_FEATURES_RANGE = {
 }
 N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
 
+# Mode H: horizon search range
+HORIZON_SEARCH = [3, 4, 5, 6, 7, 8]
+MODE_H_DEFAULT_TRIALS = 200  # extra budget for horizon dimension
+
 # Doohan V1.4.1: Continuous search spaces
 DOOHAN_GAMMA_MIN = 0.995
 DOOHAN_GAMMA_MAX = 0.999
@@ -390,10 +322,11 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 LABEL_MODE = 'fee_aware'
 
 # Mode G: live backtest validation of top 6 candidates
-MODE_G_REPLAY_HOURS = 336       # 2 full weeks
-MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
+MODE_G_REPLAY_HOURS = 168       # 1 full week
+MODE_G_CONF_THRESHOLDS = [70, 80, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_doohan_v1_7_1_production.csv'
+PRODUCTION_CSV = 'models/crypto_doohan_v1_7_production.csv'
+DEKU_CSV = 'models/crypto_deku_best_models.csv'
 
 
 
@@ -840,16 +773,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+        return f'{MODELS_DIR}/crypto_doohan_v1_7_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_doohan_v1_7_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_doohan_v1_7_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -2958,15 +2891,21 @@ GRID_COMBOS = [
     'RF+LGBM',    # LGBM without XGB (best group — XGB hurts LGBM)
     'XGB+LGBM',   # LGBM with XGB
     'RF+XGB',     # XGB without LGBM
-    # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
+    'RF+GB',      # no dominant model
+    'RF+LR',      # no dominant model
+    'GB+LR',      # no dominant model
 ]
-GRID_WINDOWS = [72, 100, 150, 200, 250, 300]  # 36/48 dropped (embargo eats too much), 250/300 added
+GRID_WINDOWS_4H = [36, 48, 72, 100, 150, 200]      # 4h horizon — short windows OK (embargo=4)
+GRID_WINDOWS_8H = [72, 100, 150, 200, 300]          # 8h horizon — no short windows (embargo=8 eats too much), add 300h
+
+def _get_grid_windows(horizon):
+    return GRID_WINDOWS_4H if horizon <= 4 else GRID_WINDOWS_8H
 GRID_FEATURES = [10, 13, 17, 20, 25, 30]
 GRID_GAMMAS = [0.999, 0.997, 0.995]
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
 REFINE_TOP_N = 3                   # how many configs to refine from Mode G
-REFINE_TRIALS = 50                 # Optuna trials per config (was 30 in V1.7)
+REFINE_TRIALS = 30                 # Optuna trials per config
 REFINE_GAMMA_RANGE = 0.002         # +/- around grid winner's gamma (minimal — grid already covers 0.995-0.999)
 REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
 REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window
@@ -3148,10 +3087,11 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     t_mode_start = time.time()
     _kill_orphan_workers()
 
-    n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
+    grid_windows = _get_grid_windows(horizon)
+    n_grid = len(GRID_COMBOS) * len(grid_windows) * len(GRID_FEATURES) * len(GRID_GAMMAS)
     print("\n" + "=" * 70)
-    print(f"  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
-    print(f"  {len(GRID_COMBOS)} combos × {len(GRID_WINDOWS)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
+    print(f"  DOOHAN V1.7 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
+    print(f"  {len(GRID_COMBOS)} combos × {len(grid_windows)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
     print("=" * 70)
@@ -3253,11 +3193,11 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # ══════════════════════════════════════════════════════════════
         model_factories = _get_deku_diagnostic_models()
 
-        n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
+        n_grid = len(GRID_COMBOS) * len(grid_windows) * len(GRID_FEATURES) * len(GRID_GAMMAS)
         print(f"\n{'='*70}")
         print(f"  EXHAUSTIVE GRID: {asset_name} {horizon}h — {n_grid} evals")
         print(f"  Combos:   {GRID_COMBOS}")
-        print(f"  Windows:  {GRID_WINDOWS}")
+        print(f"  Windows:  {grid_windows}")
         print(f"  Features: {GRID_FEATURES}")
         print(f"  Gammas:   {GRID_GAMMAS}")
         print(f"{'='*70}")
@@ -3285,7 +3225,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             print(f"  {combo_name}")
             print(f"  {'─'*60}")
 
-            for window in GRID_WINDOWS:
+            for window in grid_windows:
                 for n_feat in GRID_FEATURES:
                     if n_feat > len(ranked_features):
                         continue
@@ -3347,7 +3287,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_elapsed = (time.time() - t_grid) / 60
 
         # Save full grid to CSV
-        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_1_grid_{asset_name}_{horizon}h.csv')
+        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -3575,6 +3515,1149 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
 
 # ============================================================
+# MODE H: HORIZON SEARCH (Optuna searches horizon alongside other params)
+# ============================================================
+def run_mode_h(assets_list, n_trials=MODE_H_DEFAULT_TRIALS, resume=False):
+    """
+    DEKU Mode H: Like Mode D but with horizon as an Optuna parameter (3-8h).
+    Finds the optimal horizon for each asset. Saves top-2 distinct horizons
+    so that Mode F can compare dual-horizon strategies.
+    """
+    t_mode_start = time.time()
+    _kill_orphan_workers()
+
+    combo_options = _build_combo_list()
+    search_horizons = HORIZON_SEARCH
+
+    print("\n" + "=" * 70)
+    print(f"  DOOHAN MODE H: HORIZON SEARCH ({min(search_horizons)}-{max(search_horizons)}h)")
+    print(f"  Models: {', '.join(ALL_MODELS.keys())} ({len(combo_options)} combos)")
+    print(f"  Trials: {n_trials} (TPE sampler + Hyperband pruner)")
+    metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
+    print(f"  Search: combo × window × gamma × n_features × horizon[{min(search_horizons)}-{max(search_horizons)}]{metric_label}")
+    print("=" * 70)
+
+    # Download fresh data
+    print("\n  Updating macro & sentiment data...")
+    t0 = time.time()
+    try:
+        import download_macro_data
+        download_macro_data.main()
+    except ImportError:
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+    except Exception as e:
+        print(f"  WARNING: Macro data update failed: {e}")
+    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+
+    t0 = time.time()
+    update_all_data(assets_list)
+    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+
+    best_models = []
+
+    for asset_name in assets_list:
+        t_asset = time.time()
+
+        print(f"\n{'='*70}")
+        print(f"  DOOHAN HORIZON SEARCH: {asset_name} ({min(search_horizons)}-{max(search_horizons)}h)")
+        print(f"{'='*70}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        # Step 1: Build features with reference horizon (midpoint=5h for LGBM ranking)
+        MAX_DIAG_HOURS = 6 * 30 * 24
+        ref_horizon = 5
+        print(f"\n  Building all features (horizon={ref_horizon}h [reference])...")
+        t0 = time.time()
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=ref_horizon)
+        print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
+
+        total_rows = len(df_full)
+        if total_rows > MAX_DIAG_HOURS:
+            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+
+        # Pre-compute labels and forward returns for each searchable horizon
+        for h in search_horizons:
+            fwd_ret = df_full['close'].shift(-h) / df_full['close'] - 1
+            if LABEL_MODE == 'fee_aware':
+                df_full[f'label_{h}h'] = (fwd_ret > 2 * TRADING_FEE).astype(int)
+            else:
+                past_ret = df_full['close'] / df_full['close'].shift(h) - 1
+                rolling_med = past_ret.rolling(200, min_periods=50).median()
+                df_full[f'label_{h}h'] = (fwd_ret > rolling_med).astype(int)
+            df_full[f'_fwd_ret_{h}h'] = fwd_ret
+
+        # Drop NaN across all horizon labels
+        label_cols = [f'label_{h}h' for h in search_horizons]
+        df_clean = df_full.dropna(subset=all_cols + label_cols).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features, {len(search_horizons)} horizons")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
+            continue
+
+        # Step 2: LGBM importance ranking (using reference horizon labels)
+        # Use label_5h as the ranking target — feature importance is stable across horizons
+        df_clean_rank = df_clean.copy()
+        df_clean_rank['label'] = df_clean_rank['label_5h']
+        print(f"\n  LGBM feature importance ranking (ref: {ref_horizon}h)...")
+        t0 = time.time()
+        importance_df = _test_lgbm_importance(df_clean_rank, all_cols, gamma=1.0)
+        ranked_features = importance_df['feature'].tolist()
+        print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features ranked")
+
+        # Prepare numpy arrays
+        df_optuna = df_clean.dropna(subset=ranked_features + label_cols).reset_index(drop=True)
+        features_np_all = df_optuna[ranked_features].values.astype(np.float64)
+        closes_np_all = df_optuna['close'].values.astype(np.float64)
+
+        # Per-horizon label arrays
+        labels_np_by_h = {}
+        fwd_ret_np_by_h = {}
+        for h in search_horizons:
+            labels_np_by_h[h] = df_optuna[f'label_{h}h'].values.astype(np.int32)
+            fwd_ret_np_by_h[h] = df_optuna[f'_fwd_ret_{h}h'].values.astype(np.float64)
+
+        n_total = len(df_optuna)
+
+        # 3-fold rolling holdout setup
+        fold_train_frac = 0.60
+        fold_test_frac = 0.20
+        fold_stride = 0.10
+        holdout_folds = []
+        for fi in range(N_HOLDOUT_FOLDS):
+            train_s = int(n_total * fi * fold_stride)
+            train_e = int(n_total * (fi * fold_stride + fold_train_frac))
+            test_s = train_e
+            test_e = int(n_total * (fi * fold_stride + fold_train_frac + fold_test_frac))
+            test_e = min(test_e, n_total)
+            holdout_folds.append((train_s, train_e, test_s, test_e))
+            print(f"  Fold {fi+1}: train [{train_s}:{train_e}] ({train_e-train_s:,} rows) → test [{test_s}:{test_e}] ({test_e-test_s:,} rows)")
+
+        # Optuna trains on fold 1
+        f1_train_s, f1_train_e, _, _ = holdout_folds[0]
+        features_np = features_np_all[f1_train_s:f1_train_e]
+        closes_np = closes_np_all[f1_train_s:f1_train_e]
+        # Per-horizon labels for fold 1
+        labels_np_f1_by_h = {h: labels_np_by_h[h][f1_train_s:f1_train_e] for h in search_horizons}
+        n = len(features_np)
+
+        print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
+
+        # Step 3: Optuna study
+        print(f"\n{'='*70}")
+        print(f"  OPTUNA STUDY: {asset_name} (horizon search {min(search_horizons)}-{max(search_horizons)}h)")
+        print(f"  Search space: {len(combo_options)} combos × {len(DIAG_WINDOWS)} windows × gamma × features × {len(search_horizons)} horizons")
+        print(f"  Trials: {n_trials} | Data: {n:,} train | {N_HOLDOUT_FOLDS}-fold holdout | embargo=horizon")
+        print(f"{'='*70}")
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.HyperbandPruner(
+                min_resource=DEKU_PRUNING_WARMUP,
+                max_resource=n // DIAG_STEP,
+                reduction_factor=3,
+            ),
+            study_name=f'doohan_H_{asset_name}',
+        )
+
+        model_factories = _get_deku_diagnostic_models()
+        best_apf_so_far = 0.0
+        trial_count = 0
+        seen_params = set()
+
+        def objective(trial):
+            nonlocal best_apf_so_far, trial_count
+            trial_count += 1
+
+            h = trial.suggest_categorical('horizon', search_horizons)
+            combo_name = trial.suggest_categorical('combo', combo_options)
+            window = trial.suggest_categorical('window', DIAG_WINDOWS)
+            gamma = trial.suggest_float('gamma', DOOHAN_GAMMA_MIN, DOOHAN_GAMMA_MAX)
+
+            # Per-horizon feature range
+            max_f = min(DOOHAN_FEAT_MAX, len(ranked_features))
+            n_feat = trial.suggest_int('n_features', DOOHAN_FEAT_MIN, max_f)
+
+            combo = combo_name.split('+')
+            feat_np = features_np[:, :n_feat]
+            labels_np_h = labels_np_f1_by_h[h]
+
+            result = _deku_eval_with_pruning(
+                feat_np, labels_np_h, closes_np, combo, window, n,
+                DIAG_STEP, model_factories, gamma=gamma, trial=trial,
+                horizon=h
+            )
+
+            if result is None:
+                return 0.0
+
+            trades = result[6]
+            MIN_TRADES = 8
+            if trades < MIN_TRADES:
+                return 0.0
+
+            score = _compute_optuna_score(result)
+            ret = result[4]
+
+            if score > best_apf_so_far:
+                best_apf_so_far = score
+                print(f"  #{trial_count:3d} NEW BEST: {combo_name:22s} w={window:4d}h "
+                      f"g={gamma:.4f} f={n_feat:3d} h={h}h | {OPTUNA_METRIC}={score:.3f} ret={ret:+.1f}% "
+                      f"rawPF={result[11]:.2f} bhPF={result[12]:.2f} trades={trades}")
+            elif trial_count % 20 == 0:
+                print(f"  #{trial_count:3d} progress: {OPTUNA_METRIC}={score:.3f} | best so far: {best_apf_so_far:.3f}")
+
+            return score
+
+        t_optuna = time.time()
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+        # Auto-extend
+        APF_EXTEND_THRESH = 1.7
+        extend_steps = [250, 300]
+        for ext_target in extend_steps:
+            if ext_target <= n_trials:
+                continue
+            if study.best_value >= APF_EXTEND_THRESH:
+                break
+            extra = ext_target - len(study.trials)
+            if extra > 0:
+                print(f"\n  Best APF={study.best_value:.3f} < {APF_EXTEND_THRESH} — extending to {ext_target} trials (+{extra})...")
+                study.optimize(objective, n_trials=extra, show_progress_bar=False)
+
+        optuna_elapsed = (time.time() - t_optuna) / 60
+
+        # Results summary
+        best_trial = study.best_trial
+        print(f"\n  {'='*70}")
+        print(f"  OPTUNA RESULTS: {asset_name} horizon search ({optuna_elapsed:.1f} min)")
+        print(f"  {'='*70}")
+        print(f"  Best trial: #{best_trial.number}")
+        print(f"  {OPTUNA_METRIC.upper():12s} {best_trial.value:.4f}")
+        print(f"  Horizon:    {best_trial.params['horizon']}h")
+        print(f"  Combo:      {best_trial.params['combo']}")
+        print(f"  Window:     {best_trial.params['window']}h")
+        print(f"  Gamma:      {best_trial.params['gamma']:.4f}")
+        print(f"  N_features: {best_trial.params['n_features']}")
+
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value > 0]
+        completed_trials.sort(key=lambda t: -t.value)
+
+        n_completed = len(completed_trials)
+        n_pruned = len(study.trials) - n_completed
+        print(f"\n  Trials: {n_completed} completed, {n_pruned} pruned ({100*n_pruned//len(study.trials) if study.trials else 0}% pruned)")
+
+        # Score-based dedup: collapse identical rows
+        seen_scores_h = set()
+        unique_top_h = []
+        for t in completed_trials:
+            score_key = (round(t.value, 3), t.params['window'], t.params.get('gamma', 0), t.params.get('n_features', 0), t.params.get('horizon', 0))
+            if score_key not in seen_scores_h:
+                seen_scores_h.add(score_key)
+                unique_top_h.append(t)
+        completed_trials = unique_top_h
+
+        print(f"\n  {'Rank':>4s}  {OPTUNA_METRIC.upper():>7s}  {'Combo':22s}  {'Window':>6s}  {'Gamma':>7s}  {'Feats':>5s}  {'H':>3s}")
+        print(f"  {'-'*65}")
+        for i, t in enumerate(completed_trials[:10], 1):
+            marker = " <-- BEST" if i == 1 else ""
+            print(f"  {i:4d}  {t.value:7.3f}  {t.params['combo']:22s}  {t.params['window']:5d}h  "
+                  f"{t.params['gamma']:7.3f}  {t.params['n_features']:5d}  {t.params['horizon']:2d}h{marker}")
+
+        # Horizon distribution
+        from collections import Counter
+        h_counts = Counter(t.params['horizon'] for t in completed_trials)
+        print(f"\n  Horizon distribution (completed trials):")
+        for h in sorted(h_counts.keys()):
+            bar = '#' * (h_counts[h] * 30 // max(h_counts.values()))
+            print(f"    {h}h: {h_counts[h]:4d} {bar}")
+
+        # Parameter importance
+        try:
+            importances = optuna.importance.get_param_importances(study)
+            print(f"\n  Parameter importance:")
+            for param, imp in importances.items():
+                bar = '#' * int(imp * 40)
+                print(f"    {param:20s} {imp*100:5.1f}% {bar}")
+        except Exception:
+            pass
+
+        # ── 3-FOLD ROLLING HOLDOUT ──
+        # Diversity-aware: best per (combo, window, horizon), then ensure combo diversity
+        seen_configs = set()
+        unique_candidates = []
+        for t in completed_trials:
+            key = (t.params['combo'], t.params['window'], t.params['horizon'])
+            if key not in seen_configs:
+                seen_configs.add(key)
+                unique_candidates.append(t)
+
+        phase1 = unique_candidates[:10]
+        phase1_set = set(id(t) for t in phase1)
+        combos_in_phase1 = set(t.params['combo'] for t in phase1)
+
+        phase2 = []
+        seen_combos_p2 = set()
+        for t in unique_candidates:
+            combo = t.params['combo']
+            if combo not in combos_in_phase1 and combo not in seen_combos_p2:
+                seen_combos_p2.add(combo)
+                phase2.append(t)
+
+        candidates = phase1 + phase2
+        N_CANDIDATES = min(20, len(candidates))
+        candidates = candidates[:N_CANDIDATES]
+
+        print(f"\n  {'='*70}")
+        print(f"  {N_HOLDOUT_FOLDS}-FOLD ROLLING HOLDOUT: {asset_name} (top {N_CANDIDATES} candidates)")
+        print(f"  {'='*70}")
+
+        holdout_results = []
+        min_fold_rows = min(te - ts for _, _, ts, te in holdout_folds)
+        if min_fold_rows >= 200:
+            for ci, trial in enumerate(candidates):
+                c_combo = trial.params['combo'].split('+')
+                c_window = trial.params['window']
+                c_gamma = trial.params['gamma']
+                c_n_feat = trial.params['n_features']
+                c_horizon = trial.params['horizon']
+
+                fold_scores = []
+                fold_rets = []
+                fold_accs = []
+                fold_trades = []
+                fold_raw_pfs = []
+
+                for fi, (tr_s, tr_e, te_s, te_e) in enumerate(holdout_folds):
+                    fold_feat_test = features_np_all[te_s:te_e, :c_n_feat]
+                    fold_labels_test = labels_np_by_h[c_horizon][te_s:te_e]
+                    fold_closes_test = closes_np_all[te_s:te_e]
+                    n_fold_test = te_e - te_s
+
+                    HOLDOUT_STEP = 12
+                    ho_result = _deku_eval_with_pruning(
+                        fold_feat_test, fold_labels_test, fold_closes_test,
+                        c_combo, c_window, n_fold_test,
+                        HOLDOUT_STEP, model_factories, gamma=c_gamma, trial=None,
+                        horizon=c_horizon
+                    )
+
+                    if ho_result:
+                        fold_scores.append(_compute_optuna_score(ho_result))
+                        fold_rets.append(ho_result[4])
+                        fold_accs.append(ho_result[2])
+                        fold_trades.append(ho_result[6])
+                        fold_raw_pfs.append(ho_result[11])
+                    else:
+                        fold_scores.append(0.0)
+                        fold_rets.append(0.0)
+                        fold_accs.append(0.0)
+                        fold_trades.append(0)
+                        fold_raw_pfs.append(0.0)
+
+                avg_score = np.mean(fold_scores)
+                avg_ret = np.mean(fold_rets)
+                avg_acc = np.mean(fold_accs)
+                total_trades = sum(fold_trades)
+                avg_raw_pf = np.mean(fold_raw_pfs)
+
+                holdout_results.append((trial, avg_score, avg_ret, avg_acc, total_trades,
+                                        avg_raw_pf, fold_scores, fold_rets))
+
+            holdout_results.sort(key=lambda x: -x[1])
+
+            print(f"\n  {'Rank':>4s}  {'AVG_'+OPTUNA_METRIC.upper():>8s}  {'AVG_Ret':>8s}  {'AVG_Acc':>7s}  {'Tr':>4s}  "
+                  f"{'F1':>6s}  {'F2':>6s}  {'F3':>6s}  {'IS_'+OPTUNA_METRIC.upper():>8s}  {'Combo':22s}  {'Win':>4s}  {'Gamma':>7s}  {'F':>3s}  {'H':>3s}")
+            print(f"  {'-'*132}")
+            for i, (trial, avg_sc, avg_ret, avg_acc, tot_tr, avg_rpf, f_scores, f_rets) in enumerate(holdout_results[:10], 1):
+                is_score = trial.value
+                marker = " <-- BEST" if i == 1 else ""
+                gen = "✓" if avg_ret > 0 and avg_acc > 0.55 else "~" if avg_ret > 0 else "✗"
+                f_str = "  ".join(f"{s:+5.1f}" for s in f_rets)
+                print(f"  {i:4d}  {avg_sc:8.3f}  {avg_ret:+7.1f}%  {avg_acc*100:6.1f}%  {tot_tr:4d}  "
+                      f"{f_str}  {is_score:8.3f}  {trial.params['combo']:22s}  {trial.params['window']:3d}h  "
+                      f"{trial.params['gamma']:7.4f}  {trial.params['n_features']:3d}  {gen}  {trial.params['horizon']:2d}h{marker}")
+        else:
+            print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
+
+        # Pick top-2 distinct horizons for dual-horizon strategy comparison
+        winners_by_h = {}  # horizon -> (trial, holdout_result)
+        source = holdout_results if (holdout_results and holdout_results[0][1] > 0) else [(t, t.value, 0, 0, 0, 0, [], []) for t in completed_trials]
+
+        for entry in source:
+            trial = entry[0]
+            h = trial.params['horizon']
+            if h not in winners_by_h:
+                winners_by_h[h] = entry
+
+        # Sort horizons by their best holdout score
+        sorted_horizons = sorted(winners_by_h.keys(), key=lambda h: -winners_by_h[h][1])
+        selected_horizons = sorted_horizons[:2]  # top 2
+        selected_horizons.sort()  # short first
+
+        print(f"\n  {'='*70}")
+        print(f"  TOP HORIZONS for {asset_name}: {', '.join(str(h)+'h' for h in selected_horizons)}")
+        print(f"  {'='*70}")
+
+        # Save a model for each selected horizon
+        for h in selected_horizons:
+            entry = winners_by_h[h]
+            winner_trial = entry[0]
+            winner_ho = entry if holdout_results else None
+
+            best_combo = winner_trial.params['combo'].split('+')
+            best_window = winner_trial.params['window']
+            best_gamma = winner_trial.params['gamma']
+            best_n_feat = winner_trial.params['n_features']
+            best_features = ranked_features[:best_n_feat]
+
+            # Re-run winner for in-sample metrics
+            feat_np = features_np[:, :best_n_feat]
+            labels_np_h = labels_np_f1_by_h[h]
+            full_result = _deku_eval_with_pruning(
+                feat_np, labels_np_h, closes_np, best_combo, best_window, n,
+                DIAG_STEP, model_factories, gamma=best_gamma, trial=None,
+                horizon=h
+            )
+
+            if full_result:
+                combo_name, window, acc, n_total_r, cum_ret, win_rate, trades, _, _, max_dd, apf, raw_pf, bh_pf = full_result
+                is_score = _compute_optuna_score(full_result)
+
+                ho_score = winner_ho[1] if winner_ho else 0
+                ho_ret = winner_ho[2] if winner_ho else 0
+                ho_acc = winner_ho[3] if winner_ho else 0
+                ho_trades = winner_ho[4] if winner_ho else 0
+                ho_raw_pf = winner_ho[5] if winner_ho else 0
+                ho_fold_rets = winner_ho[7] if winner_ho else []
+
+                best_config = {
+                    'coin': asset_name,
+                    'best_window': best_window,
+                    'best_combo': winner_trial.params['combo'],
+                    'accuracy': round(acc * 100, 2),
+                    'models': winner_trial.params['combo'],
+                    'return_pct': round(ho_ret if winner_ho else cum_ret, 2),
+                    'win_rate': round(win_rate, 1),
+                    'trades': trades,
+                    'combined_score': round(ho_score if winner_ho else apf, 4),
+                    'feature_set': 'D',
+                    'n_features': best_n_feat,
+                    'optimal_features': ','.join(best_features),
+                    'horizon': h,
+                    'gamma': round(best_gamma, 4),
+                }
+                best_models.append(best_config)
+
+                gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
+                print(f"\n  WINNER {h}h: {winner_trial.params['combo']}  w={best_window}h  g={best_gamma:.4f}  f={best_n_feat}  {gen_icon}")
+                print(f"    In-sample:  {OPTUNA_METRIC}={is_score:.3f}  ret={cum_ret:+.1f}%  acc={acc*100:.1f}%  trades={trades}")
+                if winner_ho and len(ho_fold_rets) > 0:
+                    fold_str = " / ".join(f"{r:+.1f}%" for r in ho_fold_rets)
+                    print(f"    Holdout:    {OPTUNA_METRIC}={ho_score:.3f}  avg_ret={ho_ret:+.1f}%  [{fold_str}]")
+
+        print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
+
+    if not best_models:
+        print("\nNo results. Aborting.")
+        return best_models
+
+    # Save best models (merge with existing — clear all horizons for each asset)
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == m['horizon'])
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+    print(f"\n  Best models saved: {csv_path}")
+
+    # Generate signals + charts for best models
+    for m in best_models:
+        features_list = m['optimal_features'].split(',')
+        model_names = m['models'].split('+')
+        generate_signals(m['coin'], model_names, m['best_window'],
+                         feature_override=features_list, horizon=m['horizon'],
+                         gamma=m.get('gamma', 1.0))
+
+    elapsed = (time.time() - t_mode_start) / 60
+    print(f"\n  Mode H complete: {elapsed:.1f} min total")
+
+    return best_models
+
+
+# ============================================================
+# LEGACY MODE D (grid-based, kept for comparison)
+# ============================================================
+def run_mode_d(assets_list, horizon=PREDICTION_HORIZON, permtest=False, resume=False):
+    """
+    Complete pipeline from scratch:
+    1. Build all ~124 features (uses ALL available data, decay handles recency)
+    2. Run 5-test feature analysis to find optimal subset
+    3. Run 75-config diagnostic with optimal features
+    4. Save best models
+    5. Generate signals + backtest charts
+
+    Gamma (decay) is read per asset+horizon from CSV. Defaults to 1.0 (no decay).
+    With --resume: skips steps that have saved checkpoints from a previous interrupted run.
+    """
+    t_mode_start = time.time()
+
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
+
+    print("\n" + "=" * 60)
+    print(f"  MODE D: FULL PIPELINE -- {horizon}h HORIZON (V5 Cacarot)")
+    print(f"  Starts from ALL features, finds optimal subset per asset")
+    print(f"  Uses ALL available data — decay weighting handles recency")
+    if resume:
+        print(f"  RESUME MODE: will skip completed steps (checkpoints in {RESUME_DIR}/)")
+    print("=" * 60)
+
+    # Download fresh macro & sentiment data before anything else
+    print("\n  Updating macro & sentiment data...")
+    t0 = time.time()
+    try:
+        import download_macro_data
+        download_macro_data.main()
+    except ImportError:
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+    except Exception as e:
+        print(f"  WARNING: Macro data update failed: {e}")
+    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+
+    t0 = time.time()
+    update_all_data(assets_list)
+    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+
+    best_models = []
+
+    for asset_name in assets_list:
+        t_asset = time.time()
+
+        # Read gamma from CSV for this asset+horizon (default 1.0 if not set)
+        existing_config = _load_mode_d_config(asset_name, horizon)
+        gamma = existing_config.get('gamma', 1.0) if existing_config else 1.0
+
+        print(f"\n{'='*60}")
+        print(f"  FULL PIPELINE: {asset_name} ({horizon}h horizon, gamma={gamma})")
+        print(f"{'='*60}")
+
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        # Step 1: Build ALL features, cap at 6 months
+        # Decay handles recency: gamma=0.999 → 6mo data at 1% weight, gamma=0.995 → 1mo at ~0%
+        MAX_DIAG_HOURS = 6 * 30 * 24  # 4,320 hours
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        t0 = time.time()
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+        print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
+
+        total_rows = len(df_full)
+        if total_rows > MAX_DIAG_HOURS:
+            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo, decay handles recency)")
+
+        # Drop NaN for analysis
+        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
+            continue
+
+        # Step 2: Feature analysis (5 tests -> optimal subset)
+        feat_ckpt = _load_checkpoint(asset_name, horizon, 'features') if resume else None
+        if feat_ckpt:
+            optimal_features = feat_ckpt['features']
+            print(f"\n  RESUME: loaded {len(optimal_features)} optimal features from checkpoint")
+        else:
+            t0 = time.time()
+            optimal_features = run_feature_analysis(asset_name, df_clean, all_cols, gamma=gamma)
+            print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
+            if optimal_features and len(optimal_features) >= 3:
+                _save_checkpoint(asset_name, horizon, 'features', {'features': optimal_features})
+
+        if not optimal_features or len(optimal_features) < 3:
+            print(f"  Feature analysis produced too few features ({len(optimal_features or [])}). Skipping.")
+            continue
+
+        # Step 3: Run diagnostic with optimal features
+        diag_ckpt = _load_checkpoint(asset_name, horizon, 'diagnostic') if resume else None
+        if diag_ckpt:
+            best_config = diag_ckpt
+            print(f"\n  RESUME: loaded diagnostic result from checkpoint")
+            print(f"  {best_config['coin']} -> {best_config['best_combo']} | w={best_config['best_window']} | {best_config['accuracy']:.1f}%")
+        else:
+            print(f"\n{'='*60}")
+            print(f"  DIAGNOSTIC: {asset_name} ({len(optimal_features)} optimal features)  [{datetime.now().strftime('%H:%M:%S')}]")
+            print(f"{'='*60}")
+
+            df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
+            print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
+
+            t0 = time.time()
+            best_config, _ = run_diagnostic_for_asset(asset_name, df_diag, optimal_features, gamma=gamma, resume=resume, horizon=horizon)
+            print(f"  [Diagnostic: {(time.time()-t0)/60:.1f} min]")
+            if best_config:
+                _save_checkpoint(asset_name, horizon, 'diagnostic', best_config)
+
+        if best_config:
+            best_config['feature_set'] = 'D'
+            best_config['n_features'] = len(optimal_features)
+            best_config['optimal_features'] = ','.join(optimal_features)
+            best_config['horizon'] = horizon
+            best_config['gamma'] = gamma
+            best_models.append(best_config)
+
+            # -- Improvement 3: Permutation test (only if --permtest flag passed) --
+            if permtest:
+                t0 = time.time()
+                _run_permutation_test(asset_name, df_diag, optimal_features,
+                                      best_config, n_perm=200, horizon=horizon)
+                print(f"  [Permutation test: {(time.time()-t0)/60:.1f} min]")
+
+        print(f"  [{asset_name} total: {(time.time()-t_asset)/60:.1f} min]")
+
+        # Clear checkpoints after successful completion of this (asset, horizon)
+        if best_config:
+            _clear_checkpoints(asset_name, horizon)
+
+    if not best_models:
+        print("\nNo results. Aborting.")
+        return
+
+    # Save best models (merge with existing horizons)
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+    if not MODELS_CSV_OVERRIDE:
+        df_best.to_csv(f'{MODELS_DIR}/crypto_casca_best_models_mode_d.csv', index=False)
+
+    print(f"\n{'='*60}")
+    print(f"  BEST MODELS SAVED -- {horizon}h HORIZON")
+    print(f"{'='*60}")
+    for row in best_models:
+        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | "
+              f"{row['accuracy']:.1f}% | {row['n_features']} features | {horizon}h")
+    print(f"{'='*60}")
+
+    # Step 4: Generate signals + charts
+    print("\n" + "=" * 60)
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
+    print("=" * 60)
+
+    t0 = time.time()
+    all_signals = {}
+    for config in best_models:
+        asset_name = config['coin']
+        model_names = config['models'].split('+')
+        window = config['best_window']
+        feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
+
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
+        signals = simulate_portfolio(signals)
+        _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
+        all_signals[asset_name] = signals
+
+        generate_backtest_chart(asset_name, signals, model_info=config)
+
+        if signals:
+            latest = signals[-1]
+            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                  f"| price=${latest['close']:,.2f}")
+
+    export_chart_data(all_signals)
+    print(f"  [Signal generation: {(time.time()-t0)/60:.1f} min]")
+
+    elapsed_total = time.time() - t_mode_start
+    print("\n" + "=" * 60)
+    print(f"  MODE D COMPLETE (full pipeline) -- {elapsed_total/60:.1f} min total")
+    print("=" * 60)
+
+
+# ============================================================
+# MODE E: ITERATIVE REFINEMENT (2nd/3rd pass on Mode D results)
+# ============================================================
+def _load_mode_d_config(asset_name, horizon):
+    """Load the Mode D (or previous E) result for a given asset/horizon.
+    V1.4: Falls back to production CASCA CSV for gamma if own CSV has no entry."""
+    csv_path = _get_models_csv_path()
+    row = None
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        if 'horizon' not in df.columns:
+            df['horizon'] = 4
+        mask = (df['coin'] == asset_name) & (df['horizon'] == horizon)
+        match = df[mask]
+        if not match.empty:
+            row = match.iloc[0]
+
+    # Fallback to production CSV for gamma (V1.4 may not have its own entries yet)
+    if row is None:
+        prod_csv = f'{MODELS_DIR}/crypto_casca_best_models.csv'
+        if os.path.exists(prod_csv):
+            df_prod = pd.read_csv(prod_csv)
+            if 'horizon' not in df_prod.columns:
+                df_prod['horizon'] = 4
+            mask = (df_prod['coin'] == asset_name) & (df_prod['horizon'] == horizon)
+            match = df_prod[mask]
+            if not match.empty:
+                row = match.iloc[0]
+                print(f"  [V1.4] Using gamma={float(row.get('gamma', 1.0))} from production CASCA CSV")
+
+    if row is None:
+        return None
+
+    return {
+        'coin': row['coin'],
+        'models': row['models'],
+        'best_combo': row['best_combo'],
+        'best_window': int(row['best_window']),
+        'accuracy': row['accuracy'],
+        'feature_set': row.get('feature_set', 'D'),
+        'optimal_features': str(row.get('optimal_features', '')),
+        'horizon': int(row.get('horizon', 4)),
+        'training_period': str(row.get('training_period', '')),
+        'gamma': float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0,
+    }
+
+
+def _run_iteration_2(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
+    """
+    Iteration 2: Refine features + finer window grid.
+    1. Leave-one-out: drop each feature, keep only those that help
+    2. Add-back: try each dropped feature, add if it helps
+    3. Expanded window grid around winner (step=25h)
+    4. Finer DIAG_STEP=24
+    """
+    prev_features = prev_config['optimal_features'].split(',')
+    prev_features = [f for f in prev_features if f in all_cols]
+    prev_window = prev_config['best_window']
+    prev_acc = prev_config['accuracy']
+
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+
+    # --- Step 1: Leave-One-Out Refinement ---
+    print(f"\n  [ITER2 1/3] Leave-One-Out Refinement (finer step=24)...")
+    baseline_acc, _ = _quick_accuracy(df_features, prev_features, window=prev_window, step=24, gamma=gamma)
+    print(f"    Baseline: {baseline_acc:.1f}% ({len(prev_features)} features)")
+
+    features_to_drop = []
+    for feat in prev_features:
+        reduced = [f for f in prev_features if f != feat]
+        acc, _ = _quick_accuracy(df_features, reduced, window=prev_window, step=24, gamma=gamma)
+        change = acc - baseline_acc
+        if change > 0.3:
+            features_to_drop.append(feat)
+            print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+.1f}%) ** REMOVING")
+        elif change < -0.5:
+            print(f"    Drop {feat:30s} -> {acc:5.1f}% ({change:+.1f}%) ** ESSENTIAL")
+
+    refined_features = [f for f in prev_features if f not in features_to_drop]
+    if features_to_drop:
+        new_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
+        print(f"\n    Removed {len(features_to_drop)}: {', '.join(features_to_drop)}")
+        print(f"    {len(prev_features)} -> {len(refined_features)} features | {baseline_acc:.1f}% -> {new_acc:.1f}%")
+        if new_acc < baseline_acc - 0.5:
+            print(f"    Refinement hurt accuracy -- reverting.")
+            refined_features = list(prev_features)
+    else:
+        print(f"    No features to drop.")
+
+    # --- Step 2: Add-Back Test ---
+    print(f"\n  [ITER2 2/3] Add-Back Test (try adding dropped features)...")
+    dropped_features = [f for f in all_cols if f not in refined_features]
+    current_acc, _ = _quick_accuracy(df_features, refined_features, window=prev_window, step=24, gamma=gamma)
+    added = []
+
+    # Only test features that were in the top 50% by LGBM importance (speed optimization)
+    from lightgbm import LGBMClassifier
+    model_imp = LGBMClassifier(n_estimators=200, max_depth=6, verbose=-1,
+                                device=LGBM_DEVICE, random_state=42)
+    df_clean = df_features.dropna(subset=all_cols + ['label'])
+    X = df_clean[all_cols].tail(5000)
+    y = df_clean['label'].tail(5000)
+    if len(np.unique(y)) >= 2:
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
+        imp = pd.Series(model_imp.feature_importances_, index=all_cols)
+        imp = imp.sort_values(ascending=False)
+        candidates = [f for f in imp.index[:len(all_cols)//2] if f not in refined_features]
+    else:
+        candidates = dropped_features[:30]
+
+    print(f"    Testing {len(candidates)} candidate features...")
+    for feat in candidates:
+        test_set = refined_features + [feat]
+        test_df = df_features.dropna(subset=test_set + ['label'])
+        if len(test_df) < 500:
+            continue
+        acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
+        if acc > current_acc + 0.5:
+            delta = acc - current_acc
+            added.append(feat)
+            refined_features.append(feat)
+            current_acc = acc
+            print(f"    Add {feat:30s} -> {acc:5.1f}% (+{delta:.1f}%) ** ADDING")
+
+    if added:
+        print(f"\n    Added {len(added)} features: {', '.join(added)}")
+    else:
+        print(f"    No features improved accuracy.")
+
+    print(f"\n    Final feature count: {len(refined_features)}")
+
+    # --- Step 3: Expanded Window Grid ---
+    print(f"\n  [ITER2 3/3] Expanded Window Search (around w={prev_window}h)...")
+
+    # Build fine grid around winner: _100h in steps of 25h
+    fine_windows = sorted(set(
+        [max(48, prev_window + offset) for offset in range(-100, 125, 25)]
+    ))
+    print(f"    Testing windows: {fine_windows}")
+
+    # Run diagnostic with refined features + fine windows
+    # Temporarily override DIAG_WINDOWS and DIAG_STEP
+    global DIAG_WINDOWS, DIAG_STEP
+    orig_windows = DIAG_WINDOWS
+    orig_step = DIAG_STEP
+    DIAG_WINDOWS = fine_windows
+    DIAG_STEP = 24
+
+    df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
+    print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step=24")
+
+    best_config, _ = run_diagnostic_for_asset(asset_name, df_diag, refined_features)
+
+    DIAG_WINDOWS = orig_windows
+    DIAG_STEP = orig_step
+
+    if best_config:
+        best_config['feature_set'] = 'E2'
+        best_config['n_features'] = len(refined_features)
+        best_config['optimal_features'] = ','.join(refined_features)
+        best_config['horizon'] = horizon
+        best_config['iteration'] = 2
+        print(f"\n  ITERATION 2 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+              f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
+        print(f"  vs PREVIOUS:        {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{prev_config['accuracy']:.1f}%")
+        improvement = best_config['accuracy'] - prev_acc
+        print(f"  Improvement: {improvement:+.1f}%")
+
+    return best_config, refined_features
+
+
+def _run_iteration_3(asset_name, df_features, prev_config, all_cols, horizon, gamma=1.0):
+    """
+    Iteration 3: Ultra-fine tuning.
+    1. Very fine window grid (_40h, step=10h) around winner
+    2. DIAG_STEP=12 (most granular)
+    3. Feature interaction test: products of top-5 features
+    """
+    prev_features = prev_config['optimal_features'].split(',')
+    prev_features = [f for f in prev_features if f in all_cols]
+    prev_window = prev_config['best_window']
+    prev_acc = prev_config['accuracy']
+
+    print(f"\n  Starting from: {len(prev_features)} features, w={prev_window}h, {prev_acc:.1f}%")
+
+    # --- Step 1: Feature Interaction Test ---
+    print(f"\n  [ITER3 1/2] Feature Interaction Test (top-5 pairs)...")
+
+    # Get top 5 most important features
+    from lightgbm import LGBMClassifier
+    df_clean = df_features.dropna(subset=prev_features + ['label']).reset_index(drop=True)
+    model_imp = LGBMClassifier(n_estimators=200, max_depth=6, verbose=-1,
+                                device=LGBM_DEVICE, random_state=42)
+    X = df_clean[prev_features].tail(5000)
+    y = df_clean['label'].tail(5000)
+    if len(np.unique(y)) < 2:
+        top5 = prev_features[:5]
+    else:
+        sw = get_decay_weights(len(y), gamma)
+        model_imp.fit(X, y, sample_weight=sw)
+        imp = pd.Series(model_imp.feature_importances_, index=prev_features).sort_values(ascending=False)
+        top5 = list(imp.index[:5])
+    print(f"    Top 5: {top5}")
+
+    # Test interactions (product of pairs)
+    current_acc, _ = _quick_accuracy(df_clean, prev_features, window=prev_window, step=24, gamma=gamma)
+    interaction_features = []
+    tested_features = list(prev_features)
+
+    for i in range(len(top5)):
+        for j in range(i + 1, len(top5)):
+            f1, f2 = top5[i], top5[j]
+            int_name = f"{f1}_x_{f2}"
+            df_features[int_name] = df_features[f1] * df_features[f2]
+
+            test_set = tested_features + [int_name]
+            test_df = df_features.dropna(subset=test_set + ['label'])
+            if len(test_df) < 500:
+                continue
+            acc, _ = _quick_accuracy(test_df, test_set, window=prev_window, step=24, gamma=gamma)
+            if acc > current_acc + 0.3:
+                interaction_features.append(int_name)
+                tested_features.append(int_name)
+                current_acc = acc
+                print(f"    {int_name:40s} -> {acc:5.1f}% ** ADDING")
+            else:
+                print(f"    {int_name:40s} -> {acc:5.1f}%")
+                # Clean up unused interaction
+                if int_name in df_features.columns:
+                    df_features.drop(columns=[int_name], inplace=True)
+
+    if interaction_features:
+        print(f"\n    Added {len(interaction_features)} interactions: {', '.join(interaction_features)}")
+    else:
+        print(f"    No interactions improved accuracy.")
+
+    refined_features = list(tested_features)
+
+    # --- Step 2: Ultra-Fine Window Grid ---
+    print(f"\n  [ITER3 2/2] Ultra-Fine Window Search (around w={prev_window}h, step=10)...")
+
+    fine_windows = sorted(set(
+        [max(48, prev_window + offset) for offset in range(-40, 50, 10)]
+    ))
+    print(f"    Testing windows: {fine_windows}")
+
+    global DIAG_WINDOWS, DIAG_STEP
+    orig_windows = DIAG_WINDOWS
+    orig_step = DIAG_STEP
+    DIAG_WINDOWS = fine_windows
+    DIAG_STEP = 12
+
+    df_diag = df_features.dropna(subset=refined_features + ['label']).reset_index(drop=True)
+    print(f"    {len(df_diag):,} rows, {len(refined_features)} features, step=12")
+
+    best_config, _ = run_diagnostic_for_asset(asset_name, df_diag, refined_features)
+
+    DIAG_WINDOWS = orig_windows
+    DIAG_STEP = orig_step
+
+    if best_config:
+        best_config['feature_set'] = 'E3'
+        best_config['n_features'] = len(refined_features)
+        best_config['optimal_features'] = ','.join(refined_features)
+        best_config['horizon'] = horizon
+        best_config['iteration'] = 3
+        print(f"\n  ITERATION 3 RESULT: {best_config['best_combo']} | w={best_config['best_window']}h | "
+              f"{best_config['accuracy']:.1f}% | {len(refined_features)} features")
+        improvement = best_config['accuracy'] - prev_acc
+        print(f"  Improvement over iter 2: {improvement:+.1f}%")
+
+    return best_config, refined_features
+
+
+def run_mode_e(assets_list, horizon=PREDICTION_HORIZON, iterations='2'):
+    """
+    Mode E: Iterative refinement of Mode D results.
+    iteration='2'  -> run 2nd pass only
+    iteration='23' -> run 2nd + 3rd pass
+    Gamma read per asset+horizon from CSV.
+    """
+    do_iter3 = '3' in iterations
+
+    # Kill any orphaned loky workers from previous interrupted runs
+    _kill_orphan_workers()
+
+    print("\n" + "=" * 60)
+    print(f"  MODE E: ITERATIVE REFINEMENT -- {horizon}h HORIZON")
+    print(f"  Iterations: {'2nd + 3rd pass' if do_iter3 else '2nd pass only'}")
+    print("=" * 60)
+
+    # Download fresh macro & sentiment data before anything else
+    print("\n  Updating macro & sentiment data...")
+    try:
+        import download_macro_data
+        download_macro_data.main()
+    except ImportError:
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+    except Exception as e:
+        print(f"  WARNING: Macro data update failed: {e}")
+
+    update_all_data(assets_list)
+    final_models = []
+
+    for asset_name in assets_list:
+        # Load previous Mode D (or E) result
+        prev_config = _load_mode_d_config(asset_name, horizon)
+        if prev_config is None:
+            print(f"  ERROR: No existing model for {asset_name} {horizon}h.")
+            print(f"  Run Mode D first!")
+            continue
+
+        gamma = prev_config.get('gamma', 1.0)
+
+        print(f"\n{'='*60}")
+        print(f"  REFINING: {asset_name} ({horizon}h, gamma={gamma})")
+        print(f"{'='*60}")
+
+        prev_features = prev_config['optimal_features']
+        if not prev_features or prev_features == 'nan':
+            print(f"  ERROR: No optimal features saved for {asset_name}.")
+            print(f"  Run Mode D first.")
+            continue
+
+        print(f"  Previous: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{prev_config['accuracy']:.1f}% | {len(prev_features.split(','))} features")
+
+        # Build features, cap at 1 year (decay handles recency)
+        df_raw = load_data(asset_name)
+        if df_raw is None:
+            continue
+
+        print(f"\n  Building all features (horizon={horizon}h)...")
+        df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+
+        MAX_E_HOURS = 6 * 30 * 24  # 4,320 hours
+        if len(df_full) > MAX_E_HOURS:
+            print(f"  Capped: {len(df_full):,} -> {MAX_E_HOURS:,} rows (last 6mo)")
+            df_full = df_full.tail(MAX_E_HOURS).reset_index(drop=True)
+
+        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+        print(f"  Clean data: {len(df_clean):,} rows")
+
+        if len(df_clean) < 500:
+            print(f"  Not enough data. Skipping.")
+            continue
+
+        # --- ITERATION 2 ---
+        print(f"\n{'='*60}")
+        print(f"  ITERATION 2: FEATURE REFINEMENT + FINER GRID")
+        print(f"{'='*60}")
+
+        iter2_config, iter2_features = _run_iteration_2(
+            asset_name, df_clean, prev_config, all_cols, horizon, gamma=gamma)
+
+        if iter2_config is None:
+            print("  Iteration 2 failed. Keeping previous config.")
+            final_models.append(prev_config)
+            continue
+
+        # --- ITERATION 3 (optional) ---
+        if do_iter3:
+            print(f"\n{'='*60}")
+            print(f"  ITERATION 3: ULTRA-FINE TUNING")
+            print(f"{'='*60}")
+
+            iter3_config, iter3_features = _run_iteration_3(
+                asset_name, df_full, iter2_config, all_cols + [c for c in df_full.columns if '_x_' in c], horizon, gamma=gamma)
+
+            if iter3_config and iter3_config['accuracy'] > iter2_config['accuracy']:
+                final_config = iter3_config
+                print(f"\n  >>> Using iteration 3 result (better by "
+                      f"{iter3_config['accuracy'] - iter2_config['accuracy']:+.1f}%)")
+            else:
+                final_config = iter2_config
+                print(f"\n  >>> Keeping iteration 2 result (iter 3 didn't improve)")
+        else:
+            final_config = iter2_config
+
+        final_config['gamma'] = gamma
+        final_models.append(final_config)
+
+        # Summary
+        original_acc = prev_config['accuracy']
+        final_acc = final_config['accuracy']
+        print(f"\n  {'='*50}")
+        print(f"  REFINEMENT SUMMARY: {asset_name} ({horizon}h)")
+        print(f"  {'='*50}")
+        print(f"  Before: {prev_config['best_combo']} | w={prev_config['best_window']}h | "
+              f"{original_acc:.1f}% | {len(prev_config['optimal_features'].split(','))} features")
+        print(f"  After:  {final_config['best_combo']} | w={final_config['best_window']}h | "
+              f"{final_acc:.1f}% | {final_config['n_features']} features")
+        print(f"  Total improvement: {final_acc - original_acc:+.1f}%")
+        print(f"  {'='*50}")
+
+    if not final_models:
+        print("\nNo results. Aborting.")
+        return
+
+    # Save (merge with existing)
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
+    df_best = pd.DataFrame(final_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in final_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == horizon)
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+
+    print(f"\n{'='*60}")
+    print(f"  MODE E COMPLETE -- RESULTS SAVED")
+    print(f"{'='*60}")
+    for m in final_models:
+        fs = m.get('feature_set', 'E')
+        print(f"  {m['coin']:6s} -> {m['best_combo']:20s} | w={m['best_window']:4d}h | "
+              f"{m['accuracy']:.1f}% | {m.get('n_features', '?')} features | {fs} | {horizon}h")
+
+    # Generate signals + charts
+    print("\n" + "=" * 60)
+    print("  GENERATING SIGNALS & BACKTEST CHARTS")
+    print("=" * 60)
+
+    all_signals = {}
+    for config in final_models:
+        asset_name = config['coin']
+        model_names = config['models'].split('+')
+        window = config['best_window']
+        feature_override = config['optimal_features'].split(',')
+        cfg_gamma = config.get('gamma', 1.0)
+
+        signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
+                                   feature_override=feature_override, horizon=horizon, gamma=cfg_gamma)
+        signals = simulate_portfolio(signals)
+        _print_bootstrap_ci(signals, label=f"{asset_name} {horizon}h")
+        all_signals[asset_name] = signals
+
+        generate_backtest_chart(asset_name, signals, model_info=config)
+
+        if signals:
+            latest = signals[-1]
+            print(f"\n  >> {asset_name} ({horizon}h): {latest['signal']} ({latest['confidence']:.0f}%) "
+                  f"| price=${latest['close']:,.2f}")
+
+    export_chart_data(all_signals)
+
+    print("\n" + "=" * 60)
+    print("  MODE E COMPLETE")
+    print("=" * 60)
+
+
+# ============================================================
 # MODE G: LIVE BACKTEST VALIDATION (top 6 candidates → pick best)
 # ============================================================
 
@@ -3643,10 +4726,11 @@ def run_mode_g(assets_list, horizons=None):
         return
 
     df_candidates = pd.read_csv(candidates_csv)
+    df_deku = pd.read_csv(DEKU_CSV) if os.path.exists(DEKU_CSV) else None
 
     print("=" * 80)
     print(f"  MODE G: LIVE BACKTEST + REFINE — {','.join(assets_list)} {','.join(str(h)+'h' for h in horizons)}")
-    print(f"  Period: last {MODE_G_REPLAY_HOURS} hours (2 weeks), every hour")
+    print(f"  Period: last {MODE_G_REPLAY_HOURS} hours (1 week), every hour")
     print(f"  Ranking by: conf>={MODE_G_PRIMARY_CONF}% return")
     print(f"  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best")
     print(f"  Candidates: {candidates_csv}")
@@ -3680,6 +4764,21 @@ def run_mode_g(assets_list, horizons=None):
             print(f"  [Ranking done: {time.time()-t0:.1f}s] — {len(ranked_features)} features ranked")
 
             configs = {}
+
+            # Deku Production (baseline)
+            if df_deku is not None:
+                deku_mask = (df_deku['coin'] == asset) & (df_deku['horizon'] == horizon)
+                rows = df_deku[deku_mask]
+                if not rows.empty:
+                    row = rows.iloc[0]
+                    configs['Deku Prod'] = {
+                        'combo': row['best_combo'],
+                        'window': int(row['best_window']),
+                        'gamma': float(row['gamma']),
+                        'features': row['optimal_features'].split(','),
+                        'n_features': int(row['n_features']),
+                        'source': 'deku',
+                    }
 
             # Doohan candidates from Mode D
             asset_candidates = df_candidates[mask].sort_values(
@@ -3761,83 +4860,55 @@ def run_mode_g(assets_list, horizons=None):
 
             all_results[key] = results
 
-            # ── Find overall best across ALL configs and confidence thresholds ──
-            # All candidates (D + refined) compete on equal footing via return × win_rate scoring
-            all_candidates = [(lbl, r) for lbl, r in results.items() if r]
+            # ── Find overall best (D or refined) at PRIMARY_CONF ──
+            all_doohan = [(lbl, r) for lbl, r in results.items()
+                          if r and r['cfg'].get('source') in ('doohan', 'refined')
+                          and f'conf_{MODE_G_PRIMARY_CONF}' in r]
 
-            if all_candidates:
-                # Find best (config, confidence) combination
-                # Scoring: negative returns rank below all positives;
-                # among positives, return × win_rate favors consistency
-                best_label, best_r, best_conf = None, None, MODE_G_PRIMARY_CONF
-                best_score = -999
-                for lbl, r in all_candidates:
-                    for conf in MODE_G_CONF_THRESHOLDS:
-                        if f'conf_{conf}' not in r:
-                            continue
-                        sim = r[f'conf_{conf}']
-                        # Require at least 5 trades for the confidence to be valid
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
-                            best_label = lbl
-                            best_r = r
-                            best_conf = conf
+            if all_doohan:
+                best_label, best_r = max(all_doohan,
+                                         key=lambda x: x[1][f'conf_{MODE_G_PRIMARY_CONF}']['return_pct'])
+                best_sim = best_r[f'conf_{MODE_G_PRIMARY_CONF}']
+                best_cfg = best_r['cfg']
 
-                if best_r is None:
-                    # Fallback to PRIMARY_CONF
-                    for lbl, r in all_candidates:
-                        if f'conf_{MODE_G_PRIMARY_CONF}' in r:
-                            sim = r[f'conf_{MODE_G_PRIMARY_CONF}']
-                            ret = sim['return_pct']
-                            wr = sim['win_rate'] / 100.0
-                            score = ret * wr if ret > 0 else ret
-                            if score > best_score:
-                                best_score = score
-                                best_label = lbl
-                                best_r = r
-                                best_conf = MODE_G_PRIMARY_CONF
+                print(f"\n  {'='*70}")
+                print(f"  OVERALL BEST: {best_label}  →  {asset} {horizon}h")
+                print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  f={best_cfg['n_features']}")
+                print(f"  Return (conf>={MODE_G_PRIMARY_CONF}%): {best_sim['return_pct']:+.2f}%  "
+                      f"WR={best_sim['win_rate']:.0f}%  trades={best_sim['trades']}")
 
-                if best_r:
-                    best_sim = best_r[f'conf_{best_conf}']
-                    best_cfg = best_r['cfg']
+                # Compare vs Deku
+                if 'Deku Prod' in results and f'conf_{MODE_G_PRIMARY_CONF}' in results['Deku Prod']:
+                    deku_ret = results['Deku Prod'][f'conf_{MODE_G_PRIMARY_CONF}']['return_pct']
+                    diff = best_sim['return_pct'] - deku_ret
+                    print(f"  vs Deku: {diff:+.2f}% {'BETTER' if diff > 0 else 'WORSE'}")
+                print(f"  {'='*70}")
 
-                    print(f"\n  {'='*70}")
-                    print(f"  OVERALL BEST: {best_label}  →  {asset} {horizon}h")
-                    print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  f={best_cfg['n_features']}")
-                    print(f"  Return (conf>={best_conf}%): {best_sim['return_pct']:+.2f}%  "
-                          f"WR={best_sim['win_rate']:.0f}%  trades={best_sim['trades']}")
-                    print(f"  {'='*70}")
-
-                    # Build production row
-                    if best_cfg.get('source') == 'doohan' and 'csv_row' in best_cfg:
-                        prod_row = best_cfg['csv_row'].copy()
-                    else:
-                        # Refined config — build row from scratch
-                        prod_row = {
-                            'coin': asset,
-                            'best_window': best_cfg['window'],
-                            'best_combo': best_cfg['combo'],
-                            'models': best_cfg['combo'],
-                            'return_pct': 0,
-                            'accuracy': 0,
-                            'combined_score': 0,
-                            'feature_set': 'D',
-                            'n_features': best_cfg['n_features'],
-                            'optimal_features': ','.join(best_cfg['features']),
-                            'horizon': horizon,
-                            'gamma': round(best_cfg['gamma'], 4),
-                            'sampler': 'Refined',
-                        }
-                    production_models.append((prod_row, horizon, best_conf))
+                # Build production row
+                if best_cfg.get('source') == 'doohan' and 'csv_row' in best_cfg:
+                    prod_row = best_cfg['csv_row'].copy()
+                else:
+                    # Refined config — build row from scratch
+                    prod_row = {
+                        'coin': asset,
+                        'best_window': best_cfg['window'],
+                        'best_combo': best_cfg['combo'],
+                        'models': best_cfg['combo'],
+                        'return_pct': 0,
+                        'accuracy': 0,
+                        'combined_score': 0,
+                        'feature_set': 'D',
+                        'n_features': best_cfg['n_features'],
+                        'optimal_features': ','.join(best_cfg['features']),
+                        'horizon': horizon,
+                        'gamma': round(best_cfg['gamma'], 4),
+                        'sampler': 'Refined',
+                    }
+                production_models.append((prod_row, horizon))
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE G — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE G — D candidates + Refined vs Deku — Last 7 days")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -3870,7 +4941,7 @@ def run_mode_g(assets_list, horizons=None):
     # Save production models
     if production_models:
         prod_rows = []
-        for prod_row, h, best_conf in production_models:
+        for prod_row, h in production_models:
             row = prod_row.copy()
             if 'rank' in row:
                 del row['rank']
@@ -3881,41 +4952,16 @@ def run_mode_g(assets_list, horizons=None):
         # Merge with existing production CSV (other assets/horizons)
         if os.path.exists(PRODUCTION_CSV):
             df_existing = pd.read_csv(PRODUCTION_CSV)
-            for prod_row, h, best_conf in production_models:
+            for prod_row, h in production_models:
                 mask = (df_existing['coin'] == prod_row['coin']) & (df_existing['horizon'] == h)
                 df_existing = df_existing[~mask]
             df_prod = pd.concat([df_existing, df_prod], ignore_index=True)
 
         df_prod.to_csv(PRODUCTION_CSV, index=False)
         print(f"\n  Production model saved: {PRODUCTION_CSV}")
-        for prod_row, h, best_conf in production_models:
+        for prod_row, h in production_models:
             print(f"    {prod_row['coin']} {h}h: {prod_row['best_combo']}  w={prod_row['best_window']}h  "
-                  f"g={prod_row['gamma']}  f={prod_row['n_features']}  conf>={best_conf}%")
-
-        # Write trading config (horizon + min_confidence per asset)
-        tcfg_path = f'{CONFIG_DIR}/trading_config_doohan.json'
-        try:
-            with open(tcfg_path) as f:
-                trading_config = json.load(f)
-        except Exception:
-            trading_config = {}
-
-        for prod_row, h, best_conf in production_models:
-            asset = prod_row['coin']
-            if asset not in trading_config:
-                trading_config[asset] = {
-                    'max_position_usd': 0,
-                    'symbol': f'{asset}-USD',
-                    'enabled': False,
-                }
-            trading_config[asset]['horizon'] = h
-            trading_config[asset]['min_confidence'] = best_conf
-
-        with open(tcfg_path, 'w') as f:
-            json.dump(trading_config, f, indent=2)
-        print(f"  Trading config updated: {tcfg_path}")
-        for prod_row, h, best_conf in production_models:
-            print(f"    {prod_row['coin']}: horizon={h}h, min_confidence={best_conf}%")
+                  f"g={prod_row['gamma']}  f={prod_row['n_features']}")
     else:
         print(f"\n  No production models to save (no valid candidates found)")
 
@@ -4020,7 +5066,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         study = optuna.create_study(
             direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=42),
-            study_name=f'doohan_v171_refine_{asset}_{horizon}h_{cfg_idx}',
+            study_name=f'doohan_v17_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
         best_refine_apf = 0.0
@@ -4405,175 +5451,6 @@ def run_strategy_comparison(assets_list, horizons=None):
 
 
 # ============================================================
-# MODE H: HORIZON SWEEP (D+G per horizon, compare, save best)
-# ============================================================
-def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False):
-    """
-    Mode H: Horizon sweep — runs D+G for each specified horizon, then compares
-    across horizons to find the best one per asset.
-
-    Usage:
-        python crypto_trading_system_doohan.py H BTC 4,5,6,7,8h          # full D+G per horizon
-        python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
-
-    Flow per asset:
-        1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode G (backtest + refine)
-        2. Compare best config from each horizon
-        3. Save overall winner to production CSV + trading config
-    """
-    if n_trials is None:
-        n_trials = DEKU_DEFAULT_TRIALS
-
-    if len(horizons) < 2:
-        print("  ERROR: Mode H requires at least 2 horizons (e.g., 5,6,7,8h)")
-        return
-
-    print("\n" + "=" * 80)
-    print(f"  MODE H: HORIZON SWEEP")
-    print(f"  Assets: {', '.join(assets_list)}")
-    print(f"  Horizons: {', '.join(str(h)+'h' for h in horizons)}")
-    skip_label = " (--skip: reuse existing)" if skip_d else ""
-    print(f"  Pipeline: D (grid{skip_label}) → G (backtest + refine) per horizon → compare → save best")
-    print(f"  Trials: {n_trials} per horizon")
-    print("=" * 80)
-
-    t_total = time.time()
-
-    for asset in assets_list:
-        print(f"\n{'#' * 80}")
-        print(f"  HORIZON SWEEP: {asset} — testing {', '.join(str(h)+'h' for h in horizons)}")
-        print(f"{'#' * 80}")
-
-        horizon_results = {}  # horizon -> {best_label, best_cfg, best_conf, best_return, g_results}
-
-        for h in horizons:
-            print(f"\n{'=' * 70}")
-            print(f"  {asset} — HORIZON {h}h ({horizons.index(h)+1}/{len(horizons)})")
-            print(f"{'=' * 70}")
-
-            # Step 1: Run Mode D for this horizon
-            skip_this = False
-            if skip_d:
-                csv_path = _get_models_csv_path()
-                if os.path.exists(csv_path):
-                    df_bm = pd.read_csv(csv_path)
-                    skip_this = len(df_bm[(df_bm['coin'] == asset) & (df_bm['horizon'] == h)]) > 0
-
-            if skip_this:
-                print(f"\n  Mode D results already exist for {asset} {h}h — skipping D (--skip)")
-            else:
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
-
-            # Step 2: Run Mode G for this horizon
-            g_results = run_mode_g([asset], [h])
-
-            # Extract best result from Mode G
-            key = f"{asset}_{h}h"
-            if g_results and key in g_results:
-                results = g_results[key]
-                # Find best across all configs and confidence levels
-                best_score = -999
-                best_label = None
-                best_cfg = None
-                best_conf = MODE_G_PRIMARY_CONF
-
-                # All candidates (D + refined) compete via return × win_rate scoring
-                all_items = {lbl: r for lbl, r in results.items() if r}
-
-                for lbl, r in all_items.items():
-                    for conf in MODE_G_CONF_THRESHOLDS:
-                        if f'conf_{conf}' not in r:
-                            continue
-                        sim = r[f'conf_{conf}']
-                        if sim['trades'] < 5:
-                            continue
-                        ret = sim['return_pct']
-                        wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
-                        if score > best_score:
-                            best_score = score
-                            best_label = lbl
-                            best_cfg = r['cfg']
-                            best_conf = conf
-
-                if best_label:
-                    best_sim = results[best_label][f'conf_{best_conf}']
-                    horizon_results[h] = {
-                        'label': best_label,
-                        'cfg': best_cfg,
-                        'conf': best_conf,
-                        'return_pct': best_sim['return_pct'],
-                        'trades': best_sim['trades'],
-                        'win_rate': best_sim['win_rate'],
-                        'score': best_score,
-                        'buy_hold': results[best_label].get('buy_hold', 0),
-                    }
-                    print(f"\n  {asset} {h}h WINNER: {best_label}")
-                    print(f"  {best_cfg['combo']}  w={best_cfg['window']}h  g={best_cfg['gamma']:.4f}  "
-                          f"f={best_cfg['n_features']}  conf>={best_conf}%")
-                    print(f"  Return: {best_sim['return_pct']:+.2f}%  trades={best_sim['trades']}  "
-                          f"WR={best_sim['win_rate']:.0f}%  score={best_score:.2f}")
-
-        # ── Cross-horizon comparison ──
-        if not horizon_results:
-            print(f"\n  No valid results for {asset} across any horizon")
-            continue
-
-        print(f"\n{'=' * 80}")
-        print(f"  HORIZON COMPARISON: {asset}")
-        print(f"{'=' * 80}")
-        print(f"  {'H':>3} | {'Model':<25} | {'Combo':14s} | {'W':>4} | {'G':>6} | {'F':>3} | "
-              f"{'Conf':>4} | {'Return':>8} | {'Tr':>3} | {'WR':>4} | {'B&H':>7}")
-        print(f"  {'─' * 100}")
-
-        for h in sorted(horizon_results.keys()):
-            hr = horizon_results[h]
-            cfg = hr['cfg']
-            marker = ""
-            print(f"  {h:>2}h | {hr['label']:<25} | {cfg['combo']:14s} | {cfg['window']:>3}h | "
-                  f"{cfg['gamma']:>.3f} | {cfg['n_features']:>3} | {hr['conf']:>3}% | "
-                  f"{hr['return_pct']:>+7.2f}% | {hr['trades']:>3} | {hr['win_rate']:>3.0f}% | "
-                  f"{hr['buy_hold']:>+6.2f}%")
-
-        # Pick overall best horizon (return × win_rate scoring)
-        best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['score'])
-        winner = horizon_results[best_h]
-
-        print(f"\n  >>> BEST HORIZON for {asset}: {best_h}h — {winner['return_pct']:+.2f}% "
-              f"(conf>={winner['conf']}%, {winner['trades']} trades)")
-        print(f"  >>> {winner['cfg']['combo']}  w={winner['cfg']['window']}h  "
-              f"g={winner['cfg']['gamma']:.4f}  f={winner['cfg']['n_features']}")
-
-        # Note: Mode G already saved the production CSV and trading config
-        # for each horizon individually. The user can read the comparison above
-        # and the best per-horizon models are already in production CSV.
-        # Trading config will have the LAST horizon's config — update it to the best:
-        tcfg_path = f'{CONFIG_DIR}/trading_config_doohan.json'
-        try:
-            with open(tcfg_path) as f:
-                trading_config = json.load(f)
-        except Exception:
-            trading_config = {}
-
-        if asset not in trading_config:
-            trading_config[asset] = {
-                'max_position_usd': 0,
-                'symbol': f'{asset}-USD',
-                'enabled': False,
-            }
-        trading_config[asset]['horizon'] = best_h
-        trading_config[asset]['min_confidence'] = winner['conf']
-
-        with open(tcfg_path, 'w') as f:
-            json.dump(trading_config, f, indent=2)
-        print(f"  >>> Trading config: {asset} → horizon={best_h}h, min_confidence={winner['conf']}%")
-
-    elapsed = (time.time() - t_total) / 60
-    print(f"\n  Mode H complete: {elapsed:.1f} min total")
-    print(f"{'=' * 80}")
-
-
-# ============================================================
 # MAIN MENU
 # ============================================================
 def _run_quick_asset(asset):
@@ -4726,26 +5603,516 @@ def _run_quick_asset(asset):
 
     print("\nDone!")
 
+
+# ============================================================
+# MODE DAF: COMBINED D → A → F PIPELINE
+# Efficient gamma optimization: runs feature analysis once (gamma-independent),
+# then sweeps gammas only on the diagnostic (top 10 combos), then Mode F.
+# Usage: python crypto_trading_system_casca_v1.4.py DAF BTC 4,8h
+# ============================================================
+DAF_GAMMAS = [0.999, 0.998, 0.997, 0.996, 0.995]
+DAF_TOP_N = 10  # number of top (combo, window) pairs from D phase to sweep in A phase
+
+
+def run_mode_daf(assets_list, horizons, resume=False):
+    """Combined D→A→F pipeline.
+
+    D phase: Full pipeline at gamma=1.0 — data download, feature analysis, diagnostic.
+             Feature analysis is gamma-independent so it only runs once.
+             Captures sorted_results (all 55 diagnostic configs ranked by APF).
+
+    A phase: Takes top 10 (combo, window) pairs from D results.
+             Sweeps DAF_GAMMAS × top 10 = 50 eval calls per horizon (vs 275 in full Mode A).
+             Picks the best (combo, window, gamma) by APF.
+
+    F phase: Runs strategy comparison with the winning models saved to CSV.
+    """
+    from joblib.externals.loky import get_reusable_executor
+
+    total_horizons = len(horizons) * len(assets_list)
+    t_total = time.time()
+
+    print("\n" + "=" * 70)
+    print(f"  MODE DAF: COMBINED D → A → F PIPELINE (V1.4)")
+    print(f"  D: feature analysis + diagnostic (gamma=1.0)")
+    print(f"  A: gamma sweep on top {DAF_TOP_N} combos × {len(DAF_GAMMAS)} gammas")
+    print(f"  F: strategy comparison")
+    print(f"  Assets: {', '.join(assets_list)} | Horizons: {', '.join(str(h)+'h' for h in horizons)}")
+    print(f"  Gammas: {', '.join(str(g) for g in DAF_GAMMAS)}")
+    print("=" * 70)
+
+    # Download fresh macro & sentiment data once
+    print("\n  Updating macro & sentiment data...")
+    t0 = time.time()
+    try:
+        import download_macro_data
+        download_macro_data.main()
+    except ImportError:
+        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+    except Exception as e:
+        print(f"  WARNING: Macro data update failed: {e}")
+    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+
+    t0 = time.time()
+    update_all_data(assets_list)
+    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+
+    _kill_orphan_workers()
+
+    best_models = []  # final winners (one per asset+horizon)
+
+    for asset_name in assets_list:
+        for horizon in horizons:
+            t_ah = time.time()
+            print(f"\n{'#'*70}")
+            print(f"  DAF: {asset_name} {horizon}h")
+            print(f"{'#'*70}")
+
+            # ── D PHASE: feature analysis + diagnostic at gamma=1.0 ──
+            print(f"\n  ── D PHASE: {asset_name} {horizon}h (gamma=1.0) ──")
+
+            df_raw = load_data(asset_name)
+            if df_raw is None:
+                continue
+
+            MAX_DIAG_HOURS = 6 * 30 * 24  # 4,320 hours
+            print(f"\n  Building all features (horizon={horizon}h)...")
+            t0 = time.time()
+            df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
+            print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
+
+            total_rows = len(df_full)
+            if total_rows > MAX_DIAG_HOURS:
+                df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+                print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+
+            df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+            print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
+
+            if len(df_clean) < 500:
+                print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
+                continue
+
+            # Feature analysis (gamma-independent — only runs once)
+            feat_ckpt = _load_checkpoint(asset_name, horizon, 'features') if resume else None
+            if feat_ckpt:
+                optimal_features = feat_ckpt['features']
+                print(f"\n  RESUME: loaded {len(optimal_features)} optimal features from checkpoint")
+            else:
+                t0 = time.time()
+                optimal_features = run_feature_analysis(asset_name, df_clean, all_cols, gamma=1.0)
+                print(f"  [Feature analysis total: {(time.time()-t0)/60:.1f} min]")
+                if optimal_features and len(optimal_features) >= 3:
+                    _save_checkpoint(asset_name, horizon, 'features', {'features': optimal_features})
+
+            if not optimal_features or len(optimal_features) < 3:
+                print(f"  Feature analysis produced too few features ({len(optimal_features or [])}). Skipping.")
+                continue
+
+            # Diagnostic at gamma=1.0
+            df_diag = df_clean.dropna(subset=optimal_features + ['label']).reset_index(drop=True)
+            print(f"\n{'='*60}")
+            print(f"  D-PHASE DIAGNOSTIC: {asset_name} ({len(optimal_features)} features, gamma=1.0)  [{datetime.now().strftime('%H:%M:%S')}]")
+            print(f"{'='*60}")
+            print(f"  {len(df_diag):,} rows, {len(optimal_features)} features")
+
+            t0 = time.time()
+            d_best_config, d_sorted_results = run_diagnostic_for_asset(
+                asset_name, df_diag, optimal_features, gamma=1.0, resume=resume, horizon=horizon
+            )
+            d_elapsed = (time.time()-t0)/60
+            print(f"  [D-phase diagnostic: {d_elapsed:.1f} min]")
+
+            if not d_sorted_results:
+                print(f"  No diagnostic results. Skipping.")
+                continue
+
+            # ── A PHASE: gamma sweep on top N combos ──
+            print(f"\n  ── A PHASE: gamma sweep on top {DAF_TOP_N} combos ──")
+
+            # Sort by APF descending, take top N unique (combo, window) pairs
+            d_sorted_results.sort(key=lambda x: (-x[10], -x[4]))  # APF desc, return desc
+            top_configs = []
+            seen = set()
+            for r in d_sorted_results:
+                key = (r[0], r[1])  # (combo_name, window)
+                if key not in seen:
+                    seen.add(key)
+                    top_configs.append(key)
+                if len(top_configs) >= DAF_TOP_N:
+                    break
+
+            print(f"  Top {len(top_configs)} combos from D phase:")
+            for i, (combo_name, window) in enumerate(top_configs, 1):
+                # Find original APF for display
+                orig = next(r for r in d_sorted_results if r[0] == combo_name and r[1] == window)
+                print(f"    {i:2d}. {combo_name:22s} w={window:4d}h  APF={orig[10]:.3f}  ret={orig[4]:+.1f}%")
+
+            n_tests = len(DAF_GAMMAS) * len(top_configs)
+            print(f"\n  Sweeping {len(DAF_GAMMAS)} gammas × {len(top_configs)} combos = {n_tests} tests")
+
+            # Prepare numpy arrays for _eval_one_config
+            features_np = df_diag[optimal_features].values.astype(np.float64)
+            labels_np = df_diag['label'].values.astype(np.int32)
+            closes_np = df_diag['close'].values.astype(np.float64)
+            n = len(df_diag)
+
+            # Reset BLAS limits for diagnostic workers
+            get_reusable_executor().shutdown(wait=True)
+            for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                        'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+                os.environ.pop(var, None)
+
+            # Build all (gamma, combo, window) tasks
+            a_tasks = []
+            for gamma in DAF_GAMMAS:
+                for combo_name, window in top_configs:
+                    combo_list = combo_name.split('+')
+                    a_tasks.append((gamma, combo_list, window))
+
+            t_a = time.time()
+            with _suppress_stderr():
+                a_results = Parallel(n_jobs=N_JOBS_PARALLEL, verbose=0)(
+                    delayed(_eval_one_config)(
+                        features_np, labels_np, closes_np, combo, window, n, DIAG_STEP, DIAG_MODELS,
+                        pred_horizon=horizon, gamma=gamma
+                    )
+                    for gamma, combo, window in a_tasks
+                )
+
+            # Restore BLAS limits
+            for var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                        'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+                os.environ[var] = '1'
+            get_reusable_executor().shutdown(wait=True)
+
+            a_elapsed = (time.time()-t_a)/60
+            print(f"  [A-phase sweep: {a_elapsed:.1f} min]")
+
+            # Combine D (gamma=1.0) results + A (gamma sweep) results
+            # Build a unified list: (gamma, combo_name, window, APF, return, raw_pf, bh_pf, accuracy, trades)
+            all_candidates = []
+
+            # Add D-phase results (gamma=1.0) for the top N combos
+            for combo_name, window in top_configs:
+                orig = next(r for r in d_sorted_results if r[0] == combo_name and r[1] == window)
+                all_candidates.append((1.0, combo_name, window, orig[10], orig[4], orig[11], orig[12], orig[2], orig[6]))
+
+            # Add A-phase results
+            for (gamma, combo_list, window), result in zip(a_tasks, a_results):
+                if result is None:
+                    continue
+                combo_name, r_window, acc, n_total, cum_ret, win_rate, trades, avg_gain, avg_loss, max_dd, adj_pf, raw_pf, bh_pf = result
+                all_candidates.append((gamma, combo_name, r_window, adj_pf, cum_ret, raw_pf, bh_pf, acc, trades))
+
+            # Sort by APF descending, then return descending
+            all_candidates.sort(key=lambda x: (-x[3], -x[4]))
+
+            # Display top 15
+            print(f"\n  {'Rank':>4s}  {'Gamma':>6s}  {'Combo':22s}  {'Window':>6s}  {'APF':>7s}  {'Return':>8s}  {'rawPF':>6s}  {'bhPF':>6s}  {'Acc':>6s}  {'Trades':>6s}")
+            print(f"  {'-'*88}")
+            for i, (gamma, combo_name, window, apf, ret, raw_pf, bh_pf, acc, trades) in enumerate(all_candidates[:15], 1):
+                marker = " <-- WINNER" if i == 1 else ""
+                print(f"  {i:4d}  {gamma:6.3f}  {combo_name:22s}  {window:5d}h  {apf:7.3f}  {ret:+7.1f}%  {raw_pf:6.2f}  {bh_pf:6.2f}  {acc*100:5.1f}%  {trades:5d}{marker}")
+
+            # Pick winner
+            winner = all_candidates[0]
+            w_gamma, w_combo, w_window, w_apf, w_ret, w_raw_pf, w_bh_pf, w_acc, w_trades = winner
+
+            print(f"\n  {'='*70}")
+            print(f"  WINNER: {asset_name} {horizon}h")
+            print(f"  Models: {w_combo}  Window: {w_window}h  Gamma: {w_gamma}")
+            print(f"  APF: {w_apf:.3f}  Return: {w_ret:+.1f}%  Accuracy: {w_acc*100:.1f}%")
+            print(f"  rawPF: {w_raw_pf:.2f}  bhPF: {w_bh_pf:.2f}  Trades: {w_trades}")
+            print(f"  {'='*70}")
+
+            # Save winner to V1.4 models CSV
+            best_config = {
+                'coin': asset_name,
+                'best_window': w_window,
+                'best_combo': w_combo,
+                'accuracy': round(w_acc * 100, 2),
+                'models': w_combo,
+                'return_pct': round(w_ret, 2),
+                'win_rate': 0,  # not tracked in summary
+                'trades': w_trades,
+                'combined_score': round(w_apf, 4),
+                'feature_set': 'D',
+                'n_features': len(optimal_features),
+                'optimal_features': ','.join(optimal_features),
+                'horizon': horizon,
+                'gamma': w_gamma,
+            }
+            best_models.append(best_config)
+
+            # Save Mode A results CSV for reference
+            import csv
+            a_csv_path = MODE_A_RESULTS_CSV
+            file_exists = os.path.exists(a_csv_path)
+            with open(a_csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(['coin', 'horizon', 'gamma', 'models', 'window', 'accuracy',
+                                     'return_pct', 'raw_pf', 'buyhold_pf', 'adjusted_pf', 'trades'])
+                for gamma, combo_name, window, apf, ret, raw_pf, bh_pf, acc, trades in all_candidates:
+                    writer.writerow([asset_name, horizon, gamma, combo_name, window,
+                                     round(acc*100, 2), round(ret, 2), round(raw_pf, 4),
+                                     round(bh_pf, 4), round(apf, 4), trades])
+            print(f"  A-phase results saved: {a_csv_path}")
+
+            elapsed_ah = (time.time()-t_ah)/60
+            print(f"  [{asset_name} {horizon}h total: {elapsed_ah:.1f} min]")
+
+    if not best_models:
+        print("\nNo results. Aborting.")
+        return
+
+    # Save best models to V1.4 CSV (merge with existing)
+    _backup_models_csv()
+    csv_path = _get_models_csv_path()
+    df_best = pd.DataFrame(best_models)
+    if os.path.exists(csv_path):
+        df_existing = pd.read_csv(csv_path)
+        if 'horizon' not in df_existing.columns:
+            df_existing['horizon'] = 4
+        for m in best_models:
+            mask = (df_existing['coin'] == m['coin']) & (df_existing['horizon'] == m['horizon'])
+            df_existing = df_existing[~mask]
+        df_best = pd.concat([df_existing, df_best], ignore_index=True)
+    df_best.to_csv(csv_path, index=False)
+    print(f"\n  Best models saved: {csv_path}")
+
+    # ── F PHASE: strategy comparison ──
+    if len(horizons) >= 2:
+        print(f"\n  ── F PHASE: strategy comparison ──")
+        run_strategy_comparison(assets_list, horizons)
+    else:
+        print(f"\n  F PHASE skipped (need both 4h+8h for strategy comparison)")
+
+    elapsed_total = (time.time()-t_total)/60
+    print(f"\n  MODE DAF complete: {elapsed_total:.1f} min total")
+
+
+# ============================================================
+# MODE A: GAMMA OPTIMIZATION
+# Tests multiple gamma values per horizon, saves to isolated CSV.
+# Usage: python crypto_trading_system_casca.py A BTC 4,8h
+# ============================================================
+MODE_A_GAMMAS = [0.999, 0.998, 0.997, 0.996, 0.995]
+MODE_A_RESULTS_CSV = f'{MODELS_DIR}/testing_doohan_a_results.csv'
+
+
+def run_mode_a(assets_list, horizons, resume=False):
+    """Run Mode D for each gamma × horizon combo, saving results to isolated CSV."""
+    import shutil
+
+    total_tests = len(MODE_A_GAMMAS) * len(horizons) * len(assets_list)
+    print(f"\n{'='*70}")
+    print(f"  MODE A: GAMMA OPTIMIZATION")
+    print(f"  {len(MODE_A_GAMMAS)} gammas × {len(horizons)} horizons × {len(assets_list)} assets = {total_tests} tests")
+    print(f"  Gammas: {', '.join(str(g) for g in MODE_A_GAMMAS)}")
+    print(f"  Baseline (gamma=1.0) already in production CSV")
+    print(f"  Results: {MODE_A_RESULTS_CSV}")
+    print(f"{'='*70}")
+
+    t_total = time.time()
+    completed = 0
+
+    for asset in assets_list:
+        for horizon in horizons:
+            for gamma in MODE_A_GAMMAS:
+                completed += 1
+
+                # Check if already done (resume support)
+                if resume and _mode_a_is_completed(asset, gamma, horizon):
+                    print(f"\n  [{completed}/{total_tests}] SKIP: {asset} {horizon}h gamma={gamma} (already done)")
+                    continue
+
+                print(f"\n{'#'*70}")
+                print(f"  [{completed}/{total_tests}] GAMMA TEST: {asset} | {horizon}h | gamma={gamma}")
+                print(f"{'#'*70}")
+
+                t0 = time.time()
+
+                # Use MODELS_CSV_OVERRIDE to redirect Mode D output to a temp CSV
+                # so it doesn't overwrite production models
+                temp_csv = f'{MODELS_DIR}/_casca_a_temp.csv'
+                global MODELS_CSV_OVERRIDE
+                old_override = MODELS_CSV_OVERRIDE
+                MODELS_CSV_OVERRIDE = temp_csv
+
+                # Seed the temp CSV with a row that has our forced gamma
+                # so _load_mode_d_config picks it up
+                seed = pd.DataFrame([{
+                    'coin': asset, 'best_window': 100, 'best_combo': '',
+                    'accuracy': 0, 'models': '', 'return_pct': 0,
+                    'win_rate': 0, 'trades': 0, 'combined_score': 0,
+                    'feature_set': 'D', 'n_features': 0, 'optimal_features': '',
+                    'horizon': horizon, 'gamma': gamma
+                }])
+                seed.to_csv(temp_csv, index=False)
+
+                # Override charts dir for isolation
+                global CHARTS_DIR
+                old_charts = CHARTS_DIR
+                CHARTS_DIR = f'charts/casca_a_test'
+                os.makedirs(CHARTS_DIR, exist_ok=True)
+
+                try:
+                    run_mode_d([asset], horizon=horizon)
+                except Exception as e:
+                    print(f"  ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    MODELS_CSV_OVERRIDE = old_override
+                    CHARTS_DIR = old_charts
+                    continue
+                finally:
+                    MODELS_CSV_OVERRIDE = old_override
+                    CHARTS_DIR = old_charts
+
+                elapsed = time.time() - t0
+
+                # Read result from temp CSV
+                if os.path.exists(temp_csv):
+                    df_temp = pd.read_csv(temp_csv)
+                    mask = (df_temp['coin'] == asset) & (df_temp['horizon'] == horizon)
+                    matches = df_temp[mask]
+                    # Filter out our seed row (accuracy > 0)
+                    matches = matches[matches['accuracy'] > 0]
+
+                    if not matches.empty:
+                        row = matches.iloc[-1]
+                        result = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            'asset': asset,
+                            'horizon': horizon,
+                            'gamma': gamma,
+                            'best_combo': row['best_combo'],
+                            'best_window': int(row['best_window']),
+                            'accuracy': float(row['accuracy']),
+                            'return_pct': float(row.get('return_pct', 0)),
+                            'win_rate': float(row.get('win_rate', 0)),
+                            'trades': int(row.get('trades', 0)),
+                            'adjusted_pf': float(row.get('combined_score', 0)),
+                            'n_features': int(row.get('n_features', 0)),
+                            'elapsed_min': round(elapsed / 60, 1),
+                        }
+                        _mode_a_save_result(result)
+                        print(f"\n  RESULT: gamma={gamma} | {result['best_combo']} w={result['best_window']} | "
+                              f"APF={result['adjusted_pf']:.3f} | ret={result['return_pct']:+.1f}% | "
+                              f"acc={result['accuracy']:.1f}% | trades={result['trades']} | {result['elapsed_min']}min")
+                    else:
+                        print(f"  No result found for {asset} {horizon}h gamma={gamma}")
+
+                    # Clean up temp file
+                    try:
+                        os.remove(temp_csv)
+                    except OSError:
+                        pass
+
+    print(f"\n  Total time: {(time.time()-t_total)/60:.1f} min")
+    _mode_a_print_summary(assets_list, horizons)
+
+
+def _mode_a_save_result(result):
+    """Append a result to the Mode A results CSV."""
+    df_new = pd.DataFrame([result])
+    if os.path.exists(MODE_A_RESULTS_CSV):
+        df_existing = pd.read_csv(MODE_A_RESULTS_CSV)
+        mask = ((df_existing['asset'] == result['asset']) &
+                (df_existing['horizon'] == result['horizon']) &
+                (df_existing['gamma'] == result['gamma']))
+        df_existing = df_existing[~mask]
+        df_all = pd.concat([df_existing, df_new], ignore_index=True)
+    else:
+        df_all = df_new
+    df_all.to_csv(MODE_A_RESULTS_CSV, index=False)
+
+
+def _mode_a_is_completed(asset, gamma, horizon):
+    """Check if this combo already has a result."""
+    if not os.path.exists(MODE_A_RESULTS_CSV):
+        return False
+    df = pd.read_csv(MODE_A_RESULTS_CSV)
+    mask = ((df['asset'] == asset) &
+            (df['horizon'] == horizon) &
+            (df['gamma'] == gamma))
+    return mask.any()
+
+
+def _mode_a_print_summary(assets_list, horizons):
+    """Print comparison table including baseline from production CSV."""
+    if not os.path.exists(MODE_A_RESULTS_CSV):
+        print("No Mode A results yet.")
+        return
+
+    df = pd.read_csv(MODE_A_RESULTS_CSV)
+
+    # Load baseline (gamma=1.0) from production CSV
+    prod_csv = f'{MODELS_DIR}/crypto_casca_best_models.csv'
+    if os.path.exists(prod_csv):
+        df_prod = pd.read_csv(prod_csv)
+        for asset in assets_list:
+            for h in horizons:
+                mask = (df_prod['coin'] == asset) & (df_prod['horizon'] == h)
+                row = df_prod[mask]
+                if not row.empty:
+                    r = row.iloc[0]
+                    baseline = {
+                        'timestamp': '-', 'asset': asset, 'horizon': h, 'gamma': 1.0,
+                        'best_combo': r['best_combo'], 'best_window': int(r['best_window']),
+                        'accuracy': float(r['accuracy']), 'return_pct': float(r.get('return_pct', 0)),
+                        'win_rate': float(r.get('win_rate', 0)), 'trades': int(r.get('trades', 0)),
+                        'adjusted_pf': float(r.get('combined_score', 0)),
+                        'n_features': int(r.get('n_features', 0)), 'elapsed_min': 0,
+                    }
+                    df = pd.concat([df, pd.DataFrame([baseline])], ignore_index=True)
+
+    for asset in assets_list:
+        df_a = df[df['asset'] == asset]
+        if df_a.empty:
+            continue
+
+        print(f"\n{'='*95}")
+        print(f"  MODE A: GAMMA OPTIMIZATION — {asset}")
+        print(f"{'='*95}")
+        print(f"  {'Horizon':<8} {'Gamma':<8} {'Model':<18} {'Window':<8} {'APF':<8} {'Return%':<10} {'WinRate':<8} {'Trades':<8} {'Acc%':<8} {'Feats':<6}")
+        print(f"  {'-'*91}")
+
+        for h in horizons:
+            h_df = df_a[df_a['horizon'] == h].sort_values('gamma', ascending=False)
+            best_pf = h_df['adjusted_pf'].max()
+            for _, row in h_df.iterrows():
+                gamma_str = f"{row['gamma']:.3f}" if row['gamma'] < 1.0 else "1.000*"
+                marker = " <-- BEST" if row['adjusted_pf'] == best_pf else ""
+                print(f"  {h}h{'':<5} {gamma_str:<8} {row['best_combo']:<18} "
+                      f"{int(row['best_window'])}h{'':<5} {row['adjusted_pf']:<8.3f} "
+                      f"{row['return_pct']:<+10.1f} {row['win_rate']:<8.1f} "
+                      f"{int(row['trades']):<8} {row['accuracy']:<8.1f} {int(row['n_features']):<6}{marker}")
+            if h != horizons[-1]:
+                print(f"  {'-'*91}")
+
+        print(f"  {'='*91}")
+        print(f"  * = baseline (gamma=1.0, from production CSV)")
+
+
 def main():
 
     has_macro = os.path.exists(MACRO_DIR)
 
     # ================================================================
     # CLI: python crypto_trading_system_doohan.py D BTC 4,8h
-    # ================================================================
-    # Order-independent CLI parser
-    # Any order works: MODE ASSETS HORIZONS, ASSETS MODE HORIZONS, etc.
+    # Supports: MODE [ASSETS] [HORIZON] [--trials N]
     # Examples:
     #   python crypto_trading_system_doohan.py D BTC 4,8h
-    #   python crypto_trading_system_doohan.py BTC D 4,8h --trials 150
-    #   python crypto_trading_system_doohan.py H 5,6,7,8h BTC --skip
+    #   python crypto_trading_system_doohan.py D BTC 4,8h --trials 150
     #   python crypto_trading_system_doohan.py DF BTC,ETH 4,8h
+    #   python crypto_trading_system_doohan.py B BTC 8h
+    #   python crypto_trading_system_doohan.py F BTC 4,8h
     # ================================================================
-    VALID_MODES = {'B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
-
-    # Parse flags first
+    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
     flag_resume = '--resume' in sys.argv
-    flag_skip = '--skip' in sys.argv
 
     # Parse --trials N
     n_trials = DEKU_DEFAULT_TRIALS
@@ -4755,46 +6122,6 @@ def main():
                 n_trials = int(sys.argv[i + 1])
             except ValueError:
                 pass
-
-    # --help
-    if '--help' in sys.argv or '-h' in sys.argv:
-        print("""
-Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
-
-  Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
-
-Modes:
-  B       Quick run (saved models + signals + chart)
-  D       Grid optimization (combo x window x gamma x features)
-  G       Live backtest (top 6 from D → refine top 3 → pick best)
-  DG      D then G
-  F       Strategy comparison (both_agree / either_agree / Xh_only)
-  DF      D then F
-  DGF     D then G then F (full pipeline)
-  H       Horizon sweep (D+G per horizon → compare → save best)
-
-Assets:
-  BTC,ETH,LINK,...   Comma-separated asset names (default: all)
-
-Horizons:
-  5,6,7,8h           Comma-separated horizons in hours (default: 4,8h)
-
-Options:
-  --trials N          Number of Optuna trials (default: 150)
-  --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
-  --skip              Mode H only: skip Mode D for horizons that already have results
-  --resume            Resume interrupted Optuna study
-  --help, -h          Show this help
-
-Examples:
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
-  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run G only
-  python crypto_trading_system_doohan.py DG ETH 6h               # optimize + backtest ETH 6h
-  python crypto_trading_system_doohan.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_doohan.py G BTC 6h                 # re-backtest existing results
-  python crypto_trading_system_doohan.py BTC D 8h                 # order doesn't matter
-""")
-        return
 
     # Parse --metric NAME or --metric all
     global OPTUNA_METRIC
@@ -4812,79 +6139,64 @@ Examples:
                 print(f"  Unknown metric '{m}'. Valid: all, {', '.join(sorted(VALID_METRICS))}")
                 return
 
-    # Classify positional args (order-independent)
-    cli_args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    # Remove values that follow --trials or --metric
-    skip_next = set()
-    for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric') and i < len(sys.argv) - 1:
-            skip_next.add(sys.argv[i + 1])
-    cli_args = [a for a in cli_args if a not in skip_next]
+    if cli_args and cli_args[0].upper() in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', 'HF', '5', '6', '7'):
+        mode = cli_args[0].upper()
 
-    mode = None
-    assets_list = None
-    horizons = None
-
-    for arg in cli_args:
-        upper = arg.upper()
-        # Check if it's a mode
-        if upper in VALID_MODES and mode is None:
-            mode = upper
-        # Check if it's a shortcut (5/6/7)
-        elif upper in ('5', '6', '7') and mode is None:
-            mode = upper
-        # Check if it's horizons (ends with h, contains digits)
-        elif arg.lower().endswith('h') and arg[:-1].replace(',', '').isdigit():
-            horizons = [int(h) for h in arg[:-1].split(',')]
-        # Otherwise treat as asset list
-        else:
-            parsed = [a.strip().upper() for a in arg.split(',') if a.strip().upper() in ASSETS]
-            if parsed:
-                assets_list = parsed
-
-    if mode and mode in VALID_MODES:
         # Shortcuts 5/6/7 from CLI
         if mode in ('5', '6', '7'):
             shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
             _run_quick_asset(shortcut_map[mode])
             return
 
-        # Defaults
-        if assets_list is None:
+        # Parse assets (default: all)
+        if len(cli_args) >= 2 and not cli_args[1].endswith('h') and not cli_args[1].endswith('y') and not cli_args[1].endswith('m'):
+            assets_list = [a.strip().upper() for a in cli_args[1].split(',') if a.strip().upper() in ASSETS]
+            if not assets_list:
+                assets_list = list(ASSETS.keys())
+        else:
             assets_list = list(ASSETS.keys())
-        if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
 
-        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H') else ""
-        skip_str = " | --skip" if flag_skip and mode == 'H' else ""
-        h_str = ','.join(str(h)+'h' for h in horizons)
+        # Parse horizon (default: both for Mode B and DF, short for others)
+        # Mode H/HF ignores horizon args (searches 3-8h automatically)
+        horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+        for a in cli_args:
+            if a.lower().endswith('h') and a[:-1].replace(',', '').isdigit():
+                horizons = [int(h) for h in a[:-1].split(',')]
+
+        # Use MODE_H_DEFAULT_TRIALS for H/HF modes
+        if mode in ('H', 'HF') and n_trials == DEKU_DEFAULT_TRIALS:
+            n_trials = MODE_H_DEFAULT_TRIALS
+
+        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H', 'HF') else ""
+        h_str = f"search {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h" if mode in ('H', 'HF') else ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}")
         print("=" * 60)
 
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DOOHAN")
-        print("  Exhaustive grid + Optuna refine + live backtest validation")
-        print(f"  Prediction: variable horizons (specify via CLI)")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DOOHAN V1.6")
+        print("  Three-phase: window sweep + Optuna gamma/features + combo augmentation")
+        print(f"  Prediction: {', '.join(str(h)+'h' for h in AVAILABLE_HORIZONS)} horizons available")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
         print("=" * 60)
 
         print("\nChoose mode:")
         print("  B.  Quick run (saved models + signals + chart)")
-        print("  D.  GRID OPTIMIZATION (combo × window × gamma × features)")
-        print("  DG. D then G (grid + backtest top 6 + refine top 3 + pick best)")
-        print("  DGF. DG then F (full pipeline + strategy comparison)")
+        print("  D.  OPTUNA OPTIMIZATION (joint combo × window × gamma × features)")
         print("  DF. D then F (optimize + strategy comparison)")
+        print("  DG. D then G (optimize + live backtest validation)")
+        print("  DGF. D then G (grid + backtest top 6 + refine top 3 + backtest refined + pick best)")
         print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
         print("  G.  LIVE BACKTEST (top 6 candidates from Mode D, pick best)")
-        print("  H.  HORIZON SWEEP (D+G per horizon, compare, save best)")
+        print(f"  H.  HORIZON SEARCH (Optuna sweeps {min(HORIZON_SEARCH)}-{max(HORIZON_SEARCH)}h)")
+        print(f"  HF. H then F (horizon search + strategy comparison)")
         print("  ---")
         print(f"  5. Quick BTC (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  6. Quick ETH (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
         print(f"  7. Quick XRP (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        mode = input("\nEnter B/D/DG/DGF/DF/F/G/H or 5-7: ").strip().upper()
+        mode = input("\nEnter B/D/DF/DG/DGF/F/G/H/HF or 5-7: ").strip().upper()
 
         # Shortcuts 5/6/7
         if mode in ('5', '6', '7'):
@@ -4892,7 +6204,7 @@ Examples:
             _run_quick_asset(shortcut_map[mode])
             return
 
-        if mode not in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'):
+        if mode not in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H', 'HF'):
             print("Invalid choice. Defaulting to B.")
             mode = 'B'
 
@@ -5042,8 +6354,25 @@ Examples:
         run_strategy_comparison(assets_list, horizons)
     elif mode == 'G':
         run_mode_g(assets_list, horizons)
-    elif mode == 'H':
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+    elif mode in ('H', 'HF'):
+        # Per-asset: run Mode H (horizon search), then F if HF
+        for asset in assets_list:
+            print(f"\n{'='*60}")
+            print(f"  ASSET: {asset}")
+            print(f"{'='*60}")
+            h_results = run_mode_h([asset], n_trials=n_trials, resume=flag_resume)
+
+            if mode == 'HF' and h_results:
+                # Discover which horizons Mode H saved for this asset
+                found_horizons = sorted(set(m['horizon'] for m in h_results if m['coin'] == asset))
+                if len(found_horizons) >= 2:
+                    print(f"\n  Running Mode F with discovered horizons: {', '.join(str(h)+'h' for h in found_horizons)}")
+                    run_strategy_comparison([asset], found_horizons)
+                elif len(found_horizons) == 1:
+                    print(f"\n  Only 1 horizon found ({found_horizons[0]}h) — running F as single-horizon")
+                    run_strategy_comparison([asset], found_horizons)
+                else:
+                    print(f"\n  No horizons found for {asset} — skipping Mode F")
 
     print("\nDone!")
 

@@ -1,129 +1,36 @@
 """
-Doohan — Production ML Trading System
+Doohan V1.7.3 — PySR symbolic regression features
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
-130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
-Variable horizon per asset (5h, 6h, 7h, 8h etc.)
+130 base features + PySR-discovered features -> walk-forward ML -> BUY/SELL/HOLD signals.
 
-Exhaustive grid search:
-  Grid: 3 combos × 6 windows × 6 features × 3 gammas = 324 evals (~20 min)
-     - Combos: RF+LGBM, XGB+LGBM, RF+XGB
-     - Windows: 72, 100, 150, 200, 250, 300
-     - Features: 10, 13, 17, 20, 25, 30
-     - Gammas: 0.999, 0.997, 0.995
+V1.7.3 changes from V1.7.1 (production):
+  - Loads PySR-discovered symbolic expressions from models/pysr_{ASSET}_{H}h.json
+  - Computes them as new features in build_all_features()
+  - New features are appended AFTER the 130 base features in LGBM importance ranking
+  - LGBM ranking naturally selects PySR features if they're useful, drops them if not
+  - No other changes — same grid, combos, windows, refine, embargo as V1.7.1
 
-Modes:
-  B.   Quick run (saved models + signals + chart)
-  D.   Grid optimization (combo × window × gamma × features)
-  DG.  D then G (grid + backtest + refine + pick best)
-  DGF. DG then F (full pipeline + strategy comparison)
-  DF.  D then F (optimize + strategy comparison)
-  F.   Strategy comparison (both_agree / either_agree / Xh_only)
-  G.   Live backtest (top 6 → refine top 3 → pick best, write trading config)
-  H.   Horizon sweep (D+G per horizon → compare → save best)
-  5/6/7. Quick BTC/ETH/XRP
+  Prerequisites:
+    pip install pysr sympy
+    python pysr_discover_features.py BTC 6h       # run once (~1-2 hours)
+
+  Test:
+    python crypto_trading_system_doohan_v1_7_3.py DG BTC 6h
+    Compare refined results to V1.7.1 baseline (+3.75% at 70%, +3.47% at 80%)
+
+  If PySR features help: LGBM will rank them high and they'll appear in optimal_features.
+  If they don't help: LGBM will rank them low and they'll be pruned automatically.
 
 CLI Usage:
-  python crypto_trading_system_doohan.py DG BTC 8h
-  python crypto_trading_system_doohan.py H BTC 5,6,7,8h
-  python crypto_trading_system_doohan.py H BTC,ETH,LINK 5,6,7,8h
-  python crypto_trading_system_doohan.py D BTC,ETH 6,7h
+  python crypto_trading_system_doohan_v1_7_3.py DG BTC 6h
+  python crypto_trading_system_doohan_v1_7_3.py H BTC 5,6,7,8h
+  python crypto_trading_system_doohan_v1_7_3.py D BTC,ETH 6,7h
 
 Outputs:
-  models/crypto_doohan_v1_7_1_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode G)
-  config/trading_config_doohan.json                  (horizon + min_confidence per asset)
-  logs/doohan_v171_*.log                             (auto-saved terminal output)
-
-============================================================
-TODO (V1.7.1 → production readiness):
-============================================================
-  1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode G should select the production model
-     from refined configs only (not raw D candidates). D candidates are still used
-     for diagnostics and as input to pick top 3 for refinement.
-
-  2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 7h
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 8h
-     Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
-
-  3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode F for strategy selection, expand to all 9 assets.
-
-  4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
-     for all horizons. Should use train_end = i - horizon like V1.7.1.
-
-  5. WIRE INTO LIVE TRADER — Once winner is validated:
-       - Update crypto_live_trader_doohan.py to read V1.7.1 production CSV
-       - Update crypto_revolut_doohan.py to point to V1.7.1 configs
-       - Or promote V1.7.1 as new Doohan production version
-
-============================================================
-Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
-============================================================
-
-  EMBARGO (most critical difference):
-    V1.7.1:  train_end = i - horizon          (dynamic, scales with prediction horizon)
-    V1.6:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Deku:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Impact:  Pre-embargo APFs were inflated 5-26×. Post-embargo realistic range is 1.0-3.0.
-             V1.6 and Deku results are NOT comparable to V1.7.1 due to label overlap leakage.
-
-  SEARCH METHOD:
-    V1.7.1:  Exhaustive grid (324 evals) + 50-trial Optuna refine per top 3
-    V1.6:    Exhaustive grid (432 evals) + 30-trial Optuna refine per top 3
-    Deku:    Optuna TPE+Hyperband (150 trials, auto-extend to 200/250)
-
-  COMBOS:
-    V1.7.1:  3 combos — RF+LGBM, XGB+LGBM, RF+XGB (dead combos dropped)
-    V1.6:    6 combos — RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
-    Deku:    26 combos — all pairs + triples + quads + quint of RF/GB/XGB/LR/LGBM
-
-  WINDOWS:
-    V1.7.1:  [72, 100, 150, 200, 250, 300]  (36/48 dropped — embargo eats too much)
-    V1.6:    [72, 100, 150, 200]
-    Deku:    [24, 36, 48, 72, 100, 150, 200]  (Optuna picks from these)
-
-  REFINE:
-    V1.7.1:  50 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    V1.6:    30 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    Deku:    N/A (Optuna does continuous search, no separate refine phase)
-
-  BACKTEST:
-    V1.7.1:  336h (2 weeks)
-    V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode F replay)
-
-  SCORING:
-    V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
-    V1.6:    APF (same formula)
-    Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
-
-  HOLDOUT:
-    V1.7.1:  N/A (uses Mode G live backtest instead)
-    V1.6:    N/A (uses Mode G live backtest instead)
-    Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
-
-  FEATURES:
-    V1.7.1:  Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    V1.6:    Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    Deku:    Optuna picks n_features from LGBM-ranked list (continuous range)
-
-  GAMMAS:
-    V1.7.1:  Grid tests [0.995, 0.997, 0.999]
-    V1.6:    Grid tests [0.995, 0.997, 0.999]
-    Deku:    Optuna continuous (0.994, 1.0)
-
-  MODELS:
-    V1.7.1:  RF, XGB, LGBM (GB/LR only in combos that include them — but none do)
-    V1.6:    RF, GB, XGB, LR, LGBM (all 5 available in combos)
-    Deku:    RF, GB, XGB, LR, LGBM (all 5, 26 ensemble combinations)
-
-  WALK-FORWARD STEP:
-    V1.7.1:  DIAG_STEP = 36 (same as Deku)
-    V1.6:    DIAG_STEP = 36
-    Deku:    DIAG_STEP = 36
+  models/crypto_doohan_v1_7_3_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_doohan_v1_7_3_production.csv         (best live performer from Mode G)
+  logs/doohan_v173_*.log                             (auto-saved terminal output)
 """
 
 import sys
@@ -183,7 +90,7 @@ class _TeeWriter:
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"doohan_v171_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+_log_path = os.path.join(_LOG_DIR, f"doohan_v173_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
 _log_fh = open(_log_path, 'w', encoding='utf-8')
 sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
 sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
@@ -393,7 +300,7 @@ LABEL_MODE = 'fee_aware'
 MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_doohan_v1_7_1_production.csv'
+PRODUCTION_CSV = 'models/crypto_doohan_v1_7_3_production.csv'
 
 
 
@@ -840,16 +747,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+        return f'{MODELS_DIR}/crypto_doohan_v1_7_3_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_doohan_v1_7_3_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_doohan_v1_7_3_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_3_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -1005,9 +912,86 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     else:
         df['_funding_rate'] = np.nan
 
+    # ── PySR symbolic regression features (V1.7.3) ──
+    pysr_added = _compute_pysr_features(df, all_cols, asset_name, horizon, verbose)
+    added += pysr_added
+
     if verbose:
-        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset/pysr = {len(all_cols)} total")
     return df, all_cols
+
+
+def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
+    """Load PySR-discovered expressions from JSON and compute them as new features.
+    Expressions are evaluated using the existing feature columns in df.
+    Returns the number of PySR features successfully added."""
+    import sympy
+
+    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    pysr_path = os.path.join(models_dir, f'pysr_{asset_name}_{horizon}h.json')
+
+    if not os.path.exists(pysr_path):
+        if verbose:
+            print(f"    PySR: no expressions found ({pysr_path}) — skipping")
+        return 0
+
+    with open(pysr_path) as f:
+        pysr_data = json.load(f)
+
+    expressions = pysr_data.get('expressions', [])
+    if not expressions:
+        if verbose:
+            print(f"    PySR: JSON loaded but no expressions — skipping")
+        return 0
+
+    n_added = 0
+    for i, expr_info in enumerate(expressions):
+        col_name = f'pysr_{i+1}'
+        sympy_str = expr_info.get('sympy_format', expr_info.get('equation', ''))
+
+        try:
+            # Parse the sympy expression
+            # PySR uses feature names directly — they become sympy symbols
+            sym_expr = sympy.sympify(sympy_str)
+            free_symbols = [str(s) for s in sym_expr.free_symbols]
+
+            # Check all required features exist in df
+            missing = [s for s in free_symbols if s not in df.columns]
+            if missing:
+                if verbose:
+                    print(f"    PySR #{i+1}: SKIP — missing features: {missing}")
+                continue
+
+            # Build a numpy-evaluable lambda
+            sym_vars = list(sym_expr.free_symbols)
+            func = sympy.lambdify(sym_vars, sym_expr, modules=['numpy'])
+
+            # Evaluate with actual data
+            args = [df[str(s)].values.astype(np.float64) for s in sym_vars]
+            values = func(*args)
+
+            # Handle inf/nan from division by zero etc.
+            values = np.where(np.isfinite(values), values, np.nan)
+
+            df[col_name] = values
+            all_cols.append(col_name)
+            n_added += 1
+
+            if verbose:
+                complexity = expr_info.get('complexity', '?')
+                score = expr_info.get('score', 0)
+                print(f"    PySR #{i+1}: {col_name} = {sympy_str[:60]}{'...' if len(sympy_str)>60 else ''} "
+                      f"(complexity={complexity}, score={score:.4f})")
+
+        except Exception as e:
+            if verbose:
+                print(f"    PySR #{i+1}: SKIP — eval error: {e}")
+            continue
+
+    if verbose and n_added > 0:
+        print(f"    PySR: {n_added} features added from {pysr_path}")
+
+    return n_added
 
 
 # ============================================================
@@ -3150,7 +3134,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
     n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
     print("\n" + "=" * 70)
-    print(f"  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
+    print(f"  DOOHAN V1.7.3 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
     print(f"  {len(GRID_COMBOS)} combos × {len(GRID_WINDOWS)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
@@ -3347,7 +3331,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_elapsed = (time.time() - t_grid) / 60
 
         # Save full grid to CSV
-        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_1_grid_{asset_name}_{horizon}h.csv')
+        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_3_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -4020,7 +4004,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         study = optuna.create_study(
             direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=42),
-            study_name=f'doohan_v171_refine_{asset}_{horizon}h_{cfg_idx}',
+            study_name=f'doohan_v173_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
         best_refine_apf = 0.0
