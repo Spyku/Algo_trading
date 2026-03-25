@@ -54,7 +54,8 @@ pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
 # Arguments are order-independent: MODE, ASSETS, HORIZONS can appear in any order.
 # Run --help for full usage.
 
-# === Doohan (production) — exhaustive grid + Optuna refine + embargo fix ===
+# === Doohan (production) — exhaustive grid + Optuna refine + PySR + embargo fix ===
+python crypto_trading_system_doohan.py A BTC 6h                  # Mode A — PySR feature discovery (~30-120 min)
 python crypto_trading_system_doohan.py H BTC 5,6,7,8h           # Mode H — full horizon sweep (D+G per horizon)
 python crypto_trading_system_doohan.py H BTC 5,6,7h --skip      # Mode H — skip D where results exist, re-run G only
 python crypto_trading_system_doohan.py DG BTC 6h                 # Mode DG — grid + backtest for single horizon
@@ -105,7 +106,8 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 - **MIN_COMBO_SIZE=2:** Solo models removed. Prevents overconfidence from uncalibrated single-model predictions.
 - **MIN_TRADES=8:** Optuna objective returns 0 for trials with <8 trades.
 - **Models:** RF, GB, XGB, LR, LGBM — 3 viable combos: XGB+LGBM, RF+LGBM, RF+XGB (dead combos RF+GB, RF+LR, GB+LR dropped).
-- **Features:** 51 technical + 81 macro/sentiment/cross-asset = 132 total. LGBM importance ranking (~5 sec). logret_5h and logret_7h added (2026-03-25) to fill gaps for 5h/7h horizon models.
+- **Features:** 51 technical + 81 macro/sentiment/cross-asset + PySR symbolic = 132+ total. LGBM importance ranking (~5 sec). PySR features auto-loaded from `models/pysr_{ASSET}_{H}h.json` if available; safe fallback if not.
+- **PySR symbolic regression:** Mode A runs offline discovery (`pysr_discover_features.py`), saves expressions to JSON. Production loads them as computed columns. BTC 6h: +10.95% vs +3.74% without PySR. ETH 6h: +19.40% vs +1.48%.
 - **Model hot-reload:** Trader checks production CSV every 5 minutes.
 
 ### Data Flow

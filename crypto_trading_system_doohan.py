@@ -2759,105 +2759,35 @@ def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_hourly_char
     return output_file
 
 
-def run_mode_b(assets_list, horizon_filter=None, skip_data_update=False):
+def run_mode_a(assets_list, horizons):
+    """Mode A: PySR symbolic regression feature discovery."""
     print("\n" + "=" * 60)
-    print("  MODE B: QUICK HOURLY RUN (saved best models)")
+    print("  MODE A: PySR FEATURE DISCOVERY")
     print("=" * 60)
 
-    if not os.path.exists(_get_models_csv_path()):
-        print("\nERROR: crypto_casca_best_models.csv not found!")
-        print("Please run Mode D first to find best models.")
+    try:
+        from pysr_discover_features import discover_features, save_results
+    except ImportError:
+        print("\n  ERROR: pysr_discover_features.py not found!")
+        print("  Make sure it's in the same directory as this script.")
         return
 
-    df_best = pd.read_csv(_get_models_csv_path())
-    if 'horizon' not in df_best.columns:
-        df_best['horizon'] = 4  # legacy = 4h
+    for asset in assets_list:
+        for h in horizons:
+            print(f"\n{'#'*60}")
+            print(f"  {asset} {h}h")
+            print(f"{'#'*60}")
 
-    # Filter by horizon if specified
-    if horizon_filter is not None:
-        df_best = df_best[df_best['horizon'] == horizon_filter].reset_index(drop=True)
-        if df_best.empty:
-            print(f"\nERROR: No {horizon_filter}h models found in CSV. Run Mode D with {horizon_filter}h first.")
-            return
+            results = discover_features(asset, h)
 
-    print("\nLoaded best models:")
-    for _, row in df_best.iterrows():
-        fs = row.get('feature_set', '?')
-        h = int(row.get('horizon', 4))
-        print(f"  {row['coin']:6s} -> {row['best_combo']:20s} | w={row['best_window']:4d}h | {row['accuracy']:.1f}% | Set {fs} | {h}h")
-
-    available_in_csv = set(df_best['coin'].values)
-    assets_to_run = [a for a in assets_list if a in available_in_csv]
-    missing = [a for a in assets_list if a not in available_in_csv]
-    if missing:
-        print(f"\nWARNING: No best model for: {', '.join(missing)}")
-        print("Run Mode D first for these assets.")
-
-    if not assets_to_run:
-        print("No assets to process.")
-        return
-
-    # Refresh macro & sentiment data before generating signals
-    if not skip_data_update:
-        try:
-            import download_macro_data
-            download_macro_data.main()
-        except ImportError:
-            print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
-        except Exception as e:
-            print(f"  WARNING: Macro data update failed: {e}")
-
-        update_all_data(assets_to_run)
-
-    print("\n" + "=" * 60)
-    print("  GENERATING SIGNALS & BACKTEST CHARTS")
-    print("=" * 60)
-
-    all_signals = {}
-    for asset_name in assets_to_run:
-        asset_rows = df_best[df_best['coin'] == asset_name]
-        for _, row in asset_rows.iterrows():
-            model_names = row['models'].split('+')
-            window = int(row['best_window'])
-            fs = row.get('feature_set', 'A')
-            h = int(row.get('horizon', 4))
-
-            # Mode D saves optimal features in the CSV
-            if fs in ('D', 'E2', 'E3') and 'optimal_features' in row and pd.notna(row.get('optimal_features', '')):
-                feature_override = row['optimal_features'].split(',')
-            elif fs == 'B':
-                feature_override = list(FEATURE_SET_B)
+            if results:
+                df_raw = load_data(asset)
+                _, all_cols = build_all_features(df_raw, asset_name=asset, horizon=h, verbose=False)
+                save_results(asset, h, results, all_cols)
+                print(f"\n  Done! Now run Mode DG to test:")
+                print(f"  python crypto_trading_system_doohan.py DG {asset} {h}h")
             else:
-                feature_override = list(FEATURE_SET_A)
-
-            row_gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
-
-            model_info = {
-                'best_combo': row['best_combo'],
-                'best_window': window,
-                'accuracy': row['accuracy'],
-                'feature_set': fs,
-                'horizon': h,
-                'n_features': int(row['n_features']) if 'n_features' in row.index and pd.notna(row.get('n_features')) else '',
-            }
-
-            signals = generate_signals(asset_name, model_names, window, REPLAY_HOURS,
-                                       feature_override=feature_override, horizon=h, gamma=row_gamma)
-            signals = simulate_portfolio(signals)
-            _print_bootstrap_ci(signals, label=f"{asset_name} {h}h")
-
-            label = f"{asset_name}_{h}h"
-            all_signals[label] = signals
-
-            chart_suffix = f"_{h}h" if h != 4 else ""
-            generate_backtest_chart(f"{asset_name}{chart_suffix}", signals, model_info=model_info)
-
-            if signals:
-                latest = signals[-1]
-                print(f"\n  >> {asset_name} ({h}h): {latest['signal']} ({latest['confidence']:.0f}%) "
-                      f"| price=${latest['close']:,.2f} | Set {fs}")
-
-    export_chart_data(all_signals)
+                print(f"\n  No useful expressions found for {asset} {h}h. Try increasing --iterations.")
 
     # Generate interactive HTML charts (1-month + 1-week) for each asset
     # Only when both 4h and 8h are available (or whichever are present)
@@ -4648,155 +4578,6 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
 # ============================================================
 # MAIN MENU
 # ============================================================
-def _run_quick_asset(asset):
-    """Quick Mode B for a single asset, both horizons, with combined summary + interactive charts."""
-    print("=" * 60)
-    print(f"  Quick {asset}: Mode B, {HORIZON_SHORT}h+{HORIZON_LONG}h")
-    print("=" * 60)
-
-    csv_path = _get_models_csv_path()
-    if not os.path.exists(csv_path):
-        print("  ERROR: No models found!")
-        return
-
-    df_best = pd.read_csv(csv_path)
-    if 'horizon' not in df_best.columns:
-        df_best['horizon'] = 4
-
-    # Run Mode B for PNG charts (200h)
-    # Do one shared macro + data download up front, then skip inside each run_mode_b call
-    print("\n  Refreshing macro & price data...")
-    try:
-        import download_macro_data
-        download_macro_data.main()
-    except ImportError:
-        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
-    except Exception as e:
-        print(f"  WARNING: Macro data update failed: {e}")
-    update_all_data([asset])
-
-    results = {}
-    for h in AVAILABLE_HORIZONS:
-        row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
-        if row.empty:
-            print(f"\n  No {h}h model for {asset}")
-            continue
-
-        print(f"\n{'#'*60}")
-        print(f"  RUNNING {h}h HORIZON")
-        print(f"{'#'*60}")
-        run_mode_b([asset], horizon_filter=h, skip_data_update=True)
-
-        # Capture latest signal from chart data
-        json_path = f'{MODELS_DIR}/crypto_hourly_chart_data.json'
-        if os.path.exists(json_path):
-            with open(json_path) as f:
-                chart_data = json.load(f)
-            key = f"{asset}_{h}h"
-            asset_signals = chart_data.get('assets', chart_data)  # support both old and new format
-            if key in asset_signals and asset_signals[key]:
-                last = asset_signals[key][-1]
-                r = row.iloc[0]
-                results[h] = {
-                    'signal': last.get('signal', '?'),
-                    'confidence': last.get('confidence', 0),
-                    'price': last.get('close', 0),
-                    'model': r['best_combo'],
-                    'window': int(r['best_window']),
-                    'accuracy': r['accuracy'],
-                    'feature_set': r.get('feature_set', '?'),
-                }
-
-    # Generate interactive HTML charts (720h for both horizons)
-    print(f"\n{'#'*60}")
-    print(f"  GENERATING INTERACTIVE STRATEGY CHARTS")
-    print(f"{'#'*60}")
-
-    # Determine strategy
-    # Read strategy from trading_config.json, fall back to both_agree
-    try:
-        with open(f'{CONFIG_DIR}/trading_config.json') as _f:
-            _tcfg = json.load(_f)
-        strategy = _tcfg.get(asset, {}).get('strategy', 'both_agree')
-    except Exception:
-        strategy = 'both_agree'
-
-    signals_by_h = {}
-    for h in AVAILABLE_HORIZONS:
-        row = df_best[(df_best['coin'] == asset) & (df_best['horizon'] == h)]
-        if row.empty:
-            continue
-        r = row.iloc[0]
-        model_names = r['models'].split('+')
-        window = int(r['best_window'])
-        fs = r.get('feature_set', 'A')
-        opt = r.get('optimal_features', '')
-
-        if fs in ('D', 'E2', 'E3') and pd.notna(opt) and str(opt).strip() and str(opt).strip() != 'nan':
-            feature_override = [f.strip() for f in str(opt).split(',') if f.strip() and f.strip() != 'nan']
-        elif fs == 'B':
-            feature_override = list(FEATURE_SET_B)
-        else:
-            feature_override = list(FEATURE_SET_A)
-
-        row_gamma = float(r.get('gamma', 1.0)) if pd.notna(r.get('gamma', 1.0)) else 1.0
-        print(f"  Generating {h}h signals (720h)...")
-        sigs = generate_signals(asset, model_names, window, 720,
-                                feature_override=feature_override, horizon=h, gamma=row_gamma)
-        signals_by_h[h] = simulate_portfolio(sigs)
-
-    signals_short = signals_by_h.get(HORIZON_SHORT)
-    signals_long = signals_by_h.get(HORIZON_LONG)
-    if signals_short or signals_long:
-        generate_strategy_html(asset, signals_short, signals_long, strategy=strategy)
-        generate_signal_table_html(asset, signals_short, signals_long, strategy=strategy)
-
-    # Combined summary
-    if results:
-        print(f"\n{'='*60}")
-        print(f"  {asset} COMBINED SUMMARY")
-        print(f"{'='*60}")
-        for h, r in sorted(results.items()):
-            emoji = '_' if r['signal'] == 'BUY' else '_' if r['signal'] == 'SELL' else '_'
-            print(f"  {emoji} {h}h: {r['signal']} ({r['confidence']:.0f}%) | {r['model']} | w={r['window']}h | {r['accuracy']:.1f}% diag")
-
-        if len(results) == 2:
-            s4 = results.get(4, {}).get('signal', 'HOLD')
-            s8 = results.get(8, {}).get('signal', 'HOLD')
-            c4 = results.get(4, {}).get('confidence', 0)
-            c8 = results.get(8, {}).get('confidence', 0)
-
-            if s4 == 'SELL' or s8 == 'SELL':
-                combined = 'SELL'
-                reason = 'at least one model says SELL'
-            elif s4 == 'BUY' and s8 == 'BUY' and c4 >= MIN_CONFIDENCE and c8 >= MIN_CONFIDENCE:
-                combined = 'BUY (both agree)'
-                reason = f'4h+8h both BUY with {c4:.0f}%/{c8:.0f}%'
-            elif (s4 == 'BUY' or s8 == 'BUY') and strategy == 'either':
-                which = '4h' if s4 == 'BUY' else '8h'
-                conf = c4 if s4 == 'BUY' else c8
-                if conf >= MIN_CONFIDENCE:
-                    combined = f'BUY (either -- {which})'
-                    reason = f'{which} says BUY with {conf:.0f}%'
-                else:
-                    combined = 'HOLD'
-                    reason = f'{which} says BUY but confidence {conf:.0f}% < {MIN_CONFIDENCE}%'
-            elif s4 == 'BUY' or s8 == 'BUY':
-                # strategy == both_agree but only one side agrees
-                which = '4h' if s4 == 'BUY' else '8h'
-                combined = 'HOLD'
-                reason = f'{which} says BUY but both_agree strategy requires both'
-            else:
-                combined = 'HOLD'
-                reason = 'neither model says BUY'
-
-            price = results.get(4, results.get(8, {})).get('price', 0)
-            print(f"\n  >>> COMBINED [{strategy}]: {combined}")
-            print(f"  >>> Reason: {reason}")
-            print(f"  >>> Price: ${price:,.4f}" if price < 100 else f"  >>> Price: ${price:,.2f}")
-        print(f"{'='*60}")
-
-    print("\nDone!")
 
 def main():
 
@@ -4813,7 +4594,7 @@ def main():
     #   python crypto_trading_system_doohan.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_doohan.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
+    VALID_MODES = {'A', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -4836,7 +4617,7 @@ Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTION
   Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
 
 Modes:
-  B       Quick run (saved models + signals + chart)
+  A       PySR feature discovery (symbolic regression → models/pysr_*.json)
   D       Grid optimization (combo x window x gamma x features)
   G       Live backtest (top 6 from D → refine top 3 → pick best)
   DG      D then G
@@ -4859,6 +4640,7 @@ Options:
   --help, -h          Show this help
 
 Examples:
+  python crypto_trading_system_doohan.py A BTC 6h                  # discover PySR features (~30-120 min)
   python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
   python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run G only
   python crypto_trading_system_doohan.py DG ETH 6h               # optimize + backtest ETH 6h
@@ -4925,7 +4707,7 @@ Examples:
         if assets_list is None:
             assets_list = list(ASSETS.keys())
         if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('B', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+            horizons = list(AVAILABLE_HORIZONS) if mode in ('A', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H') else ""
         skip_str = " | --skip" if flag_skip and mode == 'H' else ""
@@ -4944,7 +4726,7 @@ Examples:
         print("=" * 60)
 
         print("\nChoose mode:")
-        print("  B.  Quick run (saved models + signals + chart)")
+        print("  A.  PySR FEATURE DISCOVERY (symbolic regression → new features)")
         print("  D.  GRID OPTIMIZATION (combo × window × gamma × features)")
         print("  DG. D then G (grid + backtest top 6 + refine top 3 + pick best)")
         print("  DGF. DG then F (full pipeline + strategy comparison)")
@@ -4952,21 +4734,12 @@ Examples:
         print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
         print("  G.  LIVE BACKTEST (top 6 candidates from Mode D, pick best)")
         print("  H.  HORIZON SWEEP (D+G per horizon, compare, save best)")
-        print("  ---")
-        print(f"  5. Quick BTC (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        print(f"  6. Quick ETH (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        print(f"  7. Quick XRP (Mode B, both {HORIZON_SHORT}h+{HORIZON_LONG}h)")
-        mode = input("\nEnter B/D/DG/DGF/DF/F/G/H or 5-7: ").strip().upper()
+        mode = input("\nEnter A/D/DG/DGF/DF/F/G/H: ").strip().upper()
 
-        # Shortcuts 5/6/7
-        if mode in ('5', '6', '7'):
-            shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
-            _run_quick_asset(shortcut_map[mode])
-            return
 
-        if mode not in ('B', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'):
-            print("Invalid choice. Defaulting to B.")
-            mode = 'B'
+        if mode not in VALID_MODES:
+            print("Invalid choice. Defaulting to DG.")
+            mode = 'DG'
 
         print("\nWhich assets?")
         print("  1. All (crypto + indices)")
@@ -5090,8 +4863,8 @@ Examples:
                 print(f"  {metric:<10} {r4_s:>8} {t4_s:>6} {r8_s:>8} {t8_s:>6} {strat:<16} {conf:>5}")
             # Mark best after printing all
             print(f"  >>> BEST METRIC for {asset}: {best_metric.upper()} (combined return: {best_total:+.1f}%)")
-    elif mode == 'B':
-        run_mode_b(assets_list, horizon_filter=horizons[0] if len(horizons) == 1 else None)
+    elif mode == 'A':
+        run_mode_a(assets_list, horizons)
     elif mode in ('D', 'DF', 'DG', 'DGF'):
         # Per-asset pipeline: D (all horizons) then G and/or F for each asset
         for asset in assets_list:
