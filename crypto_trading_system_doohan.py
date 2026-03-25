@@ -1006,9 +1006,80 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     else:
         df['_funding_rate'] = np.nan
 
+    # ── PySR symbolic regression features ──
+    pysr_added = _compute_pysr_features(df, all_cols, asset_name, horizon, verbose)
+    added += pysr_added
+
     if verbose:
-        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset/pysr = {len(all_cols)} total")
     return df, all_cols
+
+
+def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
+    """Load PySR-discovered expressions from JSON and compute them as new features.
+    Expressions are evaluated using the existing feature columns in df.
+    Returns the number of PySR features successfully added."""
+    import sympy
+
+    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    pysr_path = os.path.join(models_dir, f'pysr_{asset_name}_{horizon}h.json')
+
+    if not os.path.exists(pysr_path):
+        if verbose:
+            print(f"    PySR: no expressions found ({pysr_path}) — skipping")
+        return 0
+
+    with open(pysr_path) as f:
+        pysr_data = json.load(f)
+
+    expressions = pysr_data.get('expressions', [])
+    if not expressions:
+        if verbose:
+            print(f"    PySR: JSON loaded but no expressions — skipping")
+        return 0
+
+    n_added = 0
+    for i, expr_info in enumerate(expressions):
+        col_name = f'pysr_{i+1}'
+        sympy_str = expr_info.get('sympy_format', expr_info.get('equation', ''))
+
+        try:
+            sym_expr = sympy.sympify(sympy_str)
+            free_symbols = [str(s) for s in sym_expr.free_symbols]
+
+            missing = [s for s in free_symbols if s not in df.columns]
+            if missing:
+                if verbose:
+                    print(f"    PySR #{i+1}: SKIP — missing features: {missing}")
+                continue
+
+            sym_vars = list(sym_expr.free_symbols)
+            func = sympy.lambdify(sym_vars, sym_expr, modules=['numpy'])
+
+            args = [df[str(s)].values.astype(np.float64) for s in sym_vars]
+            values = func(*args)
+
+            values = np.where(np.isfinite(values), values, np.nan)
+
+            df[col_name] = values
+            all_cols.append(col_name)
+            n_added += 1
+
+            if verbose:
+                complexity = expr_info.get('complexity', '?')
+                score = expr_info.get('score', 0)
+                print(f"    PySR #{i+1}: {col_name} = {sympy_str[:60]}{'...' if len(sympy_str)>60 else ''} "
+                      f"(complexity={complexity}, score={score:.4f})")
+
+        except Exception as e:
+            if verbose:
+                print(f"    PySR #{i+1}: SKIP — eval error: {e}")
+            continue
+
+    if verbose and n_added > 0:
+        print(f"    PySR: {n_added} features added from {pysr_path}")
+
+    return n_added
 
 
 # ============================================================

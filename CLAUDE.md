@@ -6,7 +6,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 Automated ML trading system for crypto (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h — optimized via Mode H). Executes trades on Revolut X via Ed25519-signed API.
 
-**Production system:** Doohan V1.7.1 (`crypto_trading_system_doohan.py`). Deku and all prior versions archived (2026-03-24).
+**Production system:** Doohan V1.7.1 + PySR (`crypto_trading_system_doohan.py`). PySR symbolic regression features added to production (2026-03-25). Deku and all prior versions archived (2026-03-24).
 
 **Owner:** Alex, Lausanne, Switzerland (CET/CEST timezone)
 
@@ -159,12 +159,12 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system_doohan.py` | **Production** | Doohan V1.7.1: Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine. Modes B/D/G/H/F. Variable horizons. Refined-only production selection. Order-independent CLI with `--help`. |
+| `crypto_trading_system_doohan.py` | **Production** | Doohan V1.7.1 + PySR: Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine + PySR symbolic features. Modes B/D/G/H/F. Variable horizons. Refined-only production selection. Order-independent CLI with `--help`. |
 | `crypto_revolut_doohan.py` | **Live** | Auto-trader — reads `trading_config_doohan.json` (horizon per asset) + `crypto_doohan_v1_7_1_production.csv` |
 | `crypto_live_trader_doohan.py` | **Live** | Signal generation library — NOT run directly. Reports current market price (not label-shifted). |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
-| `crypto_trading_system_doohan_v1_7_3.py` | Testing | PySR symbolic regression features. Adds discovered formulas as new features. Safe fallback if no PySR JSON exists. |
+| `crypto_trading_system_doohan_v1_7_3.py` | **Merged** | PySR code merged into production (2026-03-25). Kept for reference. |
 | `pysr_discover_features.py` | Active | Offline PySR discovery script. Runs symbolic regression on training data, outputs `models/pysr_{ASSET}_{H}h.json`. |
 | `crypto_trading_system_doohan_v1_7_2.py` | **Dropped** | Regularization test. Wash — not adopted. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
@@ -226,17 +226,21 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 ### Active
 1. **SOL Mode H horizon sweep** — Running on Desktop. `python crypto_trading_system_doohan.py H SOL 5,6,7,8h`
 2. **Expand to other assets** — Run Mode H for LINK, XRP, DOGE, ADA, AVAX, DOT after SOL.
-3. **V1.7.3 — PySR symbolic regression** (in progress). PySR discovery done for BTC 6h (`models/pysr_BTC_6h.json`). Currently testing `python crypto_trading_system_doohan_v1_7_3.py DG BTC 6h`. Compare against V1.7.1 baseline (+3.75% at 70%).
+3. **Re-run Mode H for BTC and ETH** — Needed to generate fresh production configs with PySR features.
    - **Install PySR on Desktop:** `C:\algo_trading\venv\Scripts\pip.exe install pysr sympy` (TODO)
+   - **Run PySR discovery** for each new asset before Mode H: `python pysr_discover_features.py ASSET 6h`
 
 ### To Test (ML improvements)
 1. **LSTM regime embedding** — Low priority. Train LSTM daily → 2-3 dim embedding → feed to trees. Requires .pkl persistence.
 
 ### Completed (2026-03-25)
+- **PySR promoted to production** — `_compute_pysr_features()` merged into `crypto_trading_system_doohan.py`. Loads `models/pysr_{ASSET}_{H}h.json` if exists, safe fallback if not. BTC 6h: +10.95% vs +3.74% baseline. ETH 6h: +19.40% vs +1.48% baseline.
+- **logret_5h and logret_7h added** — Fills gaps in short-term momentum for 5h/7h horizon models. 132 total features.
 - **ETH Mode H horizon sweep** — All 4 horizons (5h/6h/7h/8h) grid complete. 5h/6h/7h refined. 8h best grid result (+5.93%). Config set to 6h/90%.
 - **BTC 4h/8h with embargo fix** — 4h confirmed overfit (negative post-embargo). 8h not viable. BTC production stays at 6h.
 - **V1.7.2 — Regularization** — Tested on BTC 6h. Minimal reg won (ra=0, rl=0.1, cs=0.9, ss=0.5). V1.7.1 baseline (+3.75/+3.47/+3.74 at 70/80/90%) more consistent than V1.7.2 (+3.63/+0.11/+4.64). **Verdict: wash, not adopted.**
 - **PySR installed on Laptop** — `pip install pysr sympy` done (2026-03-25). Julia 1.11.9 backend compiled.
+- **Telegram balance bug fixed** — Exchange balances were fetched before trade loop but displayed after, causing false "Tracker says invested but exchange shows 0" warnings.
 
 ### Completed (2026-03-24)
 - **Doohan V1.7.1 promoted to production** — Renamed to `crypto_trading_system_doohan.py`. Embargo-fixed grid + Optuna refine. Variable horizon per asset. BTC 6h winner: XGB+LGBM w=252h g=0.994 f=9, +3.75% at conf>=70%.
