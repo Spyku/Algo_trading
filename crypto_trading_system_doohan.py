@@ -13,25 +13,24 @@ Exhaustive grid search:
      - Gammas: 0.999, 0.997, 0.995
 
 Modes:
-  B.   Quick run (saved models + signals + chart)
-  D.   Grid optimization (combo × window × gamma × features)
-  DG.  D then G (grid + backtest + refine + pick best)
-  DGF. DG then F (full pipeline + strategy comparison)
-  DF.  D then F (optimize + strategy comparison)
-  F.   Strategy comparison (both_agree / either_agree / Xh_only)
-  G.   Live backtest (top 6 → refine top 3 → pick best, write trading config)
-  H.   Horizon sweep (D+G per horizon → compare → save best)
-  5/6/7. Quick BTC/ETH/XRP
+  P.   PySR feature discovery (symbolic regression → new features)
+  D.   Diagnose — grid optimization (combo × window × gamma × features)
+  V.   Validate — backtest top 6 → refine top 3 → pick production model
+  DV.  Diagnose + Validate (standard pipeline)
+  S.   Strategy comparison (both_agree / either_agree / Xh_only)
+  DS.  Diagnose + Strategy
+  DVS. Full pipeline: Diagnose → Validate → Strategy
+  H.   Horizon sweep (DV per horizon → compare → save best)
 
 CLI Usage:
-  python crypto_trading_system_doohan.py DG BTC 8h
+  python crypto_trading_system_doohan.py P BTC 6h
+  python crypto_trading_system_doohan.py DV BTC 8h
   python crypto_trading_system_doohan.py H BTC 5,6,7,8h
-  python crypto_trading_system_doohan.py H BTC,ETH,LINK 5,6,7,8h
   python crypto_trading_system_doohan.py D BTC,ETH 6,7h
 
 Outputs:
   models/crypto_doohan_v1_7_1_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode G)
+  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode V)
   config/trading_config_doohan.json                  (horizon + min_confidence per asset)
   logs/doohan_v171_*.log                             (auto-saved terminal output)
 
@@ -39,17 +38,17 @@ Outputs:
 TODO (V1.7.1 → production readiness):
 ============================================================
   1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode G should select the production model
+     refined versions in live backtests. Mode V should select the production model
      from refined configs only (not raw D candidates). D candidates are still used
      for diagnostics and as input to pick top 3 for refinement.
 
   2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 7h
-       python crypto_trading_system_doohan_v1_7_1.py DG BTC 8h
+       python crypto_trading_system_doohan.py DV BTC 7h
+       python crypto_trading_system_doohan.py DV BTC 8h
      Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
 
   3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode F for strategy selection, expand to all 9 assets.
+     If 6h wins: run Mode S for strategy selection, expand to all 9 assets.
 
   4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
      for all horizons. Should use train_end = i - horizon like V1.7.1.
@@ -93,7 +92,7 @@ Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
   BACKTEST:
     V1.7.1:  336h (2 weeks)
     V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode F replay)
+    Deku:    200h (Mode D replay) / 400h (Mode S replay)
 
   SCORING:
     V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
@@ -101,8 +100,8 @@ Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
     Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
 
   HOLDOUT:
-    V1.7.1:  N/A (uses Mode G live backtest instead)
-    V1.6:    N/A (uses Mode G live backtest instead)
+    V1.7.1:  N/A (uses Mode V live backtest instead)
+    V1.6:    N/A (uses Mode V live backtest instead)
     Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
 
   FEATURES:
@@ -210,7 +209,7 @@ from sklearn.utils.parallel import Parallel, delayed
 try:
     import optuna
 except ImportError:
-    optuna = None  # only needed for Mode A/D optimization, not signal generation
+    optuna = None  # only needed for Mode D optimization, not signal generation
 try:
     from xgboost import XGBClassifier
 except ImportError:
@@ -358,7 +357,7 @@ SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
-REPLAY_HOURS_F = 400   # Mode F strategy selection — longer window for more trades
+REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
 DIAG_STEP = 36
 DIAG_WINDOWS = [72, 100, 150, 200]  # V1.2: min 72h — 48h also underperforms in live backtests
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
@@ -389,7 +388,7 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 # Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
 LABEL_MODE = 'fee_aware'
 
-# Mode G: live backtest validation of top 6 candidates
+# Mode V: live backtest validation of top 6 candidates
 MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
@@ -2759,10 +2758,10 @@ def export_chart_data(all_signals, output_file=f'{MODELS_DIR}/crypto_hourly_char
     return output_file
 
 
-def run_mode_a(assets_list, horizons):
-    """Mode A: PySR symbolic regression feature discovery."""
+def run_mode_p(assets_list, horizons):
+    """Mode P: PySR symbolic regression feature discovery."""
     print("\n" + "=" * 60)
-    print("  MODE A: PySR FEATURE DISCOVERY")
+    print("  MODE P: PySR FEATURE DISCOVERY")
     print("=" * 60)
 
     try:
@@ -2784,8 +2783,8 @@ def run_mode_a(assets_list, horizons):
                 df_raw = load_data(asset)
                 _, all_cols = build_all_features(df_raw, asset_name=asset, horizon=h, verbose=False)
                 save_results(asset, h, results, all_cols)
-                print(f"\n  Done! Now run Mode DG to test:")
-                print(f"  python crypto_trading_system_doohan.py DG {asset} {h}h")
+                print(f"\n  Done! Now run Mode DV to test:")
+                print(f"  python crypto_trading_system_doohan.py DV {asset} {h}h")
             else:
                 print(f"\n  No useful expressions found for {asset} {h}h. Try increasing --iterations.")
 
@@ -2967,7 +2966,7 @@ GRID_FEATURES = [10, 13, 17, 20, 25, 30]
 GRID_GAMMAS = [0.999, 0.997, 0.995]
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
-REFINE_TOP_N = 3                   # how many configs to refine from Mode G
+REFINE_TOP_N = 3                   # how many configs to refine from Mode V
 REFINE_TRIALS = 50                 # Optuna trials per config (was 30 in V1.7)
 REFINE_GAMMA_RANGE = 0.002         # +/- around grid winner's gamma (minimal — grid already covers 0.995-0.999)
 REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
@@ -3145,7 +3144,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     1. Download fresh data + LGBM importance ranking
     2. Exhaustive grid: 6 combos × 4 windows × 6 features × 5 gammas = 720 evals
     3. Save full grid to CSV for analysis
-    4. 3-fold holdout ranking → save top 6 → Mode G backtest
+    4. 3-fold holdout ranking → save top 6 → Mode V backtest
     """
     t_mode_start = time.time()
     _kill_orphan_workers()
@@ -3577,7 +3576,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
 
 # ============================================================
-# MODE G: LIVE BACKTEST VALIDATION (top 6 candidates → pick best)
+# MODE V: LIVE BACKTEST VALIDATION (top 6 candidates → pick best)
 # ============================================================
 
 def _simulate_with_threshold(signals, conf_threshold):
@@ -3626,9 +3625,9 @@ def _simulate_with_threshold(signals, conf_threshold):
     }
 
 
-def run_mode_g(assets_list, horizons=None):
+def run_mode_v(assets_list, horizons=None):
     """
-    Mode G: Live backtest + Optuna refine + final comparison.
+    Mode V: Live backtest + Optuna refine + final comparison.
     1. Backtest top 6 from Mode D at conf 70/80/90%
     2. Pick top 3 live performers
     3. Optuna refine those 3 (gamma±0.020, features±5, window±20h, 30 trials)
@@ -3647,7 +3646,7 @@ def run_mode_g(assets_list, horizons=None):
     df_candidates = pd.read_csv(candidates_csv)
 
     print("=" * 80)
-    print(f"  MODE G: LIVE BACKTEST + REFINE — {','.join(assets_list)} {','.join(str(h)+'h' for h in horizons)}")
+    print(f"  MODE V: LIVE BACKTEST + REFINE — {','.join(assets_list)} {','.join(str(h)+'h' for h in horizons)}")
     print(f"  Period: last {MODE_G_REPLAY_HOURS} hours (2 weeks), every hour")
     print(f"  Ranking by: conf>={MODE_G_PRIMARY_CONF}% return")
     print(f"  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best")
@@ -3839,7 +3838,7 @@ def run_mode_g(assets_list, horizons=None):
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE G — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE V — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -4091,7 +4090,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
 
 # ============================================================
-# MODE F: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
+# MODE S: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
 # ============================================================
 def run_strategy_comparison(assets_list, horizons=None):
     """
@@ -4111,7 +4110,7 @@ def run_strategy_comparison(assets_list, horizons=None):
     df_models = pd.read_csv(csv_path)
 
     print("\n" + "=" * 60)
-    print("  MODE F: STRATEGY COMPARISON")
+    print("  MODE S: STRATEGY COMPARISON")
     print("=" * 60)
 
     # Load trading config for updates
@@ -4156,7 +4155,7 @@ def run_strategy_comparison(assets_list, horizons=None):
                 feats_h = row_h['optimal_features'].split(',') if pd.notna(row_h.get('optimal_features', '')) else None
                 gamma_h = float(row_h.get('gamma', 1.0)) if pd.notna(row_h.get('gamma', 1.0)) else 1.0
                 sigs = generate_signals(asset, row_h['models'].split('+'),
-                                        int(row_h['best_window']), REPLAY_HOURS_F,
+                                        int(row_h['best_window']), REPLAY_HOURS_S,
                                         feature_override=feats_h, horizon=h, gamma=gamma_h)
                 signals_by_h[h] = simulate_portfolio(sigs)
 
@@ -4419,7 +4418,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
         python crypto_trading_system_doohan.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
 
     Flow per asset:
-        1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode G (backtest + refine)
+        1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode V (backtest + refine)
         2. Compare best config from each horizon
         3. Save overall winner to production CSV + trading config
     """
@@ -4466,10 +4465,10 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             else:
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
 
-            # Step 2: Run Mode G for this horizon
-            g_results = run_mode_g([asset], [h])
+            # Step 2: Run Mode V for this horizon
+            g_results = run_mode_v([asset], [h])
 
-            # Extract best result from Mode G
+            # Extract best result from Mode V
             key = f"{asset}_{h}h"
             if g_results and key in g_results:
                 results = g_results[key]
@@ -4546,7 +4545,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
         print(f"  >>> {winner['cfg']['combo']}  w={winner['cfg']['window']}h  "
               f"g={winner['cfg']['gamma']:.4f}  f={winner['cfg']['n_features']}")
 
-        # Note: Mode G already saved the production CSV and trading config
+        # Note: Mode V already saved the production CSV and trading config
         # for each horizon individually. The user can read the comparison above
         # and the best per-horizon models are already in production CSV.
         # Trading config will have the LAST horizon's config — update it to the best:
@@ -4594,7 +4593,7 @@ def main():
     #   python crypto_trading_system_doohan.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_doohan.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'A', 'D', 'DF', 'DG', 'DGF', 'F', 'G', 'H'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'S', 'V', 'H'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -4617,14 +4616,14 @@ Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTION
   Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
 
 Modes:
-  A       PySR feature discovery (symbolic regression → models/pysr_*.json)
+  P       PySR feature discovery (symbolic regression → models/pysr_*.json)
   D       Grid optimization (combo x window x gamma x features)
-  G       Live backtest (top 6 from D → refine top 3 → pick best)
-  DG      D then G
-  F       Strategy comparison (both_agree / either_agree / Xh_only)
-  DF      D then F
-  DGF     D then G then F (full pipeline)
-  H       Horizon sweep (D+G per horizon → compare → save best)
+  V       Validate (top 6 from D → refine top 3 → pick best)
+  DV      D then V
+  S       Strategy comparison (both_agree / either_agree / Xh_only)
+  DS      D then S
+  DVS     D then V then S (full pipeline)
+  H       Horizon sweep (D+V per horizon → compare → save best)
 
 Assets:
   BTC,ETH,LINK,...   Comma-separated asset names (default: all)
@@ -4640,12 +4639,12 @@ Options:
   --help, -h          Show this help
 
 Examples:
-  python crypto_trading_system_doohan.py A BTC 6h                  # discover PySR features (~30-120 min)
+  python crypto_trading_system_doohan.py P BTC 6h                  # discover PySR features (~30-120 min)
   python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
-  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run G only
-  python crypto_trading_system_doohan.py DG ETH 6h               # optimize + backtest ETH 6h
+  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run V only
+  python crypto_trading_system_doohan.py DV ETH 6h               # optimize + validate ETH 6h
   python crypto_trading_system_doohan.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_doohan.py G BTC 6h                 # re-backtest existing results
+  python crypto_trading_system_doohan.py V BTC 6h                 # re-validate existing results
   python crypto_trading_system_doohan.py BTC D 8h                 # order doesn't matter
 """)
         return
@@ -4684,9 +4683,6 @@ Examples:
         # Check if it's a mode
         if upper in VALID_MODES and mode is None:
             mode = upper
-        # Check if it's a shortcut (5/6/7)
-        elif upper in ('5', '6', '7') and mode is None:
-            mode = upper
         # Check if it's horizons (ends with h, contains digits)
         elif arg.lower().endswith('h') and arg[:-1].replace(',', '').isdigit():
             horizons = [int(h) for h in arg[:-1].split(',')]
@@ -4697,19 +4693,13 @@ Examples:
                 assets_list = parsed
 
     if mode and mode in VALID_MODES:
-        # Shortcuts 5/6/7 from CLI
-        if mode in ('5', '6', '7'):
-            shortcut_map = {'5': 'BTC', '6': 'ETH', '7': 'XRP'}
-            _run_quick_asset(shortcut_map[mode])
-            return
-
         # Defaults
         if assets_list is None:
             assets_list = list(ASSETS.keys())
         if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('A', 'DF', 'DG', 'DGF') else [HORIZON_SHORT]
+            horizons = list(AVAILABLE_HORIZONS) if mode in ('P', 'DS', 'DV', 'DVS') else [HORIZON_SHORT]
 
-        trials_str = f" | {n_trials} trials" if mode in ('D', 'DF', 'DG', 'DGF', 'H') else ""
+        trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'H') else ""
         skip_str = " | --skip" if flag_skip and mode == 'H' else ""
         h_str = ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
@@ -4726,20 +4716,20 @@ Examples:
         print("=" * 60)
 
         print("\nChoose mode:")
-        print("  A.  PySR FEATURE DISCOVERY (symbolic regression → new features)")
+        print("  P.  PySR FEATURE DISCOVERY (symbolic regression → new features)")
         print("  D.  GRID OPTIMIZATION (combo × window × gamma × features)")
-        print("  DG. D then G (grid + backtest top 6 + refine top 3 + pick best)")
-        print("  DGF. DG then F (full pipeline + strategy comparison)")
-        print("  DF. D then F (optimize + strategy comparison)")
-        print(f"  F.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
-        print("  G.  LIVE BACKTEST (top 6 candidates from Mode D, pick best)")
-        print("  H.  HORIZON SWEEP (D+G per horizon, compare, save best)")
-        mode = input("\nEnter A/D/DG/DGF/DF/F/G/H: ").strip().upper()
+        print("  DV. D then V (grid + validate top 6 + refine top 3 + pick best)")
+        print("  DVS. DV then S (full pipeline + strategy comparison)")
+        print("  DS. D then S (optimize + strategy comparison)")
+        print(f"  S.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
+        print("  V.  VALIDATE (top 6 candidates from Mode D, pick best)")
+        print("  H.  HORIZON SWEEP (D+V per horizon, compare, save best)")
+        mode = input("\nEnter P/D/DV/DVS/DS/S/V/H: ").strip().upper()
 
 
         if mode not in VALID_MODES:
-            print("Invalid choice. Defaulting to DG.")
-            mode = 'DG'
+            print("Invalid choice. Defaulting to DV.")
+            mode = 'DV'
 
         print("\nWhich assets?")
         print("  1. All (crypto + indices)")
@@ -4775,7 +4765,7 @@ Examples:
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DF', 'DG', 'DGF'):
+        if mode in ('D', 'DS', 'DV', 'DVS'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -4784,8 +4774,8 @@ Examples:
                 pass
 
     # Execute mode
-    if run_all_metrics and mode in ('D', 'DF'):
-        # --metric all: run Mode DF for each metric, then compare
+    if run_all_metrics and mode in ('D', 'DS'):
+        # --metric all: run Mode DS for each metric, then compare
         all_results = {}  # metric -> {asset: {strategy, conf, return, win_rate, trades}}
         for metric in sorted(VALID_METRICS):
             OPTUNA_METRIC = metric
@@ -4800,7 +4790,7 @@ Examples:
                 run_mode_d_optuna(assets_list, horizon=h, n_trials=n_trials, resume=flag_resume)
             run_strategy_comparison(assets_list, horizons)
 
-            # Read the trading config that Mode F just wrote
+            # Read the trading config that Mode S just wrote
             metric_suffix = f'_{metric}' if metric != 'apf' else ''
             tcfg_path = f'{CONFIG_DIR}/trading_config_doohan{metric_suffix}.json'
             csv_path = _get_models_csv_path()
@@ -4863,10 +4853,10 @@ Examples:
                 print(f"  {metric:<10} {r4_s:>8} {t4_s:>6} {r8_s:>8} {t8_s:>6} {strat:<16} {conf:>5}")
             # Mark best after printing all
             print(f"  >>> BEST METRIC for {asset}: {best_metric.upper()} (combined return: {best_total:+.1f}%)")
-    elif mode == 'A':
-        run_mode_a(assets_list, horizons)
-    elif mode in ('D', 'DF', 'DG', 'DGF'):
-        # Per-asset pipeline: D (all horizons) then G and/or F for each asset
+    elif mode == 'P':
+        run_mode_p(assets_list, horizons)
+    elif mode in ('D', 'DS', 'DV', 'DVS'):
+        # Per-asset pipeline: D (all horizons) then V and/or S for each asset
         for asset in assets_list:
             print(f"\n{'='*60}")
             print(f"  ASSET: {asset}")
@@ -4878,15 +4868,17 @@ Examples:
                     print(f"{'#'*60}")
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
 
-            # Run backtest and/or strategy comparison after D
-            if mode in ('DGF', 'DG'):
-                run_mode_g([asset], horizons)
-            elif mode == 'DF' or (mode == 'D' and len(horizons) == 2):
+            # Run validate and/or strategy comparison after D
+            if mode in ('DVS', 'DV'):
+                run_mode_v([asset], horizons)
+                if mode == 'DVS':
+                    run_strategy_comparison([asset], horizons)
+            elif mode == 'DS' or (mode == 'D' and len(horizons) == 2):
                 run_strategy_comparison([asset], horizons)
-    elif mode == 'F':
+    elif mode == 'S':
         run_strategy_comparison(assets_list, horizons)
-    elif mode == 'G':
-        run_mode_g(assets_list, horizons)
+    elif mode == 'V':
+        run_mode_v(assets_list, horizons)
     elif mode == 'H':
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
 

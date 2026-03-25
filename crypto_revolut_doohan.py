@@ -68,7 +68,7 @@ def load_trading_config():
     if os.path.exists(TRADING_CONFIG_FILE):
         with open(TRADING_CONFIG_FILE) as f:
             file_cfg = json.load(f)
-        # Merge file config over defaults (Mode F only writes strategy + min_confidence)
+        # Merge file config over defaults (Mode S only writes strategy + min_confidence)
         for asset in file_cfg:
             if asset not in defaults:
                 defaults[asset] = {'strategy': 'both_agree', 'max_position_usd': 0, 'symbol': f'{asset}-USD', 'enabled': True}
@@ -934,7 +934,7 @@ def _handle_optimize_command(msg):
             horizons_set = set(AVAILABLE_HORIZONS)
         h_arg = ','.join(str(h) for h in sorted(horizons_set)) + 'h'
 
-        cmd = [sys.executable, script, 'DG', assets, h_arg]
+        cmd = [sys.executable, script, 'DV', assets, h_arg]
 
         # Run at below-normal priority on Windows
         creation_flags = 0
@@ -948,8 +948,8 @@ def _handle_optimize_command(msg):
             creationflags=creation_flags,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
-        print(f"  OPTIMIZE: launched Mode DG for {assets} {h_arg} (PID {_optimize_proc.pid})")
-        send_telegram(f"🚀 <b>Mode DG started</b>\n{assets} {h_arg} (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
+        print(f"  OPTIMIZE: launched Mode DV for {assets} {h_arg} (PID {_optimize_proc.pid})")
+        send_telegram(f"🚀 <b>Mode DV started</b>\n{assets} {h_arg} (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
 
         # Monitor in background thread
         def _monitor():

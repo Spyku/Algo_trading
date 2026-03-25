@@ -55,15 +55,15 @@ pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
 # Run --help for full usage.
 
 # === Doohan (production) — exhaustive grid + Optuna refine + PySR + embargo fix ===
-python crypto_trading_system_doohan.py A BTC 6h                  # Mode A — PySR feature discovery (~30-120 min)
-python crypto_trading_system_doohan.py H BTC 5,6,7,8h           # Mode H — full horizon sweep (D+G per horizon)
-python crypto_trading_system_doohan.py H BTC 5,6,7h --skip      # Mode H — skip D where results exist, re-run G only
-python crypto_trading_system_doohan.py DG BTC 6h                 # Mode DG — grid + backtest for single horizon
+python crypto_trading_system_doohan.py P BTC 6h                  # Mode P — PySR feature discovery (~30-120 min)
+python crypto_trading_system_doohan.py H BTC 5,6,7,8h           # Mode H — full horizon sweep (D+V per horizon)
+python crypto_trading_system_doohan.py H BTC 5,6,7h --skip      # Mode H — skip D where results exist, re-run V only
+python crypto_trading_system_doohan.py DV BTC 6h                 # Mode DV — grid + validate for single horizon
 python crypto_trading_system_doohan.py D BTC 6h                  # Mode D — grid optimization only
 python crypto_trading_system_doohan.py D BTC 6h --trials 200     # Custom trial count
-python crypto_trading_system_doohan.py G BTC 6h                  # Mode G — re-backtest existing D results
-python crypto_trading_system_doohan.py F BTC 5,8h                # Mode F — strategy comparison (multi-horizon)
-python crypto_trading_system_doohan.py DGF BTC 6h                # Full pipeline: grid → backtest → strategy
+python crypto_trading_system_doohan.py V BTC 6h                  # Mode V — re-validate existing D results
+python crypto_trading_system_doohan.py S BTC 5,8h                # Mode S — strategy comparison (multi-horizon)
+python crypto_trading_system_doohan.py DVS BTC 6h                # Full pipeline: grid → validate → strategy
 python crypto_trading_system_doohan.py --help                    # Show all modes, options, examples
 
 # === Auto-trader (Doohan — production) ===
@@ -81,7 +81,7 @@ python crypto_revolut_doohan.py --status            # Show positions
 ### Production File Chain
 
 ```
-crypto_trading_system_doohan.py  (Doohan V1.7.1 — Modes B/D/G/H/F, grid + refine + embargo)
+crypto_trading_system_doohan.py  (Doohan V1.7.1 — Modes P/D/V/H/S, grid + refine + PySR + embargo)
   └── hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
 crypto_revolut_doohan.py  (auto-trader — reads trading_config_doohan.json)
   └── crypto_live_trader_doohan.py  (signal generation library)
@@ -102,12 +102,12 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 - **Scoring:** APF (Adjusted Profit Factor) = `raw_PF / buyhold_PF`. Normalizes against market regime.
 - **Exhaustive grid (Mode D):** 3 combos × 6 windows × 6 features × 3 gammas = 324 evals per horizon. Saves top 6 candidates.
 - **3-fold rolling holdout:** Train on fold 1 (60%), re-rank winners by out-of-sample performance across 3 folds with embargo. Reduces overfitting.
-- **Refined-only production selection:** Mode G backtests D candidates to pick top 3 for Optuna refine (50 trials each), then selects production model from refined configs only. D candidates consistently underperform refined versions.
+- **Refined-only production selection:** Mode V backtests D candidates to pick top 3 for Optuna refine (50 trials each), then selects production model from refined configs only. D candidates consistently underperform refined versions.
 - **MIN_COMBO_SIZE=2:** Solo models removed. Prevents overconfidence from uncalibrated single-model predictions.
 - **MIN_TRADES=8:** Optuna objective returns 0 for trials with <8 trades.
 - **Models:** RF, GB, XGB, LR, LGBM — 3 viable combos: XGB+LGBM, RF+LGBM, RF+XGB (dead combos RF+GB, RF+LR, GB+LR dropped).
 - **Features:** 51 technical + 81 macro/sentiment/cross-asset + PySR symbolic = 132+ total. LGBM importance ranking (~5 sec). PySR features auto-loaded from `models/pysr_{ASSET}_{H}h.json` if available; safe fallback if not.
-- **PySR symbolic regression:** Mode A runs offline discovery (`pysr_discover_features.py`), saves expressions to JSON. Production loads them as computed columns. BTC 6h: +10.95% vs +3.74% without PySR. ETH 6h: +19.40% vs +1.48%.
+- **PySR symbolic regression:** Mode P runs offline discovery (`pysr_discover_features.py`), saves expressions to JSON. Production loads them as computed columns. BTC 6h: +10.95% vs +3.74% without PySR. ETH 6h: +19.40% vs +1.48%.
 - **Model hot-reload:** Trader checks production CSV every 5 minutes.
 
 ### Data Flow
@@ -116,7 +116,7 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 data/{asset}_hourly_data.csv           <- price data (Binance via ccxt)
 data/macro_data/*.csv                  <- VIX, DXY, S&P500, Fear&Greed, etc. (yfinance)
 models/crypto_doohan_v1_7_1_best_models.csv    <- top 6 candidates per (asset, horizon) from Mode D
-models/crypto_doohan_v1_7_1_production.csv     <- refined production model (written by Mode G)
+models/crypto_doohan_v1_7_1_production.csv     <- refined production model (written by Mode V)
 models/crypto_doohan_v1_7_1_grid_{ASSET}_{H}h.csv <- full grid results (324 evals)
 config/trading_config_doohan.json      <- per-asset: horizon, min_confidence, strategy, max_position, enabled
 config/position_{ASSET}.json           <- position tracking
@@ -136,10 +136,10 @@ config/telegram_config.json            <- Telegram bot token
 TRADING_FEE_BASE = 0.0009   # 0.09% Revolut X taker fee (0% maker)
 SLIPPAGE = 0.0002           # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = 0.0011        # total cost per trade (fee + slippage) — applied on BUY and SELL
-MIN_CONFIDENCE = 75         # global fallback only — overridden per asset by Mode G/H
+MIN_CONFIDENCE = 75         # global fallback only — overridden per asset by Mode V/H
 MAX_DIAG_HOURS = 4320       # 6 months data cap for Mode D
 REPLAY_HOURS = 200          # Modes B, D signal replay
-REPLAY_HOURS_F = 400        # Mode F — longer window for more trades in strategy selection
+REPLAY_HOURS_S = 400        # Mode S — longer window for more trades in strategy selection
 
 # Doohan V1.7.1 (production)
 GRID_COMBOS = ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']  # 3 viable combos
@@ -161,7 +161,7 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system_doohan.py` | **Production** | Doohan V1.7.1 + PySR: Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine + PySR symbolic features. Modes B/D/G/H/F. Variable horizons. Refined-only production selection. Order-independent CLI with `--help`. |
+| `crypto_trading_system_doohan.py` | **Production** | Doohan V1.7.1 + PySR: Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine + PySR symbolic features. Modes P/D/V/H/S. Variable horizons. Refined-only production selection. Order-independent CLI with `--help`. |
 | `crypto_revolut_doohan.py` | **Live** | Auto-trader — reads `trading_config_doohan.json` (horizon per asset) + `crypto_doohan_v1_7_1_production.csv` |
 | `crypto_live_trader_doohan.py` | **Live** | Signal generation library — NOT run directly. Reports current market price (not label-shifted). |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
@@ -184,7 +184,7 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 | `both_agree` | BUY when both horizons agree; SELL when either says SELL |
 | `either_agree` | BUY when either says BUY; SELL when either says SELL |
 
-**Mode G/H writes the best `horizon` and `min_confidence` to `trading_config_doohan.json`. The trader reads the configured horizon and automatically uses `Xh_only` strategy.**
+**Mode V/H writes the best `horizon` and `min_confidence` to `trading_config_doohan.json`. The trader reads the configured horizon and automatically uses `Xh_only` strategy.**
 
 ---
 
@@ -217,9 +217,9 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 2. **CSV merge logic:** When saving to production CSV, always filter by BOTH coin AND horizon.
 3. **`generate_signals()` needs `feature_override`:** When feature_set is D, caller must pass `feature_override=config['optimal_features'].split(',')`.
 4. **All timestamps in live trader use Europe/Zurich** via `_to_local()` helper.
-5. **`trading_config_doohan.json` has `horizon` and `min_confidence` per asset** — set by Mode G/H. Global `MIN_CONFIDENCE=75` is only a fallback.
+5. **`trading_config_doohan.json` has `horizon` and `min_confidence` per asset** — set by Mode V/H. Global `MIN_CONFIDENCE=75` is only a fallback.
 6. **SSL fix on Windows:** `ssl._create_unverified_context()` applied in both `crypto_revolut_doohan.py` and `crypto_live_trader_doohan.py`.
-7. **Refined-only production:** Mode G only selects from refined configs for production. D candidates are still backtested (needed to rank top 3 for refine input).
+7. **Refined-only production:** Mode V only selects from refined configs for production. D candidates are still backtested (needed to rank top 3 for refine input).
 
 ---
 
@@ -247,14 +247,14 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 ### Completed (2026-03-24)
 - **Doohan V1.7.1 promoted to production** — Renamed to `crypto_trading_system_doohan.py`. Embargo-fixed grid + Optuna refine. Variable horizon per asset. BTC 6h winner: XGB+LGBM w=252h g=0.994 f=9, +3.75% at conf>=70%.
 - **Deku archived** — All Deku files moved to `archive/`. Deku replaced by Doohan as production system.
-- **Refined-only production selection** — Mode G now only picks from refined configs. D candidates consistently underperform (confirmed on BTC 5h/6h/7h).
+- **Refined-only production selection** — Mode V now only picks from refined configs. D candidates consistently underperform (confirmed on BTC 5h/6h/7h).
 - **Variable horizon support** — Trading config stores `horizon` per asset. Trader reads it and uses `Xh_only`. Mode H sweeps multiple horizons.
-- **New Mode H** — Horizon sweep: D+G per horizon → cross-horizon comparison → saves best to trading config. `--skip` flag to reuse existing D results.
+- **New Mode H** — Horizon sweep: D+V per horizon → cross-horizon comparison → saves best to trading config. `--skip` flag to reuse existing D results.
 - **Order-independent CLI** — Arguments can appear in any order. `--help` shows full usage.
 - **Price fix ported** — Live trader now reports current market price (`df_raw.iloc[-1]['close']`) instead of label-shifted historical price.
 - **Dead code cleanup** — ~1,435 lines removed (legacy modes A/E/DAF, old Mode H, legacy Mode D).
 - **Root folder cleanup** — 28 files archived. Root now has 7 Python files + configs.
-- **Mode G confidence thresholds expanded** — Tests 65/70/75/80/85/90% (was 70/80/90).
+- **Mode V confidence thresholds expanded** — Tests 65/70/75/80/85/90% (was 70/80/90).
 
 ### Dropped
 - ~~Deku~~ — Replaced by Doohan V1.7.1. Embargo fix revealed Deku APFs were inflated.
