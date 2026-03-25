@@ -1683,6 +1683,10 @@ def run_all_once(trading_cfg, dry_run=False):
         r = process_asset(asset, cfg, dry_run=dry_run)
         results.append(r)
 
+    # Refresh balances AFTER trades so Telegram shows current exchange state
+    if not dry_run:
+        balances = get_balances()
+
     # Send combined Telegram with inline buttons
     valid = [r for r in results if r is not None]
     if valid:
