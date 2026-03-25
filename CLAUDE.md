@@ -70,9 +70,14 @@ python crypto_trading_system_doohan.py --help                    # Show all mode
 python crypto_revolut_doohan.py --loop              # Live trading loop
 python crypto_revolut_doohan.py --dry-run --loop    # Signals only, no trades
 python crypto_revolut_doohan.py --status            # Show positions
+
+# === Optimizer bot (remote optimization via Telegram) ===
+python crypto_optimizer_bot.py                      # Start optimizer bot (separate from trader bot)
 ```
 
 **Telegram commands (Doohan trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/optimize BTC` `/optstatus`
+
+**Telegram commands (Optimizer bot):** `/optimize` (interactive menu) `/queue` `/cancel` `/status` `/results` `/help` `/stop`
 
 ---
 
@@ -86,6 +91,8 @@ crypto_trading_system_doohan.py  (Doohan V1.7.1 — Modes P/D/V/H/S, grid + refi
 crypto_revolut_doohan.py  (auto-trader — reads trading_config_doohan.json)
   └── crypto_live_trader_doohan.py  (signal generation library)
         └── crypto_trading_system_doohan.py  (imports ASSETS, features, models)
+crypto_optimizer_bot.py  (Telegram bot for remote optimization — separate bot token)
+  └── crypto_trading_system_doohan.py  (spawned as subprocess for Mode D/V/H/P/S)
 ```
 
 Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
@@ -123,7 +130,8 @@ config/trading_config_doohan.json      <- per-asset: horizon, min_confidence, st
 config/position_{ASSET}.json           <- position tracking
 config/revolut_x_config.json           <- Revolut X API key
 config/private.pem                     <- Ed25519 signing key
-config/telegram_config.json            <- Telegram bot token
+config/telegram_config.json            <- Telegram bot token (trader)
+config/telegram_optimizer_config.json  <- Telegram bot token (optimizer bot — separate bot)
 ```
 
 **Config files are NOT in git.** `config/` is in `.gitignore`. Never push credentials.
@@ -169,6 +177,7 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
 | `crypto_trading_system_doohan_v1_7_3.py` | **Merged** | PySR code merged into production (2026-03-25). Kept for reference. |
 | `pysr_discover_features.py` | Active | Offline PySR discovery. Uses historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
+| `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus to select mode/assets/horizons. Sequential job queue, subprocess execution with real-time progress. Separate bot token (`config/telegram_optimizer_config.json`). Runs at below-normal priority. |
 | `crypto_trading_system_doohan_v1_7_2.py` | **Dropped** | Regularization test. Wash — not adopted. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
 | `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
@@ -194,10 +203,10 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 | Asset | Horizon | Models | Window | Gamma | Features | Best Conf | Status |
 |-------|---------|--------|--------|-------|----------|-----------|--------|
 | **BTC** | **5h** | RF+LGBM | 202h | 0.9955 | 15 | — | Refined |
-| **BTC** | **6h** | XGB+LGBM | 252h | 0.9936 | 9 | 90% | Refined |
+| **BTC** | **6h** | XGB+LGBM | 239h | 0.9963 | 13 | 90% | Refined+PySR |
 | **BTC** | **7h** | RF+LGBM | 251h | 0.9954 | 25 | — | Refined |
 | **ETH** | **5h** | XGB+LGBM | 304h | 0.9966 | 22 | — | Refined |
-| **ETH** | **6h** | RF+XGB | 76h | 0.9997 | 23 | 85% | Refined |
+| **ETH** | **6h** | XGB+LGBM | 117h | 0.9944 | 11 | 85% | Refined+PySR |
 | **ETH** | **7h** | RF+LGBM | 267h | 0.9959 | 9 | — | Refined |
 | **ETH** | **8h** | XGB+LGBM | 200h | 0.999 | 13 | — | Grid |
 | **SOL** | **5h** | XGB+LGBM | 196h | 0.9989 | 22 | — | Refined |
@@ -241,6 +250,7 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 1. **LSTM regime embedding** — Low priority. Train LSTM daily → 2-3 dim embedding → feed to trees. Requires .pkl persistence.
 
 ### Completed (2026-03-25)
+- **Telegram optimizer bot** — `crypto_optimizer_bot.py`. Remote triggering of Mode D/V/H/P/S via inline keyboard menus. Sequential job queue, subprocess execution with unbuffered real-time progress output, below-normal Windows priority. Separate bot token to avoid conflicts with trader bot.
 - **PySR leakage fix** — Initial PySR results were inflated (BTC 6h: +9.27% with leaky PySR vs +3.74% baseline, ETH 7h: +23.32%). Root cause: PySR formulas fitted on same 6-month window Mode D evaluates on. Fix: PySR discovery now uses historical window (months 12→6 ago), zero overlap with Mode D's last 6 months. Anti-leakage checks added in Mode D/V/Refine — strips PySR features early if JSON lacks `discovery_method == "historical"`. Mode V blocks production writes for leaky configs.
 - **PySR promoted to production** — `_compute_pysr_features()` merged into `crypto_trading_system_doohan.py`. Loads `models/pysr_{ASSET}_{H}h.json` if exists, safe fallback if not. Clean PySR results pending re-run with historical window.
 - **logret_5h and logret_7h added** — Fills gaps in short-term momentum for 5h/7h horizon models. 132 total features.
