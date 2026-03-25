@@ -1,0 +1,147 @@
+
+############################################################
+  BTC 5h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 5h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75290
+    Rows after dropna: 75045
+    Funding rate: 37063 rows loaded (regime gate)
+    PySR #1: SKIP — unresolvable deps: ['pysr_3', 'pysr_5']
+    PySR #2: SKIP — unresolvable deps: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — unresolvable deps: ['pysr_3', 'pysr_5']
+    PySR #4: SKIP — unresolvable deps: ['pysr_3']
+    PySR #5: SKIP — unresolvable deps: ['pysr_3', 'pysr_2']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 954 BUY (36.8%) / 1638 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+Compiling Julia backend...
+
+  PySR completed in 0.8 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0274 |   0.220671 |          9 | (0.39049932 - (logret_72h * 4.182717)) - (xa_dax_relstr5d * -0.19734606)
+    2 |   0.0110 |   0.226803 |          7 | 0.37950653 - (logret_72h - (xa_sp500_relstr5d * 0.0797495))
+    3 |   0.0041 |   0.229317 |          6 | tanh(volume_ratio_h - -0.84831345) + -0.5532568
+    4 |   0.0037 |   0.230888 |          3 | 0.36228833 - logret_72h
+    5 |   0.0037 |   0.219059 |         11 | (0.37956873 - (logret_72h * 3.7262955)) - ((xa_dax_relstr5d * -0.22824498) + logret_240h)
+
+  5 expressions saved
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_5h.json
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_5h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 5h
+
+############################################################
+  BTC 6h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 6h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75290
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: pysr_1 = -logret_240h + xa_sp500_relstr5d*0.14509219 - (logret_72h - ... (complexity=9, score=0.0098)
+    PySR #2: pysr_2 = xa_sp500_relstr5d*0.08718706 - (logret_72h - 0.38895494) (complexity=7, score=0.0087)
+    PySR #3: pysr_3 = -logret_72h + xa_sp500_relstr5d*(-3.1811388) - (-3.4507248*(... (complexity=13, score=0.0058)
+    PySR #4: pysr_4 = -logret_72h + xa_sp500_relstr5d*(-2.8074324) - (-3.0936246)*... (complexity=15, score=0.0044)
+    PySR #5: pysr_5 = -logret_120h + 0.14509219*xa_sp500_relstr5d - (logret_72h + ... (complexity=11, score=0.0040)
+    PySR: 5 features added from G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_6h.json
+    All features: 51 base + 86 macro/sentiment/cross-asset/pysr = 137 total
+  Excluded 5 existing PySR columns from inputs
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 990 BUY (38.2%) / 1602 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+
+  PySR completed in 0.7 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0277 |   0.221654 |          9 | (xa_dax_relstr5d * 0.22237341) + ((logret_72h * -4.5057693) + 0.40853474)
+    2 |   0.0102 |   0.229218 |          7 | ((xa_sp500_relstr5d * 0.09106235) - logret_72h) + 0.39581662
+    3 |   0.0059 |   0.219052 |         11 | (((logret_72h * -3.9394543) + (xa_sp500_relstr5d * 0.24746965)) + 0.39166954) - logret_240h
+    4 |   0.0059 |   0.227871 |          8 | sqrt(((xa_sp500_relstr5d * 0.07573936) + 0.1543641) - logret_72h)
+    5 |   0.0032 |   0.234563 |          3 | 0.37616277 - logret_72h
+
+  5 expressions saved
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_6h.json
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_6h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 6h
+
+############################################################
+  BTC 7h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 7h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75290
+    Rows after dropna: 75043
+    Funding rate: 37061 rows loaded (regime gate)
+    PySR #1: SKIP — unresolvable deps: ['pysr_2']
+    PySR #2: SKIP — unresolvable deps: ['pysr_2']
+    PySR #3: SKIP — unresolvable deps: ['pysr_2']
+    PySR #4: SKIP — unresolvable deps: ['pysr_2']
+    PySR #5: SKIP — unresolvable deps: ['pysr_2']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 1029 BUY (39.7%) / 1563 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+
+  PySR completed in 0.6 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0444 |   0.222509 |          9 | ((price_to_sma100h / -0.13225868) + 0.42760423) - (xa_dax_relstr5d * -0.24990399)
+    2 |   0.0130 |   0.219634 |         11 | (price_to_sma100h / -0.13509558) + ((0.4288025 - (xa_dax_relstr5d * -0.29047552)) - spread_120h_12h)
+    3 |   0.0087 |   0.232761 |          7 | ((xa_dax_relstr5d * 0.11616188) - logret_240h) + 0.41302612
+    4 |   0.0037 |   0.237643 |          3 | 0.39112872 - logret_72h
+    5 |   0.0024 |   0.218590 |         13 | ((price_to_sma100h / -0.1381685) - spread_120h_12h) + (0.4299383 - ((xa_dax_relstr5d * -0.33112243) + spread_120h_12h))
+
+  5 expressions saved
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_7h.json
+  Saved: G:\Autres ordinateurs\My laptop\engine\models\pysr_BTC_7h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 7h
+
+============================================================
+  MODE P COMPLETE
+============================================================
+
+Done!

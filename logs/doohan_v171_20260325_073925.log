@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "C:\Users\Alex\algo_trading\engine\pysr_discover_features.py", line 35, in <module>
+    from crypto_trading_system_doohan import (
+        load_data, build_all_features, PREDICTION_HORIZON, MAX_DIAG_HOURS
+    )
+ImportError: cannot import name 'MAX_DIAG_HOURS' from 'crypto_trading_system_doohan' (C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan.py)

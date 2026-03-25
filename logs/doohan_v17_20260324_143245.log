@@ -1,0 +1,81 @@
+============================================================
+  DOOHAN: Mode DG | BTC | 4h | 150 trials
+============================================================
+
+============================================================
+  ASSET: BTC
+============================================================
+
+======================================================================
+  DOOHAN V1.7 MODE D: EXHAUSTIVE GRID -- 4h HORIZON
+  6 combos × 6 windows × 6 features × 3 gammas = 648 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-24
+    VIX        (^VIX)... 1058 days
+    DXY        (DX-Y.NYB)... 1060 days
+    SP500      (^GSPC)... 1058 days
+    NASDAQ     (^IXIC)... 1058 days
+    GOLD       (GC=F)... 1060 days
+    US10Y      (^TNX)... 1058 days
+    EURUSD     (EURUSD=X)... 1096 days
+    USDJPY     (JPY=X)... 1096 days
+    OIL        (CL=F)... 1060 days
+
+  Saved: data/macro_data\macro_daily.csv (1097 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-23
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2970 rows)
+  Date range: 2018-02-01 to 2026-03-24
+  Current: 11 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36985 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1543 days
+    ETH_USD    (ETH-USD)... Traceback (most recent call last):
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan_v1_7.py", line 6381, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan_v1_7.py", line 6346, in main
+    run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan_v1_7.py", line 3104, in run_mode_d_optuna
+    download_macro_data.main()
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\Alex\algo_trading\engine\download_macro_data.py", line 491, in main
+    cross_df = download_cross_asset()
+  File "C:\Users\Alex\algo_trading\engine\download_macro_data.py", line 209, in download_cross_asset
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+  File "C:\Users\Alex\algo_trading\venv\Lib\site-packages\yfinance\utils.py", line 95, in wrapper
+    result = func(*args, **kwargs)
+  File "C:\Users\Alex\algo_trading\venv\Lib\site-packages\yfinance\multi.py", line 151, in download
+    _download_one_threaded(ticker, period=period, interval=interval,
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                           start=start, end=end, prepost=prepost,
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+                           progress=(progress and i > 0),
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                           rounding=rounding, timeout=timeout)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Alex\algo_trading\venv\Lib\site-packages\multitasking\__init__.py", line 296, in async_method
+    single.start()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\Alex\AppData\Local\Python\pythoncore-3.14-64\Lib\threading.py", line 1005, in start
+    _start_joinable_thread(self._bootstrap, handle=self._os_thread_handle,
+    ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                           daemon=self.daemon)
+                           ^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

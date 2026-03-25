@@ -1,0 +1,680 @@
+============================================================
+  DOOHAN: Mode H | BTC | 5h,6h,7h,8h | 150 trials
+============================================================
+
+================================================================================
+  MODE H: HORIZON SWEEP
+  Assets: BTC
+  Horizons: 5h, 6h, 7h, 8h
+  Pipeline: D (grid) → G (backtest + refine) per horizon → compare → save best
+  Trials: 150 per horizon
+================================================================================
+
+################################################################################
+  HORIZON SWEEP: BTC — testing 5h, 6h, 7h, 8h
+################################################################################
+
+======================================================================
+  BTC — HORIZON 5h (1/4)
+======================================================================
+
+======================================================================
+  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- 5h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-25
+    VIX        (^VIX)... 1059 days
+    DXY        (DX-Y.NYB)... 1061 days
+    SP500      (^GSPC)... 1059 days
+    NASDAQ     (^IXIC)... 1059 days
+    GOLD       (GC=F)... 1061 days
+    US10Y      (^TNX)... 1059 days
+    EURUSD     (EURUSD=X)... 1097 days
+    USDJPY     (JPY=X)... 1097 days
+    OIL        (CL=F)... 1061 days
+
+  Saved: data/macro_data\macro_daily.csv (1098 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-24
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2971 rows)
+  Date range: 2018-02-01 to 2026-03-25
+  Current: 14 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (37009 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1544 days
+    ETH_USD    (ETH-USD)... 1544 days
+    NASDAQ     (^IXIC)... 1059 days
+    SP500      (^GSPC)... 1059 days
+    DAX        (^GDAXI)... 1077 days
+
+  Saved: data/macro_data\cross_asset.csv (1544 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1544 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1544 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-24
+    sopr: 83 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4634 records -> 37065 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (37068 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-25 11:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,278 bytes
+    derivatives_btc.csv             1,207,595 bytes
+    fear_greed.csv                     69,225 bytes
+    macro_daily.csv                   184,951 bytes
+    macro_hourly.csv                6,566,513 bytes
+    onchain_btc.csv                   213,277 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.3 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating BTC from 2026-03-25 11:00:00...
+    BTC: already up to date (75288 candles)
+  [Data update: 0.1 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: BTC (5h)
+======================================================================
+
+  Building all features (horizon=5h)...
+    Rows before dropna: 75288
+    Rows after dropna: 75043
+    Funding rate: 37061 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  [Feature build: 0.0 min]
+  Capped: 75,043 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 132 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [12:40:29]
+    volatility_48h                   5.9% [      BASE] ###########
+    adx_14h                          4.8% [      BASE] #########
+    volatility_12h                   4.4% [      BASE] ########
+    logret_72h                       3.6% [      BASE] #######
+    xa_dax_relstr5d                  2.7% [CROSS-ASSET] #####
+    plus_di_14h                      2.6% [      BASE] #####
+    volume_ratio_h                   2.6% [      BASE] #####
+    price_to_sma100h                 2.5% [      BASE] #####
+    xa_dax_corr10d                   2.5% [CROSS-ASSET] #####
+    hour_cos                         2.5% [      BASE] #####
+    minus_di_14h                     2.2% [      BASE] ####
+    vol_ratio_12_48                  2.2% [      BASE] ####
+    m_nasdaq_chg1d                   2.1% [     MACRO] ####
+    xa_sp500_relstr5d                2.0% [CROSS-ASSET] ####
+    spread_240h_24h                  2.0% [      BASE] ####
+    logret_240h                      1.9% [      BASE] ###
+    xa_nasdaq_relstr5d               1.9% [CROSS-ASSET] ###
+    xa_eth_usd_relstr5d              1.9% [CROSS-ASSET] ###
+    logret_12h                       1.8% [      BASE] ###
+    price_accel_24h                  1.7% [      BASE] ###
+    ... 99 features below 1% importance
+  [Ranking: 0.0 min] — 132 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: BTC 5h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.512 ret=-17.3% tr=17  (0.1min) <-- BEST
+    [  2/324] RF+LGBM    w= 72 f=10 g=0.997 | apf=0.514 ret=-17.3% tr=17  (0.3min) <-- BEST
+    [  4/324] RF+LGBM    w= 72 f=13 g=0.999 | apf=0.739 ret=-10.8% tr=17  (0.6min) <-- BEST
+    [ 13/324] RF+LGBM    w= 72 f=25 g=0.999 | apf=0.806 ret=-10.4% tr=16  (2.0min) <-- BEST
+    [ 16/324] RF+LGBM    w= 72 f=30 g=0.999 | apf=0.865 ret=-8.1% tr=14  (2.5min) <-- BEST
+    [ 19/324] RF+LGBM    w=100 f=10 g=0.999 | apf=1.250 ret=-3.1% tr=15  (2.9min) <-- BEST
+    [ 20/324] RF+LGBM    w=100 f=10 g=0.997 | apf=1.373 ret=-1.6% tr=16  (3.1min) <-- BEST
+    [ 23/324] RF+LGBM    w=100 f=13 g=0.997 | apf=1.595 ret=+1.3% tr=16  (3.6min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=1.007 ret=-9.5% tr=17  (10.4min)
+    [ 91/324] RF+LGBM    w=300 f=10 g=0.999 | apf=2.274 ret=+7.4% tr=15  (16.6min) <-- BEST
+    [ 92/324] RF+LGBM    w=300 f=10 g=0.997 | apf=2.834 ret=+12.7% tr=14  (16.8min) <-- BEST
+    [100/324] RF+LGBM    w=300 f=20 g=0.999 | apf=3.612 ret=+16.9% tr=12  (18.4min) <-- BEST
+    [107/324] RF+LGBM    w=300 f=30 g=0.997 | apf=4.314 ret=+17.9% tr=16  (19.9min) <-- BEST
+
+  ────────────────────────────────────────────────────────────
+  XGB+LGBM
+  ────────────────────────────────────────────────────────────
+    [120/324] XGB+LGBM   w= 72 f=20 g=0.995 | apf=0.881 ret=-5.3% tr=10  (22.1min)
+    [180/324] XGB+LGBM   w=200 f=30 g=0.995 | apf=0.645 ret=-15.0% tr=10  (34.3min)
+
+  ────────────────────────────────────────────────────────────
+  RF+XGB
+  ────────────────────────────────────────────────────────────
+    [240/324] RF+XGB     w=100 f=13 g=0.995 | apf=1.473 ret=-0.2% tr=12  (42.9min)
+    [300/324] RF+XGB     w=250 f=20 g=0.995 | apf=0.376 ret=-29.6% tr=16  (44.2min)
+
+  ======================================================================
+  GRID RESULTS: BTC 5h (45.0 min)
+  ======================================================================
+  Total evals: 324 | Valid (≥8 trades): 323 | Low trades: 1 | Failed: 0
+  Unique candidates: 323
+  Grid CSV: models\crypto_doohan_v1_7_1_grid_BTC_5h.csv
+  Best overall: RF+LGBM w=300h g=0.9970 f=30 apf=4.314
+
+  Rank      APF  Combo                   Window    Gamma  Feats   Source
+  ---------------------------------------------------------------------------
+     1    4.314  RF+LGBM                   300h   0.9970     30     Grid <-- BEST
+     2    3.612  RF+LGBM                   300h   0.9990     20     Grid
+     3    3.062  RF+LGBM                   300h   0.9970     25     Grid
+     4    3.048  RF+LGBM                   300h   0.9950     25     Grid
+     5    2.956  XGB+LGBM                  300h   0.9990     13     Grid
+     6    2.872  RF+LGBM                   300h   0.9950     30     Grid
+     7    2.834  RF+LGBM                   300h   0.9970     10     Grid
+     8    2.727  RF+LGBM                   300h   0.9990     30     Grid
+     9    2.611  RF+LGBM                   300h   0.9970     17     Grid
+    10    2.510  RF+LGBM                   300h   0.9970     13     Grid
+    11    2.420  RF+LGBM                   300h   0.9970     20     Grid
+    12    2.405  XGB+LGBM                  300h   0.9990     10     Grid
+    13    2.396  RF+XGB                    300h   0.9950     13     Grid
+    14    2.361  RF+XGB                    300h   0.9990     13     Grid
+    15    2.323  XGB+LGBM                  300h   0.9950     13     Grid
+    16    2.277  XGB+LGBM                  300h   0.9970     30     Grid
+    17    2.274  RF+LGBM                   300h   0.9990     10     Grid
+    18    2.242  RF+XGB                    300h   0.9950     10     Grid
+    19    2.166  RF+XGB                    300h   0.9990     25     Grid
+    20    2.161  RF+XGB                    300h   0.9970     13     Grid
+
+  ======================================================================
+  3-FOLD ROLLING HOLDOUT: BTC 5h (top 20 candidates)
+  ======================================================================
+
+  Rank   AVG_APF   AVG_Ret  AVG_Acc    Tr      F1      F2      F3    IS_APF  Combo                    Win    Gamma    F
+  -----------------------------------------------------------------------------------------------------------------------------
+     1     2.165     +1.8%    68.2%    16   +3.1   +3.1   -0.7     2.323  XGB+LGBM                300h   0.9950   13  ✓ <-- BEST
+     2     1.491     +1.6%    63.6%    26   +3.9   +0.8   -0.1     2.510  RF+LGBM                 300h   0.9970   13  ✓
+     3     1.437     +1.1%    59.7%    24   -1.7   +6.1   -1.0     2.872  RF+LGBM                 300h   0.9950   30  ✓
+     4     1.385     -0.5%    69.0%    25   +3.4   -8.0   +3.0     2.834  RF+LGBM                 300h   0.9970   10  ✗
+     5     1.352     +0.3%    62.0%    21   +1.3   +1.4   -2.0     2.161  RF+XGB                  300h   0.9970   13  ✓
+     6     1.339     +0.7%    62.8%    27   +0.4   +0.6   +1.0     3.062  RF+LGBM                 300h   0.9970   25  ✓
+     7     1.272     +0.1%    60.5%    28   +1.2   -0.9   -0.1     2.611  RF+LGBM                 300h   0.9970   17  ✓
+     8     1.265     -0.3%    63.6%    22   -3.4   +6.2   -3.8     2.727  RF+LGBM                 300h   0.9990   30  ✗
+     9     1.232     -0.0%    55.8%    27   -3.7   +1.8   +1.9     3.048  RF+LGBM                 300h   0.9950   25  ✗
+    10     1.222     -1.3%    61.2%    24   +0.0   +2.8   -6.6     4.314  RF+LGBM                 300h   0.9970   30  ✗
+
+  ======================================================================
+  TOP 6 CANDIDATES: BTC 5h
+  ======================================================================
+  #1: XGB+LGBM  w=300h  g=0.9950  f=13  ho_apf=2.165  ho_ret=+1.8%  [+3.1% / +3.1% / -0.7%]  Grid  ✓ <-- BEST
+  #2: RF+LGBM  w=300h  g=0.9970  f=13  ho_apf=1.491  ho_ret=+1.6%  [+3.9% / +0.8% / -0.1%]  Grid  ✓
+  #3: RF+LGBM  w=300h  g=0.9950  f=30  ho_apf=1.437  ho_ret=+1.1%  [-1.7% / +6.1% / -1.0%]  Grid  ✓
+  #4: RF+LGBM  w=300h  g=0.9970  f=25  ho_apf=1.339  ho_ret=+0.7%  [+0.4% / +0.6% / +1.0%]  Grid  ✓
+  #5: RF+LGBM  w=300h  g=0.9990  f=30  ho_apf=1.265  ho_ret=-0.3%  [-3.4% / +6.2% / -3.8%]  Grid  ✗
+  #6: RF+LGBM  w=300h  g=0.9990  f=10  ho_apf=1.167  ho_ret=-1.3%  [-5.3% / +0.1% / +1.2%]  Grid  ✗
+  ======================================================================
+  [BTC total: 51.7 min]
+
+  Best models saved: models/crypto_doohan_v1_7_1_best_models.csv
+
+  Generating 5h-ahead signals for BTC (models=XGB+LGBM, window=300h, replay=200h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-19 01:00: SELL (94%) | price=$71,115.23
+    [100] 2026-03-21 03:00: SELL (92%) | price=$70,748.95
+    [150] 2026-03-23 05:00: SELL (94%) | price=$68,560.00
+    [200] 2026-03-25 07:00: SELL (92%) | price=$70,967.89
+  Generated 200 hourly signals for BTC
+
+  Mode D complete: 53.5 min total
+================================================================================
+  MODE V: LIVE BACKTEST + REFINE — BTC 5h
+  Period: last 336 hours (2 weeks), every hour
+  Ranking by: conf>=80% return
+  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best
+  Candidates: models/crypto_doohan_v1_7_1_best_models.csv
+  Production: models/crypto_doohan_v1_7_1_production.csv
+================================================================================
+
+######################################################################
+  BTC 5h
+######################################################################
+
+  Computing LGBM feature ranking for BTC...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+
+  [1/5] LGBM Feature Importance (gain-based)  [13:33:33]
+    xa_dax_relstr5d                  6.1% [CROSS-ASSET] ############
+    logret_120h                      5.7% [      BASE] ###########
+    xa_sp500_relstr5d                5.6% [CROSS-ASSET] ###########
+    m_nasdaq_chg1d                   3.2% [     MACRO] ######
+    m_sp500_chg1d                    3.1% [     MACRO] ######
+    hour_cos                         3.0% [      BASE] ######
+    price_to_sma100h                 3.0% [      BASE] #####
+    spread_120h_8h                   2.9% [      BASE] #####
+    xa_nasdaq_relstr5d               2.5% [CROSS-ASSET] ####
+    logret_72h                       2.2% [      BASE] ####
+    gk_volatility_48h                2.0% [      BASE] ####
+    dow_sin                          1.8% [      BASE] ###
+    logret_24h                       1.7% [      BASE] ###
+    fg_chg5d                         1.7% [ SENTIMENT] ###
+    m_dxy_chg1d                      1.6% [     MACRO] ###
+    volatility_12h                   1.4% [      BASE] ##
+    spread_24h_4h                    1.3% [      BASE] ##
+    intraday_range                   1.3% [      BASE] ##
+    m_vix_chg1d                      1.3% [     MACRO] ##
+    logret_2h                        1.3% [      BASE] ##
+    ... 104 features below 1% importance
+  [Ranking done: 1.2s] — 132 features ranked
+
+======================================================================
+  STEP 1: BACKTEST MODE D CANDIDATES
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.2): BTC
+  XGB+LGBM  w=300h  g=0.9950  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=XGB+LGBM, window=300h, replay=336h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (86%) | price=$71,907.64
+    [100] 2026-03-15 11:00: SELL (78%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (97%) | price=$73,744.14
+    [200] 2026-03-19 15:00: SELL (69%) | price=$69,473.44
+    [250] 2026-03-21 17:00: SELL (79%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (99%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-3.23%, trades=34, round_trips=17, win_rate=47%
+  Conf>=70%: return=-4.08%, trades=32, round_trips=16, win_rate=44%
+  Conf>=75%: return=-3.51%, trades=26, round_trips=13, win_rate=54%
+  Conf>=80%: return=-7.24%, trades=20, round_trips=10, win_rate=50%
+  Conf>=85%: return=-5.96%, trades=16, round_trips=8, win_rate=25%
+  Conf>=90%: return=-3.46%, trades=14, round_trips=7, win_rate=29%
+  Buy&Hold: +1.88%
+
+──────────────────────────────────────────────────────────────────────
+  D #2 (APF=1.5): BTC
+  RF+LGBM  w=300h  g=0.9970  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=RF+LGBM, window=300h, replay=336h, custom (13 features), gamma=0.997)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (94%) | price=$71,907.64
+    [100] 2026-03-15 11:00: SELL (80%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (98%) | price=$73,744.14
+    [200] 2026-03-19 15:00: BUY (58%) | price=$69,473.44
+    [250] 2026-03-21 17:00: SELL (68%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (99%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-3.23%, trades=36, round_trips=18, win_rate=44%
+  Conf>=70%: return=-5.27%, trades=30, round_trips=15, win_rate=33%
+  Conf>=75%: return=-7.13%, trades=20, round_trips=10, win_rate=30%
+  Conf>=80%: return=-6.00%, trades=18, round_trips=9, win_rate=33%
+  Conf>=85%: return=-3.80%, trades=16, round_trips=8, win_rate=25%
+  Conf>=90%: return=-4.02%, trades=16, round_trips=8, win_rate=25%
+  Buy&Hold: +1.88%
+
+──────────────────────────────────────────────────────────────────────
+  D #3 (APF=1.4): BTC
+  RF+LGBM  w=300h  g=0.9950  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=RF+LGBM, window=300h, replay=336h, custom (30 features), gamma=0.995)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (66%) | price=$71,907.64
+    [100] 2026-03-15 11:00: BUY (57%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (96%) | price=$73,744.14
+    [200] 2026-03-19 15:00: SELL (79%) | price=$69,473.44
+    [250] 2026-03-21 17:00: BUY (62%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (95%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-5.79%, trades=52, round_trips=26, win_rate=62%
+  Conf>=70%: return=-6.24%, trades=46, round_trips=23, win_rate=52%
+  Conf>=75%: return=-3.40%, trades=34, round_trips=17, win_rate=47%
+  Conf>=80%: return=-2.91%, trades=26, round_trips=13, win_rate=46%
+  Conf>=85%: return=-1.89%, trades=26, round_trips=13, win_rate=46%
+  Conf>=90%: return=-6.33%, trades=16, round_trips=8, win_rate=38%
+  Buy&Hold: +1.88%
+
+──────────────────────────────────────────────────────────────────────
+  D #4 (APF=1.3): BTC
+  RF+LGBM  w=300h  g=0.9970  f=25
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=RF+LGBM, window=300h, replay=336h, custom (25 features), gamma=0.997)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (87%) | price=$71,907.64
+    [100] 2026-03-15 11:00: SELL (58%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (98%) | price=$73,744.14
+    [200] 2026-03-19 15:00: BUY (59%) | price=$69,473.44
+    [250] 2026-03-21 17:00: BUY (71%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (75%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-4.97%, trades=56, round_trips=28, win_rate=71%
+  Conf>=70%: return=-3.45%, trades=48, round_trips=24, win_rate=67%
+  Conf>=75%: return=-3.70%, trades=38, round_trips=19, win_rate=58%
+  Conf>=80%: return=-2.26%, trades=32, round_trips=16, win_rate=50%
+  Conf>=85%: return=-4.02%, trades=24, round_trips=12, win_rate=33%
+  Conf>=90%: return=-1.50%, trades=16, round_trips=8, win_rate=50%
+  Buy&Hold: +1.88%
+
+──────────────────────────────────────────────────────────────────────
+  D #5 (APF=1.3): BTC
+  RF+LGBM  w=300h  g=0.9990  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=RF+LGBM, window=300h, replay=336h, custom (30 features), gamma=0.999)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (63%) | price=$71,907.64
+    [100] 2026-03-15 11:00: BUY (67%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (96%) | price=$73,744.14
+    [200] 2026-03-19 15:00: SELL (62%) | price=$69,473.44
+    [250] 2026-03-21 17:00: BUY (83%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (90%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-2.19%, trades=57, round_trips=28, win_rate=64% [still in]
+  Conf>=70%: return=-1.31%, trades=42, round_trips=21, win_rate=62%
+  Conf>=75%: return=-0.75%, trades=30, round_trips=15, win_rate=53%
+  Conf>=80%: return=-4.26%, trades=22, round_trips=11, win_rate=36%
+  Conf>=85%: return=-4.41%, trades=20, round_trips=10, win_rate=40%
+  Conf>=90%: return=-4.17%, trades=8, round_trips=4, win_rate=25%
+  Buy&Hold: +1.88%
+
+──────────────────────────────────────────────────────────────────────
+  D #6 (APF=1.2): BTC
+  RF+LGBM  w=300h  g=0.9990  f=10
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for BTC (models=RF+LGBM, window=300h, replay=336h, custom (10 features), gamma=0.999)...
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+    [50] 2026-03-13 09:00: SELL (66%) | price=$71,907.64
+    [100] 2026-03-15 11:00: SELL (59%) | price=$71,781.12
+    [150] 2026-03-17 13:00: SELL (87%) | price=$73,744.14
+    [200] 2026-03-19 15:00: BUY (52%) | price=$69,473.44
+    [250] 2026-03-21 17:00: BUY (53%) | price=$70,309.23
+    [300] 2026-03-23 19:00: BUY (97%) | price=$71,073.77
+  Generated 336 hourly signals for BTC
+  Conf>=65%: return=-1.32%, trades=32, round_trips=16, win_rate=69%
+  Conf>=70%: return=-1.68%, trades=28, round_trips=14, win_rate=64%
+  Conf>=75%: return=-1.56%, trades=28, round_trips=14, win_rate=57%
+  Conf>=80%: return=-4.56%, trades=20, round_trips=10, win_rate=50%
+  Conf>=85%: return=-0.05%, trades=20, round_trips=10, win_rate=50%
+  Conf>=90%: return=+0.36%, trades=10, round_trips=5, win_rate=60%
+  Buy&Hold: +1.88%
+
+======================================================================
+  STEP 2: OPTUNA REFINE — top 3 live performers
+  50 trials per config | gamma ±0.002 | features ±5 | window ±20h
+======================================================================
+  #1: RF+LGBM  w=300h  g=0.9970  f=25  live_ret=-2.26%
+  #2: RF+LGBM  w=300h  g=0.9950  f=30  live_ret=-2.91%
+  #3: RF+LGBM  w=300h  g=0.9990  f=30  live_ret=-4.26%
+    Rows before dropna: 75289
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    PySR #1: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #2: SKIP — missing features: ['pysr_3', 'pysr_4']
+    PySR #3: SKIP — missing features: ['pysr_5', 'pysr_3']
+    PySR #4: SKIP — missing features: ['pysr_3']
+    PySR #5: SKIP — missing features: ['pysr_2', 'pysr_3']
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+
+  ────────────────────────────────────────────────────────────
+  Refining #1: RF+LGBM  w=300h  g=0.9970  f=25
+  Ranges: gamma[0.995-0.999] features[20-30] window[280-320]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=295 g=0.9988 f=28 | apf=1.095 ret=-5.1% trades=16
+    #  2 NEW BEST: w=304 g=0.9956 f=21 | apf=1.460 ret=+1.2% trades=16
+    #  4 NEW BEST: w=309 g=0.9951 f=30 | apf=1.965 ret=+5.3% trades=17
+    # 11 NEW BEST: w=319 g=0.9950 f=30 | apf=2.744 ret=+14.1% trades=15
+    → Best: w=319h g=0.9950 f=30 apf=2.744
+
+  ────────────────────────────────────────────────────────────
+  Refining #2: RF+LGBM  w=300h  g=0.9950  f=30
+  Ranges: gamma[0.993-0.997] features[25-35] window[280-320]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=295 g=0.9968 f=33 | apf=1.218 ret=-3.4% trades=16
+    #  4 NEW BEST: w=309 g=0.9931 f=35 | apf=2.512 ret=+8.2% trades=16
+    # 19 NEW BEST: w=305 g=0.9931 f=29 | apf=2.570 ret=+10.8% trades=11
+    # 41 NEW BEST: w=305 g=0.9932 f=29 | apf=2.808 ret=+13.5% trades=12
+    → Best: w=305h g=0.9932 f=29 apf=2.808
+
+  ────────────────────────────────────────────────────────────
+  Refining #3: RF+LGBM  w=300h  g=0.9990  f=30
+  Ranges: gamma[0.997-1.000] features[25-35] window[280-320]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=295 g=0.9999 f=33 | apf=0.988 ret=-6.2% trades=16
+    #  2 NEW BEST: w=304 g=0.9975 f=26 | apf=1.354 ret=-0.3% trades=17
+    # 12 NEW BEST: w=304 g=0.9990 f=27 | apf=1.495 ret=+1.7% trades=16
+    # 13 NEW BEST: w=306 g=0.9988 f=27 | apf=1.522 ret=+1.8% trades=12
+    # 14 NEW BEST: w=306 g=0.9987 f=28 | apf=1.596 ret=+2.4% trades=11
+[33m[W 2026-03-25 14:11:15,855][0m Trial 19 failed with parameters: {'window': 291, 'gamma': 0.9982424038937175, 'n_features': 26} because of the following error: KeyboardInterrupt().[0m
+Traceback (most recent call last):
+  File [35m"C:\algo_trading\venv\Lib\site-packages\optuna\study\_optimize.py"[0m, line [35m206[0m, in [35m_run_trial[0m
+    value_or_values = func(trial)
+  File [35m"G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py"[0m, line [35m3995[0m, in [35mrefine_objective[0m
+        sampler=o[1;31mptuna.samplers.TPESampler(seed=42),[0m
+                 [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    ...<3 lines>...
+    [1;31mbest_[0mrefine_apf = 0.0
+    [1;31m^^^^^[0m
+  File [35m"G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py"[0m, line [35m2994[0m, in [35m_deku_eval_with_pruning[0m
+    if len(n[1;31mp.unique(y_train)) < 2:[0m
+            [1;31m^^^^^^^^^^^^^^^^^^^^^^^[0m
+  File [35m"C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py"[0m, line [35m1560[0m, in [35mfit[0m
+    [31msuper().fit[0m[1;31m([0m
+    [31m~~~~~~~~~~~[0m[1;31m^[0m
+        [1;31mX,[0m
+        [1;31m^^[0m
+    ...<12 lines>...
+        [1;31minit_model=init_model,[0m
+        [1;31m^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1;31m)[0m
+    [1;31m^[0m
+  File [35m"C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py"[0m, line [35m1049[0m, in [35mfit[0m
+    self._Booster = [31mtrain[0m[1;31m([0m
+                    [31m~~~~~[0m[1;31m^[0m
+        [1;31mparams=params,[0m
+        [1;31m^^^^^^^^^^^^^^[0m
+    ...<6 lines>...
+        [1;31mcallbacks=callbacks,[0m
+        [1;31m^^^^^^^^^^^^^^^^^^^^[0m
+    [1;31m)[0m
+    [1;31m^[0m
+  File [35m"C:\algo_trading\venv\Lib\site-packages\lightgbm\engine.py"[0m, line [35m297[0m, in [35mtrain[0m
+    booster = Booster(params=params, train_set=train_set)
+  File [35m"C:\algo_trading\venv\Lib\site-packages\lightgbm\basic.py"[0m, line [35m3661[0m, in [35m__init__[0m
+    [31m_LIB.LGBM_BoosterCreate[0m[1;31m([0m
+    [31m~~~~~~~~~~~~~~~~~~~~~~~[0m[1;31m^[0m
+        [1;31mtrain_set._handle,[0m
+        [1;31m^^^^^^^^^^^^^^^^^^[0m
+        [1;31m_c_str(params_str),[0m
+        [1;31m^^^^^^^^^^^^^^^^^^^[0m
+        [1;31mctypes.byref(self._handle),[0m
+        [1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1;31m)[0m
+    [1;31m^[0m
+[1;35mKeyboardInterrupt[0m
+[33m[W 2026-03-25 14:11:15,912][0m Trial 19 failed with value None.[0m
+Traceback (most recent call last):
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4843, in <module>
+    # Run validate and/or strategy comparison after D
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4837, in main
+    if len(horizons) > 1:
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4423, in run_mode_h
+    print(f"\n{'=' * 70}")
+                ^^^^^^^^^^
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 3696, in run_mode_v
+                      and f'conf_{MODE_G_PRIMARY_CONF}' in r]
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    doohan_results.sort(key=lambda x: -x[1][f'conf_{MODE_G_PRIMARY_CONF}']['return_pct'])
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4016, in _refine_top_configs
+    horizon=horizon
+  File "C:\algo_trading\venv\Lib\site-packages\optuna\study\study.py", line 490, in optimize
+    _optimize(
+    ~~~~~~~~~^
+        study=self,
+        ^^^^^^^^^^^
+    ...<7 lines>...
+        show_progress_bar=show_progress_bar,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\optuna\study\_optimize.py", line 68, in _optimize
+    _optimize_sequential(
+    ~~~~~~~~~~~~~~~~~~~~^
+        study,
+        ^^^^^^
+    ...<8 lines>...
+        progress_bar=progress_bar,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\optuna\study\_optimize.py", line 165, in _optimize_sequential
+    frozen_trial_id = _run_trial(study, func, catch)
+  File "C:\algo_trading\venv\Lib\site-packages\optuna\study\_optimize.py", line 263, in _run_trial
+    raise func_err
+  File "C:\algo_trading\venv\Lib\site-packages\optuna\study\_optimize.py", line 206, in _run_trial
+    value_or_values = func(trial)
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 3995, in refine_objective
+        sampler=optuna.samplers.TPESampler(seed=42),
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    best_refine_apf = 0.0
+    ^^^^^
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 2994, in _deku_eval_with_pruning
+    if len(np.unique(y_train)) < 2:
+            ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py", line 1560, in fit
+    super().fit(
+    ~~~~~~~~~~~^
+        X,
+        ^^
+    ...<12 lines>...
+        init_model=init_model,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py", line 1049, in fit
+    self._Booster = train(
+                    ~~~~~^
+        params=params,
+        ^^^^^^^^^^^^^^
+    ...<6 lines>...
+        callbacks=callbacks,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\engine.py", line 297, in train
+    booster = Booster(params=params, train_set=train_set)
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\basic.py", line 3661, in __init__
+    _LIB.LGBM_BoosterCreate(
+    ~~~~~~~~~~~~~~~~~~~~~~~^
+        train_set._handle,
+        ^^^^^^^^^^^^^^^^^^
+        _c_str(params_str),
+        ^^^^^^^^^^^^^^^^^^^
+        ctypes.byref(self._handle),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+KeyboardInterrupt

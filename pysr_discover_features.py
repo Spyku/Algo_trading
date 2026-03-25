@@ -1,9 +1,9 @@
 """
 PySR Feature Discovery — Offline symbolic regression for Doohan
 ================================================================
-Discovers compact mathematical formulas from training data that capture
-nonlinear feature interactions. Output formulas are added as new features
-in V1.7.3 to potentially improve tree model performance.
+Discovers compact mathematical formulas from HISTORICAL data (months 12→6 ago)
+that capture nonlinear feature interactions. Uses a data window that does NOT
+overlap with Mode D's last-6-month evaluation window, preventing leakage.
 
 Usage:
   pip install pysr sympy          # first time only (auto-installs Julia)
@@ -16,6 +16,11 @@ Output:
   models/pysr_BTC_6h_report.txt   — human-readable summary
 
 Runtime: ~30-120 min depending on iterations and hardware.
+
+Anti-leakage design:
+  Mode D uses the LAST 6 months (4320h) for grid evaluation.
+  PySR uses the PREVIOUS 6 months (months 12→6 ago) for formula discovery.
+  Zero data overlap → PySR coefficients cannot inflate Mode D backtest results.
 """
 
 import sys
@@ -42,6 +47,8 @@ MAX_DIAG_HOURS = 6 * 30 * 24  # 4320 hours = 6 months (same cap as Mode D)
 def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
     """Run PySR symbolic regression to discover feature formulas.
 
+    Uses the 6 months BEFORE Mode D's window to prevent data leakage.
+
     Args:
         asset: Asset name (e.g., 'BTC')
         horizon: Prediction horizon in hours
@@ -50,7 +57,8 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
         populations: Number of populations for genetic algorithm
 
     Returns:
-        List of dicts with 'equation', 'complexity', 'loss', 'score' keys
+        Tuple of (results_list, pysr_rows) where results_list contains dicts
+        with 'equation', 'complexity', 'loss', 'score' keys
     """
     from pysr import PySRRegressor
 
@@ -64,31 +72,42 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
     df_raw = load_data(asset)
     if df_raw is None:
         print(f"  ERROR: No data for {asset}")
-        return []
+        return [], 0
 
     df_full, all_cols = build_all_features(df_raw, asset_name=asset, horizon=horizon)
+
+    # Exclude any existing pysr_* columns — discovery must use only base features
+    pysr_cols = [c for c in all_cols if c.startswith('pysr_')]
+    if pysr_cols:
+        all_cols = [c for c in all_cols if not c.startswith('pysr_')]
+        print(f"  Excluded {len(pysr_cols)} existing PySR columns from inputs")
+
     df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
 
-    # Cap to 6 months like Mode D
-    if len(df_clean) > MAX_DIAG_HOURS:
-        df_clean = df_clean.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+    # Anti-leakage: use the 6 months BEFORE Mode D's window (months 12→6 ago)
+    # Mode D uses tail(MAX_DIAG_HOURS) = last 6 months
+    # PySR uses exactly the 6 months before that — no older data allowed
+    total_needed = MAX_DIAG_HOURS * 2  # 12 months required
+    if len(df_clean) < total_needed:
+        print(f"  ERROR: Not enough data ({len(df_clean)} rows).")
+        print(f"  Need at least {total_needed} rows (6 months for Mode D + 6 months for PySR).")
+        return [], 0
 
-    print(f"  Data: {len(df_clean)} rows, {len(all_cols)} features")
+    df_pysr = df_clean.iloc[-total_needed:-MAX_DIAG_HOURS].reset_index(drop=True)
 
-    # Use first 60% as training (same as Mode D fold 1)
-    n_total = len(df_clean)
-    train_end = int(n_total * 0.60)
-    df_train = df_clean.iloc[:train_end]
+    print(f"  Total data: {len(df_clean)} rows, {len(all_cols)} features")
+    print(f"  PySR window: {len(df_pysr)} rows (historical, BEFORE Mode D's 6-month window)")
+    print(f"  Mode D window: last {MAX_DIAG_HOURS} rows (excluded from PySR)")
 
-    X = df_train[all_cols].values.astype(np.float32)
-    y = df_train['label'].values.astype(np.float32)
+    X = df_pysr[all_cols].values.astype(np.float32)
+    y = df_pysr['label'].values.astype(np.float32)
 
     # Remove any remaining NaN/Inf
     valid_mask = np.isfinite(X).all(axis=1) & np.isfinite(y)
     X = X[valid_mask]
     y = y[valid_mask]
 
-    print(f"  Training set: {len(X)} rows (60% of {n_total})")
+    print(f"  Training set: {len(X)} rows (from {len(df_pysr)}-row historical window)")
     print(f"  Label distribution: {y.sum():.0f} BUY ({y.mean()*100:.1f}%) / {len(y)-y.sum():.0f} SELL")
 
     # Subsample if too large (PySR is O(n²) in some operations)
@@ -133,9 +152,11 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
 
     # Extract best equations
     equations = model.equations_
+    pysr_rows = len(X)
+
     if equations is None or len(equations) == 0:
         print("  No equations found!")
-        return []
+        return [], 0
 
     # Sort by score (higher = better accuracy-per-complexity)
     equations = equations.sort_values('score', ascending=False)
@@ -168,10 +189,10 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
             break
 
     print(f"\n  {len(results)} expressions saved")
-    return results
+    return results, pysr_rows
 
 
-def save_results(asset, horizon, results, all_cols):
+def save_results(asset, horizon, results, all_cols, pysr_rows=0):
     """Save discovered expressions to JSON and human-readable report."""
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
     os.makedirs(models_dir, exist_ok=True)
@@ -183,6 +204,8 @@ def save_results(asset, horizon, results, all_cols):
         'asset': asset,
         'horizon': horizon,
         'discovered_at': time.strftime('%Y-%m-%d %H:%M'),
+        'discovery_method': 'historical',
+        'pysr_data_rows': pysr_rows,
         'n_expressions': len(results),
         'feature_names': all_cols,
         'expressions': results,
@@ -213,16 +236,16 @@ def main():
     args = parser.parse_args()
     horizon = int(args.horizon.replace('h', ''))
 
-    results = discover_features(args.asset, horizon, n_top=args.top,
+    results, pysr_rows = discover_features(args.asset, horizon, n_top=args.top,
                                 iterations=args.iterations, populations=args.populations)
 
     if results:
         # Get feature names for saving
         df_raw = load_data(args.asset)
         _, all_cols = build_all_features(df_raw, asset_name=args.asset, horizon=horizon, verbose=False)
-        save_results(args.asset, horizon, results, all_cols)
-        print(f"\n  Done! Now run V1.7.3 to test these features:")
-        print(f"  python crypto_trading_system_doohan_v1_7_3.py DG {args.asset} {horizon}h")
+        save_results(args.asset, horizon, results, all_cols, pysr_rows=pysr_rows)
+        print(f"\n  Done! Now run Mode DV to test these features:")
+        print(f"  python crypto_trading_system_doohan.py DV {args.asset} {horizon}h")
     else:
         print("\n  No useful expressions found. Try increasing --iterations.")
 

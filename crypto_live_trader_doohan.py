@@ -53,7 +53,7 @@ from crypto_trading_system_doohan import (
     PREDICTION_HORIZON, ALL_MODELS,
     HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
     download_asset, load_data, build_all_features,
-    get_decay_weights,
+    get_decay_weights, _compute_pysr_features,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -159,6 +159,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             return None
 
     df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose)
+    _compute_pysr_features(df_full, all_cols, asset_name, horizon, verbose=False)
     feature_cols = [f for f in feature_list if f in all_cols]
     if not feature_cols:
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]

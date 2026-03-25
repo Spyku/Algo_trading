@@ -1,0 +1,138 @@
+
+############################################################
+  BTC 5h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 5h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75288
+    Rows after dropna: 75043
+    Funding rate: 37061 rows loaded (regime gate)
+    PySR: no expressions found (C:\Users\Alex\algo_trading\engine\models\pysr_BTC_5h.json) — skipping
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 954 BUY (36.8%) / 1638 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+Compiling Julia backend...
+
+  PySR completed in 0.7 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0230 |   0.224072 |          7 | (-3.8118742 - xa_sp500_relstr5d) * (price_to_sma100h - 0.104154356)
+    2 |   0.0163 |   0.220459 |          9 | ((-1.8889458 - xa_sp500_relstr5d) - (price_to_sma100h / -0.03248703)) * -0.20499308
+    3 |   0.0120 |   0.217542 |         11 | (spread_120h_12h - 0.24444278) * ((-1.6347066 - xa_sp500_relstr5d) - (price_to_sma100h / -0.04367628))
+    4 |   0.0036 |   0.230912 |          3 | 0.36224228 - logret_72h
+    5 |   0.0033 |   0.229385 |          5 | sqrt(tanh(volume_ratio_h)) * 0.4589336
+
+  5 expressions saved
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_5h.json
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_5h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 5h
+
+############################################################
+  BTC 7h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 7h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75288
+    Rows after dropna: 75041
+    Funding rate: 37059 rows loaded (regime gate)
+    PySR: no expressions found (C:\Users\Alex\algo_trading\engine\models\pysr_BTC_7h.json) — skipping
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 1030 BUY (39.7%) / 1562 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+
+  PySR completed in 0.4 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0248 |   0.220919 |          9 | ((logret_72h * -4.667203) + (xa_dax_relstr5d * m_eurusd_vol5d)) + 0.4239911
+    2 |   0.0110 |   0.218283 |         11 | (((logret_120h + logret_72h) * -2.2693698) + 0.41529995) + (m_eurusd_vol5d * xa_dax_relstr5d)
+    3 |   0.0102 |   0.232173 |          7 | (0.41402304 - logret_72h) + (xa_dax_relstr5d * 0.0947619)
+    4 |   0.0036 |   0.237727 |          3 | 0.39154884 - logret_72h
+    5 |   0.0016 |   0.236954 |          5 | 0.38810205 - (m_nasdaq_vol20d * logret_72h)
+
+  5 expressions saved
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_7h.json
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_7h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 7h
+
+############################################################
+  BTC 8h
+############################################################
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 8h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75288
+    Rows after dropna: 75040
+    Funding rate: 37058 rows loaded (regime gate)
+    PySR: no expressions found (C:\Users\Alex\algo_trading\engine\models\pysr_BTC_8h.json) — skipping
+    All features: 51 base + 81 macro/sentiment/cross-asset/pysr = 132 total
+  Data: 4320 rows, 132 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 1050 BUY (40.5%) / 1542 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+
+  PySR completed in 0.4 min
+
+  ======================================================================
+  TOP 5 DISCOVERED EXPRESSIONS
+  ======================================================================
+    # |    Score |       Loss | Complexity | Expression
+  ────────────────────────────────────────────────────────────────────────────────
+    1 |   0.0345 |   0.229010 |          7 | (0.13930033 - logret_72h) * (xa_sp500_relstr5d + 3.1966424)
+    2 |   0.0099 |   0.224507 |          9 | ((xa_sp500_relstr5d + 1.3573143) * 0.31489113) - (logret_120h * 4.2308087)
+    3 |   0.0090 |   0.220523 |         11 | (((xa_sp500_relstr5d + 1.3422492) * 0.3176987) - logret_72h) - (logret_120h * 4.2483215)
+    4 |   0.0053 |   0.237059 |          6 | tanh(volume_ratio_h / 0.4339281) * 0.45385087
+    5 |   0.0033 |   0.239393 |          3 | 0.3992464 - logret_72h
+
+  5 expressions saved
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_8h.json
+  Saved: C:\Users\Alex\algo_trading\engine\models\pysr_BTC_8h_report.txt
+
+  Done! Now run Mode DV to test:
+  python crypto_trading_system_doohan.py DV BTC 8h
+Traceback (most recent call last):
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan.py", line 4889, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan.py", line 4857, in main
+    run_mode_p(assets_list, horizons)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan.py", line 2793, in run_mode_p
+    if horizon_filter is None:
+       ^^^^^^^^^^^^^^
+NameError: name 'horizon_filter' is not defined

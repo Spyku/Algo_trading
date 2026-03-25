@@ -1,0 +1,47 @@
+============================================================
+  REVOLUT X MULTI-ASSET TRADER [DOOHAN]
+  2026-03-24 21:16:21
+============================================================
+
+  Current config:
+  Asset  Strategy          Max USD  Enabled    Auto   Position
+  ------ -------------- ---------- -------- ------- ----------
+  BTC    both_agree     $        0      Yes     Yes       CASH ✗
+  ETH    both_agree     $        0      Yes      No       CASH ✗
+  LINK   both_agree     $        0      Yes      No       CASH ✗
+  XRP    both_agree     $        0      Yes      No       CASH ✗
+  SOL    both_agree     $        0      Yes      No       CASH ✗
+  DOGE   both_agree     $        0      Yes      No       CASH ✗
+  ADA    both_agree     $        0      Yes      No       CASH ✗
+  AVAX   both_agree     $        0      Yes      No       CASH ✗
+  DOT    both_agree     $        0      Yes      No       CASH ✗
+
+  1. Start loop (hourly)
+  2. Run once
+  3. Dry run (once)
+  4. Configure assets
+  5. View trade history
+  6. Check balance
+  7. Setup Telegram
+
+  Enter 1-7: 
+  --- BTC ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [y]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- ETH ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- LINK ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- XRP ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- SOL ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'):     Unknown strategy 'n' — keeping [both_agree]
+
+  --- DOGE ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- ADA ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- AVAX ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  --- DOT ---
+    Enabled (y/n) [y]:     Auto-trade (y/n) [n]:     Max USD [0]:     Strategy (Enter for default 'both_agree'): 
+  Config saved.

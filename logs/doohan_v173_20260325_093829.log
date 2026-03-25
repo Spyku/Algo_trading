@@ -1,0 +1,725 @@
+============================================================
+  DOOHAN: Mode DG | ETH | 6h | 150 trials
+============================================================
+
+============================================================
+  ASSET: ETH
+============================================================
+
+======================================================================
+  DOOHAN V1.7.3 MODE D: EXHAUSTIVE GRID -- 6h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-25
+    VIX        (^VIX)... 1059 days
+    DXY        (DX-Y.NYB)... 1061 days
+    SP500      (^GSPC)... 1059 days
+    NASDAQ     (^IXIC)... 1059 days
+    GOLD       (GC=F)... 1061 days
+    US10Y      (^TNX)... 1059 days
+    EURUSD     (EURUSD=X)... 1097 days
+    USDJPY     (JPY=X)... 1097 days
+    OIL        (CL=F)... 1061 days
+
+  Saved: data/macro_data\macro_daily.csv (1098 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-24
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2971 rows)
+  Date range: 2018-02-01 to 2026-03-25
+  Current: 14 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (37009 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1544 days
+    ETH_USD    (ETH-USD)... 1544 days
+    NASDAQ     (^IXIC)... 1059 days
+    SP500      (^GSPC)... 1059 days
+    DAX        (^GDAXI)... 1077 days
+
+  Saved: data/macro_data\cross_asset.csv (1544 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1544 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1544 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-24
+    sopr: 83 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4634 records -> 37065 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (37065 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-25 08:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,278 bytes
+    derivatives_btc.csv             1,207,497 bytes
+    fear_greed.csv                     69,225 bytes
+    macro_daily.csv                   184,951 bytes
+    macro_hourly.csv                6,566,513 bytes
+    onchain_btc.csv                   213,277 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.2 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating ETH from 2026-03-25 08:00:00...
+    ETH: already up to date (75285 candles)
+  [Data update: 0.1 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: ETH (6h)
+======================================================================
+
+  Building all features (horizon=6h)...
+    Rows before dropna: 75285
+    Rows after dropna: 75039
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+  [Feature build: 0.0 min]
+  Capped: 75,039 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 135 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [09:38:51]
+    pysr_1                           5.2% [      BASE] ##########
+    pysr_3                           3.6% [      BASE] #######
+    volatility_48h                   3.2% [      BASE] ######
+    hour_cos                         3.0% [      BASE] ######
+    pysr_2                           3.0% [      BASE] #####
+    hour_sin                         2.5% [      BASE] ####
+    atr_pct_14h                      2.3% [      BASE] ####
+    minus_di_14h                     2.3% [      BASE] ####
+    logret_240h                      2.3% [      BASE] ####
+    pysr_4                           1.9% [      BASE] ###
+    vol_ratio_12_48                  1.9% [      BASE] ###
+    logret_120h                      1.8% [      BASE] ###
+    m_dxy_chg1d                      1.6% [     MACRO] ###
+    m_eurusd_vol5d                   1.6% [     MACRO] ###
+    price_to_sma100h                 1.6% [      BASE] ###
+    bb_position_20h                  1.5% [      BASE] ###
+    volume_ratio_h                   1.4% [      BASE] ##
+    adx_14h                          1.4% [      BASE] ##
+    price_to_sma20h                  1.4% [      BASE] ##
+    m_vix_chg1d                      1.4% [     MACRO] ##
+    ... 99 features below 1% importance
+  [Ranking: 0.0 min] — 135 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: ETH 6h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.664 ret=-19.4% tr=19  (0.1min) <-- BEST
+    [  3/324] RF+LGBM    w= 72 f=10 g=0.995 | apf=0.911 ret=-9.6% tr=18  (0.3min) <-- BEST
+    [  6/324] RF+LGBM    w= 72 f=13 g=0.995 | apf=1.092 ret=-8.5% tr=18  (0.5min) <-- BEST
+    [  9/324] RF+LGBM    w= 72 f=17 g=0.995 | apf=1.319 ret=-2.2% tr=17  (0.8min) <-- BEST
+    [ 15/324] RF+LGBM    w= 72 f=25 g=0.995 | apf=1.398 ret=-0.4% tr=14  (1.4min) <-- BEST
+    [ 36/324] RF+LGBM    w=100 f=30 g=0.995 | apf=1.531 ret=+3.5% tr=20  (3.7min) <-- BEST
+    [ 38/324] RF+LGBM    w=150 f=10 g=0.997 | apf=1.730 ret=+4.9% tr=14  (4.0min) <-- BEST
+    [ 39/324] RF+LGBM    w=150 f=10 g=0.995 | apf=1.938 ret=+8.4% tr=15  (4.1min) <-- BEST
+    [ 40/324] RF+LGBM    w=150 f=13 g=0.999 | apf=3.058 ret=+22.8% tr=17  (4.2min) <-- BEST
+    [ 42/324] RF+LGBM    w=150 f=13 g=0.995 | apf=4.623 ret=+31.7% tr=17  (4.5min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=3.378 ret=+29.9% tr=17  (7.1min)
+
+  ────────────────────────────────────────────────────────────
+  XGB+LGBM
+  ────────────────────────────────────────────────────────────
+    [120/324] XGB+LGBM   w= 72 f=20 g=0.995 | apf=1.706 ret=+5.0% tr=14  (16.5min)
+    [148/324] XGB+LGBM   w=150 f=13 g=0.999 | apf=4.972 ret=+31.2% tr=15  (20.9min) <-- BEST
+    [150/324] XGB+LGBM   w=150 f=13 g=0.995 | apf=5.866 ret=+32.7% tr=15  (21.3min) <-- BEST
+    [180/324] XGB+LGBM   w=200 f=30 g=0.995 | apf=2.114 ret=+11.1% tr=14  (27.9min)
+
+  ────────────────────────────────────────────────────────────
+  RF+XGB
+  ────────────────────────────────────────────────────────────
+    [240/324] RF+XGB     w=100 f=13 g=0.995 | apf=0.471 ret=-21.7% tr=16  (36.8min)
+    [300/324] RF+XGB     w=250 f=20 g=0.995 | apf=1.436 ret=-0.8% tr=12  (38.8min)
+
+  ======================================================================
+  GRID RESULTS: ETH 6h (39.9 min)
+  ======================================================================
+  Total evals: 324 | Valid (≥8 trades): 324 | Low trades: 0 | Failed: 0
+  Unique candidates: 324
+  Grid CSV: models\crypto_doohan_v1_7_3_grid_ETH_6h.csv
+  Best overall: XGB+LGBM w=150h g=0.9950 f=13 apf=5.866
+
+  Rank      APF  Combo                   Window    Gamma  Feats   Source
+  ---------------------------------------------------------------------------
+     1    5.866  XGB+LGBM                  150h   0.9950     13     Grid <-- BEST
+     2    4.972  XGB+LGBM                  150h   0.9990     13     Grid
+     3    4.972  XGB+LGBM                  150h   0.9970     13     Grid
+     4    4.772  RF+XGB                    150h   0.9970     17     Grid
+     5    4.623  RF+LGBM                   150h   0.9950     13     Grid
+     6    4.015  RF+XGB                    150h   0.9970     13     Grid
+     7    3.929  RF+XGB                    150h   0.9950     13     Grid
+     8    3.761  RF+XGB                    150h   0.9990     17     Grid
+     9    3.645  RF+LGBM                   150h   0.9950     17     Grid
+    10    3.610  XGB+LGBM                  150h   0.9970     17     Grid
+    11    3.506  XGB+LGBM                  200h   0.9950     10     Grid
+    12    3.495  RF+LGBM                   200h   0.9950     10     Grid
+    13    3.378  RF+LGBM                   200h   0.9950     13     Grid
+    14    3.364  XGB+LGBM                  200h   0.9950     13     Grid
+    15    3.305  XGB+LGBM                  150h   0.9990     17     Grid
+    16    3.220  RF+XGB                    150h   0.9950     20     Grid
+    17    3.058  RF+LGBM                   150h   0.9990     13     Grid
+    18    3.058  RF+LGBM                   150h   0.9970     13     Grid
+    19    3.037  RF+XGB                    150h   0.9990     13     Grid
+    20    3.016  RF+LGBM                   200h   0.9950     17     Grid
+
+  ======================================================================
+  3-FOLD ROLLING HOLDOUT: ETH 6h (top 20 candidates)
+  ======================================================================
+
+  Rank   AVG_APF   AVG_Ret  AVG_Acc    Tr      F1      F2      F3    IS_APF  Combo                    Win    Gamma    F
+  -----------------------------------------------------------------------------------------------------------------------------
+     1     6.641    +22.4%    57.1%    35  +17.8  +25.2  +24.3     5.866  XGB+LGBM                150h   0.9950   13  ✓ <-- BEST
+     2     6.454    +22.3%    59.5%    32  +17.4  +26.7  +22.8     4.972  XGB+LGBM                150h   0.9970   13  ✓
+     3     4.951     +8.9%    59.0%    27   +2.9   +2.9  +20.9     3.506  XGB+LGBM                200h   0.9950   10  ✓
+     4     4.922    +21.6%    58.3%    35  +17.4  +19.9  +27.6     4.015  RF+XGB                  150h   0.9970   13  ✓
+     5     4.888    +22.7%    56.5%    34  +14.1  +27.0  +27.2     4.972  XGB+LGBM                150h   0.9990   13  ✓
+     6     4.499    +19.2%    55.4%    38  +17.8  +18.8  +20.9     3.929  RF+XGB                  150h   0.9950   13  ✓
+     7     4.423    +23.7%    57.7%    36  +17.0  +19.2  +35.0     4.623  RF+LGBM                 150h   0.9950   13  ✓
+     8     3.983    +22.7%    56.0%    38  +16.6  +23.3  +28.3     3.037  RF+XGB                  150h   0.9990   13  ✓
+     9     3.326    +13.5%    56.5%    30  +14.7  +14.4  +11.4     3.305  XGB+LGBM                150h   0.9990   17  ✓
+    10     3.300    +20.4%    58.3%    43  +14.9  +21.8  +24.4     3.645  RF+LGBM                 150h   0.9950   17  ✓
+
+  ======================================================================
+  TOP 6 CANDIDATES: ETH 6h
+  ======================================================================
+  #1: XGB+LGBM  w=150h  g=0.9950  f=13  ho_apf=6.641  ho_ret=+22.4%  [+17.8% / +25.2% / +24.3%]  Grid  ✓ <-- BEST
+  #2: XGB+LGBM  w=150h  g=0.9970  f=13  ho_apf=6.454  ho_ret=+22.3%  [+17.4% / +26.7% / +22.8%]  Grid  ✓
+  #3: XGB+LGBM  w=200h  g=0.9950  f=10  ho_apf=4.951  ho_ret=+8.9%  [+2.9% / +2.9% / +20.9%]  Grid  ✓
+  #4: XGB+LGBM  w=150h  g=0.9990  f=13  ho_apf=4.888  ho_ret=+22.7%  [+14.1% / +27.0% / +27.2%]  Grid  ✓
+  #5: XGB+LGBM  w=150h  g=0.9990  f=17  ho_apf=3.326  ho_ret=+13.5%  [+14.7% / +14.4% / +11.4%]  Grid  ✓
+  #6: RF+LGBM  w=150h  g=0.9950  f=17  ho_apf=3.300  ho_ret=+20.4%  [+14.9% / +21.8% / +24.4%]  Grid  ✓
+  ======================================================================
+  [ETH total: 46.6 min]
+
+  Best models saved: models/crypto_doohan_v1_7_3_best_models.csv
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=150h, replay=200h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-18 21:00: SELL (92%) | price=$2,202.49
+    [100] 2026-03-20 23:00: BUY (92%) | price=$2,155.13
+    [150] 2026-03-23 01:00: HOLD (62%) | price=$2,044.03
+    [200] 2026-03-25 03:00: SELL (99%) | price=$2,155.01
+  Generated 200 hourly signals for ETH
+
+  Mode D complete: 48.4 min total
+================================================================================
+  MODE G: LIVE BACKTEST + REFINE — ETH 6h
+  Period: last 336 hours (2 weeks), every hour
+  Ranking by: conf>=80% return
+  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best
+  Candidates: models/crypto_doohan_v1_7_3_best_models.csv
+  Production: models/crypto_doohan_v1_7_3_production.csv
+================================================================================
+
+######################################################################
+  ETH 6h
+######################################################################
+
+  Computing LGBM feature ranking for ETH...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+
+  [1/5] LGBM Feature Importance (gain-based)  [10:26:56]
+    pysr_1                           8.7% [      BASE] #################
+    logret_24h                       3.8% [      BASE] #######
+    m_sp500_chg1d                    3.2% [     MACRO] ######
+    hour_cos                         2.7% [      BASE] #####
+    pysr_2                           2.5% [      BASE] #####
+    pysr_4                           2.5% [      BASE] #####
+    m_dxy_chg1d                      2.4% [     MACRO] ####
+    m_nasdaq_chg1d                   2.1% [     MACRO] ####
+    m_vix_chg1d                      2.0% [     MACRO] ####
+    hour_sin                         2.0% [      BASE] ###
+    m_nasdaq_chg5d                   1.9% [     MACRO] ###
+    logret_240h                      1.9% [      BASE] ###
+    volatility_48h                   1.9% [      BASE] ###
+    m_sp500_chg5d                    1.8% [     MACRO] ###
+    gk_volatility_14h                1.8% [      BASE] ###
+    price_to_sma100h                 1.7% [      BASE] ###
+    gk_volatility_48h                1.6% [      BASE] ###
+    adx_14h                          1.6% [      BASE] ###
+    m_vix_chg5d                      1.4% [     MACRO] ##
+    m_gold_chg1d                     1.4% [     MACRO] ##
+    ... 105 features below 1% importance
+  [Ranking done: 1.4s] — 135 features ranked
+
+======================================================================
+  STEP 1: BACKTEST MODE D CANDIDATES
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  D #1 (APF=6.6): ETH
+  XGB+LGBM  w=150h  g=0.9950  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=150h, replay=336h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: BUY (69%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (98%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (100%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (93%) | price=$2,172.57
+    [250] 2026-03-21 13:00: BUY (70%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (76%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+10.90%, trades=42, round_trips=21, win_rate=52%
+  Conf>=70%: return=+13.17%, trades=34, round_trips=17, win_rate=59%
+  Conf>=75%: return=+16.87%, trades=28, round_trips=14, win_rate=64%
+  Conf>=80%: return=+15.42%, trades=20, round_trips=10, win_rate=60%
+  Conf>=85%: return=+12.68%, trades=18, round_trips=9, win_rate=67%
+  Conf>=90%: return=+14.81%, trades=12, round_trips=6, win_rate=83%
+  Buy&Hold: +5.69%
+
+──────────────────────────────────────────────────────────────────────
+  D #2 (APF=6.5): ETH
+  XGB+LGBM  w=150h  g=0.9970  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=150h, replay=336h, custom (13 features), gamma=0.997)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: HOLD (63%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (98%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (100%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (91%) | price=$2,172.57
+    [250] 2026-03-21 13:00: BUY (72%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (79%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+11.49%, trades=40, round_trips=20, win_rate=60%
+  Conf>=70%: return=+10.58%, trades=36, round_trips=18, win_rate=61%
+  Conf>=75%: return=+12.71%, trades=26, round_trips=13, win_rate=69%
+  Conf>=80%: return=+10.29%, trades=24, round_trips=12, win_rate=67%
+  Conf>=85%: return=+11.63%, trades=20, round_trips=10, win_rate=70%
+  Conf>=90%: return=+13.83%, trades=14, round_trips=7, win_rate=71%
+  Buy&Hold: +5.69%
+
+──────────────────────────────────────────────────────────────────────
+  D #3 (APF=5.0): ETH
+  XGB+LGBM  w=200h  g=0.9950  f=10
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=200h, replay=336h, custom (10 features), gamma=0.995)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: BUY (75%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (94%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (89%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (76%) | price=$2,172.57
+    [250] 2026-03-21 13:00: HOLD (38%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (92%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+12.30%, trades=36, round_trips=18, win_rate=78%
+  Conf>=70%: return=+12.05%, trades=30, round_trips=15, win_rate=73%
+  Conf>=75%: return=+16.40%, trades=20, round_trips=10, win_rate=90%
+  Conf>=80%: return=+15.66%, trades=16, round_trips=8, win_rate=88%
+  Conf>=85%: return=+19.40%, trades=14, round_trips=7, win_rate=86%
+  Conf>=90%: return=+19.12%, trades=14, round_trips=7, win_rate=86%
+  Buy&Hold: +5.69%
+
+──────────────────────────────────────────────────────────────────────
+  D #4 (APF=4.9): ETH
+  XGB+LGBM  w=150h  g=0.9990  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=150h, replay=336h, custom (13 features), gamma=0.999)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: BUY (55%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (98%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (100%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (83%) | price=$2,172.57
+    [250] 2026-03-21 13:00: BUY (77%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (75%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+10.91%, trades=38, round_trips=19, win_rate=58%
+  Conf>=70%: return=+11.71%, trades=32, round_trips=16, win_rate=62%
+  Conf>=75%: return=+11.78%, trades=28, round_trips=14, win_rate=64%
+  Conf>=80%: return=+13.84%, trades=22, round_trips=11, win_rate=64%
+  Conf>=85%: return=+11.98%, trades=16, round_trips=8, win_rate=62%
+  Conf>=90%: return=+13.41%, trades=12, round_trips=6, win_rate=67%
+  Buy&Hold: +5.69%
+
+──────────────────────────────────────────────────────────────────────
+  D #5 (APF=3.3): ETH
+  XGB+LGBM  w=150h  g=0.9990  f=17
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=150h, replay=336h, custom (17 features), gamma=0.999)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: HOLD (51%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (91%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (100%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (73%) | price=$2,172.57
+    [250] 2026-03-21 13:00: BUY (68%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (98%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+7.56%, trades=34, round_trips=17, win_rate=76%
+  Conf>=70%: return=+8.71%, trades=30, round_trips=15, win_rate=87%
+  Conf>=75%: return=+10.24%, trades=28, round_trips=14, win_rate=86%
+  Conf>=80%: return=+7.83%, trades=20, round_trips=10, win_rate=70%
+  Conf>=85%: return=-0.26%, trades=14, round_trips=7, win_rate=43%
+  Conf>=90%: return=+10.52%, trades=10, round_trips=5, win_rate=40%
+  Buy&Hold: +5.69%
+
+──────────────────────────────────────────────────────────────────────
+  D #6 (APF=3.3): ETH
+  RF+LGBM  w=150h  g=0.9950  f=17
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=RF+LGBM, window=150h, replay=336h, custom (17 features), gamma=0.995)...
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 05:00: BUY (79%) | price=$2,111.82
+    [100] 2026-03-15 07:00: BUY (98%) | price=$2,107.84
+    [150] 2026-03-17 09:00: SELL (100%) | price=$2,315.79
+    [200] 2026-03-19 11:00: SELL (70%) | price=$2,172.57
+    [250] 2026-03-21 13:00: BUY (72%) | price=$2,155.86
+    [300] 2026-03-23 15:00: SELL (99%) | price=$2,128.45
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+2.26%, trades=50, round_trips=25, win_rate=56%
+  Conf>=70%: return=+6.35%, trades=34, round_trips=17, win_rate=71%
+  Conf>=75%: return=+7.01%, trades=28, round_trips=14, win_rate=79%
+  Conf>=80%: return=+7.60%, trades=26, round_trips=13, win_rate=77%
+  Conf>=85%: return=+10.42%, trades=20, round_trips=10, win_rate=70%
+  Conf>=90%: return=+11.07%, trades=16, round_trips=8, win_rate=62%
+  Buy&Hold: +5.69%
+
+======================================================================
+  STEP 2: OPTUNA REFINE — top 3 live performers
+  50 trials per config | gamma ±0.002 | features ±5 | window ±20h
+======================================================================
+  #1: XGB+LGBM  w=200h  g=0.9950  f=10  live_ret=+15.66%
+  #2: XGB+LGBM  w=150h  g=0.9950  f=13  live_ret=+15.42%
+  #3: XGB+LGBM  w=150h  g=0.9990  f=13  live_ret=+13.84%
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+
+  ────────────────────────────────────────────────────────────
+  Refining #1: XGB+LGBM  w=200h  g=0.9950  f=10
+  Ranges: gamma[0.993-0.997] features[5-15] window[180-220]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=195 g=0.9968 f=13 | apf=0.839 ret=-12.4% trades=13
+    #  2 NEW BEST: w=204 g=0.9936 f=6 | apf=1.474 ret=+0.2% trades=14
+    #  3 NEW BEST: w=182 g=0.9965 f=11 | apf=1.851 ret=+8.1% trades=18
+    #  5 NEW BEST: w=214 g=0.9938 f=7 | apf=1.973 ret=+8.2% trades=16
+    #  6 NEW BEST: w=187 g=0.9942 f=10 | apf=2.522 ret=+17.6% trades=18
+    #  8 NEW BEST: w=185 g=0.9942 f=9 | apf=2.614 ret=+13.0% trades=15
+    # 12 NEW BEST: w=180 g=0.9947 f=9 | apf=2.720 ret=+21.9% trades=17
+    # 18 NEW BEST: w=220 g=0.9934 f=8 | apf=3.113 ret=+28.1% trades=17
+    # 19 NEW BEST: w=220 g=0.9931 f=7 | apf=3.224 ret=+29.9% trades=15
+    # 21 NEW BEST: w=220 g=0.9935 f=7 | apf=3.304 ret=+31.5% trades=16
+    # 30 NEW BEST: w=219 g=0.9936 f=15 | apf=5.358 ret=+33.8% trades=16
+    → Best: w=219h g=0.9936 f=15 apf=5.358
+
+  ────────────────────────────────────────────────────────────
+  Refining #2: XGB+LGBM  w=150h  g=0.9950  f=13
+  Ranges: gamma[0.993-0.997] features[8-18] window[130-170]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=145 g=0.9968 f=16 | apf=3.372 ret=+30.6% trades=20
+    #  9 NEW BEST: w=148 g=0.9961 f=10 | apf=3.416 ret=+25.2% trades=13
+    # 12 NEW BEST: w=144 g=0.9970 f=17 | apf=3.447 ret=+26.5% trades=17
+    # 23 NEW BEST: w=144 g=0.9966 f=17 | apf=3.818 ret=+28.8% trades=17
+    # 25 NEW BEST: w=144 g=0.9959 f=17 | apf=3.964 ret=+30.1% trades=17
+    # 32 NEW BEST: w=147 g=0.9960 f=17 | apf=6.873 ret=+37.4% trades=15
+    → Best: w=147h g=0.9960 f=17 apf=6.873
+
+  ────────────────────────────────────────────────────────────
+  Refining #3: XGB+LGBM  w=150h  g=0.9990  f=13
+  Ranges: gamma[0.997-1.000] features[8-18] window[130-170]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=145 g=0.9999 f=16 | apf=3.511 ret=+33.1% trades=20
+    # 18 NEW BEST: w=147 g=0.9983 f=8 | apf=3.739 ret=+28.3% trades=12
+    # 34 NEW BEST: w=150 g=0.9973 f=16 | apf=4.476 ret=+22.9% trades=13
+    # 45 NEW BEST: w=147 g=0.9977 f=18 | apf=4.601 ret=+27.9% trades=20
+    → Best: w=147h g=0.9977 f=18 apf=4.601
+
+  [Refine: 24.6 min]
+  Refined #1: XGB+LGBM  w=147h  g=0.9960  f=17  apf=6.873
+  Refined #2: XGB+LGBM  w=219h  g=0.9936  f=15  apf=5.358
+  Refined #3: XGB+LGBM  w=147h  g=0.9977  f=18  apf=4.601
+
+======================================================================
+  STEP 3: BACKTEST REFINED CONFIGS
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Refined #1 (APF=6.9): ETH
+  XGB+LGBM  w=147h  g=0.9960  f=17
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=147h, replay=336h, custom (17 features), gamma=0.9960145207726492)...
+    Rows before dropna: 75287
+    Rows after dropna: 75041
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 06:00: SELL (86%) | price=$2,111.10
+    [100] 2026-03-15 08:00: BUY (99%) | price=$2,107.54
+    [150] 2026-03-17 10:00: SELL (100%) | price=$2,312.94
+    [200] 2026-03-19 12:00: SELL (97%) | price=$2,166.79
+    [250] 2026-03-21 14:00: SELL (77%) | price=$2,152.13
+    [300] 2026-03-23 16:00: SELL (72%) | price=$2,135.88
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+17.00%, trades=34, round_trips=17, win_rate=59%
+  Conf>=70%: return=+10.37%, trades=28, round_trips=14, win_rate=50%
+  Conf>=75%: return=+10.90%, trades=22, round_trips=11, win_rate=55%
+  Conf>=80%: return=+12.06%, trades=10, round_trips=5, win_rate=80%
+  Conf>=85%: return=+10.57%, trades=8, round_trips=4, win_rate=75%
+  Conf>=90%: return=+9.52%, trades=6, round_trips=3, win_rate=67%
+  Buy&Hold: +7.53%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #2 (APF=5.4): ETH
+  XGB+LGBM  w=219h  g=0.9936  f=15
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=219h, replay=336h, custom (15 features), gamma=0.9935542612399774)...
+    Rows before dropna: 75287
+    Rows after dropna: 75041
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 06:00: HOLD (56%) | price=$2,111.10
+    [100] 2026-03-15 08:00: BUY (91%) | price=$2,107.54
+    [150] 2026-03-17 10:00: SELL (99%) | price=$2,312.94
+    [200] 2026-03-19 12:00: SELL (97%) | price=$2,166.79
+    [250] 2026-03-21 14:00: SELL (93%) | price=$2,152.13
+    [300] 2026-03-23 16:00: BUY (81%) | price=$2,135.88
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+10.10%, trades=42, round_trips=21, win_rate=67%
+  Conf>=70%: return=+9.42%, trades=38, round_trips=19, win_rate=74%
+  Conf>=75%: return=+9.93%, trades=36, round_trips=18, win_rate=72%
+  Conf>=80%: return=+8.19%, trades=32, round_trips=16, win_rate=69%
+  Conf>=85%: return=+7.99%, trades=30, round_trips=15, win_rate=67%
+  Conf>=90%: return=+10.36%, trades=24, round_trips=12, win_rate=75%
+  Buy&Hold: +7.53%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #3 (APF=4.6): ETH
+  XGB+LGBM  w=147h  g=0.9977  f=18
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=147h, replay=336h, custom (18 features), gamma=0.9977071120691744)...
+    Rows before dropna: 75287
+    Rows after dropna: 75041
+    PySR #1: pysr_1 = -logret_120h + xa_sp500_relstr5d*0.071759365 + 0.43383926 (complexity=7, score=0.0252)
+    PySR #2: pysr_2 = -logret_120h - logret_72h + xa_dax_relstr5d*0.10553516 + 0.4... (complexity=9, score=0.0239)
+    PySR #3: pysr_3 = -logret_120h + logret_72h*(-2.8058364) + xa_dax_relstr5d*0.1... (complexity=11, score=0.0183)
+    PySR #4: pysr_4 = -logret_120h + xa_dax_relstr5d*0.20272695 - (logret_120h + l... (complexity=13, score=0.0064)
+    PySR #5: pysr_5 = 0.42163664 - logret_72h (complexity=3, score=0.0064)
+    PySR: 5 features added from C:\Users\Alex\algo_trading\engine\models\pysr_ETH_6h.json
+    All features: 49 base + 86 macro/sentiment/cross-asset/pysr = 135 total
+    [50] 2026-03-13 06:00: SELL (78%) | price=$2,111.10
+    [100] 2026-03-15 08:00: BUY (99%) | price=$2,107.54
+    [150] 2026-03-17 10:00: SELL (100%) | price=$2,312.94
+    [200] 2026-03-19 12:00: SELL (98%) | price=$2,166.79
+    [250] 2026-03-21 14:00: SELL (74%) | price=$2,152.13
+    [300] 2026-03-23 16:00: SELL (76%) | price=$2,135.88
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+16.75%, trades=32, round_trips=16, win_rate=81%
+  Conf>=70%: return=+14.24%, trades=28, round_trips=14, win_rate=79%
+  Conf>=75%: return=+7.95%, trades=22, round_trips=11, win_rate=82%
+  Conf>=80%: return=+8.85%, trades=18, round_trips=9, win_rate=78%
+  Conf>=85%: return=+7.34%, trades=14, round_trips=7, win_rate=71%
+  Conf>=90%: return=+10.05%, trades=6, round_trips=3, win_rate=67%
+  Buy&Hold: +7.53%
+
+  ======================================================================
+  OVERALL BEST: D #3 (APF=5.0)  →  ETH 6h
+  XGB+LGBM  w=200h  g=0.9950  f=10
+  Return (conf>=85%): +19.40%  WR=86%  trades=14
+  ======================================================================
+
+
+================================================================================
+  SUMMARY: MODE G — D + Refined — Last 14 days (scored by return × win_rate)
+================================================================================
+
+  ETH_6h — Buy & Hold: +5.69%
+
+  Model                     | Combo          |    W |      G |   F | Conf |   Return |  Tr |  RT |   WR
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  65% |  +10.90% |  42 |  21 |  52% 
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  70% |  +13.17% |  34 |  17 |  59% 
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  75% |  +16.87% |  28 |  14 |  64% 
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  80% |  +15.42% |  20 |  10 |  60% 
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  85% |  +12.68% |  18 |   9 |  67% 
+  D #1 (APF=6.6)            | XGB+LGBM       | 150h | 0.995 |  13 |  90% |  +14.81% |  12 |   6 |  83% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  65% |  +11.49% |  40 |  20 |  60% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  70% |  +10.58% |  36 |  18 |  61% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  75% |  +12.71% |  26 |  13 |  69% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  80% |  +10.29% |  24 |  12 |  67% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  85% |  +11.63% |  20 |  10 |  70% 
+  D #2 (APF=6.5)            | XGB+LGBM       | 150h | 0.997 |  13 |  90% |  +13.83% |  14 |   7 |  71% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  65% |  +12.30% |  36 |  18 |  78% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  70% |  +12.05% |  30 |  15 |  73% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  75% |  +16.40% |  20 |  10 |  90% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  80% |  +15.66% |  16 |   8 |  88% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  85% |  +19.40% |  14 |   7 |  86% 
+  D #3 (APF=5.0)            | XGB+LGBM       | 200h | 0.995 |  10 |  90% |  +19.12% |  14 |   7 |  86% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  65% |  +10.91% |  38 |  19 |  58% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  70% |  +11.71% |  32 |  16 |  62% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  75% |  +11.78% |  28 |  14 |  64% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  80% |  +13.84% |  22 |  11 |  64% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  85% |  +11.98% |  16 |   8 |  62% 
+  D #4 (APF=4.9)            | XGB+LGBM       | 150h | 0.999 |  13 |  90% |  +13.41% |  12 |   6 |  67% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  65% |   +7.56% |  34 |  17 |  76% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  70% |   +8.71% |  30 |  15 |  87% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  75% |  +10.24% |  28 |  14 |  86% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  80% |   +7.83% |  20 |  10 |  70% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  85% |   -0.26% |  14 |   7 |  43% 
+  D #5 (APF=3.3)            | XGB+LGBM       | 150h | 0.999 |  17 |  90% |  +10.52% |  10 |   5 |  40% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  65% |   +2.26% |  50 |  25 |  56% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  70% |   +6.35% |  34 |  17 |  71% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  75% |   +7.01% |  28 |  14 |  79% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  80% |   +7.60% |  26 |  13 |  77% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  85% |  +10.42% |  20 |  10 |  70% 
+  D #6 (APF=3.3)            | RF+LGBM        | 150h | 0.995 |  17 |  90% |  +11.07% |  16 |   8 |  62% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  65% |  +17.00% |  34 |  17 |  59% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  70% |  +10.37% |  28 |  14 |  50% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  75% |  +10.90% |  22 |  11 |  55% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  80% |  +12.06% |  10 |   5 |  80% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  85% |  +10.57% |   8 |   4 |  75% 
+  Refined #1 (APF=6.9)      | XGB+LGBM       | 147h | 0.996 |  17 |  90% |   +9.52% |   6 |   3 |  67% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  65% |  +10.10% |  42 |  21 |  67% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  70% |   +9.42% |  38 |  19 |  74% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  75% |   +9.93% |  36 |  18 |  72% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  80% |   +8.19% |  32 |  16 |  69% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  85% |   +7.99% |  30 |  15 |  67% 
+  Refined #2 (APF=5.4)      | XGB+LGBM       | 219h | 0.994 |  15 |  90% |  +10.36% |  24 |  12 |  75% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  65% |  +16.75% |  32 |  16 |  81% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  70% |  +14.24% |  28 |  14 |  79% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  75% |   +7.95% |  22 |  11 |  82% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  80% |   +8.85% |  18 |   9 |  78% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  85% |   +7.34% |  14 |   7 |  71% 
+  Refined #3 (APF=4.6)      | XGB+LGBM       | 147h | 0.998 |  18 |  90% |  +10.05% |   6 |   3 |  67% 
+
+  * = still invested at end of period
+
+  Production model saved: models/crypto_doohan_v1_7_3_production.csv
+    ETH 6h: XGB+LGBM  w=200h  g=0.995  f=10  conf>=85%
+  Trading config updated: config/trading_config_doohan.json
+    ETH: horizon=6h, min_confidence=85%
+
+================================================================================
+
+Done!

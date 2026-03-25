@@ -1,0 +1,37 @@
+
+Usage: python crypto_trading_system_doohan.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
+
+  Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
+
+Modes:
+  P       PySR feature discovery (symbolic regression → models/pysr_*.json)
+  D       Grid optimization (combo x window x gamma x features)
+  V       Validate (top 6 from D → refine top 3 → pick best)
+  DV      D then V
+  S       Strategy comparison (both_agree / either_agree / Xh_only)
+  DS      D then S
+  DVS     D then V then S (full pipeline)
+  H       Horizon sweep (D+V per horizon → compare → save best)
+
+Assets:
+  BTC,ETH,LINK,...   Comma-separated asset names (default: all)
+
+Horizons:
+  5,6,7,8h           Comma-separated horizons in hours (default: 4,8h)
+
+Options:
+  --trials N          Number of Optuna trials (default: 150)
+  --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
+  --skip              Mode H only: skip Mode D for horizons that already have results
+  --resume            Resume interrupted Optuna study
+  --help, -h          Show this help
+
+Examples:
+  python crypto_trading_system_doohan.py P BTC 6h                  # discover PySR features (~30-120 min)
+  python crypto_trading_system_doohan.py H BTC 5,6,7,8h          # full horizon sweep
+  python crypto_trading_system_doohan.py H BTC 5,6,7h --skip     # skip D, re-run V only
+  python crypto_trading_system_doohan.py DV ETH 6h               # optimize + validate ETH 6h
+  python crypto_trading_system_doohan.py D BTC,ETH 8h --trials 200
+  python crypto_trading_system_doohan.py V BTC 6h                 # re-validate existing results
+  python crypto_trading_system_doohan.py BTC D 8h                 # order doesn't matter
+

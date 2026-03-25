@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "C:\Users\Alex\algo_trading\engine\crypto_trading_system_doohan_v1_7.py", line 229, in <module>
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    ^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TeeWriter' object has no attribute 'reconfigure'

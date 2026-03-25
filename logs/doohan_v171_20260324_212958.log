@@ -1,0 +1,1479 @@
+============================================================
+  DOOHAN: Mode H | ETH | 5h,6h,7h,8h | 150 trials
+============================================================
+
+================================================================================
+  MODE H: HORIZON SWEEP
+  Assets: ETH
+  Horizons: 5h, 6h, 7h, 8h
+  Pipeline: D (grid, skipped if exists) → G (backtest + refine) per horizon → compare → save best
+  Trials: 150 per horizon
+================================================================================
+
+################################################################################
+  HORIZON SWEEP: ETH — testing 5h, 6h, 7h, 8h
+################################################################################
+
+======================================================================
+  ETH — HORIZON 5h (1/4)
+======================================================================
+
+======================================================================
+  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- 5h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-24
+    VIX        (^VIX)... 1058 days
+    DXY        (DX-Y.NYB)... 1060 days
+    SP500      (^GSPC)... 1058 days
+    NASDAQ     (^IXIC)... 1058 days
+    GOLD       (GC=F)... 1060 days
+    US10Y      (^TNX)... 1058 days
+    EURUSD     (EURUSD=X)... 1096 days
+    USDJPY     (JPY=X)... 1096 days
+    OIL        (CL=F)... 1060 days
+
+  Saved: data/macro_data\macro_daily.csv (1097 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-23
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2970 rows)
+  Date range: 2018-02-01 to 2026-03-24
+  Current: 11 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36985 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1543 days
+    ETH_USD    (ETH-USD)... 1543 days
+    NASDAQ     (^IXIC)... 1058 days
+    SP500      (^GSPC)... 1058 days
+    DAX        (^GDAXI)... 1076 days
+
+  Saved: data/macro_data\cross_asset.csv (1543 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1543 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1543 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-23
+    sopr: 82 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4632 records -> 37049 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (37053 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-24 20:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,189 bytes
+    derivatives_btc.csv             1,207,115 bytes
+    fear_greed.csv                     69,197 bytes
+    macro_daily.csv                   184,787 bytes
+    macro_hourly.csv                6,562,360 bytes
+    onchain_btc.csv                   213,153 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.6 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating ETH from 2026-03-24 00:00:00...
+    ETH: 20 new candles -> 75273 total
+  [Data update: 0.2 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: ETH (5h)
+======================================================================
+
+  Building all features (horizon=5h)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  [Feature build: 0.0 min]
+  Capped: 75,028 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 130 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [21:30:50]
+    hour_cos                         3.7% [      BASE] #######
+    logret_120h                      3.7% [      BASE] #######
+    volatility_48h                   3.3% [      BASE] ######
+    logret_72h                       3.2% [      BASE] ######
+    atr_pct_14h                      2.2% [      BASE] ####
+    xa_btc_usd_relstr5d              2.2% [CROSS-ASSET] ####
+    plus_di_14h                      2.2% [      BASE] ####
+    volume_ratio_h                   2.1% [      BASE] ####
+    xa_dax_relstr5d                  2.1% [CROSS-ASSET] ####
+    logret_12h                       2.1% [      BASE] ####
+    xa_sp500_relstr5d                1.9% [CROSS-ASSET] ###
+    logret_240h                      1.9% [      BASE] ###
+    intraday_range                   1.9% [      BASE] ###
+    logret_8h                        1.8% [      BASE] ###
+    adx_14h                          1.8% [      BASE] ###
+    spread_240h_24h                  1.7% [      BASE] ###
+    spread_120h_12h                  1.7% [      BASE] ###
+    price_accel_12h                  1.7% [      BASE] ###
+    m_sp500_chg1d                    1.7% [     MACRO] ###
+    volatility_12h                   1.5% [      BASE] ##
+    ... 93 features below 1% importance
+  [Ranking: 0.0 min] — 130 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: ETH 5h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.384 ret=-36.4% tr=18  (0.2min) <-- BEST
+    [  2/324] RF+LGBM    w= 72 f=10 g=0.997 | apf=0.413 ret=-36.4% tr=18  (0.3min) <-- BEST
+    [  3/324] RF+LGBM    w= 72 f=10 g=0.995 | apf=0.437 ret=-34.4% tr=18  (0.5min) <-- BEST
+    [  4/324] RF+LGBM    w= 72 f=13 g=0.999 | apf=0.558 ret=-28.5% tr=18  (0.6min) <-- BEST
+    [  5/324] RF+LGBM    w= 72 f=13 g=0.997 | apf=0.771 ret=-21.0% tr=19  (0.8min) <-- BEST
+    [  6/324] RF+LGBM    w= 72 f=13 g=0.995 | apf=0.865 ret=-16.8% tr=20  (0.9min) <-- BEST
+    [ 52/324] RF+LGBM    w=150 f=30 g=0.999 | apf=1.008 ret=-11.1% tr=17  (9.4min) <-- BEST
+    [ 53/324] RF+LGBM    w=150 f=30 g=0.997 | apf=1.252 ret=-4.3% tr=17  (9.6min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=0.249 ret=-27.2% tr=12  (11.2min)
+    [ 91/324] RF+LGBM    w=300 f=10 g=0.999 | apf=1.269 ret=-4.6% tr=11  (18.3min) <-- BEST
+    [ 93/324] RF+LGBM    w=300 f=10 g=0.995 | apf=1.466 ret=-1.0% tr=11  (18.7min) <-- BEST
+
+  ────────────────────────────────────────────────────────────
+  XGB+LGBM
+  ────────────────────────────────────────────────────────────
+    [120/324] XGB+LGBM   w= 72 f=20 g=0.995 | apf=0.632 ret=-23.2% tr=17  (24.5min)
+    [180/324] XGB+LGBM   w=200 f=30 g=0.995 | apf=0.231 ret=-37.7% tr=15  (37.1min)
+
+  ────────────────────────────────────────────────────────────
+  RF+XGB
+  ────────────────────────────────────────────────────────────
+    [240/324] RF+XGB     w=100 f=13 g=0.995 | apf=0.131 ret=-32.9% tr=14  (45.7min)
+    [300/324] RF+XGB     w=250 f=20 g=0.995 | apf=0.906 ret=-15.1% tr=16  (47.1min)
+
+  ======================================================================
+  GRID RESULTS: ETH 5h (47.9 min)
+  ======================================================================
+  Total evals: 324 | Valid (≥8 trades): 324 | Low trades: 0 | Failed: 0
+  Unique candidates: 324
+  Grid CSV: models\crypto_doohan_v1_7_1_grid_ETH_5h.csv
+  Best overall: RF+LGBM w=300h g=0.9950 f=10 apf=1.466
+
+  Rank      APF  Combo                   Window    Gamma  Feats   Source
+  ---------------------------------------------------------------------------
+     1    1.466  RF+LGBM                   300h   0.9950     10     Grid <-- BEST
+     2    1.367  RF+XGB                     72h   0.9990     25     Grid
+     3    1.367  RF+XGB                     72h   0.9970     25     Grid
+     4    1.328  RF+XGB                    200h   0.9990     20     Grid
+     5    1.312  RF+XGB                     72h   0.9950     25     Grid
+     6    1.269  RF+LGBM                   300h   0.9990     10     Grid
+     7    1.252  RF+LGBM                   150h   0.9970     30     Grid
+     8    1.251  XGB+LGBM                  150h   0.9990     25     Grid
+     9    1.227  XGB+LGBM                   72h   0.9950     25     Grid
+    10    1.182  RF+XGB                    200h   0.9990     10     Grid
+    11    1.167  RF+LGBM                   200h   0.9950     10     Grid
+    12    1.162  XGB+LGBM                   72h   0.9970     25     Grid
+    13    1.127  XGB+LGBM                   72h   0.9970     30     Grid
+    14    1.102  XGB+LGBM                   72h   0.9990     30     Grid
+    15    1.088  RF+XGB                     72h   0.9970     30     Grid
+    16    1.088  RF+XGB                     72h   0.9950     30     Grid
+    17    1.083  XGB+LGBM                   72h   0.9950     30     Grid
+    18    1.071  RF+LGBM                   200h   0.9990     10     Grid
+    19    1.056  RF+XGB                     72h   0.9990     30     Grid
+    20    1.045  XGB+LGBM                   72h   0.9990     25     Grid
+
+  ======================================================================
+  3-FOLD ROLLING HOLDOUT: ETH 5h (top 20 candidates)
+  ======================================================================
+
+  Rank   AVG_APF   AVG_Ret  AVG_Acc    Tr      F1      F2      F3    IS_APF  Combo                    Win    Gamma    F
+  -----------------------------------------------------------------------------------------------------------------------------
+     1     2.157    +13.6%    57.0%    43   +3.8  +20.4  +16.7     1.102  XGB+LGBM                 72h   0.9990   30  ✓ <-- BEST
+     2     1.478     +5.4%    52.2%    53   -1.2  +12.6   +4.9     1.088  RF+XGB                   72h   0.9950   30  ~
+     3     1.467     +3.5%    52.7%    43   -0.4   +6.6   +4.3     1.127  XGB+LGBM                 72h   0.9970   30  ~
+     4     1.408     +5.0%    54.3%    51   -6.6  +14.4   +7.3     1.056  RF+XGB                   72h   0.9990   30  ~
+     5     1.403     +2.2%    54.2%    46   -4.3   -4.0  +14.9     1.252  RF+LGBM                 150h   0.9970   30  ~
+     6     1.365     +4.3%    51.1%    51   -7.8  +14.1   +6.7     1.088  RF+XGB                   72h   0.9970   30  ~
+     7     1.108     -0.8%    48.8%    35   -5.4   -4.6   +7.5     1.466  RF+LGBM                 300h   0.9950   10  ✗
+     8     1.102     -0.8%    51.6%    40   -7.7   +4.4   +1.0     1.045  XGB+LGBM                 72h   0.9990   25  ✗
+     9     1.093     -1.7%    51.6%    47   -5.7   +0.9   -0.3     1.312  RF+XGB                   72h   0.9950   25  ✗
+    10     1.086     -2.6%    52.7%    43   -6.7   -3.8   +2.5     1.083  XGB+LGBM                 72h   0.9950   30  ✗
+
+  ======================================================================
+  TOP 6 CANDIDATES: ETH 5h
+  ======================================================================
+  #1: XGB+LGBM  w=72h  g=0.9990  f=30  ho_apf=2.157  ho_ret=+13.6%  [+3.8% / +20.4% / +16.7%]  Grid  ✓ <-- BEST
+  #2: RF+XGB  w=72h  g=0.9950  f=30  ho_apf=1.478  ho_ret=+5.4%  [-1.2% / +12.6% / +4.9%]  Grid  ~
+  #3: XGB+LGBM  w=72h  g=0.9970  f=30  ho_apf=1.467  ho_ret=+3.5%  [-0.4% / +6.6% / +4.3%]  Grid  ~
+  #4: RF+LGBM  w=150h  g=0.9970  f=30  ho_apf=1.403  ho_ret=+2.2%  [-4.3% / -4.0% / +14.9%]  Grid  ~
+  #5: RF+LGBM  w=300h  g=0.9950  f=10  ho_apf=1.108  ho_ret=-0.8%  [-5.4% / -4.6% / +7.5%]  Grid  ✗
+  #6: RF+XGB  w=200h  g=0.9990  f=20  ho_apf=1.016  ho_ret=-5.5%  [-24.5% / +4.1% / +3.8%]  Grid  ✗
+  ======================================================================
+  [ETH total: 53.8 min]
+
+  Best models saved: models/crypto_doohan_v1_7_1_best_models.csv
+
+  Generating 5h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=200h, custom (30 features), gamma=0.999)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-18 09:00: SELL (93%) | price=$2,329.27
+    [100] 2026-03-20 11:00: SELL (91%) | price=$2,148.63
+    [150] 2026-03-22 13:00: HOLD (47%) | price=$2,077.84
+    [200] 2026-03-24 15:00: BUY (90%) | price=$2,135.15
+  Generated 200 hourly signals for ETH
+
+  Mode D complete: 55.4 min total
+================================================================================
+  MODE G: LIVE BACKTEST + REFINE — ETH 5h
+  Period: last 336 hours (2 weeks), every hour
+  Ranking by: conf>=80% return
+  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best
+  Candidates: models/crypto_doohan_v1_7_1_best_models.csv
+  Production: models/crypto_doohan_v1_7_1_production.csv
+================================================================================
+
+######################################################################
+  ETH 5h
+######################################################################
+
+  Computing LGBM feature ranking for ETH...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  [1/5] LGBM Feature Importance (gain-based)  [22:25:26]
+    logret_120h                      7.4% [      BASE] ##############
+    xa_dax_relstr5d                  5.6% [CROSS-ASSET] ###########
+    xa_sp500_relstr5d                5.0% [CROSS-ASSET] ##########
+    xa_nasdaq_relstr5d               3.7% [CROSS-ASSET] #######
+    logret_24h                       3.1% [      BASE] ######
+    price_to_sma100h                 2.6% [      BASE] #####
+    m_sp500_chg1d                    2.6% [     MACRO] #####
+    hour_cos                         2.6% [      BASE] #####
+    logret_72h                       2.6% [      BASE] #####
+    m_nasdaq_chg1d                   2.2% [     MACRO] ####
+    logret_240h                      1.8% [      BASE] ###
+    m_dxy_chg1d                      1.8% [     MACRO] ###
+    vol_ratio_12_48                  1.8% [      BASE] ###
+    m_vix_chg1d                      1.7% [     MACRO] ###
+    spread_120h_12h                  1.7% [      BASE] ###
+    xa_sp500_corr10d                 1.7% [CROSS-ASSET] ###
+    spread_120h_8h                   1.6% [      BASE] ###
+    gk_volatility_48h                1.6% [      BASE] ###
+    m_sp500_zscore                   1.4% [     MACRO] ##
+    volatility_48h                   1.4% [      BASE] ##
+    ... 103 features below 1% importance
+  [Ranking done: 0.8s] — 130 features ranked
+
+======================================================================
+  STEP 1: BACKTEST MODE D CANDIDATES
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.2): ETH
+  XGB+LGBM  w=72h  g=0.9990  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=336h, custom (30 features), gamma=0.999)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (78%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (68%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (73%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (72%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (74%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (96%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-4.53%, trades=43, round_trips=21, win_rate=62% [still in]
+  Conf>=70%: return=-4.68%, trades=41, round_trips=20, win_rate=60% [still in]
+  Conf>=75%: return=-4.67%, trades=35, round_trips=17, win_rate=59% [still in]
+  Conf>=80%: return=-4.18%, trades=27, round_trips=13, win_rate=46% [still in]
+  Conf>=85%: return=-3.47%, trades=25, round_trips=12, win_rate=42% [still in]
+  Conf>=90%: return=-6.72%, trades=17, round_trips=8, win_rate=38% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #2 (APF=1.5): ETH
+  RF+XGB  w=72h  g=0.9950  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=RF+XGB, window=72h, replay=336h, custom (30 features), gamma=0.995)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (65%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (88%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (76%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (77%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (77%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (97%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-5.50%, trades=55, round_trips=27, win_rate=59% [still in]
+  Conf>=70%: return=-4.87%, trades=41, round_trips=20, win_rate=55% [still in]
+  Conf>=75%: return=-5.04%, trades=39, round_trips=19, win_rate=53% [still in]
+  Conf>=80%: return=-5.77%, trades=35, round_trips=17, win_rate=47% [still in]
+  Conf>=85%: return=-5.67%, trades=25, round_trips=12, win_rate=42% [still in]
+  Conf>=90%: return=+0.12%, trades=21, round_trips=10, win_rate=50% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #3 (APF=1.5): ETH
+  XGB+LGBM  w=72h  g=0.9970  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=336h, custom (30 features), gamma=0.997)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (81%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (66%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (68%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (74%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (74%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (96%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-5.23%, trades=45, round_trips=22, win_rate=64% [still in]
+  Conf>=70%: return=-5.65%, trades=39, round_trips=19, win_rate=58% [still in]
+  Conf>=75%: return=-5.33%, trades=31, round_trips=15, win_rate=47% [still in]
+  Conf>=80%: return=-3.75%, trades=29, round_trips=14, win_rate=50% [still in]
+  Conf>=85%: return=-5.12%, trades=21, round_trips=10, win_rate=40% [still in]
+  Conf>=90%: return=-7.93%, trades=19, round_trips=9, win_rate=33% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #4 (APF=1.4): ETH
+  RF+LGBM  w=150h  g=0.9970  f=30
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=RF+LGBM, window=150h, replay=336h, custom (30 features), gamma=0.997)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (95%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (88%) | price=$2,076.30
+    [150] 2026-03-16 21:00: SELL (84%) | price=$2,348.97
+    [200] 2026-03-18 23:00: SELL (67%) | price=$2,203.39
+    [250] 2026-03-21 01:00: BUY (94%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (100%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-10.35%, trades=52, round_trips=26, win_rate=50%
+  Conf>=70%: return=-10.86%, trades=44, round_trips=22, win_rate=45%
+  Conf>=75%: return=-9.67%, trades=38, round_trips=19, win_rate=42%
+  Conf>=80%: return=-7.42%, trades=34, round_trips=17, win_rate=41%
+  Conf>=85%: return=-3.76%, trades=30, round_trips=15, win_rate=53%
+  Conf>=90%: return=-5.00%, trades=22, round_trips=11, win_rate=55%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #5 (APF=1.1): ETH
+  RF+LGBM  w=300h  g=0.9950  f=10
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=RF+LGBM, window=300h, replay=336h, custom (10 features), gamma=0.995)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (61%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (56%) | price=$2,076.30
+    [150] 2026-03-16 21:00: SELL (50%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (74%) | price=$2,203.39
+    [250] 2026-03-21 01:00: BUY (100%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (98%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-10.65%, trades=52, round_trips=26, win_rate=50%
+  Conf>=70%: return=-10.21%, trades=44, round_trips=22, win_rate=50%
+  Conf>=75%: return=-8.39%, trades=38, round_trips=19, win_rate=53%
+  Conf>=80%: return=-6.26%, trades=32, round_trips=16, win_rate=56%
+  Conf>=85%: return=-11.56%, trades=24, round_trips=12, win_rate=33%
+  Conf>=90%: return=-10.07%, trades=18, round_trips=9, win_rate=22%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #6 (APF=1.0): ETH
+  RF+XGB  w=200h  g=0.9990  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=RF+XGB, window=200h, replay=336h, custom (20 features), gamma=0.999)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (60%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (97%) | price=$2,076.30
+    [150] 2026-03-16 21:00: SELL (93%) | price=$2,348.97
+    [200] 2026-03-18 23:00: SELL (53%) | price=$2,203.39
+    [250] 2026-03-21 01:00: BUY (84%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (99%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-3.29%, trades=44, round_trips=22, win_rate=68%
+  Conf>=70%: return=-1.69%, trades=34, round_trips=17, win_rate=71%
+  Conf>=75%: return=-6.19%, trades=30, round_trips=15, win_rate=67%
+  Conf>=80%: return=-1.96%, trades=22, round_trips=11, win_rate=64%
+  Conf>=85%: return=+0.11%, trades=22, round_trips=11, win_rate=45%
+  Conf>=90%: return=+1.37%, trades=16, round_trips=8, win_rate=38%
+  Buy&Hold: +2.62%
+
+======================================================================
+  STEP 2: OPTUNA REFINE — top 3 live performers
+  50 trials per config | gamma ±0.002 | features ±5 | window ±20h
+======================================================================
+  #1: RF+XGB  w=200h  g=0.9990  f=20  live_ret=-1.96%
+  #2: XGB+LGBM  w=72h  g=0.9970  f=30  live_ret=-3.75%
+  #3: XGB+LGBM  w=72h  g=0.9990  f=30  live_ret=-4.18%
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  ────────────────────────────────────────────────────────────
+  Refining #1: RF+XGB  w=200h  g=0.9990  f=20
+  Ranges: gamma[0.997-1.000] features[15-25] window[180-220]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=195 g=0.9999 f=23 | apf=1.911 ret=+7.8% trades=17
+    # 17 NEW BEST: w=218 g=0.9991 f=25 | apf=2.803 ret=+21.0% trades=17
+    → Best: w=218h g=0.9991 f=25 apf=2.803
+
+  ────────────────────────────────────────────────────────────
+  Refining #2: XGB+LGBM  w=72h  g=0.9970  f=30
+  Ranges: gamma[0.995-0.999] features[25-35] window[52-92]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=67 g=0.9988 f=33 | apf=0.375 ret=-21.3% trades=16
+    #  2 NEW BEST: w=76 g=0.9956 f=26 | apf=1.117 ret=-3.0% trades=13
+    #  3 NEW BEST: w=54 g=0.9985 f=31 | apf=1.508 ret=+3.1% trades=14
+    # 11 NEW BEST: w=52 g=0.9973 f=32 | apf=1.836 ret=+4.3% trades=12
+    # 13 NEW BEST: w=52 g=0.9972 f=33 | apf=2.381 ret=+8.8% trades=13
+    → Best: w=52h g=0.9972 f=33 apf=2.381
+
+  ────────────────────────────────────────────────────────────
+  Refining #3: XGB+LGBM  w=72h  g=0.9990  f=30
+  Ranges: gamma[0.997-1.000] features[25-35] window[52-92]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=67 g=0.9999 f=33 | apf=0.375 ret=-21.3% trades=16
+    #  2 NEW BEST: w=76 g=0.9975 f=26 | apf=1.001 ret=-5.4% trades=12
+    #  3 NEW BEST: w=54 g=0.9996 f=31 | apf=1.508 ret=+3.1% trades=14
+    # 11 NEW BEST: w=52 g=0.9987 f=32 | apf=1.592 ret=+2.4% trades=11
+    # 13 NEW BEST: w=52 g=0.9987 f=33 | apf=2.136 ret=+6.8% trades=12
+    # 24 NEW BEST: w=52 g=0.9982 f=32 | apf=2.381 ret=+8.8% trades=13
+    → Best: w=52h g=0.9982 f=32 apf=2.381
+
+  [Refine: 17.6 min]
+  Refined #1: RF+XGB  w=218h  g=0.9991  f=25  apf=2.803
+  Refined #2: XGB+LGBM  w=52h  g=0.9972  f=33  apf=2.381
+  Refined #3: XGB+LGBM  w=52h  g=0.9982  f=32  apf=2.381
+
+======================================================================
+  STEP 3: BACKTEST REFINED CONFIGS
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Refined #1 (APF=2.8): ETH
+  RF+XGB  w=218h  g=0.9991  f=25
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=RF+XGB, window=218h, replay=336h, custom (25 features), gamma=0.9991016453502887)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (83%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (79%) | price=$2,076.30
+    [150] 2026-03-16 21:00: SELL (85%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (67%) | price=$2,203.39
+    [250] 2026-03-21 01:00: BUY (76%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (99%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-2.61%, trades=48, round_trips=24, win_rate=54%
+  Conf>=70%: return=-5.55%, trades=32, round_trips=16, win_rate=62%
+  Conf>=75%: return=-2.84%, trades=28, round_trips=14, win_rate=64%
+  Conf>=80%: return=-2.93%, trades=22, round_trips=11, win_rate=55%
+  Conf>=85%: return=-1.62%, trades=18, round_trips=9, win_rate=44%
+  Conf>=90%: return=+2.97%, trades=12, round_trips=6, win_rate=50%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #2 (APF=2.4): ETH
+  XGB+LGBM  w=52h  g=0.9972  f=33
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=XGB+LGBM, window=52h, replay=336h, custom (33 features), gamma=0.9972140895995609)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (97%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (70%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (80%) | price=$2,348.97
+    [200] 2026-03-18 23:00: HOLD (41%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (65%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (90%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-4.70%, trades=32, round_trips=16, win_rate=44%
+  Conf>=70%: return=-0.14%, trades=26, round_trips=13, win_rate=54%
+  Conf>=75%: return=+5.56%, trades=24, round_trips=12, win_rate=58%
+  Conf>=80%: return=+4.36%, trades=20, round_trips=10, win_rate=60%
+  Conf>=85%: return=-0.01%, trades=16, round_trips=8, win_rate=62%
+  Conf>=90%: return=-0.35%, trades=14, round_trips=7, win_rate=57%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #3 (APF=2.4): ETH
+  XGB+LGBM  w=52h  g=0.9982  f=32
+──────────────────────────────────────────────────────────────────────
+
+  Generating 5h-ahead signals for ETH (models=XGB+LGBM, window=52h, replay=336h, custom (32 features), gamma=0.9981972306945018)...
+    Rows before dropna: 75273
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (97%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (72%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (88%) | price=$2,348.97
+    [200] 2026-03-18 23:00: HOLD (40%) | price=$2,203.39
+    [250] 2026-03-21 01:00: HOLD (44%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (90%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-3.37%, trades=40, round_trips=20, win_rate=50%
+  Conf>=70%: return=+1.98%, trades=34, round_trips=17, win_rate=53%
+  Conf>=75%: return=+4.50%, trades=26, round_trips=13, win_rate=62%
+  Conf>=80%: return=+5.14%, trades=22, round_trips=11, win_rate=73%
+  Conf>=85%: return=+4.28%, trades=20, round_trips=10, win_rate=50%
+  Conf>=90%: return=-4.68%, trades=12, round_trips=6, win_rate=67%
+  Buy&Hold: +2.62%
+
+  ======================================================================
+  OVERALL BEST: Refined #2 (APF=2.4)  →  ETH 5h
+  XGB+LGBM  w=52h  g=0.9972  f=33
+  Return (conf>=75%): +5.56%  WR=58%  trades=24
+  ======================================================================
+
+
+================================================================================
+  SUMMARY: MODE G — D candidates + Refined — Last 14 days (production from refined only)
+================================================================================
+
+  ETH_5h — Buy & Hold: +2.62%
+
+  Model                     | Combo          |    W |      G |   F | Conf |   Return |  Tr |  RT |   WR
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  65% |   -4.53% |  43 |  21 |  62%*
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  70% |   -4.68% |  41 |  20 |  60%*
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  75% |   -4.67% |  35 |  17 |  59%*
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  80% |   -4.18% |  27 |  13 |  46%*
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  85% |   -3.47% |  25 |  12 |  42%*
+  D #1 (APF=2.2)            | XGB+LGBM       |  72h | 0.999 |  30 |  90% |   -6.72% |  17 |   8 |  38%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  65% |   -5.50% |  55 |  27 |  59%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  70% |   -4.87% |  41 |  20 |  55%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  75% |   -5.04% |  39 |  19 |  53%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  80% |   -5.77% |  35 |  17 |  47%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  85% |   -5.67% |  25 |  12 |  42%*
+  D #2 (APF=1.5)            | RF+XGB         |  72h | 0.995 |  30 |  90% |   +0.12% |  21 |  10 |  50%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  65% |   -5.23% |  45 |  22 |  64%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  70% |   -5.65% |  39 |  19 |  58%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  75% |   -5.33% |  31 |  15 |  47%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  80% |   -3.75% |  29 |  14 |  50%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  85% |   -5.12% |  21 |  10 |  40%*
+  D #3 (APF=1.5)            | XGB+LGBM       |  72h | 0.997 |  30 |  90% |   -7.93% |  19 |   9 |  33%*
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  65% |  -10.35% |  52 |  26 |  50% 
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  70% |  -10.86% |  44 |  22 |  45% 
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  75% |   -9.67% |  38 |  19 |  42% 
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  80% |   -7.42% |  34 |  17 |  41% 
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  85% |   -3.76% |  30 |  15 |  53% 
+  D #4 (APF=1.4)            | RF+LGBM        | 150h | 0.997 |  30 |  90% |   -5.00% |  22 |  11 |  55% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  65% |  -10.65% |  52 |  26 |  50% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  70% |  -10.21% |  44 |  22 |  50% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  75% |   -8.39% |  38 |  19 |  53% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  80% |   -6.26% |  32 |  16 |  56% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  85% |  -11.56% |  24 |  12 |  33% 
+  D #5 (APF=1.1)            | RF+LGBM        | 300h | 0.995 |  10 |  90% |  -10.07% |  18 |   9 |  22% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  65% |   -3.29% |  44 |  22 |  68% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  70% |   -1.69% |  34 |  17 |  71% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  75% |   -6.19% |  30 |  15 |  67% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  80% |   -1.96% |  22 |  11 |  64% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  85% |   +0.11% |  22 |  11 |  45% 
+  D #6 (APF=1.0)            | RF+XGB         | 200h | 0.999 |  20 |  90% |   +1.37% |  16 |   8 |  38% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  65% |   -2.61% |  48 |  24 |  54% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  70% |   -5.55% |  32 |  16 |  62% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  75% |   -2.84% |  28 |  14 |  64% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  80% |   -2.93% |  22 |  11 |  55% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  85% |   -1.62% |  18 |   9 |  44% 
+  Refined #1 (APF=2.8)      | RF+XGB         | 218h | 0.999 |  25 |  90% |   +2.97% |  12 |   6 |  50% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  65% |   -4.70% |  32 |  16 |  44% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  70% |   -0.14% |  26 |  13 |  54% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  75% |   +5.56% |  24 |  12 |  58% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  80% |   +4.36% |  20 |  10 |  60% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  85% |   -0.01% |  16 |   8 |  62% 
+  Refined #2 (APF=2.4)      | XGB+LGBM       |  52h | 0.997 |  33 |  90% |   -0.35% |  14 |   7 |  57% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  65% |   -3.37% |  40 |  20 |  50% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  70% |   +1.98% |  34 |  17 |  53% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  75% |   +4.50% |  26 |  13 |  62% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  80% |   +5.14% |  22 |  11 |  73% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  85% |   +4.28% |  20 |  10 |  50% 
+  Refined #3 (APF=2.4)      | XGB+LGBM       |  52h | 0.998 |  32 |  90% |   -4.68% |  12 |   6 |  67% 
+
+  * = still invested at end of period
+
+  Production model saved: models/crypto_doohan_v1_7_1_production.csv
+    ETH 5h: XGB+LGBM  w=52h  g=0.9972  f=33  conf>=75%
+  Trading config updated: config/trading_config_doohan.json
+    ETH: horizon=5h, min_confidence=75%
+
+================================================================================
+
+  ETH 5h WINNER: Refined #2 (APF=2.4)
+  XGB+LGBM  w=52h  g=0.9972  f=33  conf>=75%
+  Return: +5.56%  trades=24  WR=58%
+
+======================================================================
+  ETH — HORIZON 6h (2/4)
+======================================================================
+
+======================================================================
+  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- 6h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-24
+    VIX        (^VIX)... 1058 days
+    DXY        (DX-Y.NYB)... 1060 days
+    SP500      (^GSPC)... 1058 days
+    NASDAQ     (^IXIC)... 1058 days
+    GOLD       (GC=F)... 1060 days
+    US10Y      (^TNX)... 1058 days
+    EURUSD     (EURUSD=X)... 1096 days
+    USDJPY     (JPY=X)... 1096 days
+    OIL        (CL=F)... 1060 days
+
+  Saved: data/macro_data\macro_daily.csv (1097 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-23
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2970 rows)
+  Date range: 2018-02-01 to 2026-03-24
+  Current: 11 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36985 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1543 days
+    ETH_USD    (ETH-USD)... 1543 days
+    NASDAQ     (^IXIC)... 1058 days
+    SP500      (^GSPC)... 1058 days
+    DAX        (^GDAXI)... 1076 days
+
+  Saved: data/macro_data\cross_asset.csv (1543 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1543 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1543 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-23
+    sopr: 82 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4632 records -> 37049 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (37054 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-24 21:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,189 bytes
+    derivatives_btc.csv             1,207,148 bytes
+    fear_greed.csv                     69,197 bytes
+    macro_daily.csv                   184,787 bytes
+    macro_hourly.csv                6,562,360 bytes
+    onchain_btc.csv                   213,153 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.1 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating ETH from 2026-03-24 20:00:00...
+    ETH: 1 new candles -> 75274 total
+  [Data update: 0.1 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: ETH (6h)
+======================================================================
+
+  Building all features (horizon=6h)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  [Feature build: 0.0 min]
+  Capped: 75,028 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 130 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [22:53:10]
+    adx_14h                          4.3% [      BASE] ########
+    volatility_48h                   4.2% [      BASE] ########
+    logret_120h                      3.8% [      BASE] #######
+    logret_240h                      3.1% [      BASE] ######
+    logret_72h                       3.0% [      BASE] ######
+    price_to_sma100h                 2.8% [      BASE] #####
+    xa_dax_relstr5d                  2.4% [CROSS-ASSET] ####
+    bb_position_20h                  2.3% [      BASE] ####
+    logret_8h                        2.3% [      BASE] ####
+    stoch_k_14h                      2.3% [      BASE] ####
+    m_sp500_chg1d                    2.2% [     MACRO] ####
+    atr_pct_14h                      2.1% [      BASE] ####
+    hour_sin                         2.0% [      BASE] ####
+    hour_cos                         2.0% [      BASE] ####
+    xa_sp500_relstr5d                2.0% [CROSS-ASSET] ####
+    xa_btc_usd_relstr5d              1.9% [CROSS-ASSET] ###
+    minus_di_14h                     1.7% [      BASE] ###
+    gk_volatility_48h                1.5% [      BASE] ###
+    m_nasdaq_chg1d                   1.5% [     MACRO] ###
+    gk_volatility_14h                1.5% [      BASE] ###
+    ... 97 features below 1% importance
+  [Ranking: 0.0 min] — 130 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: ETH 6h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.759 ret=-20.3% tr=22  (0.1min) <-- BEST
+    [  4/324] RF+LGBM    w= 72 f=13 g=0.999 | apf=1.175 ret=-4.3% tr=20  (0.6min) <-- BEST
+    [ 11/324] RF+LGBM    w= 72 f=20 g=0.997 | apf=1.196 ret=-4.3% tr=18  (1.7min) <-- BEST
+    [ 43/324] RF+LGBM    w=150 f=17 g=0.999 | apf=1.319 ret=-1.4% tr=19  (7.1min) <-- BEST
+    [ 58/324] RF+LGBM    w=200 f=13 g=0.999 | apf=1.943 ret=+5.0% tr=14  (10.0min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=0.544 ret=-17.3% tr=16  (10.4min)
+
+  ────────────────────────────────────────────────────────────
+  XGB+LGBM
+  ────────────────────────────────────────────────────────────
+    [118/324] XGB+LGBM   w= 72 f=20 g=0.999 | apf=2.539 ret=+20.5% tr=17  (21.7min) <-- BEST
+    [120/324] XGB+LGBM   w= 72 f=20 g=0.995 | apf=1.619 ret=+6.9% tr=15  (22.1min)
+    [180/324] XGB+LGBM   w=200 f=30 g=0.995 | apf=0.140 ret=-15.2% tr=10  (34.0min)
+
+  ────────────────────────────────────────────────────────────
+  RF+XGB
+  ────────────────────────────────────────────────────────────
+    [223/324] RF+XGB     w= 72 f=17 g=0.999 | apf=2.989 ret=+26.2% tr=15  (42.3min) <-- BEST
+    [224/324] RF+XGB     w= 72 f=17 g=0.997 | apf=2.991 ret=+26.2% tr=16  (42.3min) <-- BEST
+    [225/324] RF+XGB     w= 72 f=17 g=0.995 | apf=3.585 ret=+36.9% tr=17  (42.3min) <-- BEST
+    [240/324] RF+XGB     w=100 f=13 g=0.995 | apf=0.775 ret=-21.2% tr=16  (42.6min)
+    [300/324] RF+XGB     w=250 f=20 g=0.995 | apf=0.349 ret=-29.7% tr=16  (44.0min)
+
+  ======================================================================
+  GRID RESULTS: ETH 6h (44.8 min)
+  ======================================================================
+  Total evals: 324 | Valid (≥8 trades): 324 | Low trades: 0 | Failed: 0
+  Unique candidates: 324
+  Grid CSV: models\crypto_doohan_v1_7_1_grid_ETH_6h.csv
+  Best overall: RF+XGB w=72h g=0.9950 f=17 apf=3.585
+
+  Rank      APF  Combo                   Window    Gamma  Feats   Source
+  ---------------------------------------------------------------------------
+     1    3.585  RF+XGB                     72h   0.9950     17     Grid <-- BEST
+     2    2.991  RF+XGB                     72h   0.9970     17     Grid
+     3    2.990  RF+XGB                     72h   0.9970     20     Grid
+     4    2.989  RF+XGB                     72h   0.9990     17     Grid
+     5    2.693  RF+XGB                     72h   0.9990     20     Grid
+     6    2.620  RF+XGB                     72h   0.9950     20     Grid
+     7    2.539  XGB+LGBM                   72h   0.9990     20     Grid
+     8    2.469  RF+XGB                     72h   0.9950     13     Grid
+     9    2.241  XGB+LGBM                   72h   0.9970     20     Grid
+    10    2.226  RF+XGB                     72h   0.9950     25     Grid
+    11    2.162  RF+XGB                     72h   0.9970     25     Grid
+    12    2.053  RF+XGB                     72h   0.9970     13     Grid
+    13    2.033  RF+XGB                     72h   0.9990     13     Grid
+    14    1.943  RF+LGBM                   200h   0.9990     13     Grid
+    15    1.819  RF+XGB                     72h   0.9990     25     Grid
+    16    1.764  XGB+LGBM                  250h   0.9950     10     Grid
+    17    1.619  XGB+LGBM                   72h   0.9950     20     Grid
+    18    1.580  RF+XGB                     72h   0.9970     10     Grid
+    19    1.580  RF+XGB                     72h   0.9950     10     Grid
+    20    1.523  XGB+LGBM                  150h   0.9950     30     Grid
+
+  ======================================================================
+  3-FOLD ROLLING HOLDOUT: ETH 6h (top 20 candidates)
+  ======================================================================
+
+  Rank   AVG_APF   AVG_Ret  AVG_Acc    Tr      F1      F2      F3    IS_APF  Combo                    Win    Gamma    F
+  -----------------------------------------------------------------------------------------------------------------------------
+     1     2.703     +9.7%    51.1%    29   -5.4  +22.2  +12.3     1.764  XGB+LGBM                250h   0.9950   10  ~ <-- BEST
+     2     1.373     -3.4%    50.5%    42  -30.6   +6.3  +14.2     1.619  XGB+LGBM                 72h   0.9950   20  ✗
+     3     1.233     -4.7%    50.0%    43  -30.6   +5.6  +10.9     2.241  XGB+LGBM                 72h   0.9970   20  ✗
+     4     1.069     -5.5%    48.4%    46  -30.6   +6.7   +7.5     2.620  RF+XGB                   72h   0.9950   20  ✗
+     5     1.052     -4.8%    48.4%    46  -20.5   +7.2   -1.0     2.469  RF+XGB                   72h   0.9950   13  ✗
+     6     1.011     -6.0%    51.6%    41  -18.6   +5.2   -4.7     2.053  RF+XGB                   72h   0.9970   13  ✗
+     7     1.011     -6.6%    47.8%    45  -30.6   +6.3   +4.6     2.990  RF+XGB                   72h   0.9970   20  ✗
+     8     0.976     -7.3%    52.2%    44  -30.5   -0.6   +9.1     2.539  XGB+LGBM                 72h   0.9990   20  ✗
+     9     0.966     -7.0%    47.8%    43  -25.8   +4.5   +0.2     2.991  RF+XGB                   72h   0.9970   17  ✗
+    10     0.964     -3.6%    52.6%    32  -10.4   -2.6   +2.3     1.943  RF+LGBM                 200h   0.9990   13  ✗
+
+  ======================================================================
+  TOP 6 CANDIDATES: ETH 6h
+  ======================================================================
+  #1: XGB+LGBM  w=250h  g=0.9950  f=10  ho_apf=2.703  ho_ret=+9.7%  [-5.4% / +22.2% / +12.3%]  Grid  ~ <-- BEST
+  #2: XGB+LGBM  w=72h  g=0.9950  f=20  ho_apf=1.373  ho_ret=-3.4%  [-30.6% / +6.3% / +14.2%]  Grid  ✗
+  #3: XGB+LGBM  w=72h  g=0.9970  f=20  ho_apf=1.233  ho_ret=-4.7%  [-30.6% / +5.6% / +10.9%]  Grid  ✗
+  #4: RF+XGB  w=72h  g=0.9950  f=13  ho_apf=1.052  ho_ret=-4.8%  [-20.5% / +7.2% / -1.0%]  Grid  ✗
+  #5: RF+XGB  w=72h  g=0.9970  f=13  ho_apf=1.011  ho_ret=-6.0%  [-18.6% / +5.2% / -4.7%]  Grid  ✗
+  #6: XGB+LGBM  w=72h  g=0.9990  f=20  ho_apf=0.976  ho_ret=-7.3%  [-30.5% / -0.6% / +9.1%]  Grid  ✗
+  ======================================================================
+  [ETH total: 48.1 min]
+
+  Best models saved: models/crypto_doohan_v1_7_1_best_models.csv
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=250h, replay=200h, custom (10 features), gamma=0.995)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-18 09:00: SELL (77%) | price=$2,329.27
+    [100] 2026-03-20 11:00: BUY (65%) | price=$2,148.63
+    [150] 2026-03-22 13:00: HOLD (56%) | price=$2,077.84
+    [200] 2026-03-24 15:00: HOLD (63%) | price=$2,135.15
+  Generated 200 hourly signals for ETH
+
+  Mode D complete: 49.7 min total
+================================================================================
+  MODE G: LIVE BACKTEST + REFINE — ETH 6h
+  Period: last 336 hours (2 weeks), every hour
+  Ranking by: conf>=80% return
+  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best
+  Candidates: models/crypto_doohan_v1_7_1_best_models.csv
+  Production: models/crypto_doohan_v1_7_1_production.csv
+================================================================================
+
+######################################################################
+  ETH 6h
+######################################################################
+
+  Computing LGBM feature ranking for ETH...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  [1/5] LGBM Feature Importance (gain-based)  [23:42:33]
+    logret_120h                      7.2% [      BASE] ##############
+    xa_dax_relstr5d                  6.3% [CROSS-ASSET] ############
+    xa_sp500_relstr5d                4.6% [CROSS-ASSET] #########
+    xa_nasdaq_relstr5d               3.4% [CROSS-ASSET] ######
+    price_to_sma100h                 3.0% [      BASE] ######
+    logret_72h                       3.0% [      BASE] #####
+    m_sp500_chg1d                    2.3% [     MACRO] ####
+    logret_240h                      2.3% [      BASE] ####
+    volatility_48h                   2.3% [      BASE] ####
+    xa_sp500_corr10d                 2.1% [CROSS-ASSET] ####
+    hour_cos                         2.1% [      BASE] ####
+    m_nasdaq_chg1d                   2.1% [     MACRO] ####
+    m_vix_chg1d                      2.0% [     MACRO] ####
+    logret_24h                       2.0% [      BASE] ####
+    m_dxy_chg1d                      1.8% [     MACRO] ###
+    spread_120h_12h                  1.7% [      BASE] ###
+    spread_120h_8h                   1.5% [      BASE] ###
+    gk_volatility_48h                1.4% [      BASE] ##
+    m_dxy_vol5d                      1.4% [     MACRO] ##
+    sma20_to_sma50h                  1.2% [      BASE] ##
+    ... 103 features below 1% importance
+  [Ranking done: 0.8s] — 130 features ranked
+
+======================================================================
+  STEP 1: BACKTEST MODE D CANDIDATES
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.7): ETH
+  XGB+LGBM  w=250h  g=0.9950  f=10
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=250h, replay=336h, custom (10 features), gamma=0.995)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (63%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (66%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (54%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (88%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (78%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (96%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-0.62%, trades=39, round_trips=19, win_rate=63% [still in]
+  Conf>=70%: return=+0.76%, trades=33, round_trips=16, win_rate=62% [still in]
+  Conf>=75%: return=+0.17%, trades=31, round_trips=15, win_rate=67% [still in]
+  Conf>=80%: return=-7.64%, trades=24, round_trips=12, win_rate=58%
+  Conf>=85%: return=-5.67%, trades=16, round_trips=8, win_rate=50%
+  Conf>=90%: return=-4.59%, trades=10, round_trips=5, win_rate=40%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #2 (APF=1.4): ETH
+  XGB+LGBM  w=72h  g=0.9950  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=336h, custom (20 features), gamma=0.995)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: HOLD (33%) | price=$2,058.40
+    [100] 2026-03-14 19:00: HOLD (43%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (83%) | price=$2,348.97
+    [200] 2026-03-18 23:00: HOLD (56%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (87%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (89%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+4.85%, trades=33, round_trips=16, win_rate=56% [still in]
+  Conf>=70%: return=+3.17%, trades=29, round_trips=14, win_rate=43% [still in]
+  Conf>=75%: return=+3.87%, trades=29, round_trips=14, win_rate=43% [still in]
+  Conf>=80%: return=+4.44%, trades=25, round_trips=12, win_rate=67% [still in]
+  Conf>=85%: return=+4.78%, trades=23, round_trips=11, win_rate=73% [still in]
+  Conf>=90%: return=+8.86%, trades=21, round_trips=10, win_rate=80% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #3 (APF=1.2): ETH
+  XGB+LGBM  w=72h  g=0.9970  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=336h, custom (20 features), gamma=0.997)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: HOLD (30%) | price=$2,058.40
+    [100] 2026-03-14 19:00: HOLD (40%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (80%) | price=$2,348.97
+    [200] 2026-03-18 23:00: HOLD (58%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (90%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (88%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+2.95%, trades=31, round_trips=15, win_rate=40% [still in]
+  Conf>=70%: return=+3.61%, trades=27, round_trips=13, win_rate=46% [still in]
+  Conf>=75%: return=+3.45%, trades=27, round_trips=13, win_rate=46% [still in]
+  Conf>=80%: return=+3.45%, trades=25, round_trips=12, win_rate=58% [still in]
+  Conf>=85%: return=+3.04%, trades=21, round_trips=10, win_rate=70% [still in]
+  Conf>=90%: return=+3.57%, trades=21, round_trips=10, win_rate=80% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #4 (APF=1.1): ETH
+  RF+XGB  w=72h  g=0.9950  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=RF+XGB, window=72h, replay=336h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: SELL (91%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (56%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (86%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (93%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (97%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (98%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+3.59%, trades=37, round_trips=18, win_rate=72% [still in]
+  Conf>=70%: return=+7.17%, trades=35, round_trips=17, win_rate=71% [still in]
+  Conf>=75%: return=+8.15%, trades=34, round_trips=17, win_rate=71%
+  Conf>=80%: return=+6.07%, trades=32, round_trips=16, win_rate=75%
+  Conf>=85%: return=+1.79%, trades=30, round_trips=15, win_rate=67%
+  Conf>=90%: return=+4.85%, trades=20, round_trips=10, win_rate=80%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #5 (APF=1.0): ETH
+  RF+XGB  w=72h  g=0.9970  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=RF+XGB, window=72h, replay=336h, custom (13 features), gamma=0.997)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: SELL (93%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (60%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (88%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (93%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (98%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (98%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+4.37%, trades=41, round_trips=20, win_rate=75% [still in]
+  Conf>=70%: return=+6.18%, trades=35, round_trips=17, win_rate=71% [still in]
+  Conf>=75%: return=+6.90%, trades=34, round_trips=17, win_rate=71%
+  Conf>=80%: return=+6.73%, trades=30, round_trips=15, win_rate=67%
+  Conf>=85%: return=+2.04%, trades=26, round_trips=13, win_rate=62%
+  Conf>=90%: return=+5.75%, trades=20, round_trips=10, win_rate=80%
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  D #6 (APF=1.0): ETH
+  XGB+LGBM  w=72h  g=0.9990  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=72h, replay=336h, custom (20 features), gamma=0.999)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: HOLD (30%) | price=$2,058.40
+    [100] 2026-03-14 19:00: SELL (56%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (80%) | price=$2,348.97
+    [200] 2026-03-18 23:00: HOLD (65%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (93%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (87%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=+4.59%, trades=29, round_trips=14, win_rate=43% [still in]
+  Conf>=70%: return=+3.86%, trades=29, round_trips=14, win_rate=43% [still in]
+  Conf>=75%: return=+1.31%, trades=25, round_trips=12, win_rate=50% [still in]
+  Conf>=80%: return=+2.94%, trades=25, round_trips=12, win_rate=58% [still in]
+  Conf>=85%: return=+4.52%, trades=23, round_trips=11, win_rate=73% [still in]
+  Conf>=90%: return=+7.67%, trades=21, round_trips=10, win_rate=80% [still in]
+  Buy&Hold: +2.62%
+
+======================================================================
+  STEP 2: OPTUNA REFINE — top 3 live performers
+  50 trials per config | gamma ±0.002 | features ±5 | window ±20h
+======================================================================
+  #1: RF+XGB  w=72h  g=0.9970  f=13  live_ret=+6.73%
+  #2: RF+XGB  w=72h  g=0.9950  f=13  live_ret=+6.07%
+  #3: XGB+LGBM  w=72h  g=0.9950  f=20  live_ret=+4.44%
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  ────────────────────────────────────────────────────────────
+  Refining #1: RF+XGB  w=72h  g=0.9970  f=13
+  Ranges: gamma[0.995-0.999] features[8-18] window[52-92]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=67 g=0.9988 f=16 | apf=2.091 ret=+12.9% trades=14
+    # 12 NEW BEST: w=52 g=0.9990 f=15 | apf=2.881 ret=+30.6% trades=18
+    # 13 NEW BEST: w=52 g=0.9989 f=16 | apf=3.573 ret=+33.1% trades=17
+    # 16 NEW BEST: w=52 g=0.9983 f=16 | apf=3.581 ret=+33.2% trades=17
+    → Best: w=52h g=0.9983 f=16 apf=3.581
+
+  ────────────────────────────────────────────────────────────
+  Refining #2: RF+XGB  w=72h  g=0.9950  f=13
+  Ranges: gamma[0.993-0.997] features[8-18] window[52-92]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=67 g=0.9968 f=16 | apf=1.863 ret=+9.1% trades=14
+    #  3 NEW BEST: w=54 g=0.9965 f=14 | apf=1.888 ret=+8.3% trades=15
+    # 11 NEW BEST: w=52 g=0.9953 f=15 | apf=3.138 ret=+36.4% trades=20
+    # 22 NEW BEST: w=52 g=0.9946 f=15 | apf=3.194 ret=+37.4% trades=19
+    → Best: w=52h g=0.9946 f=15 apf=3.194
+
+  ────────────────────────────────────────────────────────────
+  Refining #3: XGB+LGBM  w=72h  g=0.9950  f=20
+  Ranges: gamma[0.993-0.997] features[15-25] window[52-92]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=67 g=0.9968 f=23 | apf=2.334 ret=+8.8% trades=11
+    # 20 NEW BEST: w=68 g=0.9936 f=22 | apf=4.027 ret=+16.8% trades=11
+    # 21 NEW BEST: w=68 g=0.9947 f=23 | apf=4.241 ret=+18.3% trades=12
+    → Best: w=68h g=0.9947 f=23 apf=4.241
+
+  [Refine: 9.4 min]
+  Refined #1: XGB+LGBM  w=68h  g=0.9947  f=23  apf=4.241
+  Refined #2: RF+XGB  w=52h  g=0.9983  f=16  apf=3.581
+  Refined #3: RF+XGB  w=52h  g=0.9946  f=15  apf=3.194
+
+======================================================================
+  STEP 3: BACKTEST REFINED CONFIGS
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Refined #1 (APF=4.2): ETH
+  XGB+LGBM  w=68h  g=0.9947  f=23
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=XGB+LGBM, window=68h, replay=336h, custom (23 features), gamma=0.99466769843331)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (85%) | price=$2,058.40
+    [100] 2026-03-14 19:00: HOLD (51%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (96%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (65%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (87%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (94%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-6.60%, trades=45, round_trips=22, win_rate=59% [still in]
+  Conf>=70%: return=-2.88%, trades=41, round_trips=20, win_rate=55% [still in]
+  Conf>=75%: return=-3.12%, trades=35, round_trips=17, win_rate=65% [still in]
+  Conf>=80%: return=-0.55%, trades=35, round_trips=17, win_rate=71% [still in]
+  Conf>=85%: return=-6.40%, trades=23, round_trips=11, win_rate=64% [still in]
+  Conf>=90%: return=-3.01%, trades=17, round_trips=8, win_rate=38% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #2 (APF=3.6): ETH
+  RF+XGB  w=52h  g=0.9983  f=16
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=RF+XGB, window=52h, replay=336h, custom (16 features), gamma=0.9982896803424406)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (75%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (64%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (96%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (82%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (92%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (94%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-4.67%, trades=39, round_trips=19, win_rate=68% [still in]
+  Conf>=70%: return=+1.02%, trades=29, round_trips=14, win_rate=71% [still in]
+  Conf>=75%: return=+1.48%, trades=25, round_trips=12, win_rate=75% [still in]
+  Conf>=80%: return=+0.98%, trades=21, round_trips=10, win_rate=70% [still in]
+  Conf>=85%: return=-2.12%, trades=15, round_trips=7, win_rate=57% [still in]
+  Conf>=90%: return=+0.45%, trades=15, round_trips=7, win_rate=71% [still in]
+  Buy&Hold: +2.62%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #3 (APF=3.2): ETH
+  RF+XGB  w=52h  g=0.9946  f=15
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for ETH (models=RF+XGB, window=52h, replay=336h, custom (15 features), gamma=0.9946038238787281)...
+    Rows before dropna: 75274
+    Rows after dropna: 75028
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 17:00: BUY (77%) | price=$2,058.40
+    [100] 2026-03-14 19:00: BUY (73%) | price=$2,076.30
+    [150] 2026-03-16 21:00: BUY (97%) | price=$2,348.97
+    [200] 2026-03-18 23:00: BUY (77%) | price=$2,203.39
+    [250] 2026-03-21 01:00: SELL (90%) | price=$2,153.59
+    [300] 2026-03-23 03:00: SELL (93%) | price=$2,052.54
+  Generated 336 hourly signals for ETH
+  Conf>=65%: return=-5.19%, trades=41, round_trips=20, win_rate=65% [still in]
+  Conf>=70%: return=-7.86%, trades=35, round_trips=17, win_rate=59% [still in]
+  Conf>=75%: return=-7.12%, trades=25, round_trips=12, win_rate=58% [still in]
+  Conf>=80%: return=-5.23%, trades=19, round_trips=9, win_rate=44% [still in]
+  Conf>=85%: return=-7.71%, trades=17, round_trips=8, win_rate=38% [still in]
+  Conf>=90%: return=-5.52%, trades=15, round_trips=7, win_rate=57% [still in]
+  Buy&Hold: +2.62%
+
+  ======================================================================
+  OVERALL BEST: Refined #2 (APF=3.6)  →  ETH 6h
+  RF+XGB  w=52h  g=0.9983  f=16
+  Return (conf>=75%): +1.48%  WR=75%  trades=25
+  ======================================================================
+
+
+================================================================================
+  SUMMARY: MODE G — D candidates + Refined — Last 14 days (production from refined only)
+================================================================================
+
+  ETH_6h — Buy & Hold: +2.62%
+
+  Model                     | Combo          |    W |      G |   F | Conf |   Return |  Tr |  RT |   WR
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  65% |   -0.62% |  39 |  19 |  63%*
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  70% |   +0.76% |  33 |  16 |  62%*
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  75% |   +0.17% |  31 |  15 |  67%*
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  80% |   -7.64% |  24 |  12 |  58% 
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  85% |   -5.67% |  16 |   8 |  50% 
+  D #1 (APF=2.7)            | XGB+LGBM       | 250h | 0.995 |  10 |  90% |   -4.59% |  10 |   5 |  40% 
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  65% |   +4.85% |  33 |  16 |  56%*
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  70% |   +3.17% |  29 |  14 |  43%*
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  75% |   +3.87% |  29 |  14 |  43%*
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  80% |   +4.44% |  25 |  12 |  67%*
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  85% |   +4.78% |  23 |  11 |  73%*
+  D #2 (APF=1.4)            | XGB+LGBM       |  72h | 0.995 |  20 |  90% |   +8.86% |  21 |  10 |  80%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  65% |   +2.95% |  31 |  15 |  40%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  70% |   +3.61% |  27 |  13 |  46%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  75% |   +3.45% |  27 |  13 |  46%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  80% |   +3.45% |  25 |  12 |  58%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  85% |   +3.04% |  21 |  10 |  70%*
+  D #3 (APF=1.2)            | XGB+LGBM       |  72h | 0.997 |  20 |  90% |   +3.57% |  21 |  10 |  80%*
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  65% |   +3.59% |  37 |  18 |  72%*
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  70% |   +7.17% |  35 |  17 |  71%*
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  75% |   +8.15% |  34 |  17 |  71% 
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  80% |   +6.07% |  32 |  16 |  75% 
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  85% |   +1.79% |  30 |  15 |  67% 
+  D #4 (APF=1.1)            | RF+XGB         |  72h | 0.995 |  13 |  90% |   +4.85% |  20 |  10 |  80% 
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  65% |   +4.37% |  41 |  20 |  75%*
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  70% |   +6.18% |  35 |  17 |  71%*
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  75% |   +6.90% |  34 |  17 |  71% 
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  80% |   +6.73% |  30 |  15 |  67% 
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  85% |   +2.04% |  26 |  13 |  62% 
+  D #5 (APF=1.0)            | RF+XGB         |  72h | 0.997 |  13 |  90% |   +5.75% |  20 |  10 |  80% 
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  65% |   +4.59% |  29 |  14 |  43%*
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  70% |   +3.86% |  29 |  14 |  43%*
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  75% |   +1.31% |  25 |  12 |  50%*
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  80% |   +2.94% |  25 |  12 |  58%*
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  85% |   +4.52% |  23 |  11 |  73%*
+  D #6 (APF=1.0)            | XGB+LGBM       |  72h | 0.999 |  20 |  90% |   +7.67% |  21 |  10 |  80%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  65% |   -6.60% |  45 |  22 |  59%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  70% |   -2.88% |  41 |  20 |  55%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  75% |   -3.12% |  35 |  17 |  65%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  80% |   -0.55% |  35 |  17 |  71%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  85% |   -6.40% |  23 |  11 |  64%*
+  Refined #1 (APF=4.2)      | XGB+LGBM       |  68h | 0.995 |  23 |  90% |   -3.01% |  17 |   8 |  38%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  65% |   -4.67% |  39 |  19 |  68%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  70% |   +1.02% |  29 |  14 |  71%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  75% |   +1.48% |  25 |  12 |  75%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  80% |   +0.98% |  21 |  10 |  70%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  85% |   -2.12% |  15 |   7 |  57%*
+  Refined #2 (APF=3.6)      | RF+XGB         |  52h | 0.998 |  16 |  90% |   +0.45% |  15 |   7 |  71%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  65% |   -5.19% |  41 |  20 |  65%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  70% |   -7.86% |  35 |  17 |  59%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  75% |   -7.12% |  25 |  12 |  58%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  80% |   -5.23% |  19 |   9 |  44%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  85% |   -7.71% |  17 |   8 |  38%*
+  Refined #3 (APF=3.2)      | RF+XGB         |  52h | 0.995 |  15 |  90% |   -5.52% |  15 |   7 |  57%*
+
+  * = still invested at end of period
+
+  Production model saved: models/crypto_doohan_v1_7_1_production.csv
+    ETH 6h: RF+XGB  w=52h  g=0.9983  f=16  conf>=75%
+  Trading config updated: config/trading_config_doohan.json
+    ETH: horizon=6h, min_confidence=75%
+
+================================================================================
+
+  ETH 6h WINNER: Refined #2 (APF=3.6)
+  RF+XGB  w=52h  g=0.9983  f=16  conf>=75%
+  Return: +1.48%  trades=25  WR=75%
+
+======================================================================
+  ETH — HORIZON 7h (3/4)
+======================================================================
+
+======================================================================
+  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- 7h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-25
+    VIX        (^VIX)... 1059 days
+    DXY        (DX-Y.NYB)... 1061 days
+    SP500      (^GSPC)... 1059 days
+    NASDAQ     (^IXIC)... 1059 days
+    GOLD       (GC=F)... 1061 days
+    US10Y      (^TNX)... 1059 days
+    EURUSD     (EURUSD=X)... 1097 days
+    USDJPY     (JPY=X)... 1098 days
+    OIL        (CL=F)... 1061 days
+
+  Saved: data/macro_data\macro_daily.csv (1099 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-25
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2970 rows)
+  Date range: 2018-02-01 to 2026-03-24
+  Current: 11 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (37033 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1544 days
+    ETH_USD    (ETH-USD)... 1544 days
+    NASDAQ     (^IXIC)... 1059 days
+    SP500      (^GSPC)... 1059 days
+    DAX        (^GDAXI)... 1077 days
+
+  Saved: data/macro_data\cross_asset.csv (1544 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1543 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1543 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-23
+    sopr: 82 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4632 records -> 37049 hourly rows
+    Open interest (hourly)... ERROR: HTTP Error 400: 
+
+  Saved: data/macro_data\derivatives_btc.csv (37049 rows, 1 columns)
+  Columns: ['funding_rate']
+  Date range: 2022-01-01 00:00:00 to 2026-03-24 16:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,277 bytes
+    derivatives_btc.csv             1,116,248 bytes
+    fear_greed.csv                     69,197 bytes
+    macro_daily.csv                   185,120 bytes
+    macro_hourly.csv                6,570,789 bytes
+    onchain_btc.csv                   213,153 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.2 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating ETH from 2026-03-24 21:00:00...
+    ETH: 2 new candles -> 75276 total
+  [Data update: 0.1 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: ETH (7h)
+======================================================================
+
+  Building all features (horizon=7h)...
+    Rows before dropna: 75276
+    Rows after dropna: 75029
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  [Feature build: 0.0 min]
+  Capped: 75,029 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 130 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [00:00:16]
+    logret_120h                      4.9% [      BASE] #########
+    adx_14h                          3.8% [      BASE] #######
+    volatility_48h                   3.1% [      BASE] ######
+    logret_240h                      3.1% [      BASE] ######
+    logret_72h                       2.9% [      BASE] #####
+    price_to_sma100h                 2.8% [      BASE] #####
+    bb_position_20h                  2.7% [      BASE] #####
+    plus_di_14h                      2.6% [      BASE] #####
+    xa_sp500_relstr5d                2.6% [CROSS-ASSET] #####
+    spread_240h_24h                  2.3% [      BASE] ####
+    xa_dax_relstr5d                  2.2% [CROSS-ASSET] ####
+    gk_volatility_14h                2.1% [      BASE] ####
+    logret_8h                        1.9% [      BASE] ###
+    hour_cos                         1.9% [      BASE] ###
+    xa_btc_usd_relstr5d              1.9% [CROSS-ASSET] ###
+    atr_pct_14h                      1.9% [      BASE] ###
+    m_dxy_chg1d                      1.9% [     MACRO] ###
+    spread_120h_12h                  1.8% [      BASE] ###
+    m_sp500_chg1d                    1.8% [     MACRO] ###
+    spread_24h_4h                    1.8% [      BASE] ###
+    ... 97 features below 1% importance
+  [Ranking: 0.0 min] — 130 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: ETH 7h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.836 ret=-15.8% tr=14  (0.1min) <-- BEST
+    [ 50/324] RF+LGBM    w=150 f=25 g=0.997 | apf=0.916 ret=-14.3% tr=20  (8.5min) <-- BEST
+    [ 57/324] RF+LGBM    w=200 f=10 g=0.995 | apf=0.926 ret=-15.4% tr=16  (9.8min) <-- BEST
+    [ 58/324] RF+LGBM    w=200 f=13 g=0.999 | apf=0.958 ret=-15.0% tr=18  (10.0min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=0.929 ret=-17.0% tr=19  (10.4min)
+    [ 66/324] RF+LGBM    w=200 f=20 g=0.995 | apf=1.048 ret=-11.3% tr=14  (11.6min) <-- BEST
+    [ 73/324] RF+LGBM    w=250 f=10 g=0.999 | apf=1.203 ret=-5.9% tr=14  (13.0min) <-- BEST
+Traceback (most recent call last):
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4980, in <module>
+    conf = ac.get('min_confidence', '?')
+    
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4974, in main
+    df_m = pd.DataFrame()
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 4459, in run_mode_h
+    df_bm = pd.read_csv(csv_path)
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 3297, in run_mode_d_optuna
+    result = _deku_eval_with_pruning(
+        feat_np, labels_np, closes_np, combo, window, n,
+        DIAG_STEP, model_factories, gamma=gamma, trial=None,
+        horizon=horizon
+    )
+  File "G:\Autres ordinateurs\My laptop\engine\crypto_trading_system_doohan.py", line 3039, in _deku_eval_with_pruning
+    model.fit(X_train_s, y_train, sample_weight=sw)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py", line 1560, in fit
+    super().fit(
+    ~~~~~~~~~~~^
+        X,
+        ^^
+    ...<12 lines>...
+        init_model=init_model,
+        ^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\sklearn.py", line 1049, in fit
+    self._Booster = train(
+                    ~~~~~^
+        params=params,
+        ^^^^^^^^^^^^^^
+    ...<6 lines>...
+        callbacks=callbacks,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\engine.py", line 322, in train
+    booster.update(fobj=fobj)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\algo_trading\venv\Lib\site-packages\lightgbm\basic.py", line 4092, in update
+    def update(
+    
+KeyboardInterrupt

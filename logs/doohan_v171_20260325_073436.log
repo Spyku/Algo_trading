@@ -1,0 +1,382 @@
+============================================================
+  REVOLUT X MULTI-ASSET TRADER [DOOHAN]
+  2026-03-25 07:34:37
+============================================================
+
+  Current config:
+  Asset  Strategy          Max USD  Enabled    Auto   Position
+  ------ -------------- ---------- -------- ------- ----------
+  BTC    both_agree     $   10,000      Yes     Yes   INVESTED
+  ETH    both_agree     $    2,000      Yes     Yes       CASH
+  LINK   both_agree     $        0       No      No       CASH ✗
+  XRP    both_agree     $        0       No      No       CASH ✗
+  SOL    both_agree     $        0       No      No       CASH ✗
+  DOGE   both_agree     $        0       No      No       CASH ✗
+  ADA    both_agree     $        0       No      No       CASH ✗
+  AVAX   both_agree     $        0       No      No       CASH ✗
+  DOT    both_agree     $        0       No      No       CASH ✗
+
+  1. Start loop (hourly)
+  2. Run once
+  3. Dry run (once)
+  4. Configure assets
+  5. View trade history
+  6. Check balance
+  7. Setup Telegram
+
+  Enter 1-7: 
+============================================================
+  REVOLUT X MULTI-ASSET TRADER [DOOHAN LIVE]
+  Assets: BTC, ETH
+  BTC: both_agree | max=$10,000 | AUTO | INVESTED
+  ETH: both_agree | max=$2,000 | AUTO | CASH
+  Min confidence: BTC=90%, ETH=90%
+  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop
+  Hot-reload: every 5 min (config + models + positions)
+============================================================
+
+  Initial position sync from Revolut X...
+  Positions in sync ✓
+  Telegram sent
+  Telegram commands: background thread (responsive anytime)
+
+  Running initial signal scan...
+
+============================================================
+  [LIVE] 2026-03-25 07:34:45
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 06:00:00...
+    BTC: already up to date (75283 candles)
+    Rows before dropna: 75283
+    Rows after dropna: 75037
+    Funding rate: 37055 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=HOLD(45%) → HOLD (45%) [no_signal] | pos=invested
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 03:00:00...
+    ETH: 3 new candles -> 75283 total
+    Rows before dropna: 75283
+    Rows after dropna: 75037
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=SELL(90%) → SELL (90%) [6h_sell] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:IN | ETH:CASH] Next: 08:00 (25 min)
+  Telegram sent (with buttons)
+
+  --- Cycle 1 | 08:00:04 ---
+  Updating BTC from 2026-03-25 06:00:00...
+    BTC: 1 new candles -> 75284 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 08:00:09
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 07:00:00...
+    BTC: already up to date (75284 candles)
+    Rows before dropna: 75284
+    Rows after dropna: 75038
+    Funding rate: 37056 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=SELL(76%) → SELL (76%) [6h_sell] | pos=invested
+    Pre-trade: 0.142087 BTC (selling ALL)
+    Post-trade: 0.000000 BTC | $12,929.55 USD
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 06:00:00...
+    ETH: 1 new candles -> 75284 total
+    Rows before dropna: 75284
+    Rows after dropna: 75038
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(78%) → HOLD (78%) [low_conf] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:CASH] Next: 09:00 (60 min)
+  Telegram sent (with buttons)
+  CONFIG RELOAD: SOL.horizon: None -> 5
+  Config reloaded at :50
+
+  --- Cycle 2 | 09:00:09 ---
+  Updating BTC from 2026-03-25 07:00:00...
+    BTC: 1 new candles -> 75285 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 09:00:14
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 08:00:00...
+    BTC: already up to date (75285 candles)
+    Rows before dropna: 75285
+    Rows after dropna: 75039
+    Funding rate: 37057 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=BUY(68%) → HOLD (68%) [low_conf] | pos=cash
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 07:00:00...
+    ETH: 1 new candles -> 75285 total
+    Rows before dropna: 75285
+    Rows after dropna: 75039
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(51%) → HOLD (51%) [low_conf] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:CASH] Next: 10:00 (60 min)
+
+  --- Cycle 3 | 10:00:08 ---
+  Updating BTC from 2026-03-25 08:00:00...
+    BTC: 1 new candles -> 75286 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 10:00:12
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 09:00:00...
+    BTC: already up to date (75286 candles)
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    Funding rate: 37058 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=BUY(92%) → BUY (92%) [6h_buy] | pos=cash
+    Pre-trade USD: $12,929.55
+    Post-trade: 0.140183 BTC | $2,929.55 USD
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 08:00:00...
+    ETH: 1 new candles -> 75286 total
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(80%) → HOLD (80%) [low_conf] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:IN | ETH:CASH] Next: 11:00 (60 min)
+  Telegram sent (with buttons)
+  Telegram sent (with buttons)
+  Telegram sent (with buttons)
+  Telegram sent (with buttons)
+  Telegram sent
+  Telegram sent
+  Telegram sent (with buttons)
+  Telegram sent (with buttons)
+  Telegram sent
+  Telegram sent
+  Config updated via Telegram /setup
+  Config changed via /setup — re-running signals
+
+============================================================
+  [LIVE] 2026-03-25 10:03:28
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 09:00:00...
+    BTC: already up to date (75286 candles)
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    Funding rate: 37058 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=BUY(92%) → BUY (92%) [6h_buy] | pos=invested
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 09:00:00...
+    ETH: already up to date (75286 candles)
+    Rows before dropna: 75286
+    Rows after dropna: 75040
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(80%) → HOLD (80%) [low_conf] | pos=cash
+  Telegram sent (with buttons)
+  CONFIG RELOAD: SOL.min_confidence: 90 -> 65
+  CONFIG RELOAD: SOL.horizon: 5 -> 6
+  Config reloaded at :10
+
+  --- Cycle 4 | 11:00:19 ---
+  Updating BTC from 2026-03-25 09:00:00...
+    BTC: 1 new candles -> 75287 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 11:00:23
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 10:00:00...
+    BTC: already up to date (75287 candles)
+    Rows before dropna: 75287
+    Rows after dropna: 75041
+    Funding rate: 37059 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=SELL(64%) → SELL (64%) [6h_sell] | pos=invested
+    Pre-trade: 0.181275 BTC (selling ALL)
+    Post-trade: 0.000000 BTC | $12,918.60 USD
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 09:00:00...
+    ETH: 1 new candles -> 75287 total
+    Rows before dropna: 75287
+    Rows after dropna: 75041
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=SELL(75%) → SELL (75%) [6h_sell] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:CASH] Next: 12:00 (59 min)
+  CONFIG RELOAD: ETH.min_confidence: 90 -> 85
+  Config reloaded at :15
+  CONFIG RELOAD: SOL.min_confidence: 65 -> 80
+  CONFIG RELOAD: SOL.horizon: 6 -> 7
+  Config reloaded at :25
+
+  --- Cycle 5 | 12:00:07 ---
+  Updating BTC from 2026-03-25 10:00:00...
+    BTC: 1 new candles -> 75288 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 12:00:11
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 11:00:00...
+    BTC: already up to date (75288 candles)
+    Rows before dropna: 75288
+    Rows after dropna: 75042
+    Funding rate: 37060 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=SELL(78%) → SELL (78%) [6h_sell] | pos=cash
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 10:00:00...
+    ETH: 1 new candles -> 75288 total
+    Rows before dropna: 75288
+    Rows after dropna: 75042
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(80%) → HOLD (80%) [low_conf] | pos=cash
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:CASH] Next: 13:00 (60 min)
+
+  --- Cycle 6 | 13:00:09 ---
+  Updating BTC from 2026-03-25 11:00:00...
+    BTC: 1 new candles -> 75289 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 13:00:14
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 12:00:00...
+    BTC: already up to date (75289 candles)
+    Rows before dropna: 75289
+    Rows after dropna: 75043
+    Funding rate: 37061 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=SELL(80%) → SELL (80%) [6h_sell] | pos=cash
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 11:00:00...
+    ETH: 1 new candles -> 75289 total
+    Rows before dropna: 75289
+    Rows after dropna: 75043
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(93%) → BUY (93%) [6h_buy] | pos=cash
+    Pre-trade USD: $12,918.60
+    Post-trade: 0.913347 ETH | $10,918.60 USD
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:IN] Next: 14:00 (60 min)
+
+  --- Cycle 7 | 14:00:07 ---
+  Updating BTC from 2026-03-25 12:00:00...
+    BTC: 1 new candles -> 75290 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 14:00:13
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 13:00:00...
+    BTC: already up to date (75290 candles)
+    Rows before dropna: 75290
+    Rows after dropna: 75044
+    Funding rate: 37062 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=BUY(61%) → HOLD (61%) [low_conf] | pos=cash
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 12:00:00...
+    ETH: 1 new candles -> 75290 total
+    Rows before dropna: 75290
+    Rows after dropna: 75044
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 6h=BUY(98%) → BUY (98%) [6h_buy] | pos=invested
+  Telegram sent (with buttons)
+
+  [BTC:CASH | ETH:IN] Next: 15:00 (60 min)
+  CONFIG RELOAD: ETH.min_confidence: 85 -> 70
+  CONFIG RELOAD: ETH.horizon: 6 -> 5
+  Config reloaded at :15
+
+  --- Cycle 8 | 15:00:07 ---
+  Updating BTC from 2026-03-25 13:00:00...
+    BTC: 1 new candles -> 75291 total
+    Fresh candle (attempt 1)
+
+============================================================
+  [LIVE] 2026-03-25 15:00:12
+============================================================
+
+  Syncing positions from Revolut X...
+
+  --- BTC (both_agree) ---
+  Updating BTC from 2026-03-25 14:00:00...
+    BTC: already up to date (75291 candles)
+    Rows before dropna: 75291
+    Rows after dropna: 75045
+    Funding rate: 37063 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  BTC: 6h=BUY(91%) → BUY (91%) [6h_buy] | pos=cash
+    Pre-trade USD: $10,918.60
+    Partial buy: $10,918.60 of $12,000.00 (limited by balance)
+    Post-trade: 0.152336 BTC | $0.00 USD
+
+  --- ETH (both_agree) ---
+  Updating ETH from 2026-03-25 13:00:00...
+    ETH: 1 new candles -> 75291 total
+    Rows before dropna: 75291
+    Rows after dropna: 75046
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  ETH: 5h=BUY(92%) → BUY (92%) [5h_buy] | pos=invested
+  Telegram sent (with buttons)
+
+  [BTC:IN | ETH:IN] Next: 16:00 (60 min)
+
+  Stopped.
+  Telegram sent

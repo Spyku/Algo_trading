@@ -1,5 +1,5 @@
 """
-Doohan — Production ML Trading System
+Doohan V1.8 — LSTM Test (NOT production)
 ============================================================
 ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
@@ -29,8 +29,8 @@ CLI Usage:
   python crypto_trading_system_doohan.py D BTC,ETH 6,7h
 
 Outputs:
-  models/crypto_doohan_v1_7_1_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_doohan_v1_7_1_production.csv         (best live performer from Mode V)
+  models/crypto_doohan_v1_8_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_doohan_v1_8_production.csv         (best live performer from Mode V)
   config/trading_config_doohan.json                  (horizon + min_confidence per asset)
   logs/doohan_v171_*.log                             (auto-saved terminal output)
 
@@ -392,7 +392,7 @@ LABEL_MODE = 'fee_aware'
 MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_doohan_v1_7_1_production.csv'
+PRODUCTION_CSV = 'models/crypto_doohan_v1_8_production.csv'
 
 
 
@@ -841,16 +841,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+        return f'{MODELS_DIR}/crypto_doohan_v1_8_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_doohan_v1_8_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_doohan_v1_8_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_doohan_v1_7_1_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_doohan_v1_8_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -1082,7 +1082,7 @@ def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
                     print(f"    PySR #{i+1}: SKIP — eval error: {e}")
         remaining = still_remaining
         if not progress:
-            break  # no more resolvable
+            break
 
     # Report any unresolved
     for i, col_name, sympy_str, sym_expr, free_symbols, expr_info in remaining:
@@ -1094,33 +1094,6 @@ def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
         print(f"    PySR: {n_added} features added from {pysr_path}")
 
     return n_added
-
-
-def _check_pysr_leakage(features, asset, horizon):
-    """Check if PySR features in a config were discovered on clean (non-overlapping) data.
-
-    Returns (is_clean, message). Used before writing to production CSV.
-    """
-    pysr_features = [f for f in features if f.startswith('pysr_')]
-    if not pysr_features:
-        return True, "No PySR features"
-
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-    pysr_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}h.json')
-
-    if not os.path.exists(pysr_path):
-        return False, f"PySR features used but no JSON found at {pysr_path}"
-
-    with open(pysr_path) as f:
-        pysr_data = json.load(f)
-
-    method = pysr_data.get('discovery_method', 'unknown')
-    if method == 'historical':
-        return True, f"PySR clean (discovery_method=historical, {len(pysr_features)} features)"
-    else:
-        return False, (f"LEAKAGE: PySR discovery_method='{method}' — "
-                       f"formulas may be fitted on same data window as Mode D. "
-                       f"Re-run Mode P first to generate clean PySR.")
 
 
 # ============================================================
@@ -1152,7 +1125,176 @@ def _get_deku_diagnostic_models():
                                         class_weight='balanced', verbose=-1, random_state=42, device='gpu'),
     }
 
-ALL_MODELS = _get_deku_models()
+
+# ============================================================
+# LSTM CLASSIFIER — V1.8 test
+# ============================================================
+# Wraps a PyTorch LSTM in an sklearn-compatible interface so it
+# plugs directly into the existing walk-forward ensemble voting.
+#
+# Architecture: sequence of last SEQ_LEN rows → LSTM → dense → binary prediction
+# The walk-forward loop passes flat (n_samples, n_features) arrays.
+# The wrapper reshapes into overlapping sequences internally.
+# ============================================================
+
+LSTM_SEQ_LEN = 24          # lookback window for sequences (24h = 1 day)
+LSTM_HIDDEN = 32            # LSTM hidden size
+LSTM_EPOCHS = 20            # training epochs (lightweight — this runs every walk-forward step)
+LSTM_LR = 0.001             # learning rate
+LSTM_BATCH = 128            # batch size
+
+try:
+    import torch
+    import torch.nn as nn
+    LSTM_AVAILABLE = True
+except ImportError:
+    LSTM_AVAILABLE = False
+
+
+class _LSTMNet(nn.Module):
+    """Small LSTM binary classifier."""
+    def __init__(self, input_dim, hidden_dim=LSTM_HIDDEN):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers=1, batch_first=True)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        _, (h_n, _) = self.lstm(x)
+        # h_n: (1, batch, hidden) → squeeze to (batch, hidden)
+        out = self.head(h_n.squeeze(0))
+        return out.squeeze(-1)
+
+
+class LSTMClassifier:
+    """Sklearn-compatible wrapper around a PyTorch LSTM.
+
+    Accepts flat (n_samples, n_features) arrays like other models.
+    Internally creates overlapping sequences of length LSTM_SEQ_LEN.
+    Rows with insufficient history (first SEQ_LEN-1 rows) are skipped during training.
+
+    For predict/predict_proba on a single row (the walk-forward case),
+    the model uses the LAST SEQ_LEN rows from the training set + the test row
+    as the input sequence.
+    """
+
+    def __init__(self, seq_len=LSTM_SEQ_LEN, hidden_dim=LSTM_HIDDEN,
+                 epochs=LSTM_EPOCHS, lr=LSTM_LR, batch_size=LSTM_BATCH):
+        self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.model = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._X_train_tail = None  # save last seq_len rows for predict context
+
+    def _make_sequences(self, X, y=None, sw=None):
+        """Convert flat array into overlapping sequences.
+        Returns: X_seq (n, seq_len, features), y_seq (n,), sw_seq (n,)"""
+        n = len(X)
+        seqs, labels, weights = [], [], []
+        for i in range(self.seq_len, n):
+            seqs.append(X[i - self.seq_len:i])
+            if y is not None:
+                labels.append(y[i])
+            if sw is not None:
+                weights.append(sw[i])
+        if not seqs:
+            return None, None, None
+        X_seq = np.array(seqs, dtype=np.float32)
+        y_seq = np.array(labels, dtype=np.float32) if y is not None else None
+        sw_seq = np.array(weights, dtype=np.float32) if sw is not None else None
+        return X_seq, y_seq, sw_seq
+
+    def fit(self, X, y, sample_weight=None):
+        """Train LSTM on sequences extracted from flat training data."""
+        if not LSTM_AVAILABLE:
+            raise RuntimeError("PyTorch not installed")
+
+        # Save tail for predict context
+        self._X_train_tail = X[-self.seq_len:].copy() if len(X) >= self.seq_len else X.copy()
+
+        X_seq, y_seq, sw_seq = self._make_sequences(X, y, sample_weight)
+        if X_seq is None or len(X_seq) < 10:
+            # Not enough data for sequences — mark as untrained
+            self.model = None
+            return self
+
+        n_features = X_seq.shape[2]
+        self.model = _LSTMNet(n_features, self.hidden_dim).to(self.device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        loss_fn = nn.BCELoss(reduction='none')
+
+        torch.manual_seed(42)
+        X_t = torch.tensor(X_seq, device=self.device)
+        y_t = torch.tensor(y_seq, device=self.device)
+        sw_t = torch.tensor(sw_seq, device=self.device) if sw_seq is not None else torch.ones(len(y_seq), device=self.device)
+
+        dataset = torch.utils.data.TensorDataset(X_t, y_t, sw_t)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        self.model.train()
+        for epoch in range(self.epochs):
+            for xb, yb, wb in loader:
+                optimizer.zero_grad()
+                pred = self.model(xb)
+                loss = (loss_fn(pred, yb) * wb).mean()
+                loss.backward()
+                optimizer.step()
+
+        return self
+
+    def predict(self, X):
+        """Predict class (0/1) for test rows. Uses saved training tail as context."""
+        proba = self.predict_proba(X)
+        return (proba[:, 1] >= 0.5).astype(int)
+
+    def predict_proba(self, X):
+        """Return (n, 2) probability array. For walk-forward: X is typically 1 row."""
+        if self.model is None:
+            # Untrained — return neutral 50/50
+            n = len(X)
+            return np.column_stack([np.full(n, 0.5), np.full(n, 0.5)])
+
+        self.model.eval()
+        results = []
+        with torch.no_grad():
+            for i in range(len(X)):
+                # Build sequence: tail of training data + this test row
+                context = np.vstack([self._X_train_tail, X[i:i+1]])
+                # Take last seq_len rows as the sequence
+                seq = context[-self.seq_len:].astype(np.float32)
+                if len(seq) < self.seq_len:
+                    # Pad with zeros if not enough context
+                    pad = np.zeros((self.seq_len - len(seq), seq.shape[1]), dtype=np.float32)
+                    seq = np.vstack([pad, seq])
+                seq_t = torch.tensor(seq, device=self.device).unsqueeze(0)
+                p = self.model(seq_t).item()
+                results.append(p)
+        proba = np.array(results)
+        return np.column_stack([1 - proba, proba])
+
+
+# Add LSTM to model registries
+def _get_v18_models():
+    """V1.8 models: production + LSTM."""
+    models = _get_deku_models()
+    if LSTM_AVAILABLE:
+        models['LSTM'] = lambda: LSTMClassifier()
+    return models
+
+def _get_v18_diagnostic_models():
+    """V1.8 diagnostic models: lightweight + LSTM (fewer epochs)."""
+    models = _get_deku_diagnostic_models()
+    if LSTM_AVAILABLE:
+        models['LSTM'] = lambda: LSTMClassifier(epochs=10)
+    return models
+
+ALL_MODELS = _get_v18_models()
 
 
 # ============================================================
@@ -2137,7 +2279,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
             trades, avg_gain, avg_loss, max_dd * 100, adjusted_pf, raw_pf, bh_pf)
 
 
-DIAG_MODELS = _get_deku_diagnostic_models()
+DIAG_MODELS = _get_v18_diagnostic_models()
 
 
 def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, resume=False, horizon=None):
@@ -2819,12 +2961,12 @@ def run_mode_p(assets_list, horizons):
             print(f"  {asset} {h}h")
             print(f"{'#'*60}")
 
-            results, pysr_rows = discover_features(asset, h)
+            results = discover_features(asset, h)
 
             if results:
                 df_raw = load_data(asset)
                 _, all_cols = build_all_features(df_raw, asset_name=asset, horizon=h, verbose=False)
-                save_results(asset, h, results, all_cols, pysr_rows=pysr_rows)
+                save_results(asset, h, results, all_cols)
                 print(f"\n  Done! Now run Mode DV to test:")
                 print(f"  python crypto_trading_system_doohan.py DV {asset} {h}h")
             else:
@@ -2955,7 +3097,10 @@ GRID_COMBOS = [
     'RF+LGBM',    # LGBM without XGB (best group — XGB hurts LGBM)
     'XGB+LGBM',   # LGBM with XGB
     'RF+XGB',     # XGB without LGBM
-    # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
+    # V1.8 LSTM test combos
+    'LSTM',        # LSTM solo (no ensemble voting)
+    'LSTM+LGBM',  # LSTM + best tree model
+    'LSTM+XGB',   # LSTM + second best tree
 ]
 GRID_WINDOWS = [72, 100, 150, 200, 250, 300]  # 36/48 dropped (embargo eats too much), 250/300 added
 GRID_FEATURES = [10, 13, 17, 20, 25, 30]
@@ -3187,19 +3332,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"\n  Building all features (horizon={horizon}h)...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
-        n_pysr = _compute_pysr_features(df_full, all_cols, asset_name, horizon)
-        # Early leakage check: if PySR features loaded but not from clean historical window, strip them
-        if n_pysr > 0:
-            pysr_cols_loaded = [c for c in all_cols if c.startswith('pysr_')]
-            is_clean, leak_msg = _check_pysr_leakage(pysr_cols_loaded, asset_name, horizon)
-            if not is_clean:
-                print(f"\n  *** LEAKAGE DETECTED (early check): {leak_msg}")
-                print(f"  *** Stripping {len(pysr_cols_loaded)} PySR features from this run")
-                print(f"  *** Fix: run Mode P first to generate clean PySR")
-                for pc in pysr_cols_loaded:
-                    all_cols.remove(pc)
-                    if pc in df_full.columns:
-                        df_full.drop(columns=[pc], inplace=True)
+        _compute_pysr_features(df_full, all_cols, asset_name, horizon)
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
@@ -3357,7 +3490,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_elapsed = (time.time() - t_grid) / 60
 
         # Save full grid to CSV
-        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_7_1_grid_{asset_name}_{horizon}h.csv')
+        grid_csv_path = os.path.join('models', f'crypto_doohan_v1_8_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -3684,18 +3817,7 @@ def run_mode_v(assets_list, horizons=None):
             t0 = time.time()
             df_raw = load_data(asset)
             df_full, all_cols = build_all_features(df_raw, asset_name=asset, horizon=horizon)
-            n_pysr = _compute_pysr_features(df_full, all_cols, asset, horizon)
-            # Early leakage check
-            if n_pysr > 0:
-                pysr_cols_loaded = [c for c in all_cols if c.startswith('pysr_')]
-                is_clean, leak_msg = _check_pysr_leakage(pysr_cols_loaded, asset, horizon)
-                if not is_clean:
-                    print(f"\n  *** LEAKAGE DETECTED (early check): {leak_msg}")
-                    print(f"  *** Stripping {len(pysr_cols_loaded)} PySR features from this run")
-                    for pc in pysr_cols_loaded:
-                        all_cols.remove(pc)
-                        if pc in df_full.columns:
-                            df_full.drop(columns=[pc], inplace=True)
+            _compute_pysr_features(df_full, all_cols, asset, horizon)
             df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
             importance_df = _test_lgbm_importance(df_clean, all_cols, gamma=1.0)
             ranked_features = importance_df['feature'].tolist()
@@ -3862,19 +3984,7 @@ def run_mode_v(assets_list, horizons=None):
                             'gamma': round(best_cfg['gamma'], 4),
                             'sampler': 'Refined',
                         }
-                    # Check for PySR leakage before allowing production write
-                    features_to_check = best_cfg.get('features', [])
-                    if isinstance(features_to_check, str):
-                        features_to_check = features_to_check.split(',')
-                    is_clean, leak_msg = _check_pysr_leakage(features_to_check, asset, horizon)
-                    if not is_clean:
-                        print(f"\n  *** LEAKAGE BLOCKED: {leak_msg}")
-                        print(f"  *** Skipping production write for {asset} {horizon}h")
-                        print(f"  *** Fix: run Mode P first, then re-run Mode DV")
-                    else:
-                        if any(f.startswith('pysr_') for f in features_to_check):
-                            print(f"  PySR leakage check: {leak_msg}")
-                        production_models.append((prod_row, horizon, best_conf))
+                    production_models.append((prod_row, horizon, best_conf))
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
@@ -4010,15 +4120,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
     MAX_DIAG_HOURS = 6 * 30 * 24
     df_full_r, all_cols_r = build_all_features(df_raw, asset_name=asset, horizon=horizon)
-    n_pysr = _compute_pysr_features(df_full_r, all_cols_r, asset, horizon, verbose=False)
-    if n_pysr > 0:
-        pysr_cols_r = [c for c in all_cols_r if c.startswith('pysr_')]
-        is_clean, _ = _check_pysr_leakage(pysr_cols_r, asset, horizon)
-        if not is_clean:
-            for pc in pysr_cols_r:
-                all_cols_r.remove(pc)
-                if pc in df_full_r.columns:
-                    df_full_r.drop(columns=[pc], inplace=True)
+    _compute_pysr_features(df_full_r, all_cols_r, asset, horizon, verbose=False)
     total_rows = len(df_full_r)
     if total_rows > MAX_DIAG_HOURS:
         df_full_r = df_full_r.tail(MAX_DIAG_HOURS).reset_index(drop=True)

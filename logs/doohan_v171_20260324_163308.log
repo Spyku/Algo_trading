@@ -1,0 +1,588 @@
+============================================================
+  DOOHAN: Mode DG | BTC | 6h | 150 trials
+============================================================
+
+============================================================
+  ASSET: BTC
+============================================================
+
+======================================================================
+  DOOHAN V1.7.1 MODE D: EXHAUSTIVE GRID -- 6h HORIZON
+  3 combos × 6 windows × 6 features × 3 gammas = 324 evals
+  Scoring: apf
+======================================================================
+
+  Updating macro & sentiment data...
+============================================================
+  MACRO & SENTIMENT DATA DOWNLOAD
+============================================================
+
+  Downloading 9 macro indicators from yfinance...
+  Period: 2022-01-01 to 2026-03-24
+    VIX        (^VIX)... 1058 days
+    DXY        (DX-Y.NYB)... 1060 days
+    SP500      (^GSPC)... 1058 days
+    NASDAQ     (^IXIC)... 1058 days
+    GOLD       (GC=F)... 1060 days
+    US10Y      (^TNX)... 1058 days
+    EURUSD     (EURUSD=X)... 1096 days
+    USDJPY     (JPY=X)... 1096 days
+    OIL        (CL=F)... 1060 days
+
+  Saved: data/macro_data\macro_daily.csv (1097 rows, 9 columns)
+  Columns: ['VIX', 'DXY', 'SP500', 'NASDAQ', 'GOLD', 'US10Y', 'EURUSD', 'USDJPY', 'OIL']
+  Date range: 2022-01-03 to 2026-03-23
+  NaN summary:
+
+  Downloading Crypto Fear & Greed Index...
+  Saved: data/macro_data\fear_greed.csv (2970 rows)
+  Date range: 2018-02-01 to 2026-03-24
+  Current: 11 (Extreme Fear)
+
+  Creating hourly macro proxy (forward-fill daily into hourly)...
+  Saved: data/macro_data\macro_hourly.csv (36985 rows)
+
+  Downloading cross-asset pairs for correlation features...
+    BTC_USD    (BTC-USD)... 1543 days
+    ETH_USD    (ETH-USD)... 1543 days
+    NASDAQ     (^IXIC)... 1058 days
+    SP500      (^GSPC)... 1058 days
+    DAX        (^GDAXI)... 1076 days
+
+  Saved: data/macro_data\cross_asset.csv (1543 rows)
+
+  Downloading Bitcoin on-chain data...
+    CoinMetrics: 7 metrics... 1543 days, 8 columns
+    BGeometrics: SOPR... 1461 days
+
+  Saved: data/macro_data\onchain_btc.csv (1543 rows, 9 columns)
+  Columns: ['active_addresses', 'mvrv', 'fees_btc', 'exchange_inflow', 'exchange_outflow', 'hashrate', 'tx_count', 'exchange_netflow', 'sopr']
+  Date range: 2022-01-01 to 2026-03-23
+    sopr: 82 NaN rows
+
+  Downloading BTC derivatives data from Binance...
+    Funding rate (8h intervals)... 4631 records -> 37041 hourly rows
+    Open interest (hourly)... 672 hourly rows
+
+  Saved: data/macro_data\derivatives_btc.csv (37048 rows, 3 columns)
+  Columns: ['funding_rate', 'open_interest', 'open_interest_usd']
+  Date range: 2022-01-01 00:00:00 to 2026-03-24 15:00:00
+
+============================================================
+  DOWNLOAD COMPLETE
+============================================================
+
+  Files saved in data/macro_data/:
+    cross_asset.csv                   139,189 bytes
+    derivatives_btc.csv             1,206,960 bytes
+    fear_greed.csv                     69,197 bytes
+    macro_daily.csv                   184,787 bytes
+    macro_hourly.csv                6,562,360 bytes
+    onchain_btc.csv                   213,153 bytes
+
+  Next step: run diagnostic with V2 features:
+    python features_v2.py --test
+    python hourly_trading_system.py  (will auto-detect V2)
+  [Macro update: 0.2 min]
+
+============================================================
+  UPDATING HOURLY DATA
+============================================================
+  Updating BTC from 2026-03-24 14:00:00...
+    BTC: 1 new candles -> 75268 total
+  [Data update: 0.1 min]
+
+======================================================================
+  DOOHAN OPTIMIZATION: BTC (6h)
+======================================================================
+
+  Building all features (horizon=6h)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  [Feature build: 0.0 min]
+  Capped: 75,022 -> 4,320 rows (last 6mo)
+  Clean data: 4,320 rows, 130 features
+
+  LGBM feature importance ranking...
+
+  [1/5] LGBM Feature Importance (gain-based)  [16:33:25]
+    volatility_48h                   6.0% [      BASE] ############
+    adx_14h                          4.7% [      BASE] #########
+    logret_72h                       4.2% [      BASE] ########
+    volatility_12h                   3.5% [      BASE] ######
+    spread_48h_12h                   2.6% [      BASE] #####
+    logret_240h                      2.5% [      BASE] #####
+    volume_ratio_h                   2.3% [      BASE] ####
+    price_to_sma100h                 2.3% [      BASE] ####
+    plus_di_14h                      2.1% [      BASE] ####
+    xa_dax_relstr5d                  2.1% [CROSS-ASSET] ####
+    hour_cos                         2.0% [      BASE] ####
+    stoch_k_14h                      2.0% [      BASE] ###
+    gk_volatility_48h                1.9% [      BASE] ###
+    vol_ratio_12_48                  1.9% [      BASE] ###
+    xa_nasdaq_relstr5d               1.9% [CROSS-ASSET] ###
+    hour_sin                         1.8% [      BASE] ###
+    price_accel_24h                  1.8% [      BASE] ###
+    m_nasdaq_chg1d                   1.7% [     MACRO] ###
+    m_us10y_chg1d                    1.7% [     MACRO] ###
+    logret_120h                      1.7% [      BASE] ###
+    ... 91 features below 1% importance
+  [Ranking: 0.0 min] — 130 features ranked
+  Fold 1: train [0:2592] (2,592 rows) → test [2592:3456] (864 rows)
+  Fold 2: train [432:3024] (2,592 rows) → test [3024:3887] (863 rows)
+  Fold 3: train [864:3456] (2,592 rows) → test [3456:4320] (864 rows)
+  Optuna trains on fold 1: 2,592 rows | 3-fold holdout ranking after
+
+======================================================================
+  EXHAUSTIVE GRID: BTC 6h — 324 evals
+  Combos:   ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']
+  Windows:  [72, 100, 150, 200, 250, 300]
+  Features: [10, 13, 17, 20, 25, 30]
+  Gammas:   [0.999, 0.997, 0.995]
+======================================================================
+
+  ────────────────────────────────────────────────────────────
+  RF+LGBM
+  ────────────────────────────────────────────────────────────
+    [  1/324] RF+LGBM    w= 72 f=10 g=0.999 | apf=0.965 ret=-7.9% tr=16  (0.1min) <-- BEST
+    [  3/324] RF+LGBM    w= 72 f=10 g=0.995 | apf=1.064 ret=-6.0% tr=16  (0.3min) <-- BEST
+    [  6/324] RF+LGBM    w= 72 f=13 g=0.995 | apf=1.288 ret=-1.2% tr=15  (0.6min) <-- BEST
+    [ 11/324] RF+LGBM    w= 72 f=20 g=0.997 | apf=1.304 ret=-1.0% tr=14  (1.0min) <-- BEST
+    [ 40/324] RF+LGBM    w=150 f=13 g=0.999 | apf=2.619 ret=+6.4% tr=13  (4.2min) <-- BEST
+    [ 42/324] RF+LGBM    w=150 f=13 g=0.995 | apf=5.240 ret=+14.0% tr=14  (4.5min) <-- BEST
+    [ 60/324] RF+LGBM    w=200 f=13 g=0.995 | apf=0.659 ret=-13.4% tr=17  (7.0min)
+
+  ────────────────────────────────────────────────────────────
+  XGB+LGBM
+  ────────────────────────────────────────────────────────────
+    [120/324] XGB+LGBM   w= 72 f=20 g=0.995 | apf=1.079 ret=-4.2% tr=15  (16.0min)
+    [180/324] XGB+LGBM   w=200 f=30 g=0.995 | apf=1.494 ret=-0.3% tr=12  (26.7min)
+
+  ────────────────────────────────────────────────────────────
+  RF+XGB
+  ────────────────────────────────────────────────────────────
+    [240/324] RF+XGB     w=100 f=13 g=0.995 | apf=1.139 ret=-3.6% tr=15  (35.3min)
+    [300/324] RF+XGB     w=250 f=20 g=0.995 | apf=2.150 ret=+3.6% tr=11  (37.2min)
+
+  ======================================================================
+  GRID RESULTS: BTC 6h (38.3 min)
+  ======================================================================
+  Total evals: 324 | Valid (≥8 trades): 322 | Low trades: 2 | Failed: 0
+  Unique candidates: 322
+  Grid CSV: models\crypto_doohan_v1_7_1_grid_BTC_6h.csv
+  Best overall: RF+LGBM w=150h g=0.9950 f=13 apf=5.240
+
+  Rank      APF  Combo                   Window    Gamma  Feats   Source
+  ---------------------------------------------------------------------------
+     1    5.240  RF+LGBM                   150h   0.9950     13     Grid <-- BEST
+     2    2.868  XGB+LGBM                  250h   0.9970     25     Grid
+     3    2.707  XGB+LGBM                  150h   0.9970     25     Grid
+     4    2.619  RF+LGBM                   150h   0.9990     13     Grid
+     5    2.573  XGB+LGBM                  250h   0.9970     20     Grid
+     6    2.512  RF+XGB                    100h   0.9950     25     Grid
+     7    2.456  XGB+LGBM                  250h   0.9950     13     Grid
+     8    2.456  XGB+LGBM                  250h   0.9950     17     Grid
+     9    2.445  RF+XGB                    250h   0.9970     20     Grid
+    10    2.352  RF+LGBM                   250h   0.9990     20     Grid
+    11    2.347  RF+LGBM                   150h   0.9990     25     Grid
+    12    2.325  RF+XGB                    100h   0.9950     17     Grid
+    13    2.320  RF+XGB                    100h   0.9970     25     Grid
+    14    2.317  XGB+LGBM                  150h   0.9950     13     Grid
+    15    2.301  RF+LGBM                   150h   0.9970     25     Grid
+    16    2.228  XGB+LGBM                  200h   0.9950     20     Grid
+    17    2.210  XGB+LGBM                  250h   0.9990     20     Grid
+    18    2.173  XGB+LGBM                  100h   0.9950     25     Grid
+    19    2.169  XGB+LGBM                  250h   0.9950     20     Grid
+    20    2.164  RF+XGB                    250h   0.9990     30     Grid
+
+  ======================================================================
+  3-FOLD ROLLING HOLDOUT: BTC 6h (top 20 candidates)
+  ======================================================================
+
+  Rank   AVG_APF   AVG_Ret  AVG_Acc    Tr      F1      F2      F3    IS_APF  Combo                    Win    Gamma    F
+  -----------------------------------------------------------------------------------------------------------------------------
+     1     1.964     +5.3%    65.2%    29   -3.8   +8.3  +11.5     2.573  XGB+LGBM                250h   0.9970   20  ✓ <-- BEST
+     2     1.742     +2.3%    63.1%    25   -3.9   +2.9   +7.8     2.210  XGB+LGBM                250h   0.9990   20  ✓
+     3     1.629     +1.7%    63.8%    25   -5.0   +2.9   +7.1     2.868  XGB+LGBM                250h   0.9970   25  ✓
+     4     1.622     +5.5%    63.8%    32   -2.8  +10.1   +9.2     2.164  RF+XGB                  250h   0.9990   30  ✓
+     5     1.487     +2.9%    63.1%    30   -3.8   +5.8   +6.7     2.445  RF+XGB                  250h   0.9970   20  ✓
+     6     1.449     +2.4%    56.0%    33   -2.1   +4.1   +5.0     2.707  XGB+LGBM                150h   0.9970   25  ✓
+     7     1.298     +0.5%    61.7%    31   -7.5   +6.1   +3.0     2.456  XGB+LGBM                250h   0.9950   17  ✓
+     8     1.268     +0.9%    53.0%    38   -2.1   +2.1   +2.6     2.301  RF+LGBM                 150h   0.9970   25  ~
+     9     1.165     +0.4%    64.5%    31   -6.0   -0.3   +7.4     2.352  RF+LGBM                 250h   0.9990   20  ✓
+    10     1.128     -3.5%    59.6%    30  -18.9   +5.6   +2.8     2.456  XGB+LGBM                250h   0.9950   13  ✗
+
+  ======================================================================
+  TOP 6 CANDIDATES: BTC 6h
+  ======================================================================
+  #1: XGB+LGBM  w=250h  g=0.9970  f=20  ho_apf=1.964  ho_ret=+5.3%  [-3.8% / +8.3% / +11.5%]  Grid  ✓ <-- BEST
+  #2: XGB+LGBM  w=250h  g=0.9990  f=20  ho_apf=1.742  ho_ret=+2.3%  [-3.9% / +2.9% / +7.8%]  Grid  ✓
+  #3: XGB+LGBM  w=150h  g=0.9970  f=25  ho_apf=1.449  ho_ret=+2.4%  [-2.1% / +4.1% / +5.0%]  Grid  ✓
+  #4: XGB+LGBM  w=250h  g=0.9950  f=17  ho_apf=1.298  ho_ret=+0.5%  [-7.5% / +6.1% / +3.0%]  Grid  ✓
+  #5: XGB+LGBM  w=250h  g=0.9950  f=13  ho_apf=1.128  ho_ret=-3.5%  [-18.9% / +5.6% / +2.8%]  Grid  ✗
+  #6: RF+LGBM  w=150h  g=0.9950  f=13  ho_apf=1.094  ho_ret=-2.1%  [-14.7% / +0.3% / +8.1%]  Grid  ✗
+  ======================================================================
+  [BTC total: 45.8 min]
+
+  Best models saved: models/crypto_doohan_v1_7_1_best_models.csv
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=250h, replay=200h, custom (20 features), gamma=0.997)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-18 03:00: HOLD (65%) | price=$74,338.92
+    [100] 2026-03-20 05:00: BUY (90%) | price=$70,767.96
+    [150] 2026-03-22 07:00: SELL (80%) | price=$68,919.38
+    [200] 2026-03-24 09:00: HOLD (31%) | price=$70,988.54
+  Generated 200 hourly signals for BTC
+
+  Mode D complete: 47.8 min total
+================================================================================
+  MODE G: LIVE BACKTEST + REFINE — BTC 6h
+  Period: last 336 hours (2 weeks), every hour
+  Ranking by: conf>=80% return
+  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best
+  Candidates: models/crypto_doohan_v1_7_1_best_models.csv
+  Production: models/crypto_doohan_v1_7_1_production.csv
+================================================================================
+
+######################################################################
+  BTC 6h
+######################################################################
+
+  Computing LGBM feature ranking for BTC...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  [1/5] LGBM Feature Importance (gain-based)  [17:21:01]
+    logret_120h                      6.8% [      BASE] #############
+    xa_dax_relstr5d                  6.3% [CROSS-ASSET] ############
+    xa_sp500_relstr5d                5.4% [CROSS-ASSET] ##########
+    hour_cos                         3.1% [      BASE] ######
+    price_to_sma100h                 3.0% [      BASE] ######
+    m_nasdaq_chg1d                   2.8% [     MACRO] #####
+    m_sp500_chg1d                    2.7% [     MACRO] #####
+    xa_nasdaq_relstr5d               2.6% [CROSS-ASSET] #####
+    logret_72h                       2.1% [      BASE] ####
+    dow_sin                          1.9% [      BASE] ###
+    logret_24h                       1.9% [      BASE] ###
+    spread_120h_8h                   1.7% [      BASE] ###
+    vol_ratio_12_48                  1.6% [      BASE] ###
+    gk_volatility_48h                1.5% [      BASE] ###
+    m_vix_chg1d                      1.5% [     MACRO] ##
+    spread_120h_12h                  1.4% [      BASE] ##
+    fg_chg10d                        1.4% [ SENTIMENT] ##
+    logret_240h                      1.3% [      BASE] ##
+    m_dxy_chg1d                      1.3% [     MACRO] ##
+    volatility_48h                   1.3% [      BASE] ##
+    ... 103 features below 1% importance
+  [Ranking done: 1.2s] — 130 features ranked
+
+======================================================================
+  STEP 1: BACKTEST MODE D CANDIDATES
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.0): BTC
+  XGB+LGBM  w=250h  g=0.9970  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=250h, replay=336h, custom (20 features), gamma=0.997)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (88%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (98%) | price=$70,748.58
+    [150] 2026-03-16 15:00: HOLD (34%) | price=$73,545.59
+    [200] 2026-03-18 17:00: BUY (65%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (87%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (94%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-0.67%, trades=40, round_trips=20, win_rate=70%
+  Conf>=80%: return=-0.27%, trades=28, round_trips=14, win_rate=64%
+  Conf>=90%: return=-2.82%, trades=22, round_trips=11, win_rate=55%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  D #2 (APF=1.7): BTC
+  XGB+LGBM  w=250h  g=0.9990  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=250h, replay=336h, custom (20 features), gamma=0.999)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (92%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (98%) | price=$70,748.58
+    [150] 2026-03-16 15:00: HOLD (28%) | price=$73,545.59
+    [200] 2026-03-18 17:00: BUY (74%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (82%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (93%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-3.63%, trades=38, round_trips=19, win_rate=74%
+  Conf>=80%: return=+0.09%, trades=30, round_trips=15, win_rate=73%
+  Conf>=90%: return=+1.14%, trades=18, round_trips=9, win_rate=78%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  D #3 (APF=1.4): BTC
+  XGB+LGBM  w=150h  g=0.9970  f=25
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=150h, replay=336h, custom (25 features), gamma=0.997)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (93%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (96%) | price=$70,748.58
+    [150] 2026-03-16 15:00: SELL (61%) | price=$73,545.59
+    [200] 2026-03-18 17:00: HOLD (55%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (95%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (99%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-4.53%, trades=42, round_trips=21, win_rate=67%
+  Conf>=80%: return=-2.41%, trades=26, round_trips=13, win_rate=62%
+  Conf>=90%: return=-0.04%, trades=20, round_trips=10, win_rate=70%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  D #4 (APF=1.3): BTC
+  XGB+LGBM  w=250h  g=0.9950  f=17
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=250h, replay=336h, custom (17 features), gamma=0.995)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (82%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (98%) | price=$70,748.58
+    [150] 2026-03-16 15:00: SELL (66%) | price=$73,545.59
+    [200] 2026-03-18 17:00: BUY (73%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (93%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (96%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-1.37%, trades=40, round_trips=20, win_rate=70%
+  Conf>=80%: return=-3.21%, trades=28, round_trips=14, win_rate=64%
+  Conf>=90%: return=-3.38%, trades=14, round_trips=7, win_rate=57%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  D #5 (APF=1.1): BTC
+  XGB+LGBM  w=250h  g=0.9950  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=250h, replay=336h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (88%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (99%) | price=$70,748.58
+    [150] 2026-03-16 15:00: SELL (73%) | price=$73,545.59
+    [200] 2026-03-18 17:00: HOLD (50%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (91%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (97%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=+3.27%, trades=38, round_trips=19, win_rate=79%
+  Conf>=80%: return=+0.56%, trades=28, round_trips=14, win_rate=71%
+  Conf>=90%: return=-0.03%, trades=20, round_trips=10, win_rate=80%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  D #6 (APF=1.1): BTC
+  RF+LGBM  w=150h  g=0.9950  f=13
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=RF+LGBM, window=150h, replay=336h, custom (13 features), gamma=0.995)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: BUY (51%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (100%) | price=$70,748.58
+    [150] 2026-03-16 15:00: BUY (62%) | price=$73,545.59
+    [200] 2026-03-18 17:00: SELL (84%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (84%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (100%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-1.00%, trades=46, round_trips=23, win_rate=48%
+  Conf>=80%: return=-1.85%, trades=38, round_trips=19, win_rate=58%
+  Conf>=90%: return=-0.27%, trades=28, round_trips=14, win_rate=64%
+  Buy&Hold: -0.08%
+
+======================================================================
+  STEP 2: OPTUNA REFINE — top 3 live performers
+  50 trials per config | gamma ±0.002 | features ±5 | window ±20h
+======================================================================
+  #1: XGB+LGBM  w=250h  g=0.9950  f=13  live_ret=+0.56%
+  #2: XGB+LGBM  w=250h  g=0.9990  f=20  live_ret=+0.09%
+  #3: XGB+LGBM  w=250h  g=0.9970  f=20  live_ret=-0.27%
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+
+  ────────────────────────────────────────────────────────────
+  Refining #1: XGB+LGBM  w=250h  g=0.9950  f=13
+  Ranges: gamma[0.993-0.997] features[8-18] window[230-270]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=245 g=0.9968 f=16 | apf=1.825 ret=+3.0% trades=17
+    #  7 NEW BEST: w=247 g=0.9942 f=14 | apf=3.313 ret=+7.9% trades=15
+    # 15 NEW BEST: w=252 g=0.9946 f=11 | apf=4.433 ret=+13.6% trades=13
+    # 41 NEW BEST: w=252 g=0.9936 f=9 | apf=5.415 ret=+15.9% trades=12
+    → Best: w=252h g=0.9936 f=9 apf=5.415
+
+  ────────────────────────────────────────────────────────────
+  Refining #2: XGB+LGBM  w=250h  g=0.9990  f=20
+  Ranges: gamma[0.997-1.000] features[15-25] window[230-270]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=245 g=0.9999 f=23 | apf=4.361 ret=+17.8% trades=15
+    → Best: w=245h g=0.9999 f=23 apf=4.361
+
+  ────────────────────────────────────────────────────────────
+  Refining #3: XGB+LGBM  w=250h  g=0.9970  f=20
+  Ranges: gamma[0.995-0.999] features[15-25] window[230-270]
+  ────────────────────────────────────────────────────────────
+    #  1 NEW BEST: w=245 g=0.9988 f=23 | apf=1.847 ret=+3.1% trades=17
+    #  2 NEW BEST: w=254 g=0.9956 f=16 | apf=2.047 ret=+4.7% trades=13
+    #  6 NEW BEST: w=237 g=0.9962 f=20 | apf=2.315 ret=+4.5% trades=12
+    # 20 NEW BEST: w=250 g=0.9953 f=20 | apf=2.397 ret=+7.1% trades=10
+    # 48 NEW BEST: w=252 g=0.9957 f=19 | apf=2.862 ret=+6.9% trades=12
+    # 50 NEW BEST: w=245 g=0.9957 f=20 | apf=2.996 ret=+14.1% trades=18
+    → Best: w=245h g=0.9957 f=20 apf=2.996
+
+  [Refine: 27.7 min]
+  Refined #1: XGB+LGBM  w=252h  g=0.9936  f=9  apf=5.415
+  Refined #2: XGB+LGBM  w=245h  g=0.9999  f=23  apf=4.361
+  Refined #3: XGB+LGBM  w=245h  g=0.9957  f=20  apf=2.996
+
+======================================================================
+  STEP 3: BACKTEST REFINED CONFIGS
+======================================================================
+
+──────────────────────────────────────────────────────────────────────
+  Refined #1 (APF=5.4): BTC
+  XGB+LGBM  w=252h  g=0.9936  f=9
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=252h, replay=336h, custom (9 features), gamma=0.9936472212608979)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (93%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (93%) | price=$70,748.58
+    [150] 2026-03-16 15:00: BUY (85%) | price=$73,545.59
+    [200] 2026-03-18 17:00: SELL (61%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (96%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (98%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=+3.75%, trades=42, round_trips=21, win_rate=76%
+  Conf>=80%: return=+3.47%, trades=30, round_trips=15, win_rate=73%
+  Conf>=90%: return=+3.74%, trades=20, round_trips=10, win_rate=80%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #2 (APF=4.4): BTC
+  XGB+LGBM  w=245h  g=0.9999  f=23
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=245h, replay=336h, custom (23 features), gamma=0.9998521429192297)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: SELL (67%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (97%) | price=$70,748.58
+    [150] 2026-03-16 15:00: HOLD (66%) | price=$73,545.59
+    [200] 2026-03-18 17:00: BUY (79%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (72%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (90%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=-3.45%, trades=32, round_trips=16, win_rate=62%
+  Conf>=80%: return=-4.48%, trades=18, round_trips=9, win_rate=44%
+  Conf>=90%: return=-4.45%, trades=14, round_trips=7, win_rate=43%
+  Buy&Hold: -0.08%
+
+──────────────────────────────────────────────────────────────────────
+  Refined #3 (APF=3.0): BTC
+  XGB+LGBM  w=245h  g=0.9957  f=20
+──────────────────────────────────────────────────────────────────────
+
+  Generating 6h-ahead signals for BTC (models=XGB+LGBM, window=245h, replay=336h, custom (20 features), gamma=0.9957143571178582)...
+    Rows before dropna: 75268
+    Rows after dropna: 75022
+    Funding rate: 37040 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+    [50] 2026-03-12 11:00: HOLD (63%) | price=$70,406.75
+    [100] 2026-03-14 13:00: SELL (97%) | price=$70,748.58
+    [150] 2026-03-16 15:00: BUY (67%) | price=$73,545.59
+    [200] 2026-03-18 17:00: BUY (63%) | price=$71,334.85
+    [250] 2026-03-20 19:00: BUY (79%) | price=$69,830.92
+    [300] 2026-03-22 21:00: SELL (93%) | price=$68,201.26
+  Generated 336 hourly signals for BTC
+  Conf>=70%: return=+3.38%, trades=40, round_trips=20, win_rate=65%
+  Conf>=80%: return=+1.92%, trades=26, round_trips=13, win_rate=85%
+  Conf>=90%: return=-2.97%, trades=18, round_trips=9, win_rate=56%
+  Buy&Hold: -0.08%
+
+  ======================================================================
+  OVERALL BEST: Refined #1 (APF=5.4)  →  BTC 6h
+  XGB+LGBM  w=252h  g=0.9936  f=9
+  Return (conf>=80%): +3.47%  WR=73%  trades=30
+  ======================================================================
+
+
+================================================================================
+  SUMMARY: MODE G — D candidates + Refined — Last 14 days
+================================================================================
+
+  BTC_6h — Buy & Hold: -0.08%
+
+  Model                     | Combo          |    W |      G |   F | Conf |   Return |  Tr |  RT |   WR
+  ───────────────────────────────────────────────────────────────────────────────────────────────────────
+  D #1 (APF=2.0)            | XGB+LGBM       | 250h | 0.997 |  20 |  70% |   -0.67% |  40 |  20 |  70% 
+  D #1 (APF=2.0)            | XGB+LGBM       | 250h | 0.997 |  20 |  80% |   -0.27% |  28 |  14 |  64% 
+  D #1 (APF=2.0)            | XGB+LGBM       | 250h | 0.997 |  20 |  90% |   -2.82% |  22 |  11 |  55% 
+  D #2 (APF=1.7)            | XGB+LGBM       | 250h | 0.999 |  20 |  70% |   -3.63% |  38 |  19 |  74% 
+  D #2 (APF=1.7)            | XGB+LGBM       | 250h | 0.999 |  20 |  80% |   +0.09% |  30 |  15 |  73% 
+  D #2 (APF=1.7)            | XGB+LGBM       | 250h | 0.999 |  20 |  90% |   +1.14% |  18 |   9 |  78% 
+  D #3 (APF=1.4)            | XGB+LGBM       | 150h | 0.997 |  25 |  70% |   -4.53% |  42 |  21 |  67% 
+  D #3 (APF=1.4)            | XGB+LGBM       | 150h | 0.997 |  25 |  80% |   -2.41% |  26 |  13 |  62% 
+  D #3 (APF=1.4)            | XGB+LGBM       | 150h | 0.997 |  25 |  90% |   -0.04% |  20 |  10 |  70% 
+  D #4 (APF=1.3)            | XGB+LGBM       | 250h | 0.995 |  17 |  70% |   -1.37% |  40 |  20 |  70% 
+  D #4 (APF=1.3)            | XGB+LGBM       | 250h | 0.995 |  17 |  80% |   -3.21% |  28 |  14 |  64% 
+  D #4 (APF=1.3)            | XGB+LGBM       | 250h | 0.995 |  17 |  90% |   -3.38% |  14 |   7 |  57% 
+  D #5 (APF=1.1)            | XGB+LGBM       | 250h | 0.995 |  13 |  70% |   +3.27% |  38 |  19 |  79% 
+  D #5 (APF=1.1)            | XGB+LGBM       | 250h | 0.995 |  13 |  80% |   +0.56% |  28 |  14 |  71% 
+  D #5 (APF=1.1)            | XGB+LGBM       | 250h | 0.995 |  13 |  90% |   -0.03% |  20 |  10 |  80% 
+  D #6 (APF=1.1)            | RF+LGBM        | 150h | 0.995 |  13 |  70% |   -1.00% |  46 |  23 |  48% 
+  D #6 (APF=1.1)            | RF+LGBM        | 150h | 0.995 |  13 |  80% |   -1.85% |  38 |  19 |  58% 
+  D #6 (APF=1.1)            | RF+LGBM        | 150h | 0.995 |  13 |  90% |   -0.27% |  28 |  14 |  64% 
+  Refined #1 (APF=5.4)      | XGB+LGBM       | 252h | 0.994 |   9 |  70% |   +3.75% |  42 |  21 |  76% 
+  Refined #1 (APF=5.4)      | XGB+LGBM       | 252h | 0.994 |   9 |  80% |   +3.47% |  30 |  15 |  73% 
+  Refined #1 (APF=5.4)      | XGB+LGBM       | 252h | 0.994 |   9 |  90% |   +3.74% |  20 |  10 |  80% 
+  Refined #2 (APF=4.4)      | XGB+LGBM       | 245h | 1.000 |  23 |  70% |   -3.45% |  32 |  16 |  62% 
+  Refined #2 (APF=4.4)      | XGB+LGBM       | 245h | 1.000 |  23 |  80% |   -4.48% |  18 |   9 |  44% 
+  Refined #2 (APF=4.4)      | XGB+LGBM       | 245h | 1.000 |  23 |  90% |   -4.45% |  14 |   7 |  43% 
+  Refined #3 (APF=3.0)      | XGB+LGBM       | 245h | 0.996 |  20 |  70% |   +3.38% |  40 |  20 |  65% 
+  Refined #3 (APF=3.0)      | XGB+LGBM       | 245h | 0.996 |  20 |  80% |   +1.92% |  26 |  13 |  85% 
+  Refined #3 (APF=3.0)      | XGB+LGBM       | 245h | 0.996 |  20 |  90% |   -2.97% |  18 |   9 |  56% 
+
+  * = still invested at end of period
+
+  Production model saved: models/crypto_doohan_v1_7_1_production.csv
+    BTC 6h: XGB+LGBM  w=252h  g=0.9936  f=9
+
+================================================================================
+
+Done!

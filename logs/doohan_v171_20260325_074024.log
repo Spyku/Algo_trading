@@ -1,0 +1,33 @@
+
+======================================================================
+  PySR FEATURE DISCOVERY: BTC 6h
+  Iterations: 40 | Populations: 30 | Top: 5
+======================================================================
+
+  Loading data for BTC...
+    Rows before dropna: 75283
+    Rows after dropna: 75037
+    Funding rate: 37055 rows loaded (regime gate)
+    All features: 49 base + 81 macro/sentiment/cross-asset = 130 total
+  Data: 4320 rows, 130 features
+  Training set: 2592 rows (60% of 4320)
+  Label distribution: 991 BUY (38.2%) / 1601 SELL
+
+  Starting PySR (this may take 30-120 min)...
+  First run will install Julia backend (~2 min one-time)...
+Traceback (most recent call last):
+  File "C:\Users\Alex\algo_trading\engine\pysr_discover_features.py", line 232, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Alex\algo_trading\engine\pysr_discover_features.py", line 217, in main
+    results = discover_features(args.asset, horizon, n_top=args.top,
+                                iterations=args.iterations, populations=args.populations)
+  File "C:\Users\Alex\algo_trading\engine\pysr_discover_features.py", line 108, in discover_features
+    model = PySRRegressor(
+        niterations=iterations,
+    ...<17 lines>...
+        verbosity=1,
+    )
+  File "C:\Users\Alex\algo_trading\venv\Lib\site-packages\pysr\sr.py", line 1071, in __init__
+    raise TypeError(err_msg)
+TypeError: `feature_names` is not a valid keyword argument for PySRRegressor.
