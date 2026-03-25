@@ -665,7 +665,7 @@ def load_data(asset_name):
 def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df = df_hourly.copy()
 
-    for period in [1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 120, 240]:
+    for period in [1, 2, 3, 4, 5, 6, 7, 8, 12, 24, 48, 72, 120, 240]:
         df[f'logret_{period}h'] = np.log(df['close'] / df['close'].shift(period))
 
     df['spread_24h_4h']   = df['logret_24h']  - df['logret_4h']
@@ -788,8 +788,9 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         df['label'] = (future_return > rolling_median).astype(int)
 
     feature_cols = [
-        'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_6h',
-        'logret_8h', 'logret_12h', 'logret_24h', 'logret_48h', 'logret_72h',
+        'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_5h',
+        'logret_6h', 'logret_7h', 'logret_8h', 'logret_12h', 'logret_24h',
+        'logret_48h', 'logret_72h',
         'logret_120h', 'logret_240h',
         'spread_24h_4h', 'spread_48h_4h', 'spread_120h_8h',
         'spread_240h_24h', 'spread_48h_12h', 'spread_120h_12h',

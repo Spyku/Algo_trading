@@ -105,7 +105,7 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 - **MIN_COMBO_SIZE=2:** Solo models removed. Prevents overconfidence from uncalibrated single-model predictions.
 - **MIN_TRADES=8:** Optuna objective returns 0 for trials with <8 trades.
 - **Models:** RF, GB, XGB, LR, LGBM — 3 viable combos: XGB+LGBM, RF+LGBM, RF+XGB (dead combos RF+GB, RF+LR, GB+LR dropped).
-- **Features:** 49 technical + 81 macro/sentiment/cross-asset = 130 total. LGBM importance ranking (~5 sec).
+- **Features:** 51 technical + 81 macro/sentiment/cross-asset = 132 total. LGBM importance ranking (~5 sec). logret_5h and logret_7h added (2026-03-25) to fill gaps for 5h/7h horizon models.
 - **Model hot-reload:** Trader checks production CSV every 5 minutes.
 
 ### Data Flow
@@ -231,7 +231,6 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 
 ### To Test (ML improvements)
 1. **LSTM regime embedding** — Low priority. Train LSTM daily → 2-3 dim embedding → feed to trees. Requires .pkl persistence.
-2. **Extended derivatives** — Low priority. Add vol acceleration, RSI momentum. Partially done already.
 
 ### Completed (2026-03-25)
 - **ETH Mode H horizon sweep** — All 4 horizons (5h/6h/7h/8h) grid complete. 5h/6h/7h refined. 8h best grid result (+5.93%). Config set to 6h/90%.
