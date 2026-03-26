@@ -176,6 +176,7 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
 | `crypto_trading_system_doohan_v1_7_3.py` | **Merged** | PySR code merged into production (2026-03-25). Kept for reference. |
+| `crypto_trading_system_doohan_v1_8.py` | **Dropped** | LSTM test (2026-03-26). LSTM solo failed, LSTM combos identical to RF combos. Not adopted. |
 | `pysr_discover_features.py` | Active | Offline PySR discovery. Uses historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
 | `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus to select mode/assets/horizons. Sequential job queue, subprocess execution with real-time progress. Separate bot token (`config/telegram_optimizer_config.json`). Runs at below-normal priority. |
 | `crypto_trading_system_doohan_v1_7_2.py` | **Dropped** | Regularization test. Wash — not adopted. |
@@ -246,8 +247,8 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 2. **Re-run Mode P → DV for BTC and ETH with clean PySR** — Previous PySR results had leakage (fitted on overlapping data). Must run Mode P first (historical window), then DV to get clean results.
    - **Run PySR discovery** for each asset before Mode DV: `python crypto_trading_system_doohan.py P ASSET 6h`
 
-### To Test (ML improvements)
-1. **LSTM regime embedding** — Low priority. Train LSTM daily → 2-3 dim embedding → feed to trees. Requires .pkl persistence.
+### Completed (2026-03-26)
+- **V1.8 LSTM test — FAILED** — Tested LSTM as classifier in grid: LSTM solo (0 valid results, all failed), LSTM+LGBM (identical to RF+LGBM), LSTM+XGB (identical to RF+XGB). LSTM votes randomly, adds nothing. Confirms LGBM dominance — partner model is irrelevant. All ML improvement ideas now tested and resolved.
 
 ### Completed (2026-03-25)
 - **Telegram optimizer bot** — `crypto_optimizer_bot.py`. Remote triggering of Mode D/V/H/P/S via inline keyboard menus. Sequential job queue, subprocess execution with unbuffered real-time progress output, below-normal Windows priority. Separate bot token to avoid conflicts with trader bot.
@@ -285,3 +286,4 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 - ~~Multi-timeframe fusion~~ — Cross-TF fusion worse than single-timeframe.
 - ~~V1.7.2 Regularization~~ — Wash. Minimal reg won but inconsistent across confidence levels. V1.7.1 unregularized baseline kept.
 - ~~TabPFN / tabular transformers~~ — Tested and failed.
+- ~~V1.8 LSTM~~ — LSTM solo: 0 valid results (all failed). LSTM+LGBM/XGB: identical to RF+LGBM/XGB (LSTM votes randomly, partner model carries all signal). Confirms LGBM dominance.
