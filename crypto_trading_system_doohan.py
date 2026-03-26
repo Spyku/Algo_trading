@@ -4141,7 +4141,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 # ============================================================
 # MODE S: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
 # ============================================================
-def run_strategy_comparison(assets_list, horizons=None):
+def run_strategy_comparison(assets_list, horizons=None, skip_confidence=False):
     """
     Backtest all combination strategies for each asset using saved model configs:
       - both_agree  : trade only when 4h AND 8h agree
@@ -4150,6 +4150,8 @@ def run_strategy_comparison(assets_list, horizons=None):
       - 8h_only     : use 8h model alone
     CASCA: scores by return directly. Updates trading_config.json with best strategy.
     Requires Mode D to have been run first for both 4h and 8h.
+    If skip_confidence=True, only update strategy (not min_confidence) — used in DVS
+    where Mode V already set the optimal confidence.
     """
     csv_path = _get_models_csv_path()
     if not os.path.exists(csv_path):
@@ -4437,12 +4439,15 @@ def run_strategy_comparison(assets_list, horizons=None):
                        'accuracy': base_acc * 100, 'gamma': first_cfg.get('gamma', 1.0)}
         generate_backtest_chart(asset, chart_signals, model_info=model_info)
 
-        # Update trading config with both strategy and threshold
+        # Update trading config with strategy (and threshold unless skipped)
         if asset not in trading_config:
             trading_config[asset] = {}
         trading_config[asset]['strategy'] = best_strat
-        trading_config[asset]['min_confidence'] = best_conf
-        print(f"  >>> Updated trading_config.json: {asset} -> strategy={best_strat}, min_confidence={best_conf}%")
+        if skip_confidence:
+            print(f"  >>> Updated trading_config.json: {asset} -> strategy={best_strat} (min_confidence kept from Mode V)")
+        else:
+            trading_config[asset]['min_confidence'] = best_conf
+            print(f"  >>> Updated trading_config.json: {asset} -> strategy={best_strat}, min_confidence={best_conf}%")
 
     # Save updated trading config
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -4921,7 +4926,7 @@ Examples:
             if mode in ('DVS', 'DV'):
                 run_mode_v([asset], horizons)
                 if mode == 'DVS':
-                    run_strategy_comparison([asset], horizons)
+                    run_strategy_comparison([asset], horizons, skip_confidence=True)
             elif mode == 'DS' or (mode == 'D' and len(horizons) == 2):
                 run_strategy_comparison([asset], horizons)
     elif mode == 'S':
