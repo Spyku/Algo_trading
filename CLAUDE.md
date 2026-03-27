@@ -180,6 +180,8 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `pysr_discover_features.py` | Active | Offline PySR discovery. Uses historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
 | `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus to select mode/assets/horizons. Sequential job queue, subprocess execution with real-time progress. Separate bot token (`config/telegram_optimizer_config.json`). Runs at below-normal priority. |
 | `crypto_trading_system_doohan_v1_7_2.py` | **Dropped** | Regularization test. Wash — not adopted. |
+| `start_trader.bat` | **Live** | Launches trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
+| `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
 | `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
 
@@ -199,29 +201,25 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 
 ---
 
-## Current Best Models (Doohan Production)
+## Mode H Results (Doohan Production — 2026-03-27)
 
-| Asset | Horizon | Models | Window | Gamma | Features | Best Conf | Status |
-|-------|---------|--------|--------|-------|----------|-----------|--------|
-| **BTC** | **5h** | RF+LGBM | 202h | 0.9955 | 15 | — | Refined |
-| **BTC** | **6h** | XGB+LGBM | 239h | 0.9963 | 13 | 90% | Refined+PySR |
-| **BTC** | **7h** | RF+LGBM | 251h | 0.9954 | 25 | — | Refined |
-| **ETH** | **5h** | XGB+LGBM | 304h | 0.9966 | 22 | — | Refined |
-| **ETH** | **6h** | XGB+LGBM | 117h | 0.9944 | 11 | 85% | Refined+PySR |
-| **ETH** | **7h** | RF+LGBM | 267h | 0.9959 | 9 | — | Refined |
-| **ETH** | **8h** | XGB+LGBM | 200h | 0.999 | 13 | — | Grid |
-| **SOL** | **5h** | XGB+LGBM | 196h | 0.9989 | 22 | — | Refined |
-| **SOL** | **6h** | XGB+LGBM | 195h | 0.9999 | 23 | — | Refined |
-| **SOL** | **7h** | XGB+LGBM | 200h | 0.995 | 13 | 80% | Grid |
+| Asset | Best H | Models | Window | Gamma | Features | Return | Trades | WR | Conf | B&H | Status |
+|-------|--------|--------|--------|-------|----------|--------|--------|----|------|-----|--------|
+| **BTC** | **6h** | XGB+LGBM | 88h | 0.9986 | 12 | +8.78% | 26 | 85% | 70% | -1.88% | Refined+PySR |
+| **ETH** | **7h** | RF+LGBM | 247h | 0.9997 | 8 | +23.58% | 16 | 62% | 90% | +6.57% | Refined+PySR |
+| **SOL** | **8h** | RF+XGB | 250h | 0.9970 | 17 | +22.43% | 32 | 69% | 75% | +4.53% | Grid+PySR |
+| **XRP** | **8h** | XGB+LGBM | 150h | 0.9950 | 17 | +9.99% | 18 | 78% | 80% | +0.51% | Grid+PySR |
+| **LINK** | **8h** | RF+LGBM | 300h | 0.9990 | 25 | +7.77% | 14 | 86% | 90% | -3.16% | Grid+PySR |
 
 ## Current Trading Config (Doohan)
 
 ```json
 {
-  "BTC": { "horizon": 6, "min_confidence": 90, "max_position_usd": 12000, "enabled": true },
-  "ETH": { "horizon": 6, "min_confidence": 85, "max_position_usd": 2000, "enabled": true },
-  "SOL": { "horizon": 7, "min_confidence": 80, "enabled": false },
-  "LINK": { "min_confidence": 65, "enabled": false }
+  "BTC": { "horizon": 6, "min_confidence": 70, "max_position_usd": 12000, "enabled": true },
+  "ETH": { "horizon": 7, "min_confidence": 90, "max_position_usd": 2000, "enabled": true },
+  "SOL": { "horizon": 6, "min_confidence": 90, "max_position_usd": 2000, "enabled": true },
+  "XRP": { "horizon": 8, "min_confidence": 80, "enabled": false },
+  "LINK": { "horizon": 8, "min_confidence": 90, "enabled": false }
 }
 ```
 
@@ -243,20 +241,28 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 ## Pending Work
 
 ### Active
-1. **Expand to other assets** — Run Mode H for LINK, XRP, DOGE, ADA, AVAX, DOT.
-2. **Re-run Mode P → DV for BTC and ETH with clean PySR** — Previous PySR results had leakage (fitted on overlapping data). Must run Mode P first (historical window), then DV to get clean results.
-   - **Run PySR discovery** for each asset before Mode DV: `python crypto_trading_system_doohan.py P ASSET 6h`
+1. **Expand to remaining assets** — Run Mode H for DOGE, ADA, AVAX, DOT. PySR features already generated for all.
+2. **SOL config mismatch** — Mode H winner is 8h/conf=75% but trading config still shows 6h/conf=90%. Needs updating.
+3. **Enable XRP/LINK for live trading** — Mode H complete, configs written. Currently `enabled: false`.
+
+### Completed (2026-03-27)
+- **LINK Mode H horizon sweep** — 5 horizons (4h-8h). Winner: 8h RF+LGBM +7.77%, 14 trades, 86% WR, conf>=90%. Config updated.
+- **BTC Mode H re-run with PySR** — 2 horizons (5h/6h). Winner: 6h XGB+LGBM +8.78%, 26 trades, 85% WR, conf>=70%. Config updated.
+- **Bat file venv auto-detect** — `start_trader.bat` and `start_optimizer.bat` now auto-detect Desktop vs Laptop venv path. Previously hardcoded to Desktop path, broke on Laptop.
 
 ### Completed (2026-03-26)
 - **V1.8 LSTM test — FAILED** — Tested LSTM as classifier in grid: LSTM solo (0 valid results, all failed), LSTM+LGBM (identical to RF+LGBM), LSTM+XGB (identical to RF+XGB). LSTM votes randomly, adds nothing. Confirms LGBM dominance — partner model is irrelevant. All ML improvement ideas now tested and resolved.
+- **XRP Mode H horizon sweep** — 4 horizons (5h-8h). Winner: 8h XGB+LGBM +9.99%, 18 trades, 78% WR, conf>=80%. Config updated.
+- **SOL Mode H re-run (full 4h-8h with PySR)** — 5 horizons. Winner: 8h RF+XGB +22.43%, 32 trades, 69% WR, conf>=75%.
+- **PySR discovery for all assets** — Mode P completed for BTC, ETH, SOL, XRP, LINK, DOGE, ADA, AVAX, DOT (all horizons 4h-8h). Historical window method.
 
 ### Completed (2026-03-25)
 - **Telegram optimizer bot** — `crypto_optimizer_bot.py`. Remote triggering of Mode D/V/H/P/S via inline keyboard menus. Sequential job queue, subprocess execution with unbuffered real-time progress output, below-normal Windows priority. Separate bot token to avoid conflicts with trader bot.
 - **PySR leakage fix** — Initial PySR results were inflated (BTC 6h: +9.27% with leaky PySR vs +3.74% baseline, ETH 7h: +23.32%). Root cause: PySR formulas fitted on same 6-month window Mode D evaluates on. Fix: PySR discovery now uses historical window (months 12→6 ago), zero overlap with Mode D's last 6 months. Anti-leakage checks added in Mode D/V/Refine — strips PySR features early if JSON lacks `discovery_method == "historical"`. Mode V blocks production writes for leaky configs.
 - **PySR promoted to production** — `_compute_pysr_features()` merged into `crypto_trading_system_doohan.py`. Loads `models/pysr_{ASSET}_{H}h.json` if exists, safe fallback if not. Clean PySR results pending re-run with historical window.
 - **logret_5h and logret_7h added** — Fills gaps in short-term momentum for 5h/7h horizon models. 132 total features.
-- **ETH Mode H horizon sweep** — All 4 horizons (5h/6h/7h/8h) grid complete. 5h/6h/7h refined. 8h best grid result (+5.93%). Config set to 6h/85%.
-- **SOL Mode H horizon sweep** — 5h/6h/7h done. Config set to 7h/80%.
+- **ETH Mode H horizon sweep** — 3 horizons (5h/6h/7h) with PySR. Winner: 7h RF+LGBM +23.58%, 16 trades, 62% WR, conf>=90%. Config updated to 7h/90%.
+- **SOL Mode H horizon sweep** — Initial run 5h/6h/7h. Re-run 2026-03-26 with full 4h-8h + PySR (see above).
 - **BTC 4h/8h with embargo fix** — 4h confirmed overfit (negative post-embargo). 8h not viable. BTC production stays at 6h.
 - **V1.7.2 — Regularization** — Tested on BTC 6h. Minimal reg won (ra=0, rl=0.1, cs=0.9, ss=0.5). V1.7.1 baseline (+3.75/+3.47/+3.74 at 70/80/90%) more consistent than V1.7.2 (+3.63/+0.11/+4.64). **Verdict: wash, not adopted.**
 - **PySR installed on both machines** — Laptop + Desktop done (2026-03-25). Julia 1.11.9 backend compiled.
