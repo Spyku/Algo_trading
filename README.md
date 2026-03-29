@@ -4,7 +4,7 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 
 **Production systems:**
 - **Doohan V1.7.1** — Fixed-horizon trading with PySR symbolic regression features (stable)
-- **Ed V1.0** — Regime-switching trading: bull/bear detection with dynamic horizon selection (testing)
+- **Ed V1.0** — Regime-switching trading: bull/bear detection with dynamic horizon selection (production)
 
 ---
 
@@ -78,16 +78,26 @@ python crypto_trading_system_doohan.py --help                    # Show all mode
 
 ## Architecture
 
-### Production File Chain
+### Production File Chains
 
 ```
-crypto_trading_system_doohan.py  (Doohan V1.7.1 -- Modes P/D/V/H/S, grid + refine + PySR + embargo)
-  +-- hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
+# Doohan (fixed horizons -- stable production)
+crypto_trading_system_doohan.py  (V1.7.1 -- Modes P/D/V/H/S)
+  +-- hardware_config.py
 crypto_revolut_doohan.py  (auto-trader -- reads trading_config_doohan.json)
-  +-- crypto_live_trader_doohan.py  (signal generation library)
-        +-- crypto_trading_system_doohan.py  (imports ASSETS, features, models)
-crypto_optimizer_bot.py  (Telegram bot for remote optimization -- separate bot token)
-  +-- crypto_trading_system_doohan.py  (spawned as subprocess for Mode D/V/H/P/S)
+  +-- crypto_live_trader_doohan.py  (signal generation)
+        +-- crypto_trading_system_doohan.py
+
+# Ed (regime-switching -- dynamic horizons)
+crypto_trading_system_ed.py  (V1.0 -- Modes P/D/V/H/S/R/HRS)
+  +-- hardware_config.py
+crypto_revolut_ed.py  (auto-trader -- reads regime_config_ed.json)
+  +-- crypto_live_trader_ed.py  (regime-aware signal generation)
+        +-- crypto_trading_system_ed.py
+
+# Shared
+crypto_optimizer_bot.py  (Telegram bot for remote optimization)
+  +-- crypto_trading_system_doohan.py  (spawned as subprocess)
 ```
 
 ### Index CFDs (separate system)
@@ -111,7 +121,7 @@ cfd/broly.py                (enhancement layer -- regime detection)
 | **Temporal decay** | Exponential sample weighting `w_i = gamma^(age)`. gamma=0.995 -> half-life ~6 days, gamma=0.999 -> ~29 days |
 | **6-month data cap** | Training capped at 4,320 hours. Prevents stale data from diluting recent patterns |
 | **Fee-aware labels** | `label = 1` when future return > 2x TRADING_FEE (0.22%). Only labels profitable moves as positive |
-| **Label overlap embargo** | Adjacent rows share overlapping future windows. Fix: `EMBARGO_CANDLES = horizon`. Without this, training data leaks label information |
+| **Label overlap embargo** | Adjacent rows share overlapping future windows. Fix: `EMBARGO_CANDLES = horizon`. **Backtesting only** — never in live signal generation. In live, all labels use known past prices (no leakage). Per Lopez de Prado. |
 | **Walk-forward validation** | Train on last `window` hours -> predict next candle -> step forward (DIAG_STEP=36). No future leakage |
 | **Ensemble voting** | Majority vote across 2-model combo. Confidence = average probability across models |
 | **PySR symbolic regression** | Offline discovery of mathematical expressions from historical data. Anti-leakage: formulas discovered on months 12->6 ago only, never overlapping Mode D's evaluation window |
@@ -275,15 +285,19 @@ DOT:  both_agree   @80%                  disabled
 
 ```
 engine/
-+-- crypto_trading_system_doohan.py    # Doohan V1.7.1 production -- Modes P/D/V/H/S
-+-- crypto_revolut_doohan.py           # Auto-trader (reads trading_config_doohan.json)
-+-- crypto_live_trader_doohan.py       # Signal generation library (not run directly)
++-- crypto_trading_system_doohan.py    # Doohan V1.7.1 -- Modes P/D/V/H/S
++-- crypto_revolut_doohan.py           # Doohan auto-trader (reads trading_config_doohan.json)
++-- crypto_live_trader_doohan.py       # Doohan signal generation (not run directly)
++-- crypto_trading_system_ed.py        # Ed V1.0 -- Modes P/D/V/H/S/R/HRS
++-- crypto_revolut_ed.py               # Ed auto-trader (reads regime_config_ed.json)
++-- crypto_live_trader_ed.py           # Ed regime-aware signal generation
 +-- crypto_optimizer_bot.py            # Telegram bot for remote optimization
 +-- hardware_config.py                 # Auto-detect Desktop/Laptop config
 +-- download_macro_data.py             # Macro/sentiment/cross-asset downloader
 +-- pysr_discover_features.py          # Offline PySR discovery (historical window)
-+-- start_trader.bat                   # Trader launcher with auto-restart + logging
-+-- start_optimizer.bat                # Optimizer bot launcher with auto-restart + logging
++-- start_trader.bat                   # Doohan trader launcher with auto-restart
++-- start_ed.bat                       # Ed trader launcher with auto-restart
++-- start_optimizer.bat                # Optimizer bot launcher with auto-restart
 +-- git_push.bat                       # Git push helper
 |
 +-- cfd/
@@ -298,6 +312,8 @@ engine/
 |   +-- revolut_x_test.py             # API connectivity test
 |   +-- detect_hardware.py            # Hardware detection -> config
 |   +-- buy_btc.py                    # Manual BTC purchase
+|   +-- backtest_regime_master.py      # Regime detector backtest (21 detectors x horizon pairs)
+|   +-- pysr_discover_regime.py       # PySR regime formula discovery
 |   +-- backtest_v5_v15.py            # Legacy backtest comparison
 |   +-- ib_test_connection.py         # IB broker connectivity test
 |
@@ -307,19 +323,22 @@ engine/
 |   +-- indices/                      # DAX, S&P500, SMI, CAC40 OHLCV
 |
 +-- models/
-|   +-- crypto_doohan_v1_7_1_production.csv     # Production model (written by Mode V)
+|   +-- crypto_doohan_v1_7_1_production.csv     # Doohan production model (written by Mode V)
 |   +-- crypto_doohan_v1_7_1_best_models.csv    # Top 6 candidates per (asset, horizon)
 |   +-- crypto_doohan_v1_7_1_grid_*.csv         # Full grid results (324 evals)
+|   +-- crypto_ed_production.csv                # Ed production model
 |   +-- pysr_{ASSET}_{H}h.json                  # PySR symbolic expressions
 |   +-- pysr_{ASSET}_{H}h_report.txt            # PySR discovery reports
 |
 +-- config/                           # NOT in git -- credentials + state
-|   +-- trading_config_doohan.json    # Per-asset: horizon, min_confidence, strategy, max_position
+|   +-- trading_config_doohan.json    # Doohan: per-asset horizon, min_confidence, strategy
+|   +-- regime_config_ed.json         # Ed: per-asset detector, bull/bear horizon+confidence+position
 |   +-- revolut_x_config.json         # Exchange API key
 |   +-- private.pem                   # Ed25519 signing key
 |   +-- telegram_config.json          # Bot token (trader)
 |   +-- telegram_optimizer_config.json # Bot token (optimizer -- separate)
-|   +-- position_{ASSET}.json         # Position tracking
+|   +-- position_{ASSET}.json         # Doohan position tracking
+|   +-- position_ed_{ASSET}.json      # Ed position tracking (separate)
 |   +-- signal_log.csv                # Signal history (for /chart)
 |
 +-- logs/                             # Auto-generated by start_trader.bat / optimization runs

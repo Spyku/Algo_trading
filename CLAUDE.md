@@ -133,7 +133,7 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 ### Key Concepts
 
 - **Variable horizons:** Each asset has its own optimal prediction horizon (5h, 6h, 7h, 8h), stored in `trading_config_doohan.json`. Mode H sweeps horizons to find the best per asset. The trader reads the configured horizon and uses `Xh_only` strategy.
-- **Label overlap embargo (V1.7+):** Adjacent rows share overlapping future windows used for labeling. Fix: `EMBARGO_CANDLES = horizon`, so `train_end = i - horizon`. Without this, training data leaks label information. Pre-embargo APFs were inflated 5-26×; post-embargo realistic range is 1.0-3.0.
+- **Label overlap embargo (V1.7+):** Adjacent rows share overlapping future windows used for labeling. Fix: `EMBARGO_CANDLES = horizon`, so `train_end = i - horizon`. Without this, training data leaks label information. Pre-embargo APFs were inflated 5-26×; post-embargo realistic range is 1.0-3.0. **IMPORTANT: Embargo applies to backtesting/cross-validation ONLY, never to live signal generation.** In live trading, all labels use known past prices — no future leakage exists. Removing training rows wastes valid data. Per Lopez de Prado: purging/embargo apply to train/test splits for evaluation, not to live deployment.
 - **No model persistence:** System retrains from scratch every prediction. No .pkl files. Intentional design.
 - **Temporal decay:** Exponential sample weighting `w_i = gamma^(age_in_hours)`. Per-model gamma stored in production CSV. Newest sample weight=1, oldest=gamma^(n-1). gamma=0.995 → half-life ~6 days, gamma=0.999 → ~29 days.
 - **6-month data cap:** Mode D caps training data at 4,320 hours (6 months). Hardcoded as `MAX_DIAG_HOURS`.
@@ -160,8 +160,11 @@ data/macro_data/*.csv                  <- VIX, DXY, S&P500, Fear&Greed, etc. (yf
 models/crypto_doohan_v1_7_1_best_models.csv    <- top 6 candidates per (asset, horizon) from Mode D
 models/crypto_doohan_v1_7_1_production.csv     <- refined production model (written by Mode V)
 models/crypto_doohan_v1_7_1_grid_{ASSET}_{H}h.csv <- full grid results (324 evals)
+models/crypto_ed_production.csv                <- Ed production model (shared with Doohan models)
 config/trading_config_doohan.json      <- per-asset: horizon, min_confidence, strategy, max_position, enabled
-config/position_{ASSET}.json           <- position tracking
+config/position_{ASSET}.json           <- Doohan position tracking
+config/position_ed_{ASSET}.json        <- Ed position tracking (separate from Doohan)
+config/regime_config_ed.json           <- Ed: per-asset regime detector, bull/bear horizon+confidence+position
 config/revolut_x_config.json           <- Revolut X API key
 config/private.pem                     <- Ed25519 signing key
 config/telegram_config.json            <- Telegram bot token (trader)
@@ -209,11 +212,11 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `crypto_live_trader_doohan.py` | **Live** | Signal generation library — NOT run directly. Reports current market price (not label-shifted). |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
-| `crypto_trading_system_doohan_v1_7_3.py` | **Merged** | PySR code merged into production (2026-03-25). Kept for reference. |
-| `crypto_trading_system_doohan_v1_8.py` | **Dropped** | LSTM test (2026-03-26). LSTM solo failed, LSTM combos identical to RF combos. Not adopted. |
+| `crypto_trading_system_doohan_v1_7_3.py` | **Archived** | PySR code merged into production (2026-03-25). |
+| `crypto_trading_system_doohan_v1_8.py` | **Archived** | LSTM test (2026-03-26). Failed — not adopted. |
 | `pysr_discover_features.py` | Active | Offline PySR discovery. Uses historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
 | `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus to select mode/assets/horizons. Sequential job queue, subprocess execution with real-time progress. Separate bot token (`config/telegram_optimizer_config.json`). Runs at below-normal priority. |
-| `crypto_trading_system_doohan_v1_7_2.py` | **Dropped** | Regularization test. Wash — not adopted. |
+| `crypto_trading_system_doohan_v1_7_2.py` | **Archived** | Regularization test. Wash — not adopted. |
 | `start_trader.bat` | **Live** | Launches trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `crypto_trading_system_ed.py` | **Testing** | Ed V1.0: Regime-switching. All Doohan modes (P/D/V/H/S) + Mode R (regime backtest). Reads `crypto_ed_production.csv`. |
@@ -255,11 +258,20 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 
 ```json
 {
-  "BTC": { "horizon": 6, "min_confidence": 70, "max_position_usd": 12000, "enabled": true },
+  "BTC": { "horizon": 8, "min_confidence": 90, "max_position_usd": 12000, "enabled": true },
   "ETH": { "horizon": 7, "min_confidence": 90, "max_position_usd": 2000, "enabled": true },
-  "SOL": { "horizon": 6, "min_confidence": 90, "max_position_usd": 2000, "enabled": true },
+  "SOL": { "enabled": false },
   "XRP": { "horizon": 8, "min_confidence": 80, "enabled": false },
   "LINK": { "horizon": 8, "min_confidence": 90, "enabled": false }
+}
+```
+
+## Current Regime Config (Ed)
+
+```json
+{
+  "BTC": { "detector": "sma_cross(48,200)", "bull": "7h@95%/$12k", "bear": "8h@90%/$6k", "enabled": true },
+  "ETH": { "detector": "sma_cross(24,100)", "bull": "7h@90%/$2k", "bear": "8h@95%/$1k", "enabled": true }
 }
 ```
 
@@ -275,6 +287,8 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 6. **SSL fix on Windows:** `ssl._create_unverified_context()` applied in both `crypto_revolut_doohan.py` and `crypto_live_trader_doohan.py`.
 7. **Production scoring:** Mode V/H selects best model using `return × (win_rate/100)` for positive returns, raw return for negatives. All candidates (D + refined) compete equally. This favors consistent winners over high-return low-win-rate configs.
 8. **Leakage check before any production promotion:** Before writing to production CSV or pushing code that affects live trading, verify no data leakage exists (PySR, feature engineering, or otherwise). For PySR: confirm `discovery_method == "historical"` in JSON metadata. This is enforced in code by `_check_pysr_leakage()` but must also be checked manually for any new feature engineering.
+9. **NEVER add embargo in live signal generation.** Embargo (`train_end = i - horizon`) is for backtesting/cross-validation ONLY. In `generate_live_signal()` the training window must be `df.iloc[train_start:i]` — all available data. Per Lopez de Prado: purging/embargo apply to evaluation splits, not live deployment.
+10. **Ed position files are separate from Doohan** — `position_ed_{ASSET}.json` vs `position_{ASSET}.json`. Both traders can run simultaneously without conflict.
 
 ---
 
@@ -289,7 +303,6 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 - **Mode S implemented** — Regime confidence sweep (7×7=49 combos). HRS/DVRS/RS combo modes. Both_agree removed from Ed. Mode H no longer picks winner (R does).
 - **PySR regime discovery — FAILED** — Tested forward48, sma48_200, forward72 labels. Best accuracy 58% (too weak). sma48>sma200 hand-crafted detector confirmed as winner.
 - **Ed Telegram display fixed** — Shows bull/bear horizons + confidence instead of old strategy/both_agree.
-- **Ed V1.0 release** — Regime-switching system. Dynamic bull/bear horizon selection via `regime_config_ed.json` (not hardcoded). Mode R regime backtest (16 detectors × all horizon pairs). PySR regime discovery script. Separate production CSV. Runs alongside Doohan. Telegram `/regime` command.
 - **Ed V1.0 release** — Regime-switching system. Dynamic bull/bear horizon selection via `regime_config_ed.json` (not hardcoded). Mode R regime backtest (16 detectors × all horizon pairs). PySR regime discovery script. Separate production CSV. Runs alongside Doohan. Telegram `/regime` command.
 - **All 9 assets Mode H complete** — DOGE (5h), ADA (7h), AVAX (all negative), DOT (7h) completed. Every asset now has production models.
 - **SOL disabled from Doohan** — Turned off from live trading.
