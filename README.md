@@ -2,7 +2,9 @@
 
 Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT) and **index CFDs** (DAX, S&P 500). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h). Executes trades on Revolut X via Ed25519-signed API.
 
-**Production system:** Doohan V1.7.1 + PySR symbolic regression features.
+**Production systems:**
+- **Doohan V1.7.1** — Fixed-horizon trading with PySR symbolic regression features (stable)
+- **Ed V1.0** — Regime-switching trading: bull/bear detection with dynamic horizon selection (testing)
 
 ---
 
@@ -35,11 +37,21 @@ python crypto_trading_system_doohan.py DV BTC 6h                 # Grid + valida
 python crypto_trading_system_doohan.py H BTC 5,6,7,8h            # Full horizon sweep
 python crypto_trading_system_doohan.py P BTC 6h                  # PySR feature discovery
 
-# === Live trading ===
+# === Live trading (Doohan -- production) ===
 start_trader.bat                                    # Auto-restart wrapper
 python crypto_revolut_doohan.py --loop              # Direct (no auto-restart)
 python crypto_revolut_doohan.py --dry-run --loop    # Signals only, no trades
 python crypto_revolut_doohan.py --status            # Show positions
+
+# === Live trading (Ed -- regime-switching) ===
+start_ed.bat                                        # Auto-restart wrapper
+python crypto_revolut_ed.py --loop                  # Direct
+python crypto_revolut_ed.py --dry-run --loop        # Signals only, no trades
+
+# === Ed regime backtest ===
+python crypto_trading_system_ed.py R BTC 5,6,7,8h              # Test all regime detectors
+python crypto_trading_system_ed.py R BTC --replay 2880         # 4-month backtest
+python tools/pysr_discover_regime.py --bull 6 --bear 8         # PySR regime formula discovery
 
 # === Optimizer bot (remote optimization via Telegram) ===
 start_optimizer.bat                                 # Auto-restart wrapper
@@ -389,12 +401,16 @@ MIN_TRADES = 8                  # reject unreliable configs
 
 ## Pending Work
 
-### MOST IMPORTANT
-1. **Regime-switching backtest (4 months)** -- Run `python tools/backtest_regime_master.py --months 4` on Desktop. Tests all horizon combos (4-14h) × regime detectors to find optimal bull/bear switching strategy (e.g., sma24>sma100: bull=6h, bear=8h). Then implement winning strategy in the live trader.
-
 ### Active
-1. **Expand to remaining assets** -- Run Mode P + H for DOGE, ADA, AVAX, DOT (LINK, XRP, SOL already done)
-2. **Re-run DV for BTC with fresh PySR** -- Mode P re-run 2026-03-26, DV pending with new expressions
+1. **Run Ed Mode R regime backtest** -- `python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880` to find best detector + horizon pair
+2. **Run PySR regime discovery** -- `python tools/pysr_discover_regime.py --months 4` then compare vs hand-crafted detectors
+3. **Ed dry-run validation** -- Run Ed trader in dry-run mode alongside Doohan to compare live signals
+
+### Completed (2026-03-29)
+- **Ed V1.0 release** -- Regime-switching system: bull/bear detection with dynamic horizon/confidence. Mode R backtest. External regime config (not hardcoded). Runs alongside Doohan.
+- **All 9 assets Mode H complete** -- BTC, ETH, SOL, LINK, XRP, DOGE, ADA, AVAX, DOT all have production models. AVAX negative (skip).
+- **SOL disabled** -- Turned off from Doohan live trading
+- **Trailing stop / regime filter analysis** -- Tested on 2-week replay. Baseline signal exits beat all trailing stop variants. Model signal quality is the edge.
 
 ---
 
@@ -402,6 +418,8 @@ MIN_TRADES = 8                  # reject unreliable configs
 
 | Date | Milestone |
 |------|-----------|
+| **2026-03-29** | **Ed V1.0 release.** Regime-switching system: dynamic bull/bear horizon selection via external config. Mode R regime backtest. PySR regime discovery script. Runs alongside Doohan. SOL disabled from Doohan. Trailing stop analysis completed (baseline wins). |
+| **2026-03-27** | BTC -7.5% selloff. Full Mode H re-run for BTC with crash data. All 9 assets Mode H complete. AVAX all horizons negative. |
 | **2026-03-26** | V1.8 LSTM test -- FAILED. LSTM solo: 0 valid results. LSTM combos identical to RF combos. Not adopted. BTC Mode P re-run. LINK Mode P + H started. SOL Mode H completed (8h winner, +22.43%). |
 | **2026-03-25** | Telegram optimizer bot. PySR leakage fix (historical window). PySR promoted to production. ETH + SOL Mode H. BTC embargo-verified (4h overfit, 6h production). V1.7.2 regularization test -- wash, not adopted. |
 | **2026-03-24** | Doohan V1.7.1 promoted to production. Deku archived. Variable horizon support. New Mode H. Order-independent CLI. Dead code cleanup (~1,435 lines). Root folder cleanup (28 files archived). |
@@ -418,4 +436,4 @@ MIN_TRADES = 8                  # reject unreliable configs
 
 ### Evolution
 
-Doohan V1.7.1 > Doohan V1.6 > Deku > CASCA > V5 > V4 > V3. All legacy systems archived.
+Ed V1.0 (regime) + Doohan V1.7.1 (fixed) > Doohan V1.6 > Deku > CASCA > V5 > V4 > V3. All legacy systems archived.

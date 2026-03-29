@@ -571,7 +571,10 @@ def _run_job(job):
             break
 
         line = raw_line.decode('utf-8', errors='replace').rstrip()
-        print(line)
+        try:
+            print(line)
+        except UnicodeEncodeError:
+            print(line.encode('ascii', errors='replace').decode('ascii'))
         job.output_lines.append(line)
         # Keep buffer manageable
         if len(job.output_lines) > 500:
