@@ -172,7 +172,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     i = n - 1
     row = df.iloc[i]
     train_start = max(0, i - window)
-    train = df.iloc[train_start:i]
+    train_end = max(train_start, i - horizon)  # embargo: match backtesting
+    train = df.iloc[train_start:train_end]
     X_train = train[feature_cols]
     y_train = train['label'].values
     X_test = df.iloc[i:i+1][feature_cols]
