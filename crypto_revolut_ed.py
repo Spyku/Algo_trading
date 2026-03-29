@@ -226,7 +226,7 @@ def place_market_sell(symbol, base_size):
 # PER-ASSET POSITION STATE
 # ============================================================
 def _position_file(asset):
-    return f'config/position_{asset}.json'
+    return f'config/position_ed_{asset}.json'
 
 def load_position(asset):
     path = _position_file(asset)
@@ -395,25 +395,10 @@ def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
 def process_asset(asset, trading_cfg, dry_run=False):
     """Generate signals and execute for one asset. Returns result dict."""
     position = load_position(asset)
-    strategy = trading_cfg.get('strategy', 'both_agree')
     symbol = trading_cfg.get('symbol', f'{asset}-USD')
     max_usd = trading_cfg.get('max_position_usd', 0)
 
-    # Load configs — use configured horizon if set, otherwise all available
-    sigs_by_horizon = {}
-    any_config = False
-    configured_horizon = trading_cfg.get('horizon')
-    horizons_to_load = [configured_horizon] if configured_horizon else list(AVAILABLE_HORIZONS)
-    for h in horizons_to_load:
-        cfg = load_best_config(asset, horizon=h)
-        if cfg:
-            any_config = True
-            sigs_by_horizon[h] = cfg  # store config temporarily
-
-    if not any_config:
-        return None
-
-    # Download data once
+    # Download data first — needed for regime detection
     try:
         download_asset(asset, update_only=True)
     except Exception:
@@ -423,19 +408,28 @@ def process_asset(asset, trading_cfg, dry_run=False):
     if df_raw is None:
         return None
 
-    # Detect regime and override horizon/confidence/max_position from regime config
+    # Detect regime — determines horizon, confidence, and max_position
     regime_label, regime_cfg = detect_regime(asset, df_raw)
     regime_horizon = regime_cfg.get('horizon')
     regime_min_conf = regime_cfg.get('min_confidence')
     if regime_cfg.get('max_position_usd'):
         max_usd = regime_cfg['max_position_usd']
+
+    # Load model config for the regime-selected horizon only
+    sigs_by_horizon = {}
     if regime_horizon:
-        # Override: use regime-selected horizon only
-        sigs_by_horizon = {}
         cfg_r = load_best_config(asset, horizon=regime_horizon)
         if cfg_r:
             sigs_by_horizon[regime_horizon] = cfg_r
-            any_config = True
+    else:
+        # Fallback: load all available horizons
+        for h in list(AVAILABLE_HORIZONS):
+            cfg = load_best_config(asset, horizon=h)
+            if cfg:
+                sigs_by_horizon[h] = cfg
+
+    if not sigs_by_horizon:
+        return None
     # Generate live signals for each available horizon
     first = True
     for h in list(sigs_by_horizon.keys()):
@@ -444,11 +438,11 @@ def process_asset(asset, trading_cfg, dry_run=False):
         sigs_by_horizon[h] = sig  # replace config with actual signal
         first = False
 
-    # Apply asset-specific strategy — single configured horizon uses Xh_only
+    # Apply strategy — regime always picks single horizon → Xh_only
     min_conf = regime_min_conf if regime_min_conf else trading_cfg.get('min_confidence', MIN_CONFIDENCE)
-    effective_horizon = regime_horizon if regime_horizon else configured_horizon
-    if effective_horizon and len(sigs_by_horizon) == 1:
-        strategy = f'{effective_horizon}h_only'
+    strategy = trading_cfg.get('strategy', 'both_agree')
+    if regime_horizon and len(sigs_by_horizon) == 1:
+        strategy = f'{regime_horizon}h_only'
     action, confidence, reason = compute_asset_signal(sigs_by_horizon, strategy, min_conf=min_conf)
     any_sig = next((s for s in sigs_by_horizon.values() if s), None)
     price = any_sig['close'] if any_sig else 0
@@ -567,7 +561,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
     # Get gamma from the primary horizon model
     gamma_val = ''
-    gamma_horizons = [configured_horizon] if configured_horizon else [HORIZON_LONG, HORIZON_SHORT]
+    gamma_horizons = [regime_horizon] if regime_horizon else [HORIZON_LONG, HORIZON_SHORT]
     for h in gamma_horizons:
         cfg_g = load_best_config(asset, horizon=h)
         if cfg_g:
@@ -582,7 +576,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
         'pnl_msg': pnl_msg, 'sigs_by_horizon': sigs_by_horizon,
         'sig_short': sig_short, 'sig_long': sig_long,
         'position': position, 'strategy': strategy,
-        'min_confidence': trading_cfg.get('min_confidence', MIN_CONFIDENCE),
+        'min_confidence': min_conf,
         'gamma': gamma_val, 'regime': regime_label,
     }
 
