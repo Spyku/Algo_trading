@@ -73,6 +73,15 @@ python crypto_revolut_doohan.py --status            # Show positions
 
 # === Optimizer bot (remote optimization via Telegram) ===
 python crypto_optimizer_bot.py                      # Start optimizer bot (separate from trader bot)
+
+# === Regime backtest (horizon switching analysis) ===
+python tools/backtest_regime_master.py                         # 2-month default, all horizons
+python tools/backtest_regime_master.py --months 4              # 4-month backtest
+python tools/backtest_regime_master.py --horizons 6,8          # only test 6h and 8h (fast)
+python tools/backtest_regime_master.py --bull 6 --bear 8       # fix pair, compare regimes only
+python tools/backtest_regime_master.py --regimes sma,rsi       # filter regime families
+python tools/backtest_regime_master.py --no-combos             # single-horizon baselines only
+python tools/backtest_regime_master.py --asset ETH             # test other assets
 ```
 
 **Telegram commands (Doohan trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/optimize BTC` `/optstatus`
@@ -117,6 +126,7 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 - **PySR symbolic regression:** Mode P runs offline discovery (`pysr_discover_features.py`), saves expressions to JSON. Production loads them as computed columns. Anti-leakage: PySR formulas are discovered on months 12→6 ago only, never overlapping with Mode D's last-6-month evaluation window.
 - **PySR anti-leakage checks:** `_check_pysr_leakage()` runs early in Mode D, V, and Refine. If PySR JSON lacks `discovery_method == "historical"`, all PySR features are stripped before the run starts. Mode V also blocks production CSV writes for leaky PySR configs.
 - **Model hot-reload:** Trader checks production CSV every 5 minutes.
+- **Regime-switching horizons:** `backtest_regime_master.py` tests whether switching between horizons based on market regime (e.g., SMA24>SMA100 = bull -> use 6h model, bear -> use 8h model) outperforms a fixed single-horizon strategy. Evaluates multiple regime detectors (SMA, RSI, volatility, etc.) and horizon pairs.
 
 ### Data Flow
 

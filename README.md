@@ -1,6 +1,8 @@
 # Algo Trading Engine
 
-Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT) and **index CFDs** (DAX, S&P 500). Generates hourly BUY/SELL/HOLD signals using dual-horizon ensemble ML with walk-forward validation and temporal decay sample weighting. Executes trades via exchange API.
+Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT) and **index CFDs** (DAX, S&P 500). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h). Executes trades on Revolut X via Ed25519-signed API.
+
+**Production system:** Doohan V1.7.1 + PySR symbolic regression features.
 
 ---
 
@@ -9,10 +11,10 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [How It Works](#how-it-works)
-- [Trading Systems](#trading-systems)
-- [Features (130)](#features-130)
+- [Features (132)](#features-132)
 - [Strategies](#strategies)
 - [Auto-Trader](#auto-trader)
+- [Optimizer Bot](#optimizer-bot)
 - [Current Models](#current-models)
 - [Project Structure](#project-structure)
 - [Setup](#setup)
@@ -28,63 +30,61 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 # Desktop:  C:\algo_trading\venv\Scripts\activate.bat
 # Laptop:   C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
 
-# Train models (Mode D) then pick best strategy (Mode F)
-python crypto_trading_system_deku.py DF BTC,ETH 4,8h       # per-asset: D+F for BTC, then D+F for ETH
+# === Model optimization ===
+python crypto_trading_system_doohan.py DV BTC 6h                 # Grid + validate for single horizon
+python crypto_trading_system_doohan.py H BTC 5,6,7,8h            # Full horizon sweep
+python crypto_trading_system_doohan.py P BTC 6h                  # PySR feature discovery
 
-# Start live trading
-python crypto_revolut_deku.py --loop
+# === Live trading ===
+start_trader.bat                                    # Auto-restart wrapper
+python crypto_revolut_doohan.py --loop              # Direct (no auto-restart)
+python crypto_revolut_doohan.py --dry-run --loop    # Signals only, no trades
+python crypto_revolut_doohan.py --status            # Show positions
 
-# Dry run (signals only, no trades)
-python crypto_revolut_deku.py --dry-run --loop
-
-# Check positions / balance
-python crypto_revolut_deku.py --status
-python crypto_revolut_deku.py --balance
+# === Optimizer bot (remote optimization via Telegram) ===
+start_optimizer.bat                                 # Auto-restart wrapper
+python crypto_optimizer_bot.py                      # Direct
 ```
 
-### Other Commands
+### All Optimization Modes
 
 ```bash
-# Deku with custom trials or scoring metric
-python crypto_trading_system_deku.py D BTC 4,8h --trials 150
-python crypto_trading_system_deku.py DF BTC 4,8h --metric calmar
-python crypto_trading_system_deku.py DF BTC 4,8h --metric all     # compare 5 metrics
-
-# Doohan V1.6 (exhaustive grid + Optuna refine)
-python crypto_trading_system_doohan_v1_6.py D BTC 8h              # Mode D — exhaustive grid (432 evals)
-python crypto_trading_system_doohan_v1_6.py DGF BTC,ETH,LINK 8h   # Full pipeline: grid → backtest → refine → strategy
-python backtest_doohan_v1_6.py                                     # Backtest top 6 vs Deku, save best
-python crypto_revolut_doohan.py --loop                             # Doohan live trading
-python crypto_revolut_doohan.py --dry-run --loop                   # Doohan signals only
-
-# CASCA (standby system — profit factor scoring)
-python crypto_trading_system_casca.py DF BTC,ETH 4,8h
-python crypto_trading_system_casca.py A BTC 4,8h                  # gamma optimization
-
-# Index CFD trader
-python cfd/ib_auto_trader.py --loop          # DAX
-python cfd/ib_auto_trader_test.py --loop     # S&P 500
+# Arguments are order-independent: MODE, ASSETS, HORIZONS can appear in any order.
+python crypto_trading_system_doohan.py P BTC 6h                  # Mode P -- PySR feature discovery (~30-120 min)
+python crypto_trading_system_doohan.py H BTC 5,6,7,8h            # Mode H -- full horizon sweep (D+V per horizon)
+python crypto_trading_system_doohan.py H BTC 5,6,7h --skip       # Mode H -- skip D where results exist, re-run V only
+python crypto_trading_system_doohan.py DV BTC 6h                 # Mode DV -- grid + validate for single horizon
+python crypto_trading_system_doohan.py D BTC 6h                  # Mode D -- grid optimization only
+python crypto_trading_system_doohan.py D BTC 6h --trials 200     # Custom trial count
+python crypto_trading_system_doohan.py V BTC 6h                  # Mode V -- re-validate existing D results
+python crypto_trading_system_doohan.py S BTC 5,8h                # Mode S -- strategy comparison (multi-horizon)
+python crypto_trading_system_doohan.py DVS BTC 6h                # Full pipeline: grid -> validate -> strategy
+python crypto_trading_system_doohan.py --help                    # Show all modes, options, examples
 ```
 
 ---
 
 ## Architecture
 
+### Production File Chain
+
 ```
-DEKU (production)                DOOHAN V1.6 (production)         CASCA (standby)
-─────────────────                ────────────────────────         ───────────────
-crypto_trading_system_deku.py    crypto_trading_system_doohan_v1_6.py  crypto_trading_system_casca.py
-  ↓ imports                        ↓ imports (from deku)                ↓ imports
-crypto_live_trader_deku.py       crypto_live_trader_doohan.py          crypto_live_trader.py
-  ↓ imports                        ↓ imports                            ↓ imports
-crypto_revolut_deku.py           crypto_revolut_doohan.py              crypto_revolut_trader.py
-  ↓ trades via                     ↓ trades via                         ↓ trades via
-Exchange API (Ed25519 signed)    Exchange API (Ed25519 signed)         Exchange API (Ed25519 signed)
+crypto_trading_system_doohan.py  (Doohan V1.7.1 -- Modes P/D/V/H/S, grid + refine + PySR + embargo)
+  +-- hardware_config.py  (machine-specific model configs, n_jobs, GPU settings)
+crypto_revolut_doohan.py  (auto-trader -- reads trading_config_doohan.json)
+  +-- crypto_live_trader_doohan.py  (signal generation library)
+        +-- crypto_trading_system_doohan.py  (imports ASSETS, features, models)
+crypto_optimizer_bot.py  (Telegram bot for remote optimization -- separate bot token)
+  +-- crypto_trading_system_doohan.py  (spawned as subprocess for Mode D/V/H/P/S)
 ```
 
-**Deku** uses Optuna Bayesian optimization (TPE + Hyperband). **Doohan V1.6** uses exhaustive grid search + Optuna refinement with 6 signal-distinct combos. **CASCA** uses grid search with profit factor scoring. All share the same ML pipeline, features, and walk-forward validation. The systems are independent — separate models, configs, and traders.
+### Index CFDs (separate system)
 
-**Index CFDs** (in `cfd/`) are completely separate: different models, assets, broker, and config.
+```
+cfd/ib_auto_trader.py       (DAX CFD trader -- Broly 1.2)
+cfd/ib_auto_trader_test.py  (S&P 500 CFD overnight)
+cfd/broly.py                (enhancement layer -- regime detection)
+```
 
 ---
 
@@ -94,137 +94,83 @@ Exchange API (Ed25519 signed)    Exchange API (Ed25519 signed)         Exchange 
 
 | Concept | Detail |
 |---------|--------|
-| **Dual horizons** | 4h and 8h — independent models per horizon (different features, window, combo). Never mixed. |
-| **No model persistence** | Retrains from scratch every prediction. No .pkl files. Always uses latest market data. |
-| **Temporal decay** | Exponential sample weighting `w_i = gamma^(age)`. Recent data matters more. gamma=0.996 → half-life ~7 days. |
-| **6-month data cap** | Training capped at 4,320 hours. Prevents stale data from diluting recent patterns. |
-| **Fee-aware labels** | `label = 1` when future return > 2×TRADING_FEE (0.22%). Only labels profitable moves as positive. Fallback: 200h rolling median. |
-| **Walk-forward validation** | Train on `window` hours → predict next candle → step forward. No future leakage. |
-| **Ensemble voting** | Majority vote across model combo. Confidence = average probability across models. |
+| **Variable horizons** | Each asset has its own optimal prediction horizon (5h, 6h, 7h, 8h), found by Mode H and stored in `trading_config_doohan.json` |
+| **No model persistence** | Retrains from scratch every prediction. No .pkl files. Always uses latest market data |
+| **Temporal decay** | Exponential sample weighting `w_i = gamma^(age)`. gamma=0.995 -> half-life ~6 days, gamma=0.999 -> ~29 days |
+| **6-month data cap** | Training capped at 4,320 hours. Prevents stale data from diluting recent patterns |
+| **Fee-aware labels** | `label = 1` when future return > 2x TRADING_FEE (0.22%). Only labels profitable moves as positive |
+| **Label overlap embargo** | Adjacent rows share overlapping future windows. Fix: `EMBARGO_CANDLES = horizon`. Without this, training data leaks label information |
+| **Walk-forward validation** | Train on last `window` hours -> predict next candle -> step forward (DIAG_STEP=36). No future leakage |
+| **Ensemble voting** | Majority vote across 2-model combo. Confidence = average probability across models |
+| **PySR symbolic regression** | Offline discovery of mathematical expressions from historical data. Anti-leakage: formulas discovered on months 12->6 ago only, never overlapping Mode D's evaluation window |
 
 ### ML Pipeline (Mode D)
 
-1. **Data download** — Hourly candles (Binance via ccxt) + macro data (yfinance)
-2. **Feature engineering** — 130 features (technical + macro + sentiment + cross-asset)
-3. **Feature ranking** — LGBM gain importance ranks all features (~5 sec)
-4. **Optuna optimization** — Joint search over (model combo, window, gamma, n_features) using TPE + Hyperband pruning. Default 150 trials, auto-extends to 200/250 if APF < 1.7
-5. **Walk-forward evaluation** — Train → predict → step forward (DIAG_STEP=36h). Score by APF
-6. **Signal generation** — Best config generates signals with bootstrap confidence intervals
-7. **Charts** — Backtest PNG + interactive HTML strategy charts
-8. **Save** — Best model written to `models/crypto_deku_best_models.csv`
+1. **Data download** -- Hourly candles (Binance via ccxt) + macro data (yfinance)
+2. **Feature engineering** -- 132 features (technical + macro + sentiment + cross-asset + PySR symbolic)
+3. **Feature ranking** -- LGBM gain importance ranks all features (~5 sec)
+4. **Exhaustive grid search** -- 3 combos x 6 windows x 6 features x 3 gammas = 324 evals
+5. **3-fold rolling holdout** -- Re-rank winners by out-of-sample performance with embargo
+6. **Walk-forward evaluation** -- Train -> predict -> step forward. Score by APF
+7. **Save** -- Top 6 candidates to `models/crypto_doohan_v1_7_1_best_models.csv`
+
+### Mode V (Validate + Refine)
+
+1. **Backtest** D candidates across 6 confidence thresholds (65-90%)
+2. **Select top 3** for Optuna refinement (50 trials each)
+3. **Production selection** from refined configs only using `return x (win_rate/100)` scoring
+4. **Save** winner to `models/crypto_doohan_v1_7_1_production.csv` and update `trading_config_doohan.json`
 
 ### Modes
 
 | Mode | Purpose | When to Use |
 |------|---------|-------------|
-| **D** | Full optimization pipeline | After market regime change, or periodically |
-| **F** | Strategy comparison + confidence sweep → writes `trading_config.json` | After Mode D |
-| **DF** | D then F in one command | Standard workflow |
-| **B** | Quick signals from saved models | Daily check |
-| **A** | Gamma optimization (6 values × horizons) | CASCA only — tune temporal decay |
-| **E** | Iterative refinement | CASCA only — after Mode D |
+| **P** | PySR symbolic feature discovery | Before D/V to add symbolic features (~30-120 min) |
+| **D** | Exhaustive grid optimization | After market regime change, or periodically |
+| **V** | Validate + Optuna refine -> writes production model | After Mode D |
+| **DV** | D then V in one command | Standard workflow |
+| **H** | Horizon sweep (D+V per horizon -> compare -> best) | Find optimal horizon per asset |
+| **S** | Strategy comparison (multi-horizon) | Compare strategies across horizons |
+| **DVS** | Full pipeline: D -> V -> S | Complete optimization |
 
 ---
 
-## Trading Systems
-
-### Deku (Production)
-
-Optuna Bayesian optimization with TPE + Hyperband pruning.
-
-| Parameter | Value |
-|-----------|-------|
-| **Models** | RF, GB, XGB, LR, LGBM — 26 ensemble combos (pairs + triples + quads + quint) |
-| **Optimizer** | Optuna TPE, Hyperband pruning (~60% trials pruned) |
-| **Search space** | 7 windows [24–200], gamma [0.994–1.0], n_features [4–80] |
-| **Scoring** | APF = raw_PF / buyhold_PF (regime-normalized). Alternatives via `--metric` flag |
-| **Walk-forward step** | 36h (doubled eval points vs CASCA) |
-| **Min trades** | 8 (reject unreliable configs) |
-| **3-fold holdout** | Diversity-aware: top 10 + best per unexplored combo → up to 20 candidates |
-| **Auto-extend** | If best APF < 1.7 after 150 trials → extend to 200 → 250 |
-| **Enhancements** | Optional `--enhancements` flag: return weighting, disagreement filter, funding gate (Optuna toggles) |
-| **DF mode** | Per-asset pipeline: D (all horizons) + F for each asset before moving to next |
-| **Output** | `models/crypto_deku_best_models.csv`, `config/trading_config_deku.json` |
-
-**Scoring metrics** (`--metric` flag): `apf` (default), `rawpf`, `calmar`, `return`, `rpf_sqrt`. Use `--metric all` to compare all 5.
-
-### Doohan V1.6 (Production)
-
-Exhaustive grid search over 6 signal-distinct combos + Optuna refinement on top performers.
-
-| Parameter | Value |
-|-----------|-------|
-| **Models** | 6 signal-distinct combos: RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR |
-| **Key finding** | LGBM dominates all combos it's in; XGB hurts LGBM performance |
-| **Grid search** | 6 combos × 4 windows [72–200] × 6 features [10–30] × 3 gammas [0.995–0.999] = 432 evals |
-| **Scoring** | APF (same as Deku) |
-| **Walk-forward step** | 36h (same as Deku) |
-| **Holdout** | 3-fold rolling, saves top 6 candidates |
-| **Backtest (Mode G)** | 1-week live replay at conf 70/80/90% |
-| **Refine** | Optuna on top 3 live-validated configs: gamma±0.020, features±5, window±20h, 30 trials each |
-| **DGF mode** | Full pipeline: D (grid) → G (backtest) → Refine (Optuna) → F (strategy) |
-| **Output** | `models/crypto_doohan_v1_6_production.csv`, `config/trading_config_doohan.json` |
-
-### CASCA (Standby)
-
-Grid search with profit factor scoring. Can be reactivated without code changes.
-
-| Parameter | Value |
-|-----------|-------|
-| **Models** | RF, GB, LR, LGBM — 11 ensemble combos |
-| **Optimizer** | Grid search: 11 combos × 5 windows = 55 configs |
-| **Feature selection** | 5-test analysis: LGBM importance, permutation, ablation, reduced sets, consensus |
-| **Scoring** | Profit Factor = gross_profit / \|gross_loss\| (cap 5.0, min 3 trades) |
-| **Walk-forward step** | 72h |
-| **Output** | `models/crypto_casca_best_models.csv`, `config/trading_config.json` |
-
-### Index CFDs
-
-Independent system using Broly 1.2 ML model via broker API.
-
-| Asset | File | Hours (UTC) |
-|-------|------|-------------|
-| DAX | `cfd/ib_auto_trader.py` | Mon–Fri 07:00–16:00 |
-| S&P 500 | `cfd/ib_auto_trader_test.py` | Sun 23:00 – Fri 22:00 |
-
-Risk controls: 2% stop-loss, €2,000 daily loss limit, 2h cooldown after stop-loss.
-
----
-
-## Features (130)
+## Features (132)
 
 | Category | Count | Examples |
 |----------|-------|---------|
-| **Technical** | 49 | Log returns (1–240h), RSI, Bollinger Bands, ATR, ADX/DI, Garman-Klass vol, volatility ratios, Stochastic, spread ratios, SMA ratios, hour sin/cos |
+| **Technical** | 51 | Log returns (1-240h), RSI, Bollinger Bands, ATR, ADX/DI, Garman-Klass vol, volatility ratios, Stochastic, spread ratios, SMA ratios, hour sin/cos |
 | **Macro** | 40 | VIX (level, zscore, regime), DXY, S&P500/Nasdaq changes (1/5/10d), US10Y, EUR/USD, USD/JPY, Oil, Gold volatility |
 | **Sentiment** | 25 | Fear & Greed Index (value, zscore, changes, MA, extreme flags) |
 | **Cross-asset** | 16 | BTC/ETH/DAX/Nasdaq/S&P500 rolling correlation (10/30d), relative strength (5d) |
+| **PySR symbolic** | variable | Auto-loaded from `models/pysr_{ASSET}_{H}h.json` if available; safe fallback if not |
 
 ---
 
 ## Strategies
 
-Set per asset by Mode F, stored in trading config:
-
 | Strategy | BUY Condition | SELL Condition |
 |----------|--------------|----------------|
-| `both_agree` | 4h AND 8h both say BUY (≥ min_confidence) | Either says SELL |
-| `either_agree` | Either 4h or 8h says BUY | Either says SELL |
-| `4h_only` | 4h says BUY | 4h says SELL |
-| `8h_only` | 8h says BUY | 8h says SELL |
+| `Xh_only` | Single horizon says BUY (e.g., `6h_only`) | Horizon says SELL |
+| `both_agree` | Both horizons agree BUY (>= min_confidence) | Either says SELL |
+| `either_agree` | Either horizon says BUY | Either says SELL |
 
-Mode F backtests all strategies with a confidence sweep (60–90%) and writes the winner to `trading_config_deku.json`.
+Mode V/H writes the best `horizon` and `min_confidence` to `trading_config_doohan.json`. The trader reads the configured horizon and uses `Xh_only` strategy.
 
 ---
 
 ## Auto-Trader
 
+### Startup
+
+Run `start_trader.bat` (recommended) -- auto-restarts if the bot crashes. Or run directly: `python crypto_revolut_doohan.py --loop`
+
 ### Loop Cycle
 
-1. **Startup** — Sync positions with exchange → Telegram notification → immediate scan
-2. **Every hour** — Download data → generate 4h+8h signals → apply strategy → execute trades → Telegram
-3. **Every 5 min** — Position sync (detects manual trades), model hot-reload from CSV
-4. **Every 5 sec** — Poll Telegram for commands
+1. **Startup** -- Sync positions with Revolut X -> Telegram notification -> immediate scan
+2. **Every hour** -- Download data -> generate signals -> apply strategy -> execute trades -> Telegram
+3. **Every 5 min** -- Position sync (detects manual trades), model + config hot-reload
+4. **Every 5 sec** -- Poll Telegram for commands
 
 ### Telegram Commands
 
@@ -236,55 +182,79 @@ Mode F backtests all strategies with a confidence sweep (60–90%) and writes th
 | `/pause` / `/resume` | Pause/resume trading |
 | `/sync` | Force position sync |
 | `/conf` / `/config` | Show current config |
-| `/setup` | Inline button config editor (asset picker, toggle, strategy, confidence, max position) |
-| `/help` | List all commands |
+| `/setup` | Inline button config editor |
 | `/chart BTC` | Generate and send chart |
-| `/optimize BTC` | Launch Mode D in background (Deku only) |
-| `/optstatus` | Check optimization progress (Deku only) |
+| `/help` | List all commands |
 
 ### Authentication
 
-Asymmetric Ed25519 signature: `timestamp + method + path + body → base64 signature`.
+Asymmetric Ed25519 signature: `timestamp + method + path + body -> base64 signature`.
+
+---
+
+## Optimizer Bot
+
+Separate Telegram bot for remote model optimization. Run `start_optimizer.bat` (auto-restart) or `python crypto_optimizer_bot.py`.
+
+Inline keyboard menus to select mode/assets/horizons. Sequential job queue with subprocess execution and real-time progress output. Uses separate bot token from the trader.
+
+### Telegram Commands
+
+| Command | Action |
+|---------|--------|
+| `/optimize` | Start optimization flow (Mode -> Assets -> Horizons -> Confirm) |
+| `/queue` | Show running/pending/completed jobs |
+| `/cancel` | Cancel current job or menu flow |
+| `/status` | Show current production models |
+| `/results` | Show last results for an asset |
+| `/help` | List commands |
+| `/stop` | Stop the bot |
+
+---
+
+## Regime Backtest
+
+`tools/backtest_regime_master.py` tests whether dynamically switching between horizons based on market regime outperforms a fixed single-horizon strategy. For example, using the 6h model in bull markets (SMA24 > SMA100) and the 8h model in bear markets.
+
+```bash
+python tools/backtest_regime_master.py                         # 2-month default, all horizons
+python tools/backtest_regime_master.py --months 4              # 4-month backtest
+python tools/backtest_regime_master.py --horizons 6,8          # only test 6h and 8h (fast)
+python tools/backtest_regime_master.py --bull 6 --bear 8       # fix pair, compare regimes only
+python tools/backtest_regime_master.py --regimes sma,rsi       # filter regime families
+python tools/backtest_regime_master.py --no-combos             # single-horizon baselines only
+python tools/backtest_regime_master.py --asset ETH             # test other assets
+```
 
 ---
 
 ## Current Models
 
-### Deku (Production — 3-fold holdout validation)
+### Doohan V1.7.1 Production
 
-| Asset | Horizon | Models | Window | Return | APF | Features | Gamma | Trades |
-|-------|---------|--------|--------|--------|-----|----------|-------|--------|
-| BTC | 4h | GB+XGB+LR | 150h | +1.9% | 1.82 | 4 | 0.9962 | 16 |
-| BTC | 8h | XGB+LR+LGBM | 200h | +11.3% | 1.47 | 13 | 0.9956 | 22 |
-| ETH | 4h | RF+GB+XGB+LGBM | 36h | +4.6% | 4.16 | 5 | 0.9944 | 14 |
-| ETH | 8h | RF+GB+XGB+LGBM | 48h | +6.5% | 2.41 | 21 | 0.9957 | 14 |
-| XRP | 4h | RF+XGB+LR+LGBM | 36h | +0.5% | 2.49 | 34 | 0.9941 | 8 |
-| XRP | 8h | GB+LR+LGBM | 150h | +7.6% | 2.29 | 73 | 0.9971 | 16 |
-| DOGE | 4h | LR+LGBM | 150h | +3.2% | 2.15 | 27 | 0.9962 | 14 |
-| DOGE | 8h | GB+LR+LGBM | 150h | +6.4% | 2.22 | 73 | 0.9971 | 14 |
-| SOL | 4h | RF+XGB+LR+LGBM | 72h | -0.7% | 1.98 | 13 | 0.9972 | 12 |
-| SOL | 8h | RF+GB+XGB | 48h | +5.4% | 2.18 | 17 | 0.9971 | 17 |
-| LINK | 4h | XGB+LGBM | 150h | +5.3% | 2.15 | 6 | 0.9972 | 17 |
-| LINK | 8h | RF+GB+LR+LGBM | 200h | +23.5% | 1.71 | 20 | 0.9963 | 31 |
-| ADA | 4h | RF+GB+XGB+LR+LGBM | 150h | +3.6% | 1.78 | 24 | 0.9967 | 14 |
-| ADA | 8h | RF+GB+XGB+LGBM | 24h | +21.3% | 7.94 | 26 | 0.9996 | 8 |
-| AVAX | 4h | RF+XGB+LR+LGBM | 100h | +6.5% | 1.97 | 20 | 1.0 | 11 |
-| AVAX | 8h | XGB+LR | 150h | +19.6% | 4.03 | 52 | 0.9944 | 18 |
-| DOT | 4h | RF+XGB+LGBM | 100h | +12.5% | 2.83 | 27 | 0.9954 | 16 |
-| DOT | 8h | XGB+LR | 150h | +9.3% | 8.47 | 41 | 0.999 | 17 |
+| Asset | Horizon | Models | Window | Gamma | Features | Min Conf | Status |
+|-------|---------|--------|--------|-------|----------|----------|--------|
+| **BTC** | **6h** | XGB+LGBM | 209h | 0.9938 | 31 | 85% | Refined+PySR |
+| **BTC** | **5h** | RF+XGB | 159h | 0.9957 | 20 | -- | Refined+PySR |
+| **ETH** | **7h** | RF+LGBM | 247h | 0.9997 | 8 | 90% | Refined+PySR |
+| **ETH** | **6h** | XGB+LGBM | 117h | 0.9944 | 11 | -- | Refined+PySR |
+| **ETH** | **8h** | RF+XGB | 250h | 0.999 | 10 | -- | Grid+PySR |
+| **XRP** | **8h** | XGB+LGBM | 150h | 0.995 | 17 | 80% | Grid+PySR |
+| **SOL** | **6h** | RF+XGB | 100h | 0.995 | 17 | 90% | Grid+PySR |
+| **LINK** | **7h** | XGB+LGBM | 311h | 0.9974 | 8 | 90% | Refined+PySR |
 
 ### Trading Config
 
 ```
-BTC:  8h_only      @70%  ($1,000 max)  enabled
-ETH:  8h_only      @70%  ($1,000 max)  disabled
-XRP:  either_agree @60%                 disabled
-DOGE: 8h_only      @75%                 disabled
-SOL:  4h_only      @75%                 disabled
-LINK: 8h_only      @75%  ($1,000 max)  enabled
-ADA:  4h_only      @75%                 disabled
-AVAX: 4h_only      @60%                 disabled
-DOT:  8h_only      @80%                 disabled
+BTC:  6h_only      @85%  ($12,000 max)  enabled
+ETH:  both_agree   @90%  ($2,000 max)   enabled
+XRP:  both_agree   @80%                  disabled
+SOL:  both_agree   @90%                  disabled
+LINK: both_agree   @90%                  disabled
+DOGE: both_agree   @80%                  disabled
+ADA:  both_agree   @80%                  disabled
+AVAX: both_agree   @90%                  disabled
+DOT:  both_agree   @80%                  disabled
 ```
 
 ---
@@ -293,67 +263,58 @@ DOT:  8h_only      @80%                 disabled
 
 ```
 engine/
-├── crypto_trading_system_deku.py        # Deku production — Optuna, Modes D/F/DF/B
-├── crypto_trading_system_doohan_v1_6.py # Doohan V1.6 production — grid + refine, Modes D/DGF/G/F
-├── crypto_trading_system_deku_15m.py    # Deku V15 — 15-min candles
-├── crypto_trading_system_casca.py       # CASCA standby — PF scoring, Modes A/B/D/E/F/DF
-│
-├── crypto_revolut_deku.py               # Deku live trader
-├── crypto_revolut_doohan.py             # Doohan live trader
-├── crypto_revolut_trader.py             # CASCA live trader
-├── crypto_live_trader_deku.py           # Deku signal generation (library)
-├── crypto_live_trader_doohan.py         # Doohan signal generation (library)
-├── crypto_live_trader.py                # CASCA signal generation (library)
-│
-├── hardware_config.py                   # Auto-detect Desktop/Laptop config
-├── download_macro_data.py               # Macro/sentiment/cross-asset downloader
-│
-├── backtest_doohan_v1_6.py              # Doohan V1.6 backtest (top 6 vs Deku)
-│
-├── cfd/
-│   ├── ib_auto_trader.py                # DAX CFD trader (Broly 1.2)
-│   ├── ib_auto_trader_test.py           # S&P 500 CFD overnight
-│   └── broly.py                         # Enhancement layer (regime detection)
-│
-├── tools/
-│   ├── check_balance.py                 # Exchange balance
-│   ├── check_trades.py                  # Trade history
-│   ├── debug_price.py                   # API price diagnostic
-│   ├── revolut_x_test.py               # API connectivity test
-│   ├── detect_hardware.py               # Hardware detection → config
-│   ├── buy_btc.py                       # Manual BTC purchase
-│   ├── backtest_v5_v15.py              # V5 vs V15 backtest comparison
-│   └── ib_test_connection.py            # IB broker connectivity test
-│
-├── data/
-│   ├── {asset}_hourly_data.csv          # Hourly OHLCV (Binance)
-│   ├── {asset}_15m_data.csv             # 15-min OHLCV
-│   ├── {asset}_30m_data.csv             # 30-min OHLCV
-│   ├── macro_data/                      # VIX, DXY, S&P500, Fear&Greed, etc.
-│   └── indices/                         # DAX, S&P500, SMI, CAC40 OHLCV
-│
-├── models/
-│   ├── crypto_deku_best_models.csv      # Deku production models
-│   ├── crypto_doohan_v1_6_production.csv # Doohan V1.6 production models
-│   ├── crypto_doohan_v1_6_best_models.csv # Doohan V1.6 top 6 candidates
-│   ├── crypto_doohan_v1_6_grid_*.csv    # Doohan V1.6 full grid results
-│   ├── crypto_casca_best_models.csv     # CASCA standby models
-│   ├── crypto_deku_15m_best_models.csv  # Deku V15 models
-│   └── crypto_feature_analysis_*.csv    # Feature scores
-│
-├── config/                              # NOT in git — credentials + state
-│   ├── trading_config_deku.json         # Deku per-asset strategy + confidence
-│   ├── trading_config_doohan.json       # Doohan per-asset strategy + confidence
-│   ├── trading_config.json              # CASCA per-asset strategy
-│   ├── revolut_x_config.json            # Exchange API key
-│   ├── private.pem                      # Ed25519 signing key
-│   ├── telegram_config.json             # Bot token
-│   └── position_*.json                  # Position state per asset
-│
-├── charts/                              # Backtest PNGs + interactive HTML
-├── archive/                             # Superseded versions (V3–V5.6, Doohan V1.1–V1.5)
-├── CLAUDE.md                            # Claude Code instructions
-└── README.md
++-- crypto_trading_system_doohan.py    # Doohan V1.7.1 production -- Modes P/D/V/H/S
++-- crypto_revolut_doohan.py           # Auto-trader (reads trading_config_doohan.json)
++-- crypto_live_trader_doohan.py       # Signal generation library (not run directly)
++-- crypto_optimizer_bot.py            # Telegram bot for remote optimization
++-- hardware_config.py                 # Auto-detect Desktop/Laptop config
++-- download_macro_data.py             # Macro/sentiment/cross-asset downloader
++-- pysr_discover_features.py          # Offline PySR discovery (historical window)
++-- start_trader.bat                   # Trader launcher with auto-restart + logging
++-- start_optimizer.bat                # Optimizer bot launcher with auto-restart + logging
++-- git_push.bat                       # Git push helper
+|
++-- cfd/
+|   +-- ib_auto_trader.py             # DAX CFD trader (Broly 1.2)
+|   +-- ib_auto_trader_test.py        # S&P 500 CFD overnight
+|   +-- broly.py                      # Enhancement layer (regime detection)
+|
++-- tools/
+|   +-- check_balance.py              # Exchange balance
+|   +-- check_trades.py               # Trade history
+|   +-- debug_price.py                # API price diagnostic
+|   +-- revolut_x_test.py             # API connectivity test
+|   +-- detect_hardware.py            # Hardware detection -> config
+|   +-- buy_btc.py                    # Manual BTC purchase
+|   +-- backtest_v5_v15.py            # Legacy backtest comparison
+|   +-- ib_test_connection.py         # IB broker connectivity test
+|
++-- data/
+|   +-- {asset}_hourly_data.csv       # Hourly OHLCV (Binance)
+|   +-- macro_data/                   # VIX, DXY, S&P500, Fear&Greed, etc.
+|   +-- indices/                      # DAX, S&P500, SMI, CAC40 OHLCV
+|
++-- models/
+|   +-- crypto_doohan_v1_7_1_production.csv     # Production model (written by Mode V)
+|   +-- crypto_doohan_v1_7_1_best_models.csv    # Top 6 candidates per (asset, horizon)
+|   +-- crypto_doohan_v1_7_1_grid_*.csv         # Full grid results (324 evals)
+|   +-- pysr_{ASSET}_{H}h.json                  # PySR symbolic expressions
+|   +-- pysr_{ASSET}_{H}h_report.txt            # PySR discovery reports
+|
++-- config/                           # NOT in git -- credentials + state
+|   +-- trading_config_doohan.json    # Per-asset: horizon, min_confidence, strategy, max_position
+|   +-- revolut_x_config.json         # Exchange API key
+|   +-- private.pem                   # Ed25519 signing key
+|   +-- telegram_config.json          # Bot token (trader)
+|   +-- telegram_optimizer_config.json # Bot token (optimizer -- separate)
+|   +-- position_{ASSET}.json         # Position tracking
+|   +-- signal_log.csv                # Signal history (for /chart)
+|
++-- logs/                             # Auto-generated by start_trader.bat / optimization runs
++-- charts/                           # Backtest PNGs + interactive HTML
++-- archive/                          # All legacy versions (Deku, CASCA, V1.1-V1.7, etc.)
++-- CLAUDE.md                         # Claude Code instructions
++-- README.md
 ```
 
 ---
@@ -366,10 +327,10 @@ One shared engine folder synced via Google Drive. Only the venv is local per mac
 
 | Machine | Engine Path | Venv | CPU | GPU |
 |---------|-------------|------|-----|-----|
-| Desktop (primary) | `G:\engine\` | `C:\algo_trading\venv\` | i7-14700KF | RTX 4080 |
+| Desktop (primary) | `G:\Autres ordinateurs\My laptop\engine\` | `C:\algo_trading\venv\` | i7-14700KF | RTX 4080 |
 | Laptop | `G:\Autres ordinateurs\My laptop\engine\` | `C:\Users\Alex\algo_trading\venv\` | 16 cores | RTX 3070 Ti |
 
-`hardware_config.py` auto-detects Desktop (26 workers) vs Laptop (14 workers).
+`hardware_config.py` auto-detects Desktop (26 workers) vs Laptop (14 workers). LGBM uses GPU (`device='gpu'`).
 
 ### Installation
 
@@ -377,19 +338,17 @@ One shared engine folder synced via Google Drive. Only the venv is local per mac
 # Desktop
 python -m venv C:\algo_trading\venv
 C:\algo_trading\venv\Scripts\activate.bat
-pip install -r G:\engine\requirements.txt
-python tools/detect_hardware.py
+pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
 
 # Laptop
 python -m venv C:\Users\Alex\algo_trading\venv
 C:\Users\Alex\algo_trading\venv\Scripts\activate.bat
 pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
-python tools/detect_hardware.py
 ```
 
 ### Key Dependencies
 
-`pandas`, `numpy`, `scikit-learn`, `lightgbm` (GPU), `xgboost`, `optuna`, `ccxt`, `yfinance`, `pynacl`, `cryptography`, `matplotlib`, `joblib`, `PyWavelets`
+`pandas`, `numpy`, `scikit-learn`, `lightgbm` (GPU), `xgboost`, `optuna`, `ccxt`, `yfinance`, `pynacl`, `cryptography`, `matplotlib`, `joblib`, `pysr`
 
 ---
 
@@ -397,31 +356,33 @@ python tools/detect_hardware.py
 
 ```python
 # Trading costs
-TRADING_FEE_BASE = 0.0009       # 0.09% taker fee
-SLIPPAGE = 0.0002               # 0.02% estimated
-TRADING_FEE = 0.0011            # total per trade
+TRADING_FEE_BASE = 0.0009       # 0.09% Revolut X taker fee (0% maker)
+SLIPPAGE = 0.0002               # 0.02% estimated slippage
+TRADING_FEE = 0.0011            # total cost per trade (fee + slippage)
 
-# Horizons
-HORIZON_SHORT = 4               # short prediction horizon
-HORIZON_LONG = 8                # long prediction horizon
+# Grid search (Mode D)
+GRID_COMBOS = ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']  # 3 viable combos
+GRID_WINDOWS = [72, 100, 150, 200, 250, 300]       # window sizes
+GRID_FEATURES = [5, 10, 15, 20, 25, 30]            # feature counts
+GRID_GAMMAS = [0.995, 0.997, 0.999]                # temporal decay values
+# Total: 3 x 6 x 6 x 3 = 324 evaluations per horizon
 
-# Deku
-DIAG_STEP = 36                  # walk-forward step (2× CASCA)
-DIAG_WINDOWS = [24, 36, 48, 72, 100, 150, 200]
-GAMMA_RANGE = [0.994, 1.0]      # continuous gamma search
-MIN_TRADES = 8                  # reject low-trade trials
-DEKU_DEFAULT_TRIALS = 150       # auto-extends to 200 then 250 if APF < 1.7
-APF_EXTEND_THRESH = 1.7         # extension threshold
-
-# CASCA
-DIAG_STEP = 72                  # walk-forward step
-DIAG_WINDOWS = [48, 72, 100, 150, 200]
-
-# Shared
-MIN_CONFIDENCE = 75             # fallback — overridden per asset by Mode F
+# Walk-forward
+DIAG_STEP = 36                  # walk-forward step size
 MAX_DIAG_HOURS = 4320           # 6-month data cap
-REPLAY_HOURS = 200              # Mode B/D signal replay
-REPLAY_HOURS_F = 400            # Mode F — longer for more trades
+EMBARGO_CANDLES = horizon       # label overlap fix (dynamic per horizon)
+
+# Optuna refinement
+DEKU_DEFAULT_TRIALS = 150       # Optuna trial count
+REFINE_TRIALS = 50              # Optuna refine trials per config
+REFINE_TOP_N = 3                # top N D candidates to refine
+
+# Validation
+MODE_G_REPLAY_HOURS = 336       # 2-week backtest window
+MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
+MIN_CONFIDENCE = 75             # global fallback (overridden per asset by Mode V/H)
+MIN_COMBO_SIZE = 2              # no solo models
+MIN_TRADES = 8                  # reject unreliable configs
 ```
 
 ---
@@ -429,15 +390,8 @@ REPLAY_HOURS_F = 400            # Mode F — longer for more trades
 ## Pending Work
 
 ### Active
-1. **Doohan V1.6 DGF overnight run** — Running BTC, ETH, LINK 8h via `python crypto_trading_system_doohan_v1_6.py DGF BTC,ETH,LINK 8h`. Full pipeline: grid (432 evals) → backtest → Optuna refine → strategy comparison.
-
-### Completed
-- **Doohan V1.6 promoted to production** — DONE (2026-03-24). Exhaustive grid + Optuna refine. 6 signal-distinct combos. Trader wired to V1.6 production CSV. Doohan V1.1–V1.5 archived.
-- **LGBM dominance proven** — DONE (2026-03-23). LGBM alone determines all ensemble signals when present. XGB hurts LGBM. 26 combos reduced to 6 signal-distinct groups.
-- **Doohan V1.3 BTC 8h** — DONE (2026-03-23). Multi-seed Optuna (3×150 trials). V1.3 #2 beats Deku at conf>=90%. Superseded by V1.6.
-- **CPCV investigation** — DONE (2026-03-22). V1.3.1 + V1.4 tested. Gamma=1.0 failed. CPCV dropped. Finding: 4h overfits (PBO=1.0), 8h reliable, LR+LGBM core required.
-- **Telegram UX overhaul** — DONE (2026-03-22). Candlestick charts, inline button config, colorblind blue scheme.
-- **Multi-asset expansion** — DONE (2026-03-21). All 9 assets optimized. BTC+LINK activated for live trading.
+1. **Expand to remaining assets** -- Run Mode P + H for DOGE, ADA, AVAX, DOT (LINK, XRP, SOL already done)
+2. **Re-run DV for BTC with fresh PySR** -- Mode P re-run 2026-03-26, DV pending with new expressions
 
 ---
 
@@ -445,27 +399,20 @@ REPLAY_HOURS_F = 400            # Mode F — longer for more trades
 
 | Date | Milestone |
 |------|-----------|
-| **2026-03-24** | **Doohan V1.6 promoted to production.** Exhaustive grid (6 combos × 4 windows × 6 features × 3 gammas = 432 evals) + Optuna refine. LGBM dominance proven — 26 combos reduced to 6 signal-distinct groups. DGF pipeline: grid → backtest → refine → strategy. Doohan V1.1–V1.5 archived. |
-| **2026-03-23** | **LGBM dominance discovery.** LGBM alone determines all ensemble signals. XGB hurts LGBM. Doohan V1.3 BTC 8h multi-seed results validated. |
-| **2026-03-22** | **CPCV investigation concluded.** V1.3.1 CPCV + V1.4 gamma=1.0 tested. CPCV dropped — gamma essential, 4h unreliable. V1.5 started (dynamic data cap + holdout comparison). Telegram UX overhaul (candlestick charts, inline buttons, colorblind blue scheme). |
-| **2026-03-21** | **Multi-asset expansion.** Added SOL, LINK, ADA, AVAX, DOT. All 9 assets optimized. Per-asset DF pipeline. 150 default trials. Diversity-aware holdout. Optional enhancements. BTC+LINK activated for live trading. Top: LINK 8h +16.4%, ADA 8h +21.3%, AVAX 8h +19.6%. |
-| **2026-03-20** | **Deku promoted to production.** 3-fold holdout validation. Enhancements tested and rejected. Auto-extend trials. |
-| **2026-03-19** | Deku tuning: DIAG_STEP=36, expanded search space, `--metric` flag. Deku trader + `/optimize` Telegram. ETH DF: 4h +79.8%, 8h +77.1%. |
-| **2026-03-18** | **Deku release.** Optuna TPE+Hyperband, XGBoost, APF scoring, LGBM importance. BTC 4h: +54.2% (2× CASCA). Deku V15 + fusion test. |
-| **2026-03-17** | CASCA DF BTC (RF+GB 4h PF=5.0). MIN_COMBO_SIZE=2. V1.3.1 (per-model features — dead end). |
-| **2026-03-15–16** | **CASCA release.** PF scoring replaces acc×ret. V5 archived. V15/V30 Cacarot. Temporal decay (Cacarot). |
-| **2026-03-10** | **V5 production.** acc×(1+ret/100) scoring. Mode F. BTC 2y: 4h 80.2%, 8h 84.7%. |
-| **2026-03-08** | **V4.** Bootstrap CI, Calmar/Sharpe scoring. Mock validation. |
-| **2026-03-07** | 8h horizon BTC 80.3%. "Both Agree" strategy. Crypto auto-trader. |
-| **2026-03-04** | Dual horizon (4h+8h). Mode E. Derivative features. |
-| **2026-03-02** | Macro features (VIX, DXY, S&P500). Modes A/B/C. |
-| **2026-02-22** | **Broly 1.2.** IB auto-trader for DAX CFDs. |
+| **2026-03-26** | V1.8 LSTM test -- FAILED. LSTM solo: 0 valid results. LSTM combos identical to RF combos. Not adopted. BTC Mode P re-run. LINK Mode P + H started. SOL Mode H completed (8h winner, +22.43%). |
+| **2026-03-25** | Telegram optimizer bot. PySR leakage fix (historical window). PySR promoted to production. ETH + SOL Mode H. BTC embargo-verified (4h overfit, 6h production). V1.7.2 regularization test -- wash, not adopted. |
+| **2026-03-24** | Doohan V1.7.1 promoted to production. Deku archived. Variable horizon support. New Mode H. Order-independent CLI. Dead code cleanup (~1,435 lines). Root folder cleanup (28 files archived). |
+| **2026-03-23** | LGBM dominance proven -- 26 combos reduced to 6 signal-distinct groups. Doohan V1.3 multi-seed validated. CPCV investigation concluded (dropped). |
+| **2026-03-22** | Telegram UX overhaul (candlestick charts, inline buttons). CPCV tested and dropped. |
+| **2026-03-21** | Multi-asset expansion -- all 9 assets optimized. BTC + LINK activated for live trading. |
+| **2026-03-20** | Deku promoted to production. 3-fold holdout validation. |
+| **2026-03-18** | Deku release -- Optuna TPE+Hyperband, XGBoost, APF scoring, LGBM importance. |
+| **2026-03-15** | CASCA release -- profit factor scoring. Temporal decay (Cacarot). |
+| **2026-03-10** | V5 production. Mode F strategy selection. |
+| **2026-03-04** | Dual horizon (4h+8h). Derivative features. |
+| **2026-02-22** | Broly 1.2 -- IB auto-trader for DAX CFDs. |
 | **2026-02-21** | Initial commit. |
 
-### Evolution: Deku / Doohan V1.6 > CASCA > V5 > V4 > V3
+### Evolution
 
-- **Deku** — Optuna Bayesian optimization, XGBoost (5th model), APF scoring, continuous gamma, LGBM importance ranking. Finds better configs in similar time.
-- **Doohan V1.6** — Exhaustive grid over 6 signal-distinct combos + Optuna refinement. Proven that LGBM dominates all combos. Complementary to Deku — grid finds the full landscape, Optuna fine-tunes.
-- **CASCA** — Profit factor scoring. Fixed V5's broken formula but limited by grid search.
-- **V5** — `acc × (1 + ret/100)` scoring. Picked money-losing models because accuracy dominated.
-- **V4** — Calmar/Sharpe scoring. Biased toward low-trade configs.
+Doohan V1.7.1 > Doohan V1.6 > Deku > CASCA > V5 > V4 > V3. All legacy systems archived.
