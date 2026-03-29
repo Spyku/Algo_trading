@@ -402,9 +402,8 @@ MIN_TRADES = 8                  # reject unreliable configs
 ## Pending Work
 
 ### Active
-1. **4-month regime backtest running on Desktop** -- `python tools/backtest_regime_master.py --months 4` testing all horizon combos (4-14h) × 22 regime detectors. Results will determine best bull/bear switching strategy for Ed.
-2. **Run PySR regime discovery** -- `python tools/pysr_discover_regime.py --months 4` then compare vs hand-crafted detectors
-3. **Ed dry-run validation** -- Start `python crypto_revolut_ed.py --dry-run --loop` alongside Doohan to compare live signals before going live
+1. **ETH HRS running on Desktop** -- `python crypto_trading_system_ed.py HRS ETH 5,6,7,8,10,12h --skip --replay 2880`. Trains 10h/12h, reuses 5-8h, then regime + confidence.
+2. **SOL HRS running on Laptop** -- `python crypto_trading_system_ed.py HRS SOL 5,6,7,8,10,12h --skip --replay 2880`. Same pipeline.
 
 ### Completed (2026-03-29)
 - **Ed V1.0 tested and bug-fixed** -- Fixed: max_position_usd always 0 (BUY never executed), shared position files with Doohan, unnecessary model loading, stale variable refs. All signal generation tests pass.

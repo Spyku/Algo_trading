@@ -4139,324 +4139,260 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
 
 # ============================================================
-# MODE S: STRATEGY COMPARISON (both_agree / either_agree / 4h / 8h)
+# MODE S: REGIME CONFIDENCE OPTIMIZATION
 # ============================================================
-def run_strategy_comparison(assets_list, horizons=None, skip_confidence=False):
+def run_mode_s(assets_list, horizons, args=None):
     """
-    Backtest all combination strategies for each asset using saved model configs:
-      - both_agree  : trade only when 4h AND 8h agree
-      - either_agree: trade when either 4h OR 8h signals
-      - 4h_only     : use 4h model alone
-      - 8h_only     : use 8h model alone
-    CASCA: scores by return directly. Updates trading_config.json with best strategy.
-    Requires Mode D to have been run first for both 4h and 8h.
-    If skip_confidence=True, only update strategy (not min_confidence) — used in DVS
-    where Mode V already set the optimal confidence.
+    Ed Mode S: Given a regime detector and bull/bear horizon pair (from regime_config_ed.json
+    or Mode R), optimize confidence thresholds per regime independently.
+
+    Sweeps bull_conf × bear_conf (7×7 = 49 combos), picks the best, writes config.
+
+    Flow:
+        1. Read regime_config_ed.json for detector + horizon pair
+        2. Generate signals for bull_h and bear_h
+        3. Build regime indicators
+        4. Sweep confidence per regime (65-95%)
+        5. Pick best combo by return × win_rate scoring
+        6. Write optimized config to regime_config_ed.json
     """
-    csv_path = _get_models_csv_path()
-    if not os.path.exists(csv_path):
-        print("  ERROR: No saved models found. Run Mode D first.")
-        return
+    replay = int(getattr(args, 'replay', 0)) or 2880
+    top_n = int(getattr(args, 'top', 0)) or 15
 
-    df_models = pd.read_csv(csv_path)
-
-    print("\n" + "=" * 60)
-    print("  MODE S: STRATEGY COMPARISON")
-    print("=" * 60)
-
-    # Load trading config for updates
-    metric_suffix = f'_{OPTUNA_METRIC}' if OPTUNA_METRIC != 'apf' else ''
-    tcfg_path = f'{CONFIG_DIR}/regime_config_ed{metric_suffix}.json'
+    # Load regime config
+    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
     try:
         with open(tcfg_path) as f:
-            trading_config = json.load(f)
-    except Exception:
-        trading_config = {}
+            regime_config = json.load(f)
+    except Exception as e:
+        print(f"  ERROR: Cannot read {tcfg_path}: {e}")
+        return
+
+    CONF_LEVELS = [65, 70, 75, 80, 85, 90, 95]
+
+    print(f"\n{'='*80}")
+    print(f"  MODE S: REGIME CONFIDENCE OPTIMIZATION")
+    print(f"  Assets: {', '.join(assets_list)} | Replay: {replay}h")
+    print(f"  Confidence sweep: {CONF_LEVELS}")
+    print(f"{'='*80}")
+
+    df_models = pd.read_csv(PRODUCTION_CSV)
 
     for asset in assets_list:
-        print(f"\n{'='*60}")
-        print(f"  {asset}: Strategy Comparison")
-        print(f"{'='*60}")
+        acfg = regime_config.get(asset, {})
+        detector = acfg.get('regime_detector', {})
+        det_type = detector.get('type', 'sma_cross')
+        det_params = detector.get('params', {})
+        bull_h = acfg.get('bull', {}).get('horizon')
+        bear_h = acfg.get('bear', {}).get('horizon')
 
-        # Load configs for each horizon (use CLI horizons if provided, else defaults)
-        active_horizons = sorted(horizons) if horizons else sorted(AVAILABLE_HORIZONS)
-        h_short = active_horizons[0]
-        h_long = active_horizons[-1] if len(active_horizons) > 1 else active_horizons[0]
-        cfg_by_h = {}
-        for h in active_horizons:
-            cfg_h = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
-            if len(cfg_h) > 0:
-                cfg_by_h[h] = cfg_h
-
-        has_short = h_short in cfg_by_h
-        has_long = h_long in cfg_by_h
-
-        if not has_short and not has_long:
-            print(f"  No saved models for {asset}. Run Mode D first.")
+        if not bull_h or not bear_h:
+            print(f"\n  {asset}: no bull/bear horizons in config — skipping")
             continue
 
-        # Generate signals for available horizons
-        signals_by_h = {}
+        det_label = f"{det_type}({det_params.get('fast','?')}/{det_params.get('slow','?')})" if det_type == 'sma_cross' else det_type
 
-        with _suppress_stderr():
-            for h in active_horizons:
-                if h not in cfg_by_h:
-                    continue
-                row_h = cfg_by_h[h].iloc[0]
-                feats_h = row_h['optimal_features'].split(',') if pd.notna(row_h.get('optimal_features', '')) else None
-                gamma_h = float(row_h.get('gamma', 1.0)) if pd.notna(row_h.get('gamma', 1.0)) else 1.0
-                sigs = generate_signals(asset, row_h['models'].split('+'),
-                                        int(row_h['best_window']), REPLAY_HOURS_S,
-                                        feature_override=feats_h, horizon=h, gamma=gamma_h)
-                signals_by_h[h] = simulate_portfolio(sigs)
+        print(f"\n{'='*80}")
+        print(f"  {asset} — detector: {det_label} | bull={bull_h}h | bear={bear_h}h")
+        print(f"{'='*80}")
 
-        # Build merged timeline
-        sig_maps = {h: {s['datetime']: s for s in (signals_by_h.get(h) or [])} for h in active_horizons}
-        all_dts = set()
-        for sm in sig_maps.values():
-            all_dts.update(sm.keys())
-        all_times = sorted(all_dts)
+        # ── Generate signals for both horizons ──
+        signals_cache = {}
+        for h in [bull_h, bear_h]:
+            if h in signals_cache:
+                continue
+            rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
+            if len(rows) == 0:
+                print(f"  ERROR: No production model for {asset} {h}h")
+                break
+            row = rows.sort_values('combined_score', ascending=False).iloc[0]
+            feats = row['optimal_features'].split(',') if pd.notna(row.get('optimal_features', '')) else None
+            gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
 
-        if not all_times:
-            print(f"  No signals generated for {asset}.")
+            print(f"\n  Generating {h}h signals ({row['models']} w={int(row['best_window'])}h)...")
+            with _suppress_stderr():
+                sigs = generate_signals(asset, row['models'].split('+'),
+                                        int(row['best_window']), replay,
+                                        feature_override=feats, horizon=h, gamma=gamma)
+            result = {}
+            for s in sigs:
+                dt = s['datetime']
+                if isinstance(dt, str):
+                    dt = _dt_log.strptime(dt, '%Y-%m-%d %H:%M')
+                    s['datetime'] = dt
+                result[dt] = s
+            signals_cache[h] = result
+            print(f"    {h}h: {len(result)} signals ({sum(1 for s in result.values() if s['signal']=='BUY')} BUY)")
+
+        if len(signals_cache) < len(set([bull_h, bear_h])):
+            print(f"  Skipping {asset} — missing signals")
             continue
 
-        # Hold-out: evaluate strategies on last 33% of signals
-        n_signals = len(all_times)
-        holdout_start = int(n_signals * 0.67)
-        holdout_times = all_times[holdout_start:]
-        print(f"  Signals: {n_signals} total, evaluating on last {len(holdout_times)} (hold-out 33%)")
+        all_dts = sorted(set().union(*[set(s.keys()) for s in signals_cache.values()]))
 
-        # Define strategies to test
-        strategies = []
-        if has_short and has_long:
-            strategies = ['both_agree', 'either_agree', f'{h_short}h_only', f'{h_long}h_only']
-        elif has_short:
-            strategies = [f'{h_short}h_only']
-        elif has_long:
-            strategies = [f'{h_long}h_only']
+        # ── Build regime detector ──
+        print(f"\n  Building regime indicators...")
+        df_raw = load_data(asset)
+        df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
+        df_ind = df_raw.set_index('datetime').sort_index()
 
-        results = []
-        for strat in strategies:
+        for w in [24, 48, 72, 100, 200]:
+            df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
+        delta = df_ind['close'].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        df_ind['rsi14'] = 100 - (100 / (1 + rs))
+        for w in [24, 48, 72]:
+            df_ind[f'high_{w}'] = df_ind['high'].rolling(w).max()
+            df_ind[f'dd_{w}'] = (df_ind['close'] / df_ind[f'high_{w}'] - 1) * 100
+        df_ind['ema12'] = df_ind['close'].ewm(span=12).mean()
+        df_ind['ema26'] = df_ind['close'].ewm(span=26).mean()
+        df_ind['macd_line'] = df_ind['ema12'] - df_ind['ema26']
+        ind = df_ind.to_dict('index')
+
+        def safe(dt, fn, default=True):
+            if dt not in ind:
+                return default
+            try:
+                return fn(ind[dt])
+            except (KeyError, TypeError):
+                return default
+
+        # Build detector function from config
+        if det_type == 'sma_cross':
+            fast = int(det_params.get('fast', 24))
+            slow = int(det_params.get('slow', 100))
+            det_fn = lambda dt, _f=fast, _s=slow: safe(dt, lambda r: r[f'sma{_f}'] > r[f'sma{_s}'])
+        elif det_type == 'rsi':
+            level = float(det_params.get('level', 50))
+            det_fn = lambda dt, _l=level: safe(dt, lambda r: r['rsi14'] > _l)
+        elif det_type == 'drawdown':
+            thresh = float(det_params.get('threshold', -3))
+            window = int(det_params.get('window', 48))
+            det_fn = lambda dt, _w=window, _t=thresh: safe(dt, lambda r: r[f'dd_{_w}'] > _t)
+        elif det_type == 'macd':
+            det_fn = lambda dt: safe(dt, lambda r: r['macd_line'] > 0)
+        else:
+            det_fn = lambda dt: True  # fallback: always bull
+
+        # Count regime distribution
+        bull_count = sum(1 for dt in all_dts if det_fn(dt))
+        bear_count = len(all_dts) - bull_count
+        print(f"  Regime split: {bull_count} bull ({bull_count/len(all_dts)*100:.0f}%) / "
+              f"{bear_count} bear ({bear_count/len(all_dts)*100:.0f}%)")
+
+        # ── Sweep confidence combos ──
+        print(f"\n  Sweeping {len(CONF_LEVELS)}×{len(CONF_LEVELS)} = {len(CONF_LEVELS)**2} confidence combos...")
+
+        def _sim(bull_conf, bear_conf):
             cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
-            trades, wins, correct = 0, 0, 0
-            total_candles = 0
+            trades, wins = 0, 0
+            bull_trades, bear_trades = 0, 0
+            first_price, last_price = None, None
 
-            for dt in holdout_times:
-                s_short = sig_maps[h_short].get(dt) if has_short else None
-                s_long = sig_maps[h_long].get(dt) if has_long else None
-                price = (s_short or s_long)['close']
-                sig_s = s_short['signal'] if s_short else 'HOLD'
-                conf_s = s_short['confidence'] if s_short else 50
-                sig_l = s_long['signal'] if s_long else 'HOLD'
-                conf_l = s_long['confidence'] if s_long else 50
+            for dt in all_dts:
+                is_bull = det_fn(dt)
+                h = bull_h if is_bull else bear_h
+                conf = bull_conf if is_bull else bear_conf
 
-                # Determine combined signal based on strategy
-                if strat == 'both_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
-                        signal = 'SELL'
-                    elif sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= MIN_CONFIDENCE and conf_l >= MIN_CONFIDENCE:
-                        signal = 'BUY'
-                    else:
-                        signal = 'HOLD'
-                elif strat == 'either_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
-                        signal = 'SELL'
-                    elif (sig_s == 'BUY' and conf_s >= MIN_CONFIDENCE) or (sig_l == 'BUY' and conf_l >= MIN_CONFIDENCE):
-                        signal = 'BUY'
-                    else:
-                        signal = 'HOLD'
-                elif strat == f'{h_short}h_only':
-                    signal = sig_s if conf_s >= MIN_CONFIDENCE or sig_s == 'SELL' else 'HOLD'
-                else:  # Xh_only (long)
-                    signal = sig_l if conf_l >= MIN_CONFIDENCE or sig_l == 'SELL' else 'HOLD'
+                sigs = signals_cache.get(h)
+                if sigs is None:
+                    continue
+                s = sigs.get(dt)
+                if s is None:
+                    for oh in signals_cache:
+                        os_ = signals_cache[oh].get(dt)
+                        if os_:
+                            last_price = os_['close']
+                            if first_price is None:
+                                first_price = last_price
+                            break
+                    continue
 
-                # Simulate trade
-                if signal == 'BUY' and not in_pos:
+                price = s['close']
+                last_price = price
+                if first_price is None:
+                    first_price = price
+
+                if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
                     held = cash * (1 - TRADING_FEE) / price
                     cash = 0
                     in_pos = True
                     entry_px = price
                     trades += 1
-                elif signal == 'SELL' and in_pos:
+                    if is_bull:
+                        bull_trades += 1
+                    else:
+                        bear_trades += 1
+                elif s['signal'] == 'SELL' and in_pos:
                     cash = held * price * (1 - TRADING_FEE)
                     if price > entry_px:
                         wins += 1
                     held = 0
                     in_pos = False
 
-                # Accuracy: did signal match direction?
-                ref_sig = sig_s if s_short else sig_l
-                if ref_sig != 'HOLD':
-                    total_candles += 1
-                    if ref_sig == signal:
-                        correct += 1
+            if in_pos and last_price:
+                cash = held * last_price * (1 - TRADING_FEE)
+                if last_price > entry_px:
+                    wins += 1
 
-            # Close open position
-            if in_pos and holdout_times:
-                last_px = None
-                for sm in sig_maps.values():
-                    if holdout_times[-1] in sm:
-                        last_px = sm[holdout_times[-1]]['close']
-                        break
-                if last_px:
-                    cash = held * last_px * (1 - TRADING_FEE)
+            ret = (cash / 1000.0 - 1) * 100
+            wr = (wins / trades * 100) if trades > 0 else 0
+            bh = ((last_price / first_price - 1) * 100) if first_price and last_price else 0
+            return ret, trades, wr, bh, bull_trades, bear_trades
 
-            cum_ret = (cash / 1000.0 - 1) * 100
-            win_rate = (wins / trades * 100) if trades > 0 else 0
-            # Use underlying model accuracy (average of available horizons)
-            accs = [cfg_by_h[h].iloc[0].get('accuracy', 65) / 100 for h in cfg_by_h]
-            base_acc = sum(accs) / len(accs) if accs else 0.65
+        results = []
+        for bc in CONF_LEVELS:
+            for rc in CONF_LEVELS:
+                ret, tr, wr, bh, bt, rt = _sim(bc, rc)
+                score = ret * (wr / 100) if ret > 0 else ret
+                results.append({
+                    'bull_conf': bc, 'bear_conf': rc,
+                    'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
+                    'alpha': ret - bh, 'score': score,
+                    'bull_trades': bt, 'bear_trades': rt,
+                })
 
-            score = cum_ret  # rank strategies by return directly
-            results.append((strat, cum_ret, win_rate, trades, score))
+        results.sort(key=lambda x: x['score'], reverse=True)
 
-        # Sort by score
-        results.sort(key=lambda x: -x[4])
-        best_strat = results[0][0]
+        # ── Results ──
+        print(f"\n  {'='*100}")
+        print(f"  TOP {top_n} CONFIDENCE COMBOS — {asset} ({det_label}, bull={bull_h}h, bear={bear_h}h)")
+        print(f"  {'='*100}")
+        print(f"  {'#':>3}  {'BullC':>6}  {'BearC':>6}  {'Return':>8}  {'Trades':>7}  {'WR':>5}  "
+              f"{'Alpha':>7}  {'Score':>7}  {'BullTr':>7}  {'BearTr':>7}")
+        print(f"  {'-'*3}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
 
-        print(f"\n  {'Strategy':<16} {'Return':>8} {'WinRate':>8} {'Trades':>7} {'Score':>8}")
-        print(f"  {'-'*52}")
-        for strat, ret, wr, tr, sc in results:
-            marker = " <-- BEST" if strat == best_strat else ""
-            print(f"  {strat:<16} {ret:>+7.1f}% {wr:>7.0f}% {tr:>7d} {sc:>8.3f}{marker}")
+        for i, r in enumerate(results[:top_n]):
+            print(f"  {i+1:>3}  {r['bull_conf']:>5}%  {r['bear_conf']:>5}%  {r['return']:>+7.2f}%  "
+                  f"{r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  {r['score']:>7.2f}  "
+                  f"{r['bull_trades']:>7}  {r['bear_trades']:>7}")
 
-        print(f"\n  >>> BEST STRATEGY for {asset}: {best_strat}")
+        # Fixed confidence baseline (90/90)
+        fixed_90 = next((r for r in results if r['bull_conf'] == 90 and r['bear_conf'] == 90), None)
 
-        # -- Confidence threshold sweep --
-        # Replay the best strategy's signals with different thresholds
-        # No retraining — just filter the existing signals
-        CONF_THRESHOLDS = [60, 65, 70, 75, 80, 85, 90]
-        print(f"\n  Confidence threshold sweep (strategy={best_strat}):")
-        print(f"  {'Threshold':>10} {'Return':>8} {'WinRate':>8} {'Trades':>7} {'Score':>8}")
-        print(f"  {'-'*48}")
+        winner = results[0]
+        print(f"\n  {'='*100}")
+        print(f"  WINNER: bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"  Return: {winner['return']:+.2f}%  Trades: {winner['trades']}  WR: {winner['wr']:.0f}%  "
+              f"Alpha: {winner['alpha']:+.2f}%")
+        if fixed_90:
+            diff = winner['return'] - fixed_90['return']
+            print(f"  vs fixed 90/90: {fixed_90['return']:+.2f}% → improvement: {diff:+.2f}%")
+        print(f"  {'='*100}")
 
-        best_conf_score = -999
-        best_conf = MIN_CONFIDENCE  # fallback to global default
+        # ── Write to config ──
+        regime_config[asset]['bull']['min_confidence'] = winner['bull_conf']
+        regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
-        for thresh in CONF_THRESHOLDS:
-            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
-            trades_c, wins_c = 0, 0
+        with open(tcfg_path, 'w') as f:
+            json.dump(regime_config, f, indent=2)
+        print(f"\n  Config updated: {asset} bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
 
-            for dt in holdout_times:
-                s_short = sig_maps[h_short].get(dt) if has_short else None
-                s_long = sig_maps[h_long].get(dt) if has_long else None
-                price = (s_short or s_long)['close']
-                sig_s = s_short['signal'] if s_short else 'HOLD'
-                conf_s = s_short['confidence'] if s_short else 50
-                sig_l = s_long['signal'] if s_long else 'HOLD'
-                conf_l = s_long['confidence'] if s_long else 50
-
-                # Apply best strategy with this threshold
-                if best_strat == 'both_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
-                        signal = 'SELL'
-                    elif sig_s == 'BUY' and sig_l == 'BUY' and conf_s >= thresh and conf_l >= thresh:
-                        signal = 'BUY'
-                    else:
-                        signal = 'HOLD'
-                elif best_strat == 'either_agree':
-                    if sig_s == 'SELL' or sig_l == 'SELL':
-                        signal = 'SELL'
-                    elif (sig_s == 'BUY' and conf_s >= thresh) or (sig_l == 'BUY' and conf_l >= thresh):
-                        signal = 'BUY'
-                    else:
-                        signal = 'HOLD'
-                elif best_strat == f'{h_short}h_only':
-                    signal = sig_s if conf_s >= thresh or sig_s == 'SELL' else 'HOLD'
-                else:  # Xh_only (long)
-                    signal = sig_l if conf_l >= thresh or sig_l == 'SELL' else 'HOLD'
-
-                if signal == 'BUY' and not in_pos:
-                    held = cash * (1 - TRADING_FEE) / price
-                    cash = 0; in_pos = True; entry_px = price; trades_c += 1
-                elif signal == 'SELL' and in_pos:
-                    cash = held * price * (1 - TRADING_FEE)
-                    if price > entry_px: wins_c += 1
-                    held = 0; in_pos = False
-
-            if in_pos and holdout_times:
-                last_px = None
-                for sm in sig_maps.values():
-                    if holdout_times[-1] in sm:
-                        last_px = sm[holdout_times[-1]]['close']
-                        break
-                if last_px:
-                    cash = held * last_px * (1 - TRADING_FEE)
-
-            cum_ret_c = (cash / 1000.0 - 1) * 100
-            win_rate_c = (wins_c / trades_c * 100) if trades_c > 0 else 0
-            score_c = cum_ret_c  # CASCA: rank confidence thresholds by return
-            marker = ""
-            if score_c > best_conf_score:
-                best_conf_score = score_c
-                best_conf = thresh
-                marker = " <-- BEST"
-            print(f"  {thresh:>9}% {cum_ret_c:>+7.1f}% {win_rate_c:>7.0f}% {trades_c:>7d} {score_c:>8.3f}{marker}")
-
-        print(f"\n  >>> BEST THRESHOLD for {asset}: {best_conf}%")
-
-        # Generate chart for best strategy + threshold
-        chart_signals = []
-        for dt in all_times:
-            s_short = sig_maps[h_short].get(dt) if has_short else None
-            s_long = sig_maps[h_long].get(dt) if has_long else None
-            price = (s_short or s_long)['close']
-            sig_s_v = s_short['signal'] if s_short else 'HOLD'
-            conf_s_v = s_short['confidence'] if s_short else 50
-            sig_l_v = s_long['signal'] if s_long else 'HOLD'
-            conf_l_v = s_long['confidence'] if s_long else 50
-
-            if best_strat == 'both_agree':
-                if sig_s_v == 'SELL' or sig_l_v == 'SELL':
-                    signal = 'SELL'
-                elif sig_s_v == 'BUY' and sig_l_v == 'BUY' and conf_s_v >= best_conf and conf_l_v >= best_conf:
-                    signal = 'BUY'
-                else:
-                    signal = 'HOLD'
-            elif best_strat == 'either_agree':
-                if sig_s_v == 'SELL' or sig_l_v == 'SELL':
-                    signal = 'SELL'
-                elif (sig_s_v == 'BUY' and conf_s_v >= best_conf) or (sig_l_v == 'BUY' and conf_l_v >= best_conf):
-                    signal = 'BUY'
-                else:
-                    signal = 'HOLD'
-            elif best_strat == f'{h_short}h_only':
-                signal = sig_s_v if conf_s_v >= best_conf or sig_s_v == 'SELL' else 'HOLD'
-            else:
-                signal = sig_l_v if conf_l_v >= best_conf or sig_l_v == 'SELL' else 'HOLD'
-
-            best_conf_val = max(conf_s_v, conf_l_v)
-            rsi_val = (s_short or s_long).get('rsi', 50)
-            chart_signals.append({
-                'datetime': dt, 'close': price, 'signal': signal,
-                'confidence': best_conf_val, 'rsi': rsi_val,
-            })
-
-        chart_signals = simulate_portfolio(chart_signals)
-        first_cfg = cfg_by_h[h_short].iloc[0] if has_short else cfg_by_h[h_long].iloc[0]
-        model_info = {'best_combo': f'{best_strat}@{best_conf}%', 'best_window': 'F',
-                       'accuracy': base_acc * 100, 'gamma': first_cfg.get('gamma', 1.0)}
-        generate_backtest_chart(asset, chart_signals, model_info=model_info)
-
-        # Update trading config with strategy (and threshold unless skipped)
-        if asset not in trading_config:
-            trading_config[asset] = {}
-        trading_config[asset]['strategy'] = best_strat
-        if skip_confidence:
-            print(f"  >>> Updated trading_config.json: {asset} -> strategy={best_strat} (min_confidence kept from Mode V)")
-        else:
-            trading_config[asset]['min_confidence'] = best_conf
-            print(f"  >>> Updated trading_config.json: {asset} -> strategy={best_strat}, min_confidence={best_conf}%")
-
-    # Save updated trading config
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(tcfg_path, 'w') as f:
-        json.dump(trading_config, f, indent=2)
-
-    print("\n" + "=" * 60)
-    print("  STRATEGY COMPARISON COMPLETE")
-    print("=" * 60)
+    print(f"\n{'='*80}")
+    print(f"  MODE S COMPLETE")
+    print(f"{'='*80}")
 
 
 # ============================================================
@@ -4569,7 +4505,7 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
                     print(f"  Return: {best_sim['return_pct']:+.2f}%  trades={best_sim['trades']}  "
                           f"WR={best_sim['win_rate']:.0f}%  score={best_score:.2f}")
 
-        # ── Cross-horizon comparison ──
+        # ── Cross-horizon comparison (informational — Mode R picks the winner) ──
         if not horizon_results:
             print(f"\n  No valid results for {asset} across any horizon")
             continue
@@ -4584,44 +4520,16 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
         for h in sorted(horizon_results.keys()):
             hr = horizon_results[h]
             cfg = hr['cfg']
-            marker = ""
             print(f"  {h:>2}h | {hr['label']:<25} | {cfg['combo']:14s} | {cfg['window']:>3}h | "
                   f"{cfg['gamma']:>.3f} | {cfg['n_features']:>3} | {hr['conf']:>3}% | "
                   f"{hr['return_pct']:>+7.2f}% | {hr['trades']:>3} | {hr['win_rate']:>3.0f}% | "
                   f"{hr['buy_hold']:>+6.2f}%")
 
-        # Pick overall best horizon (return × win_rate scoring)
         best_h = max(horizon_results.keys(), key=lambda h: horizon_results[h]['score'])
         winner = horizon_results[best_h]
-
-        print(f"\n  >>> BEST HORIZON for {asset}: {best_h}h — {winner['return_pct']:+.2f}% "
+        print(f"\n  Best single horizon: {best_h}h — {winner['return_pct']:+.2f}% "
               f"(conf>={winner['conf']}%, {winner['trades']} trades)")
-        print(f"  >>> {winner['cfg']['combo']}  w={winner['cfg']['window']}h  "
-              f"g={winner['cfg']['gamma']:.4f}  f={winner['cfg']['n_features']}")
-
-        # Note: Mode V already saved the production CSV and trading config
-        # for each horizon individually. The user can read the comparison above
-        # and the best per-horizon models are already in production CSV.
-        # Trading config will have the LAST horizon's config — update it to the best:
-        tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
-        try:
-            with open(tcfg_path) as f:
-                trading_config = json.load(f)
-        except Exception:
-            trading_config = {}
-
-        if asset not in trading_config:
-            trading_config[asset] = {
-                'max_position_usd': 0,
-                'symbol': f'{asset}-USD',
-                'enabled': False,
-            }
-        trading_config[asset]['horizon'] = best_h
-        trading_config[asset]['min_confidence'] = winner['conf']
-
-        with open(tcfg_path, 'w') as f:
-            json.dump(trading_config, f, indent=2)
-        print(f"  >>> Trading config: {asset} → horizon={best_h}h, min_confidence={winner['conf']}%")
+        print(f"  Note: Run Mode R to find best bull/bear horizon pair, then Mode S for confidence.")
 
     elapsed = (time.time() - t_total) / 60
     print(f"\n  Mode H complete: {elapsed:.1f} min total")
@@ -4895,7 +4803,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'S', 'V', 'H', 'R'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'R', 'RS'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -4949,10 +4857,11 @@ Modes:
   D       Grid optimization (combo x window x gamma x features)
   V       Validate (top 6 from D → refine top 3 → pick best)
   DV      D then V
-  S       Strategy comparison (both_agree / either_agree / Xh_only)
-  DS      D then S
-  DVS     D then V then S (full pipeline)
-  H       Horizon sweep (D+V per horizon → compare → save best)
+  S       Regime confidence optimization (sweep bull/bear confidence → write config)
+  RS      R then S (find best regime pair → optimize confidence)
+  H       Horizon sweep (D+V per horizon — produces models, no winner picking)
+  HRS     Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)
+  DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
 
 Assets:
@@ -4972,15 +4881,17 @@ Options:
   --help, -h          Show this help
 
 Examples:
+  python crypto_trading_system_ed.py HRS BTC 5,6,7,8h          # full Ed pipeline
+  python crypto_trading_system_ed.py DVRS BTC 5,6,7,8h         # same as HRS
+  python crypto_trading_system_ed.py RS BTC 5,6,7,8h            # regime pair + confidence (skip D/V)
+  python crypto_trading_system_ed.py S BTC                       # optimize confidence only (uses current config)
+  python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880 --conf 85 --top 20
   python crypto_trading_system_ed.py P BTC 6h                  # discover PySR features (~30-120 min)
-  python crypto_trading_system_ed.py H BTC 5,6,7,8h          # full horizon sweep
+  python crypto_trading_system_ed.py H BTC 5,6,7,8h          # horizon sweep (D+V only)
   python crypto_trading_system_ed.py H BTC 5,6,7h --skip     # skip D, re-run V only
   python crypto_trading_system_ed.py DV ETH 6h               # optimize + validate ETH 6h
   python crypto_trading_system_ed.py D BTC,ETH 8h --trials 200
   python crypto_trading_system_ed.py V BTC 6h                 # re-validate existing results
-  python crypto_trading_system_ed.py BTC D 8h                 # order doesn't matter
-  python crypto_trading_system_ed.py R BTC 5,6,7,8h           # regime backtest with defaults
-  python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 4320 --conf 85 --top 20
 """)
         return
 
@@ -5032,20 +4943,25 @@ Examples:
         if assets_list is None:
             assets_list = list(ASSETS.keys())
         if horizons is None:
-            horizons = list(AVAILABLE_HORIZONS) if mode in ('P', 'DS', 'DV', 'DVS') else [HORIZON_SHORT]
+            if mode in ('H', 'HRS', 'DVRS', 'R', 'RS'):
+                horizons = [5, 6, 7, 8]  # Ed default: test 4 horizons
+            elif mode in ('P', 'DV', 'DVS'):
+                horizons = list(AVAILABLE_HORIZONS)
+            else:
+                horizons = [HORIZON_SHORT]
 
-        trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'H') else ""
-        skip_str = " | --skip" if flag_skip and mode == 'H' else ""
+        trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'DVRS', 'H', 'HRS') else ""
+        skip_str = " | --skip" if flag_skip and mode in ('H', 'HRS', 'DVRS') else ""
         h_str = ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  DOOHAN: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  ED: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
         print("=" * 60)
 
     else:
 
         print("=" * 60)
-        print("  CRYPTO HOURLY ML TRADING SYSTEM -- DOOHAN")
-        print("  Exhaustive grid + Optuna refine + live backtest validation")
+        print("  CRYPTO HOURLY ML TRADING SYSTEM -- ED")
+        print("  Exhaustive grid + Optuna refine + regime-switching validation")
         print(f"  Prediction: variable horizons (specify via CLI)")
         print(f"  Macro data: {'FOUND' if has_macro else 'NOT FOUND -- run download_macro_data.py'}")
         print("=" * 60)
@@ -5054,13 +4970,15 @@ Examples:
         print("  P.  PySR FEATURE DISCOVERY (symbolic regression → new features)")
         print("  D.  GRID OPTIMIZATION (combo × window × gamma × features)")
         print("  DV. D then V (grid + validate top 6 + refine top 3 + pick best)")
-        print("  DVS. DV then S (full pipeline + strategy comparison)")
-        print("  DS. D then S (optimize + strategy comparison)")
-        print(f"  S.  STRATEGY COMPARISON (both_agree / either_agree / {HORIZON_SHORT}h / {HORIZON_LONG}h)")
+        print("  DVS. DV then S (optimize + validate + confidence)")
+        print("  S.  REGIME CONFIDENCE OPTIMIZATION (sweep bull/bear confidence)")
+        print("  RS. R then S (find best regime pair + optimize confidence)")
         print("  V.  VALIDATE (top 6 candidates from Mode D, pick best)")
-        print("  H.  HORIZON SWEEP (D+V per horizon, compare, save best)")
+        print("  H.  HORIZON SWEEP (D+V per horizon — produces models)")
+        print("  HRS. Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)")
         print("  R.  REGIME BACKTEST (bull/bear horizon switching with regime detectors)")
-        mode = input("\nEnter P/D/DV/DVS/DS/S/V/H/R: ").strip().upper()
+        print("  DVRS. Same as HRS for specified horizons")
+        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS: ").strip().upper()
 
 
         if mode not in VALID_MODES:
@@ -5101,7 +5019,7 @@ Examples:
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DS', 'DV', 'DVS'):
+        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -5110,7 +5028,7 @@ Examples:
                 pass
 
     # Execute mode
-    if run_all_metrics and mode in ('D', 'DS'):
+    if run_all_metrics and mode == 'D':
         # --metric all: run Mode DS for each metric, then compare
         all_results = {}  # metric -> {asset: {strategy, conf, return, win_rate, trades}}
         for metric in sorted(VALID_METRICS):
@@ -5124,7 +5042,11 @@ Examples:
                     print(f"  RUNNING {h}h HORIZON")
                     print(f"{'#'*60}")
                 run_mode_d_optuna(assets_list, horizon=h, n_trials=n_trials, resume=flag_resume)
-            run_strategy_comparison(assets_list, horizons)
+            class _Args: pass
+            _r_args = _Args()
+            _r_args.replay = 2880
+            _r_args.top = 15
+            run_mode_s(assets_list, horizons, _r_args)
 
             # Read the trading config that Mode S just wrote
             metric_suffix = f'_{metric}' if metric != 'apf' else ''
@@ -5197,10 +5119,32 @@ Examples:
         _r_args.conf = flag_conf
         _r_args.top = flag_top
         _run_mode_r(assets_list, horizons, _r_args)
+    elif mode == 'S':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.top = flag_top
+        run_mode_s(assets_list, horizons, _r_args)
+    elif mode == 'RS':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.conf = flag_conf
+        _r_args.top = flag_top
+        _run_mode_r(assets_list, horizons, _r_args)
+        run_mode_s(assets_list, horizons, _r_args)
+    elif mode in ('HRS', 'DVRS'):
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.conf = flag_conf
+        _r_args.top = flag_top
+        _run_mode_r(assets_list, horizons, _r_args)
+        run_mode_s(assets_list, horizons, _r_args)
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
-    elif mode in ('D', 'DS', 'DV', 'DVS'):
-        # Per-asset pipeline: D (all horizons) then V and/or S for each asset
+    elif mode in ('D', 'DV', 'DVS'):
         for asset in assets_list:
             print(f"\n{'='*60}")
             print(f"  ASSET: {asset}")
@@ -5211,16 +5155,14 @@ Examples:
                     print(f"  RUNNING {h}h HORIZON")
                     print(f"{'#'*60}")
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
-
-            # Run validate and/or strategy comparison after D
             if mode in ('DVS', 'DV'):
                 run_mode_v([asset], horizons)
                 if mode == 'DVS':
-                    run_strategy_comparison([asset], horizons, skip_confidence=True)
-            elif mode == 'DS' or (mode == 'D' and len(horizons) == 2):
-                run_strategy_comparison([asset], horizons)
-    elif mode == 'S':
-        run_strategy_comparison(assets_list, horizons)
+                    class _Args: pass
+                    _r_args = _Args()
+                    _r_args.replay = flag_replay
+                    _r_args.top = flag_top
+                    run_mode_s([asset], horizons, _r_args)
     elif mode == 'V':
         run_mode_v(assets_list, horizons)
     elif mode == 'H':

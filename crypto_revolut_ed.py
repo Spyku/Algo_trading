@@ -438,11 +438,14 @@ def process_asset(asset, trading_cfg, dry_run=False):
         sigs_by_horizon[h] = sig  # replace config with actual signal
         first = False
 
-    # Apply strategy — regime always picks single horizon → Xh_only
+    # Apply strategy — Ed regime always uses single horizon (Xh_only)
     min_conf = regime_min_conf if regime_min_conf else trading_cfg.get('min_confidence', MIN_CONFIDENCE)
-    strategy = trading_cfg.get('strategy', 'both_agree')
-    if regime_horizon and len(sigs_by_horizon) == 1:
+    if regime_horizon:
         strategy = f'{regime_horizon}h_only'
+    else:
+        # Fallback: use first available horizon
+        first_h = sorted(sigs_by_horizon.keys())[0]
+        strategy = f'{first_h}h_only'
     action, confidence, reason = compute_asset_signal(sigs_by_horizon, strategy, min_conf=min_conf)
     any_sig = next((s for s in sigs_by_horizon.values() if s), None)
     price = any_sig['close'] if any_sig else 0
@@ -877,10 +880,14 @@ def _handle_config_command():
         enabled = "🔵" if cfg.get('enabled') else "🔴"
         pos = load_position(asset)
         auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
+        det = cfg.get('regime_detector', {})
+        det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+        bull_cfg = cfg.get('bull', {})
+        bear_cfg = cfg.get('bear', {})
         lines.append(
-            f"{enabled} <b>{asset}</b> | {cfg.get('strategy', '?')} | "
-            f"{cfg.get('min_confidence', MIN_CONFIDENCE)}% | "
-            f"${cfg.get('max_position_usd', 0):,.0f} | {auto}"
+            f"{enabled} <b>{asset}</b> | {det_label} | "
+            f"bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% | "
+            f"bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto}"
         )
     buttons = [[('⚙️ Edit Config', '/setup')]]
     send_telegram_with_buttons("\n".join(lines), buttons)
@@ -1712,7 +1719,9 @@ def run_all_once(trading_cfg, dry_run=False):
         else:
             if not load_best_config(asset, horizon=HORIZON_SHORT) and not load_best_config(asset, horizon=HORIZON_LONG):
                 continue
-        print(f"\n  --- {asset} ({cfg.get('strategy', '?')}) ---")
+        bull_h = cfg.get('bull', {}).get('horizon', '?')
+        bear_h = cfg.get('bear', {}).get('horizon', '?')
+        print(f"\n  --- {asset} (bull={bull_h}h / bear={bear_h}h) ---")
         r = process_asset(asset, cfg, dry_run=dry_run)
         results.append(r)
 
@@ -1738,20 +1747,22 @@ def _send_startup_telegram(trading_cfg):
         pos = load_position(a)
         auto = pos.get('auto_trade', False)
         icon = "🔵 ON" if auto else "🔴 OFF"
-        asset_lines.append(f"  {a}: {c.get('strategy','?')} | ${c.get('max_position_usd',0):,.0f} | {icon}")
-
-    conf_parts_str = ', '.join(
-        f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%"
-        for a, c in trading_cfg.items() if c.get('enabled')
-    )
+        bull_cfg = c.get('bull', {})
+        bear_cfg = c.get('bear', {})
+        det = c.get('regime_detector', {})
+        det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+        asset_lines.append(
+            f"  {a}: {det_label}\n"
+            f"    BULL: {bull_cfg.get('horizon','?')}h @ {bull_cfg.get('min_confidence','?')}% | ${bull_cfg.get('max_position_usd', c.get('max_position_usd', 0)):,.0f}\n"
+            f"    BEAR: {bear_cfg.get('horizon','?')}h @ {bear_cfg.get('min_confidence','?')}% | ${bear_cfg.get('max_position_usd', 0):,.0f}\n"
+            f"    {icon}"
+        )
 
     send_telegram(
-        f"🚀 <b>Multi-Asset Trader Started</b>\n\n"
+        f"🚀 <b>Ed Trader Started</b>\n\n"
         + "\n".join(asset_lines) + "\n\n"
-        f"BUY needs >= {conf_parts_str}\n"
-        f"SELL when either model says SELL\n"
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"📱 /help for all commands"
+        f"📱 /help for all commands | /regime for current state"
     )
 
 
@@ -1766,9 +1777,13 @@ def run_loop(trading_cfg, dry_run=False):
         if cfg.get('enabled'):
             pos = load_position(asset)
             auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
-            print(f"  {asset}: {cfg.get('strategy','?')} | max=${cfg.get('max_position_usd',0):,.0f} | {auto} | {pos['state'].upper()}")
-    conf_parts = [f"{a}={c.get('min_confidence', MIN_CONFIDENCE)}%" for a, c in trading_cfg.items() if c.get('enabled')]
-    print(f"  Min confidence: {', '.join(conf_parts)}")
+            bull_cfg = cfg.get('bull', {})
+            bear_cfg = cfg.get('bear', {})
+            det = cfg.get('regime_detector', {})
+            det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+            print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
+                  f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {pos['state'].upper()}")
+    print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop /regime")
     print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
@@ -1952,17 +1967,19 @@ def main():
     # Interactive menu
     if len(args) == 0:
         print("\n  Current config:")
-        print(f"  {'Asset':<6} {'Strategy':<14} {'Max USD':>10} {'Enabled':>8} {'Auto':>7} {'Position':>10}")
-        print(f"  {'-'*6} {'-'*14} {'-'*10} {'-'*8} {'-'*7} {'-'*10}")
+        print(f"  {'Asset':<6} {'Bull':>10} {'Bear':>10} {'Enabled':>8} {'Auto':>7} {'Position':>10}")
+        print(f"  {'-'*6} {'-'*10} {'-'*10} {'-'*8} {'-'*7} {'-'*10}")
         for asset, cfg in trading_cfg.items():
             pos = load_position(asset)
-            _cfg_h = cfg.get('horizon')
-            has_model = load_best_config(asset, horizon=_cfg_h) if _cfg_h else (load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG))
+            bull_cfg = cfg.get('bull', {})
+            bear_cfg = cfg.get('bear', {})
+            bull_str = f"{bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}%"
+            bear_str = f"{bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}%"
             enabled_str = "Yes" if cfg.get('enabled', True) else "No"
             auto_str    = "Yes" if pos.get('auto_trade') else "No"
             pos_str     = pos['state'].upper()
-            model_mark  = "" if has_model else " ✗"
-            print(f"  {asset:<6} {cfg.get('strategy','?'):<14} ${cfg.get('max_position_usd',0):>9,.0f} {enabled_str:>8} {auto_str:>7} {pos_str:>10}{model_mark}")
+            model_mark  = "" if not cfg.get('enabled') else ""
+            print(f"  {asset:<6} {bull_str:>10} {bear_str:>10} {enabled_str:>8} {auto_str:>7} {pos_str:>10}{model_mark}")
 
         print(f"\n  1. Start loop (hourly)")
         print(f"  2. Run once")

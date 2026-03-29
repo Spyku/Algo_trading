@@ -281,11 +281,15 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 ## Pending Work
 
 ### Active
-1. **Run Ed Mode R regime backtest** — `python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880` to find best detector + horizon pair.
-2. **Run PySR regime discovery** — `python tools/pysr_discover_regime.py --months 4` then compare vs hand-crafted detectors.
-3. **Ed dry-run validation** — Run Ed trader alongside Doohan in dry-run to compare live signals.
+1. **ETH HRS running on Desktop** — `python crypto_trading_system_ed.py HRS ETH 5,6,7,8,10,12h --skip --replay 2880`. Trains 10h/12h models, reuses 5-8h, then regime + confidence optimization.
+2. **SOL HRS running on Laptop** — `python crypto_trading_system_ed.py HRS SOL 5,6,7,8,10,12h --skip --replay 2880`. Same pipeline.
 
 ### Completed (2026-03-29)
+- **BTC Ed regime fully optimized** — sma48>sma200, bull=7h@95%, bear=8h@90% → +50.35% over 4 months (78 trades, 69% WR). Ed live on BTC.
+- **Mode S implemented** — Regime confidence sweep (7×7=49 combos). HRS/DVRS/RS combo modes. Both_agree removed from Ed. Mode H no longer picks winner (R does).
+- **PySR regime discovery — FAILED** — Tested forward48, sma48_200, forward72 labels. Best accuracy 58% (too weak). sma48>sma200 hand-crafted detector confirmed as winner.
+- **Ed Telegram display fixed** — Shows bull/bear horizons + confidence instead of old strategy/both_agree.
+- **Ed V1.0 release** — Regime-switching system. Dynamic bull/bear horizon selection via `regime_config_ed.json` (not hardcoded). Mode R regime backtest (16 detectors × all horizon pairs). PySR regime discovery script. Separate production CSV. Runs alongside Doohan. Telegram `/regime` command.
 - **Ed V1.0 release** — Regime-switching system. Dynamic bull/bear horizon selection via `regime_config_ed.json` (not hardcoded). Mode R regime backtest (16 detectors × all horizon pairs). PySR regime discovery script. Separate production CSV. Runs alongside Doohan. Telegram `/regime` command.
 - **All 9 assets Mode H complete** — DOGE (5h), ADA (7h), AVAX (all negative), DOT (7h) completed. Every asset now has production models.
 - **SOL disabled from Doohan** — Turned off from live trading.
