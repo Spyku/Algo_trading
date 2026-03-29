@@ -402,12 +402,14 @@ MIN_TRADES = 8                  # reject unreliable configs
 ## Pending Work
 
 ### Active
-1. **Run Ed Mode R regime backtest** -- `python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880` to find best detector + horizon pair
+1. **4-month regime backtest running on Desktop** -- `python tools/backtest_regime_master.py --months 4` testing all horizon combos (4-14h) × 22 regime detectors. Results will determine best bull/bear switching strategy for Ed.
 2. **Run PySR regime discovery** -- `python tools/pysr_discover_regime.py --months 4` then compare vs hand-crafted detectors
-3. **Ed dry-run validation** -- Run Ed trader in dry-run mode alongside Doohan to compare live signals
+3. **Ed dry-run validation** -- Start `python crypto_revolut_ed.py --dry-run --loop` alongside Doohan to compare live signals before going live
 
 ### Completed (2026-03-29)
+- **Ed V1.0 tested and bug-fixed** -- Fixed: max_position_usd always 0 (BUY never executed), shared position files with Doohan, unnecessary model loading, stale variable refs. All signal generation tests pass.
 - **Ed V1.0 release** -- Regime-switching system: bull/bear detection with dynamic horizon/confidence. Mode R backtest. External regime config (not hardcoded). Runs alongside Doohan.
+- **Regime backtest tool** -- `tools/backtest_regime_master.py`: tests all horizon pairs × regime detectors with monthly breakdown. Supports --months, --horizons, --bull/--bear, --regimes, --asset flags.
 - **All 9 assets Mode H complete** -- BTC, ETH, SOL, LINK, XRP, DOGE, ADA, AVAX, DOT all have production models. AVAX negative (skip).
 - **SOL disabled** -- Turned off from Doohan live trading
 - **Trailing stop / regime filter analysis** -- Tested on 2-week replay. Baseline signal exits beat all trailing stop variants. Model signal quality is the edge.
