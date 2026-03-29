@@ -51,16 +51,18 @@ REGIME_CONFIG_FILE = 'config/regime_config_ed.json'
 
 DEFAULT_TRADING_CONFIG = {
     'BTC': {
-        'strategy': 'both_agree',   # BUY when both horizons agree
-        'max_position_usd': 0,
-        'symbol': 'BTC-USD',
         'enabled': True,
+        'symbol': 'BTC-USD',
+        'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
+        'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
+        'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
     },
     'ETH': {
-        'strategy': 'either',       # BUY when either says BUY
-        'max_position_usd': 0,
-        'symbol': 'ETH-USD',
         'enabled': True,
+        'symbol': 'ETH-USD',
+        'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
+        'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
+        'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
     },
 }
 
@@ -72,7 +74,12 @@ def load_trading_config():
         # Merge file config over defaults
         for asset in file_cfg:
             if asset not in defaults:
-                defaults[asset] = {'strategy': 'both_agree', 'max_position_usd': 0, 'symbol': f'{asset}-USD', 'enabled': True}
+                defaults[asset] = {
+                    'enabled': True, 'symbol': f'{asset}-USD',
+                    'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
+                    'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
+                    'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
+                }
             defaults[asset].update(file_cfg[asset])
     return defaults
 
@@ -581,6 +588,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
         'position': position, 'strategy': strategy,
         'min_confidence': min_conf,
         'gamma': gamma_val, 'regime': regime_label,
+        'horizon': regime_horizon or '',
     }
 
 
@@ -605,7 +613,6 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
         conf = r['confidence']
         price = r['price']
         position = r['position']
-        strategy = r['strategy']
 
         # Get RSI + last 4 candles from data
         rsi = 0
@@ -661,7 +668,8 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
         mc = r.get('min_confidence', '')
         conf_str = f" | conf:{mc}%" if mc else ""
         regime_tag = r.get('regime', 'bull').upper()
-        lines.append(f"{auto_icon} <b>{asset}</b> {price_str} | RSI:{rsi:.0f} | [{regime_tag}] [{strategy}{gamma_suffix}]{conf_str}")
+        horizon_tag = r.get('horizon', '?')
+        lines.append(f"{auto_icon} <b>{asset}</b> {price_str} | RSI:{rsi:.0f} | [{regime_tag}|{horizon_tag}h{gamma_suffix}]{conf_str}")
 
         # Last 4 prices
         if last_prices:
@@ -775,7 +783,10 @@ def _handle_status_command(with_charts=False):
         enabled_assets.append(asset)
         pos = load_position(asset)
         symbol = cfg.get('symbol', f'{asset}-USD')
-        strategy = cfg.get('strategy', 'both_agree')
+        # Regime info for display
+        bull_cfg = cfg.get('bull', {})
+        bear_cfg = cfg.get('bear', {})
+        regime_label = f"bull={bull_cfg.get('horizon','?')}h|bear={bear_cfg.get('horizon','?')}h"
 
         # Get live price from exchange
         price = get_asset_price(symbol)
@@ -812,7 +823,7 @@ def _handle_status_command(with_charts=False):
 
         # Header
         price_str = f"${price:,.2f}" if price >= 100 else f"${price:,.4f}"
-        lines.append(f"<b>{asset}</b> {price_str} | RSI: {rsi:.0f} | [{strategy}]")
+        lines.append(f"<b>{asset}</b> {price_str} | RSI: {rsi:.0f} | [{regime_label}]")
 
         # Last 4 prices
         if last_prices:
@@ -832,7 +843,9 @@ def _handle_status_command(with_charts=False):
             if actual_held > 0:
                 lines.append(f"  Held: {actual_held:.6f} {asset}")
         else:
-            lines.append(f"  💵 CASH (max ${cfg.get('max_position_usd',0):,.0f})")
+            bull_max = cfg.get('bull', {}).get('max_position_usd', 0)
+            bear_max = cfg.get('bear', {}).get('max_position_usd', 0)
+            lines.append(f"  💵 CASH (bull max ${bull_max:,.0f} | bear max ${bear_max:,.0f})")
             if actual_held > 0 and actual_usd > 5:
                 lines.append(f"  ⚠️ Exchange: {actual_held:.6f} {asset} (≈${actual_usd:,.2f})")
 
@@ -868,7 +881,7 @@ _rerun_event = threading.Event()
 _paused_lock = threading.Lock()
 _paused_flag = [False]  # mutable container for thread-safe access
 
-STRATEGIES = ['both_agree', 'either_agree', f'{HORIZON_SHORT}h_only', f'{HORIZON_LONG}h_only']
+# Ed uses regime-based horizon selection — no strategy picker needed
 
 # ---- Simple command handlers ----
 
@@ -1372,70 +1385,73 @@ def _setup_send_menu(asset, cfg):
     enabled = cfg.get('enabled', False)
     pos = load_position(asset)
     auto = pos.get('auto_trade', False)
-    strategy = cfg.get('strategy', '?')
-    confidence = cfg.get('min_confidence', MIN_CONFIDENCE)
-    max_pos = cfg.get('max_position_usd', 0)
+    det = cfg.get('regime_detector', {})
+    det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+    bull_cfg = cfg.get('bull', {})
+    bear_cfg = cfg.get('bear', {})
 
     text = (
         f"⚙️ <b>{asset} Settings</b>\n\n"
         f"Enabled: {'🔵 ON' if enabled else '🔴 OFF'}\n"
-        f"Strategy: {strategy}\n"
-        f"Confidence: {confidence}%\n"
-        f"Max position: ${max_pos:,.0f}\n"
+        f"Detector: {det_label}\n"
+        f"Bull: {bull_cfg.get('horizon','?')}h | conf>={bull_cfg.get('min_confidence','?')}% | max=${bull_cfg.get('max_position_usd',0):,.0f}\n"
+        f"Bear: {bear_cfg.get('horizon','?')}h | conf>={bear_cfg.get('min_confidence','?')}% | max=${bear_cfg.get('max_position_usd',0):,.0f}\n"
         f"Auto-trade: {'🔵 ON' if auto else '🔴 OFF'}"
     )
     buttons = [
         [('🔀 Toggle ON/OFF', f'/cfg_{asset}_toggle'),
          ('🔀 Auto-trade', f'/cfg_{asset}_auto')],
-        [('📐 Strategy', f'/cfg_{asset}_strategy')],
-        [('📊 Confidence', f'/cfg_{asset}_conf'),
-         ('💰 Max Position', f'/cfg_{asset}_max')],
+        [('📊 Bull Confidence', f'/cfg_{asset}_bull_conf'),
+         ('📊 Bear Confidence', f'/cfg_{asset}_bear_conf')],
+        [('💰 Bull Max Pos', f'/cfg_{asset}_bull_max'),
+         ('💰 Bear Max Pos', f'/cfg_{asset}_bear_max')],
         [('⬅️ Back', '/cfg_back')],
     ]
     send_telegram_with_buttons(text, buttons)
 
 def _setup_send_strategy_picker(asset, cfg):
-    """Show strategy picker with inline buttons."""
-    current = cfg.get('strategy', '')
-    buttons = []
-    for s in STRATEGIES:
-        label = f"{'✅ ' if s == current else ''}{s}"
-        buttons.append([(label, f'/cfg_{asset}_strat_{s}')])
-    buttons.append([('⬅️ Back', f'/cfg_{asset}')])
-    send_telegram_with_buttons(f"📐 Strategy for <b>{asset}</b>:", buttons)
+    """Strategy is controlled by regime detector — no manual picker."""
+    send_telegram(f"📐 <b>{asset}</b>: Strategy is controlled by the regime detector. Use /conf to see current regime settings.")
+    _setup_send_menu(asset, cfg)
 
-def _setup_send_confidence_picker(asset, cfg):
-    """Show confidence picker with inline buttons."""
-    current = cfg.get('min_confidence', MIN_CONFIDENCE)
-    values = [60, 65, 70, 75, 80, 85, 90]
+def _setup_send_confidence_picker(asset, cfg, regime='bull'):
+    """Show confidence picker for bull or bear regime."""
+    regime_cfg = cfg.get(regime, {})
+    current = regime_cfg.get('min_confidence', MIN_CONFIDENCE)
+    values = [60, 65, 70, 75, 80, 85, 90, 95]
     buttons = []
     row = []
     for v in values:
         label = f"{'✅ ' if v == current else ''}{v}%"
-        row.append((label, f'/cfg_{asset}_confv_{v}'))
+        row.append((label, f'/cfg_{asset}_{regime}_confv_{v}'))
         if len(row) == 4:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
     buttons.append([('⬅️ Back', f'/cfg_{asset}')])
-    send_telegram_with_buttons(f"📊 Min confidence for <b>{asset}</b>:", buttons)
+    send_telegram_with_buttons(f"📊 Min confidence for <b>{asset}</b> ({regime.upper()}):", buttons)
 
-def _setup_send_max_picker(asset, cfg):
-    """Show max position picker with inline buttons."""
-    current = cfg.get('max_position_usd', 0)
-    values = [0, 1000, 5000, 10000]
+def _setup_send_max_picker(asset, cfg, regime='bull'):
+    """Show max position picker for bull or bear regime."""
+    regime_cfg = cfg.get(regime, {})
+    current = regime_cfg.get('max_position_usd', 0)
+    values = [0, 1000, 3000, 6000, 10000, 12000]
     buttons = []
     row = []
     for v in values:
         label = f"{'✅ ' if v == current else ''}${v:,}"
-        row.append((label, f'/cfg_{asset}_maxv_{v}'))
-    buttons.append(row)
+        row.append((label, f'/cfg_{asset}_{regime}_maxv_{v}'))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     # Custom input button + current value display
     custom_label = f"✏️ Custom (now ${current:,})" if current not in values else "✏️ Custom"
-    buttons.append([(custom_label, f'/cfg_{asset}_maxcustom')])
+    buttons.append([(custom_label, f'/cfg_{asset}_{regime}_maxcustom')])
     buttons.append([('⬅️ Back', f'/cfg_{asset}')])
-    send_telegram_with_buttons(f"💰 Max position for <b>{asset}</b>:", buttons)
+    send_telegram_with_buttons(f"💰 Max position for <b>{asset}</b> ({regime.upper()}):", buttons)
 
 def _setup_start(trading_cfg):
     """Begin interactive setup — show asset picker."""
@@ -1477,18 +1493,21 @@ def _setup_handle(text, trading_cfg):
 
     # Handle custom max amount input (user typed a number)
     awaiting_asset = _setup_state.get('awaiting_custom_max')
+    awaiting_regime = _setup_state.get('awaiting_custom_max_regime', 'bull')
     if awaiting_asset and awaiting_asset in cfg:
         try:
             val = int(text_l.strip().replace('$', '').replace(',', ''))
             if 0 <= val <= 100000:
-                cfg[awaiting_asset]['max_position_usd'] = val
+                cfg[awaiting_asset].setdefault(awaiting_regime, {})['max_position_usd'] = val
                 _setup_state.pop('awaiting_custom_max', None)
-                send_telegram(f"✅ {awaiting_asset} max position → ${val:,}")
+                _setup_state.pop('awaiting_custom_max_regime', None)
+                send_telegram(f"✅ {awaiting_asset} {awaiting_regime} max position → ${val:,}")
                 _setup_send_menu(awaiting_asset, cfg[awaiting_asset])
                 return
         except ValueError:
             # Not a number — clear awaiting state and continue normal routing
             _setup_state.pop('awaiting_custom_max', None)
+            _setup_state.pop('awaiting_custom_max_regime', None)
 
     # /cfg_save — save and close
     if text_l == '/cfg_save':
@@ -1524,56 +1543,57 @@ def _setup_handle(text, trading_cfg):
             _setup_send_menu(asset, cfg[asset])
             return
 
-        # /cfg_{ASSET}_strategy — show strategy picker
-        if text_l == f'/cfg_{asset}_strategy':
-            _setup_send_strategy_picker(asset, cfg[asset])
+        # /cfg_{ASSET}_bull_conf — show bull confidence picker
+        if text_l == f'/cfg_{asset}_bull_conf':
+            _setup_send_confidence_picker(asset, cfg[asset], regime='bull')
             return
 
-        # /cfg_{ASSET}_strat_{strategy} — set strategy
-        for s in STRATEGIES:
-            if text_l == f'/cfg_{asset}_strat_{s}':
-                cfg[asset]['strategy'] = s
-                send_telegram(f"✅ {asset} strategy → {s}")
-                _setup_send_menu(asset, cfg[asset])
+        # /cfg_{ASSET}_bear_conf — show bear confidence picker
+        if text_l == f'/cfg_{asset}_bear_conf':
+            _setup_send_confidence_picker(asset, cfg[asset], regime='bear')
+            return
+
+        # /cfg_{ASSET}_{regime}_confv_{value} — set bull/bear confidence
+        for regime in ('bull', 'bear'):
+            if text_l.startswith(f'/cfg_{asset}_{regime}_confv_'):
+                try:
+                    val = int(text_l.split('_')[-1])
+                    cfg[asset].setdefault(regime, {})['min_confidence'] = val
+                    send_telegram(f"✅ {asset} {regime} confidence → {val}%")
+                    _setup_send_menu(asset, cfg[asset])
+                except ValueError:
+                    pass
                 return
 
-        # /cfg_{ASSET}_conf — show confidence picker
-        if text_l == f'/cfg_{asset}_conf':
-            _setup_send_confidence_picker(asset, cfg[asset])
+        # /cfg_{ASSET}_bull_max — show bull max position picker
+        if text_l == f'/cfg_{asset}_bull_max':
+            _setup_send_max_picker(asset, cfg[asset], regime='bull')
             return
 
-        # /cfg_{ASSET}_confv_{value} — set confidence
-        if text_l.startswith(f'/cfg_{asset}_confv_'):
-            try:
-                val = int(text_l.split('_')[-1])
-                cfg[asset]['min_confidence'] = val
-                send_telegram(f"✅ {asset} confidence → {val}%")
-                _setup_send_menu(asset, cfg[asset])
-            except ValueError:
-                pass
+        # /cfg_{ASSET}_bear_max — show bear max position picker
+        if text_l == f'/cfg_{asset}_bear_max':
+            _setup_send_max_picker(asset, cfg[asset], regime='bear')
             return
 
-        # /cfg_{ASSET}_max — show max position picker
-        if text_l == f'/cfg_{asset}_max':
-            _setup_send_max_picker(asset, cfg[asset])
-            return
+        # /cfg_{ASSET}_{regime}_maxv_{value} — set bull/bear max position
+        for regime in ('bull', 'bear'):
+            if text_l.startswith(f'/cfg_{asset}_{regime}_maxv_'):
+                try:
+                    val = int(text_l.split('_')[-1])
+                    cfg[asset].setdefault(regime, {})['max_position_usd'] = val
+                    send_telegram(f"✅ {asset} {regime} max position → ${val:,}")
+                    _setup_send_menu(asset, cfg[asset])
+                except ValueError:
+                    pass
+                return
 
-        # /cfg_{ASSET}_maxv_{value} — set max position
-        if text_l.startswith(f'/cfg_{asset}_maxv_'):
-            try:
-                val = int(text_l.split('_')[-1])
-                cfg[asset]['max_position_usd'] = val
-                send_telegram(f"✅ {asset} max position → ${val:,}")
-                _setup_send_menu(asset, cfg[asset])
-            except ValueError:
-                pass
-            return
-
-        # /cfg_{ASSET}_maxcustom — prompt for custom amount
-        if text_l == f'/cfg_{asset}_maxcustom':
-            _setup_state['awaiting_custom_max'] = asset
-            send_telegram(f"💰 Type the max position amount in USD for <b>{asset}</b> (e.g. 2500):")
-            return
+        # /cfg_{ASSET}_{regime}_maxcustom — prompt for custom amount
+        for regime in ('bull', 'bear'):
+            if text_l == f'/cfg_{asset}_{regime}_maxcustom':
+                _setup_state['awaiting_custom_max'] = asset
+                _setup_state['awaiting_custom_max_regime'] = regime
+                send_telegram(f"💰 Type the max position amount in USD for <b>{asset}</b> ({regime.upper()}) (e.g. 2500):")
+                return
 
 # ---- Command loop ----
 
@@ -1784,7 +1804,6 @@ def run_loop(trading_cfg, dry_run=False):
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {pos['state'].upper()}")
     print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop /regime")
-    print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
@@ -1939,8 +1958,10 @@ def main():
             trading_cfg = load_trading_config()
             for asset, cfg in trading_cfg.items():
                 pos = load_position(asset)
-                print(f"\n  {asset} [{cfg.get('strategy','?')}]:")
-                print(f"    State: {pos['state'].upper()} | Max: ${cfg.get('max_position_usd',0):,.2f}")
+                bull_c = cfg.get('bull', {})
+                bear_c = cfg.get('bear', {})
+                print(f"\n  {asset} [bull={bull_c.get('horizon','?')}h|bear={bear_c.get('horizon','?')}h]:")
+                print(f"    State: {pos['state'].upper()} | Bull max: ${bull_c.get('max_position_usd',0):,.0f} | Bear max: ${bear_c.get('max_position_usd',0):,.0f}")
                 print(f"    Auto-trade: {pos.get('auto_trade', False)}")
                 if pos['state'] == 'invested':
                     print(f"    Entry: ${pos['entry_price']:,.2f} at {pos['entry_time']}")
@@ -2009,10 +2030,11 @@ def main():
                             print(f"    SELL ${t['price']:,.2f} | {t['time']} | {t.get('pnl_pct',0):+.1f}%")
             return
         elif ch == '4':
-            VALID_STRATEGIES = ('both_agree', 'either_agree', f'{HORIZON_SHORT}h_only', f'{HORIZON_LONG}h_only', 'any_agree')
             for asset in trading_cfg:
                 cfg = trading_cfg[asset]
                 pos = load_position(asset)
+                bull_c = cfg.get('bull', {})
+                bear_c = cfg.get('bear', {})
                 print(f"\n  --- {asset} ---")
 
                 en = input(f"    Enabled (y/n) [{('y' if cfg.get('enabled', True) else 'n')}]: ").strip().lower()
@@ -2028,16 +2050,33 @@ def main():
                     pos['auto_trade'] = False
                     save_position(asset, pos)
 
-                max_inp = input(f"    Max USD [{cfg.get('max_position_usd', 0):.0f}]: ").strip()
-                if max_inp:
+                bull_conf_inp = input(f"    Bull min confidence [{bull_c.get('min_confidence', 95)}]: ").strip()
+                if bull_conf_inp:
                     try:
-                        cfg['max_position_usd'] = float(max_inp)
+                        cfg.setdefault('bull', {})['min_confidence'] = int(bull_conf_inp)
                     except ValueError:
                         pass
 
-                strat = input(f"    Strategy (Enter for default '{cfg['strategy']}'): ").strip().lower()
-                if strat in VALID_STRATEGIES: cfg['strategy'] = strat
-                elif strat: print(f"    Unknown strategy '{strat}' — keeping [{cfg['strategy']}]")
+                bear_conf_inp = input(f"    Bear min confidence [{bear_c.get('min_confidence', 90)}]: ").strip()
+                if bear_conf_inp:
+                    try:
+                        cfg.setdefault('bear', {})['min_confidence'] = int(bear_conf_inp)
+                    except ValueError:
+                        pass
+
+                bull_max_inp = input(f"    Bull max USD [{bull_c.get('max_position_usd', 0):.0f}]: ").strip()
+                if bull_max_inp:
+                    try:
+                        cfg.setdefault('bull', {})['max_position_usd'] = float(bull_max_inp)
+                    except ValueError:
+                        pass
+
+                bear_max_inp = input(f"    Bear max USD [{bear_c.get('max_position_usd', 0):.0f}]: ").strip()
+                if bear_max_inp:
+                    try:
+                        cfg.setdefault('bear', {})['max_position_usd'] = float(bear_max_inp)
+                    except ValueError:
+                        pass
 
             save_trading_config(trading_cfg)
             print("\n  Config saved.")
