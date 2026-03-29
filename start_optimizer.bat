@@ -1,5 +1,5 @@
 @echo off
-title Doohan Optimizer
+title Ed Optimizer
 cd /d "%~dp0"
 
 REM Auto-detect machine: Desktop vs Laptop

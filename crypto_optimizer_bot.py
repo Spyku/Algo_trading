@@ -49,9 +49,9 @@ else:
 if not os.path.exists(PYTHON_EXE):
     PYTHON_EXE = sys.executable
 
-SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_doohan.py')
-PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_doohan_v1_7_1_production.csv')
-TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'trading_config_doohan.json')
+SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed.py')
+PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
+TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
 
 ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP', 'DOGE', 'ADA', 'AVAX', 'DOT']
@@ -825,7 +825,7 @@ def _handle_results(asset=None):
         import pandas as pd
         # Try grid CSV first
         for h in HORIZONS:
-            grid_path = os.path.join(ENGINE_DIR, 'models', f'crypto_doohan_v1_7_1_grid_{asset}_{h}h.csv')
+            grid_path = os.path.join(ENGINE_DIR, 'models', f'crypto_ed_grid_{asset}_{h}h.csv')
             if os.path.exists(grid_path):
                 df = pd.read_csv(grid_path)
                 df = df.sort_values('apf', ascending=False).head(10)
