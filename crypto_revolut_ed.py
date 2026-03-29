@@ -81,11 +81,6 @@ def save_trading_config(cfg):
     with open(REGIME_CONFIG_FILE, 'w') as f:
         json.dump(cfg, f, indent=2)
 
-def save_trading_config(config):
-    os.makedirs('config', exist_ok=True)
-    with open(REGIME_CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
-
 
 # ============================================================
 # REVOLUT X API
@@ -428,10 +423,12 @@ def process_asset(asset, trading_cfg, dry_run=False):
     if df_raw is None:
         return None
 
-    # Detect regime and override horizon/confidence from regime config
+    # Detect regime and override horizon/confidence/max_position from regime config
     regime_label, regime_cfg = detect_regime(asset, df_raw)
     regime_horizon = regime_cfg.get('horizon')
     regime_min_conf = regime_cfg.get('min_confidence')
+    if regime_cfg.get('max_position_usd'):
+        max_usd = regime_cfg['max_position_usd']
     if regime_horizon:
         # Override: use regime-selected horizon only
         sigs_by_horizon = {}
@@ -2038,33 +2035,16 @@ def main():
         elif ch == '2': pass  # run once below
         elif ch == '1': loop_mode = True
 
-    # Ensure max positions are set
-    needs_config = False
+    # Check max positions — Ed reads them from bull/bear in regime config, not top-level
     for asset, cfg in trading_cfg.items():
-        if cfg.get('enabled') and cfg.get('max_position_usd', 0) <= 0:
-            _cfg_h = cfg.get('horizon')
-            has_model = load_best_config(asset, horizon=_cfg_h) if _cfg_h else (load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG))
-            if has_model:
-                needs_config = True
-                break
-
-    if needs_config:
-        print(f"\n  ⚠️ Max positions not set. Configure now:")
-        for asset, cfg in trading_cfg.items():
-            if not cfg.get('enabled'): continue
-            _cfg_h = cfg.get('horizon')
-            has_model = load_best_config(asset, horizon=_cfg_h) if _cfg_h else (load_best_config(asset, horizon=HORIZON_SHORT) or load_best_config(asset, horizon=HORIZON_LONG))
-            if not has_model: continue
-            if cfg.get('max_position_usd', 0) <= 0:
-                while True:
-                    try:
-                        val = float(input(f"  {asset} max position USD: $").strip())
-                        if val > 0:
-                            cfg['max_position_usd'] = val
-                            break
-                    except ValueError:
-                        pass
-        save_trading_config(trading_cfg)
+        if not cfg.get('enabled'):
+            continue
+        bull_max = cfg.get('bull', {}).get('max_position_usd', 0)
+        bear_max = cfg.get('bear', {}).get('max_position_usd', 0)
+        top_max = cfg.get('max_position_usd', 0)
+        if bull_max <= 0 and bear_max <= 0 and top_max <= 0:
+            print(f"  ⚠️ {asset}: No max_position_usd set in bull/bear config. Trades will be skipped.")
+            print(f"     Edit config/regime_config_ed.json to set max_position_usd.")
 
     if loop_mode:
         run_loop(trading_cfg, dry_run=dry_run)
