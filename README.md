@@ -389,6 +389,9 @@ MIN_TRADES = 8                  # reject unreliable configs
 
 ## Pending Work
 
+### MOST IMPORTANT
+1. **Regime-switching backtest (4 months)** -- Run `python tools/backtest_regime_master.py --months 4` on Desktop. Tests all horizon combos (4-14h) × regime detectors to find optimal bull/bear switching strategy (e.g., sma24>sma100: bull=6h, bear=8h). Then implement winning strategy in the live trader.
+
 ### Active
 1. **Expand to remaining assets** -- Run Mode P + H for DOGE, ADA, AVAX, DOT (LINK, XRP, SOL already done)
 2. **Re-run DV for BTC with fresh PySR** -- Mode P re-run 2026-03-26, DV pending with new expressions
