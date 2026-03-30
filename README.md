@@ -425,8 +425,10 @@ MIN_TRADES = 8                  # reject unreliable configs
 ## Pending Work
 
 ### Active
-1. **ETH HRS running on Desktop** -- `python crypto_trading_system_ed.py HRS ETH 5,6,7,8,10,12h --skip --replay 2880`. Trains 10h/12h, reuses 5-8h, then regime + confidence.
-2. **SOL HRS running on Laptop** -- `python crypto_trading_system_ed.py HRS SOL 5,6,7,8,10,12h --skip --replay 2880`. Same pipeline.
+1. **Ein HRS BTC** -- `python crypto_trading_system_ein.py HRS BTC 4,5,6,7,8,9,10` -- 15-minute candle test (grid 12h-120h)
+2. **Eli HRS BTC** -- `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` -- 30-minute candle test (grid 12h-120h)
+3. **ETH HRS on Desktop** -- `python crypto_trading_system_ed.py HRS ETH 5,6,7,8,10,12h --skip --replay 2880`
+4. **SOL HRS on Laptop** -- `python crypto_trading_system_ed.py HRS SOL 5,6,7,8,10,12h --skip --replay 2880`
 
 ### Completed (2026-03-29)
 - **Ed V1.0 tested and bug-fixed** -- Fixed: max_position_usd always 0 (BUY never executed), shared position files with Doohan, unnecessary model loading, stale variable refs. All signal generation tests pass.
