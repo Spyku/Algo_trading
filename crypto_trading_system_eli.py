@@ -357,7 +357,7 @@ MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 400          # ~200h at 30min candles
 REPLAY_HOURS_S = 800       # Mode S — longer window
 DIAG_STEP = 72             # walk-forward step (= 36h at 30min)
-DIAG_WINDOWS = [100, 200, 300, 400]  # candle windows (50h to 200h at 30min)
+DIAG_WINDOWS = [24, 48, 96, 192]  # candle windows (12h to 96h at 30min)
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 EMBARGO_CANDLES_DEFAULT = 10  # gap between train/test — must be >= horizon
@@ -2955,7 +2955,7 @@ GRID_COMBOS = [
     'RF+XGB',     # XGB without LGBM
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [100, 200, 300, 400, 500, 600]  # candle windows (50h-300h at 30min)
+GRID_WINDOWS = [24, 48, 96, 192, 288, 500]  # candle windows (12h, 24h, 48h, 96h, 144h, 250h at 30min)
 GRID_FEATURES = [10, 13, 17, 20, 25, 30]
 GRID_GAMMAS = [0.999, 0.997, 0.995]
 
