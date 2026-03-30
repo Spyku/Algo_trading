@@ -55,7 +55,7 @@ TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
 
 ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP', 'DOGE', 'ADA', 'AVAX', 'DOT']
-HORIZONS = [5, 6, 7, 8]
+HORIZONS = [5, 6, 7, 8, 10, 12, 14]
 MODES = {
     'P':    'PySR Discovery',
     'D':    'Grid Search',
@@ -231,6 +231,7 @@ class OptJob:
     mode: str
     assets: list
     horizons: list
+    replay: int = 0              # --replay hours (0 = default)
     status: str = 'queued'       # queued, running, done, failed, cancelled
     created_at: str = ''
     started_at: str = ''
@@ -244,7 +245,8 @@ class OptJob:
     def label(self):
         assets_str = ','.join(self.assets)
         h_str = ','.join(f'{h}h' for h in self.horizons)
-        return f"{self.mode} {assets_str} {h_str}"
+        replay_str = f" {self.replay}h" if self.replay else ""
+        return f"{self.mode} {assets_str} {h_str}{replay_str}"
 
 
 _job_queue = []          # pending jobs
@@ -255,11 +257,22 @@ _stop_event = threading.Event()
 
 
 # ── Menu State Machine ───────────────────────────────────────────────
+REPLAY_OPTIONS = {
+    '2w': (336, '2 weeks'),
+    '1m': (720, '1 month'),
+    '2m': (1440, '2 months'),
+    '3m': (2160, '3 months'),
+    '4m': (2880, '4 months'),
+    '6m': (4320, '6 months'),
+}
+REPLAY_MODES = {'R', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+
 _menu_state = {
-    'step': None,              # None, 'mode', 'assets', 'horizons', 'confirm'
+    'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
     'mode': None,
     'selected_assets': set(),
     'selected_horizons': set(),
+    'selected_replay': 2880,   # default 4 months
     'last_activity': 0,
 }
 MENU_TIMEOUT = 300  # 5 minutes
@@ -269,7 +282,7 @@ def _menu_reset():
     _menu_state.update({
         'step': None, 'mode': None,
         'selected_assets': set(), 'selected_horizons': set(),
-        'last_activity': 0,
+        'selected_replay': 2880, 'last_activity': 0,
     })
 
 
@@ -336,6 +349,24 @@ def _show_horizon_menu():
     send_telegram_with_buttons("<b>Select horizons:</b>", buttons)
 
 
+def _show_replay_menu():
+    _menu_state['step'] = 'replay'
+    _menu_touch()
+    current = _menu_state['selected_replay']
+    buttons = []
+    row = []
+    for key, (hours, label) in REPLAY_OPTIONS.items():
+        check = '>' if hours == current else ' '
+        row.append((f"{check}{label}", f"opt_replay_{key}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([('Next ->', 'opt_replay_next'), ('Cancel', 'opt_cancel')])
+    send_telegram_with_buttons("<b>Select backtest period:</b>", buttons)
+
+
 def _show_confirm():
     _menu_state['step'] = 'confirm'
     _menu_touch()
@@ -358,11 +389,19 @@ def _show_confirm():
     else:
         time_est = f"~{total_min/60:.1f} hours"
 
+    replay_str = ""
+    if mode in REPLAY_MODES:
+        replay_hours = _menu_state['selected_replay']
+        for key, (hours, label) in REPLAY_OPTIONS.items():
+            if hours == replay_hours:
+                replay_str = f"\nReplay: {label} ({replay_hours}h)"
+                break
+
     msg = (
         f"<b>Confirm optimization:</b>\n\n"
         f"Mode: {mode_name} ({mode})\n"
         f"Assets: {assets_str}\n"
-        f"Horizons: {h_str}\n"
+        f"Horizons: {h_str}{replay_str}\n"
         f"Machine: {MACHINE}\n"
         f"Est. time: {time_est}"
     )
@@ -417,6 +456,17 @@ def _handle_menu_callback(data):
         _show_asset_menu()
         return
 
+    # Replay selection
+    if data.startswith('opt_replay_'):
+        val = data.replace('opt_replay_', '')
+        if val == 'next':
+            _show_confirm()
+            return
+        if val in REPLAY_OPTIONS:
+            _menu_state['selected_replay'] = REPLAY_OPTIONS[val][0]
+        _show_replay_menu()
+        return
+
     # Horizon toggle
     if data.startswith('opt_h_'):
         h = data.replace('opt_h_', '')
@@ -424,7 +474,11 @@ def _handle_menu_callback(data):
             if not _menu_state['selected_horizons']:
                 send_telegram("Select at least one horizon.")
                 return
-            _show_confirm()
+            # Show replay menu for modes that support it
+            if _menu_state['mode'] in REPLAY_MODES:
+                _show_replay_menu()
+            else:
+                _show_confirm()
             return
         h_int = int(h)
         s = _menu_state['selected_horizons']
@@ -447,11 +501,13 @@ def _enqueue_job():
     mode = _menu_state['mode']
     assets = sorted(_menu_state['selected_assets'])
     horizons = sorted(_menu_state['selected_horizons'])
+    replay = _menu_state.get('selected_replay', 0) if mode in REPLAY_MODES else 0
     job = OptJob(
         id=uuid.uuid4().hex[:8],
         mode=mode,
         assets=assets,
         horizons=horizons,
+        replay=replay,
         created_at=datetime.now().strftime('%H:%M:%S'),
     )
     with _queue_lock:
@@ -536,6 +592,8 @@ def _run_job(job):
     assets_arg = ','.join(job.assets)
     h_arg = ','.join(str(h) for h in job.horizons) + 'h'
     cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
+    if hasattr(job, 'replay') and job.replay:
+        cmd.extend(['--replay', str(job.replay)])
 
     print(f"  CMD: {' '.join(cmd)}")
 
