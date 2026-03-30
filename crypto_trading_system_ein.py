@@ -664,7 +664,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df = df_hourly.copy()
 
     for period in [1, 2, 3, 4, 5, 6, 7, 8, 12, 24, 48, 72, 120, 240]:
-        df[f'logret_{period}h'] = np.log(df['close'] / df['close'].shift(period))
+        df[f'logret_{period}'] = np.log(df['close'] / df['close'].shift(period))
 
     df['spread_24_4']   = df['logret_24']  - df['logret_4']
     df['spread_48_4']   = df['logret_48']  - df['logret_4']
