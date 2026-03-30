@@ -344,7 +344,11 @@ def _show_horizon_menu():
     for h in HORIZONS:
         check = '[x]' if h in selected else '[ ]'
         row.append((f"{check} {h}h", f"opt_h_{h}"))
-    buttons.append(row)
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     buttons.append([('Next ->', 'opt_h_next'), ('Cancel', 'opt_cancel')])
     send_telegram_with_buttons("<b>Select horizons:</b>", buttons)
 
@@ -356,9 +360,9 @@ def _show_replay_menu():
     buttons = []
     row = []
     for key, (hours, label) in REPLAY_OPTIONS.items():
-        check = '>' if hours == current else ' '
-        row.append((f"{check}{label}", f"opt_replay_{key}"))
-        if len(row) == 3:
+        mark = ">> " if hours == current else ""
+        row.append((f"{mark}{label}", f"opt_replay_{key}"))
+        if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
