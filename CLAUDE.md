@@ -306,11 +306,12 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 
 ## Pending Work
 
-### Active
-1. **Ein HRS BTC** — `python crypto_trading_system_ein.py HRS BTC 4,5,6,7,8,9,10` — 15-minute candle test
-2. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
-3. **ETH HRS on Desktop** — `python crypto_trading_system_ed.py HRS ETH 5,6,7,8,10,12h --skip --replay 2880`
-4. **SOL HRS on Laptop** — `python crypto_trading_system_ed.py HRS SOL 5,6,7,8,10,12h --skip --replay 2880`
+### Running
+1. **Ein HRS BTC on Laptop** — `python crypto_trading_system_ein.py HRS BTC 4,5,6,7,8,9,10` — 15-minute candle test
+2. **LINK Ed HRS on Desktop** — `python crypto_trading_system_ed.py HRS LINK ...` — Ed hourly regime optimization
+
+### TODO
+1. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test (after Ein finishes)
 
 ### Completed (2026-03-29)
 - **BTC Ed regime fully optimized** — sma48>sma200, bull=7h@95%, bear=8h@90% → +50.35% over 4 months (78 trades, 69% WR). Ed live on BTC.
