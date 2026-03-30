@@ -900,13 +900,13 @@ def _handle_results(asset=None):
 
 def _handle_help():
     send_telegram(
-        "<b>Optimizer Bot Commands</b>\n\n"
-        "/optimize — Start optimization (menu)\n"
-        "/queue — Show job queue\n"
-        "/cancel — Cancel current job/menu\n"
-        "/status — Production models\n"
-        "/results BTC — Grid results for asset\n"
-        "/stop — Stop the bot\n"
+        "<b>Optimiser Bot Commands</b>\n\n"
+        "/optimise — Start optimisation (menu)\n\n"
+        "/queue — Show job queue\n\n"
+        "/cancel — Cancel current job/menu\n\n"
+        "/status — Production models\n\n"
+        "/results BTC — Grid results for asset\n\n"
+        "/stop — Stop the bot\n\n"
         "/help — This message"
     )
 
@@ -997,7 +997,7 @@ def main():
     send_telegram(
         f"<b>Optimizer Bot started</b>\n"
         f"Machine: {MACHINE}\n"
-        f"/optimize to begin, /help for commands"
+        f"/optimise to begin, /help for commands"
     )
 
     print("  Bot running. Polling for commands...")
@@ -1014,7 +1014,7 @@ def main():
                     continue
 
                 # Text commands
-                if text_lower in ('/optimize', '/start'):
+                if text_lower in ('/optimize', '/optimise', '/start'):
                     _handle_optimize()
                 elif text_lower == '/queue':
                     _handle_queue()
