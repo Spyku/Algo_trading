@@ -57,17 +57,20 @@ OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_c
 ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP', 'DOGE', 'ADA', 'AVAX', 'DOT']
 HORIZONS = [5, 6, 7, 8]
 MODES = {
-    'P':   'PySR Discovery',
-    'D':   'Grid Search',
-    'V':   'Validate + Refine',
-    'DV':  'Grid + Validate',
-    'DVS': 'Full Pipeline',
-    'H':   'Horizon Sweep',
-    'S':   'Strategy Compare',
+    'P':    'PySR Discovery',
+    'D':    'Grid Search',
+    'V':    'Validate + Refine',
+    'DV':   'Grid + Validate',
+    'H':    'Horizon Sweep',
+    'R':    'Regime Backtest',
+    'S':    'Regime Confidence',
+    'RS':   'Regime + Confidence',
+    'HRS':  'Full Ed Pipeline',
+    'DVRS': 'DV + Regime + Conf',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'DVS': 60, 'H': 55, 'S': 5}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'RS': 60, 'HRS': 120, 'DVRS': 120}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -289,9 +292,10 @@ def _show_mode_menu():
     _menu_touch()
     buttons = [
         [('D - Grid', 'opt_mode_D'), ('V - Validate', 'opt_mode_V')],
-        [('DV - Grid+Val', 'opt_mode_DV'), ('DVS - Full', 'opt_mode_DVS')],
-        [('H - Horizon', 'opt_mode_H'), ('P - PySR', 'opt_mode_P')],
-        [('S - Strategy', 'opt_mode_S')],
+        [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
+        [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
+        [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
+        [('P - PySR', 'opt_mode_P')],
         [('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
@@ -380,10 +384,8 @@ def _handle_menu_callback(data):
         # Default asset selection
         _menu_state['selected_assets'] = {'BTC'}
         # Default horizon selection based on mode
-        if mode == 'H':
+        if mode in ('H', 'HRS', 'DVRS', 'R', 'RS'):
             _menu_state['selected_horizons'] = set(HORIZONS)
-        elif mode in ('S',):
-            _menu_state['selected_horizons'] = {6}
         else:
             _menu_state['selected_horizons'] = {6}
         _show_asset_menu()
@@ -401,7 +403,7 @@ def _handle_menu_callback(data):
                 send_telegram("Select at least one asset.")
                 return
             # Skip horizon menu for modes that don't need it
-            if _menu_state['mode'] in ('P', 'S'):
+            if _menu_state['mode'] in ('P',):
                 _show_horizon_menu()
             else:
                 _show_horizon_menu()
