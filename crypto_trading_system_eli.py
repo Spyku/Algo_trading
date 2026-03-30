@@ -2955,7 +2955,7 @@ GRID_COMBOS = [
     'RF+XGB',     # XGB without LGBM
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [24, 48, 96, 192, 288, 500]  # candle windows (12h, 24h, 48h, 96h, 144h, 250h at 30min)
+GRID_WINDOWS = [24, 48, 96, 144, 192, 240]  # candle windows (12h, 24h, 48h, 72h, 96h, 120h at 30min)
 GRID_FEATURES = [10, 13, 17, 20, 25, 30]
 GRID_GAMMAS = [0.999, 0.997, 0.995]
 

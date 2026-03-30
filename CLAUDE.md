@@ -86,6 +86,16 @@ python crypto_revolut_ed.py --loop                              # Ed live tradin
 python crypto_revolut_ed.py --dry-run --loop                    # Ed signals only, no trades
 python tools/pysr_discover_regime.py --bull 6 --bear 8          # PySR regime formula discovery
 
+# === Ein (15-minute candles) — testing only, no trader ===
+python crypto_trading_system_ein.py D BTC 6                     # Mode D — horizon 6 candles (= 1h30)
+python crypto_trading_system_ein.py H BTC 4,5,6,7,8,9,10       # Horizon sweep (all candle horizons)
+python crypto_trading_system_ein.py HRS BTC 4,5,6,7,8,9,10     # Full pipeline
+
+# === Eli (30-minute candles) — testing only, no trader ===
+python crypto_trading_system_eli.py D BTC 6                     # Mode D — horizon 6 candles (= 3h)
+python crypto_trading_system_eli.py H BTC 4,5,6,7,8,9,10       # Horizon sweep
+python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10     # Full pipeline
+
 # === Legacy regime backtest (pre-Ed) ===
 python tools/backtest_regime_master.py                         # 2-month default, all horizons
 python tools/backtest_regime_master.py --months 4              # 4-month backtest
@@ -219,10 +229,12 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `crypto_trading_system_doohan_v1_7_2.py` | **Archived** | Regularization test. Wash — not adopted. |
 | `start_trader.bat` | **Live** | Launches trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
-| `crypto_trading_system_ed.py` | **Testing** | Ed V1.0: Regime-switching. All Doohan modes (P/D/V/H/S) + Mode R (regime backtest). Reads `crypto_ed_production.csv`. |
-| `crypto_revolut_ed.py` | **Testing** | Ed auto-trader — reads `regime_config_ed.json`, switches horizon per bull/bear regime. Telegram `/regime` command. |
-| `crypto_live_trader_ed.py` | **Testing** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. Supports sma_cross, pysr, rsi, drawdown, fixed detectors. |
-| `start_ed.bat` | **Testing** | Launches Ed trader with auto-restart + log tee. |
+| `crypto_trading_system_ed.py` | **Production** | Ed V1.0: Regime-switching (1h candles). All Doohan modes + Mode R (regime backtest). Reads `crypto_ed_production.csv`. |
+| `crypto_revolut_ed.py` | **Live** | Ed auto-trader — reads `regime_config_ed.json`, switches horizon per bull/bear regime. |
+| `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. |
+| `start_ed.bat` | **Live** | Launches Ed trader with auto-restart + log tee. |
+| `crypto_trading_system_ein.py` | **Testing** | Ein V1.0: 15-minute candles. Horizons 4-10 candles (1h-2h30). Candle-based features (no 'h' suffix). Grid windows 12h-120h. No trader yet. |
+| `crypto_trading_system_eli.py` | **Testing** | Eli V1.0: 30-minute candles. Horizons 4-10 candles (2h-5h). Same as Ein but 2x candle length. Grid windows 12h-120h. No trader yet. |
 | `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery. Historical window (6mo before backtest). Anti-leakage. |
 | `tools/backtest_regime_master.py` | Active | Hand-crafted regime detector backtest. 21 detectors × all horizon pairs. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |

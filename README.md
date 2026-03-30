@@ -6,6 +6,10 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 - **Doohan V1.7.1** — Fixed-horizon trading with PySR symbolic regression features (stable)
 - **Ed V1.0** — Regime-switching trading: bull/bear detection with dynamic horizon selection (production)
 
+**Testing:**
+- **Ein V1.0** — 15-minute candles, horizons 4-10 candles (1h-2h30), grid windows 12h-120h
+- **Eli V1.0** — 30-minute candles, horizons 4-10 candles (2h-5h), grid windows 12h-120h
+
 ---
 
 ## Table of Contents
