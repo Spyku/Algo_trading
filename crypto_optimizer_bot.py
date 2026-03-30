@@ -304,15 +304,11 @@ def _show_mode_menu():
     _menu_state['step'] = 'mode'
     _menu_touch()
     buttons = [
-        [('D - Grid Search', 'opt_mode_D')],
-        [('V - Validate + Refine', 'opt_mode_V')],
-        [('DV - Grid + Validate', 'opt_mode_DV')],
-        [('H - Horizon Sweep', 'opt_mode_H')],
-        [('R - Regime Backtest', 'opt_mode_R')],
-        [('S - Regime Confidence', 'opt_mode_S')],
-        [('RS - Regime + Confidence', 'opt_mode_RS')],
-        [('HRS - Full Ed Pipeline', 'opt_mode_HRS')],
-        [('P - PySR Discovery', 'opt_mode_P')],
+        [('D - Grid', 'opt_mode_D'), ('V - Validate', 'opt_mode_V')],
+        [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
+        [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
+        [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
+        [('P - PySR', 'opt_mode_P')],
         [('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
@@ -322,11 +318,14 @@ def _show_asset_menu():
     _menu_state['step'] = 'assets'
     _menu_touch()
     selected = _menu_state['selected_assets']
-    # One asset per row for big fingers
+    # Build asset buttons in rows of 3
     asset_rows = []
-    for a in ASSETS:
-        check = '[x]' if a in selected else '[ ]'
-        asset_rows.append([(f"{check} {a}", f"opt_asset_{a}")])
+    for i in range(0, len(ASSETS), 3):
+        row = []
+        for a in ASSETS[i:i+3]:
+            check = '[x]' if a in selected else '[ ]'
+            row.append((f"{check} {a}", f"opt_asset_{a}"))
+        asset_rows.append(row)
     asset_rows.append([('Select All', 'opt_asset_all'), ('Clear', 'opt_asset_clear')])
     asset_rows.append([('Next ->', 'opt_asset_next'), ('Cancel', 'opt_cancel')])
     mode_name = MODES.get(_menu_state['mode'], _menu_state['mode'])
@@ -340,11 +339,16 @@ def _show_horizon_menu():
     _menu_state['step'] = 'horizons'
     _menu_touch()
     selected = _menu_state['selected_horizons']
-    # One horizon per row for big fingers
     buttons = []
+    row = []
     for h in HORIZONS:
         check = '[x]' if h in selected else '[ ]'
-        buttons.append([(f"{check} {h}h", f"opt_h_{h}")])
+        row.append((f"{check} {h}h", f"opt_h_{h}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     buttons.append([('Next ->', 'opt_h_next'), ('Cancel', 'opt_cancel')])
     send_telegram_with_buttons("<b>Select horizons:</b>", buttons)
 
@@ -353,11 +357,16 @@ def _show_replay_menu():
     _menu_state['step'] = 'replay'
     _menu_touch()
     current = _menu_state['selected_replay']
-    # One option per row for big fingers
     buttons = []
+    row = []
     for key, (hours, label) in REPLAY_OPTIONS.items():
         mark = ">> " if hours == current else ""
-        buttons.append([(f"{mark}{label}", f"opt_replay_{key}")])
+        row.append((f"{mark}{label}", f"opt_replay_{key}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     buttons.append([('Next ->', 'opt_replay_next'), ('Cancel', 'opt_cancel')])
     send_telegram_with_buttons("<b>Select backtest period:</b>", buttons)
 
