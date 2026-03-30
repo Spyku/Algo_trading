@@ -56,6 +56,7 @@ DEFAULT_TRADING_CONFIG = {
         'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
         'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
         'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
+        'take_profit_pct': 0,
     },
     'ETH': {
         'enabled': True,
@@ -63,6 +64,7 @@ DEFAULT_TRADING_CONFIG = {
         'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
         'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
         'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
+        'take_profit_pct': 0,
     },
 }
 
@@ -394,6 +396,107 @@ def compute_asset_signal(sigs_by_horizon, strategy, min_conf=MIN_CONFIDENCE):
         return 'HOLD', max(_c(h) for h in available), 'low_conf'
 
     return 'HOLD', 50, 'no_signal'
+
+
+# ============================================================
+# TAKE-PROFIT CHECK
+# ============================================================
+def _check_take_profit(asset, trading_cfg, dry_run=False):
+    """Check if take-profit should trigger for an invested position.
+    Called every 5 minutes from the sync loop.
+    Returns True if TP was triggered and position was sold.
+    """
+    cfg = trading_cfg.get(asset, {})
+    if not cfg.get('enabled'):
+        return False
+
+    tp_pct = cfg.get('take_profit_pct', 0)
+    if not tp_pct or tp_pct <= 0:
+        return False
+
+    position = load_position(asset)
+    if position['state'] != 'invested' or not position.get('entry_price'):
+        return False
+
+    symbol = cfg.get('symbol', f'{asset}-USD')
+
+    # Get current price
+    try:
+        from crypto_live_trader_ed import download_asset
+        df = download_asset(asset)
+        if df is None or len(df) == 0:
+            return False
+        current_price = float(df.iloc[-1]['close'])
+    except Exception as e:
+        print(f"  [!] TP price check error for {asset}: {e}")
+        return False
+
+    pnl_pct = (current_price - position['entry_price']) / position['entry_price'] * 100
+
+    if pnl_pct >= tp_pct:
+        print(f"\n  *** TAKE PROFIT TRIGGERED: {asset} at ${current_price:,.2f} "
+              f"(+{pnl_pct:.2f}% >= +{tp_pct}% target) ***")
+
+        if dry_run:
+            print(f"  [DRY RUN] Would sell {asset} at ${current_price:,.2f}")
+            send_telegram(
+                f"<b>TP TRIGGERED (dry run)</b>\n"
+                f"{asset}: ${current_price:,.2f} (+{pnl_pct:.2f}%)\n"
+                f"Entry: ${position['entry_price']:,.2f}\n"
+                f"Target: +{tp_pct}%"
+            )
+            return False
+
+        # Execute sell
+        actual_held = position.get('base_amount', 0)
+        if actual_held <= 0:
+            return False
+
+        try:
+            status, order = place_market_sell(symbol, actual_held)
+        except Exception as e:
+            print(f"  [!] TP sell failed: {e}")
+            send_telegram(f"<b>TP sell failed:</b> {asset}\n{e}")
+            return False
+
+        if status == 200 and order:
+            sell_price = float(order.get('average_fill_price', current_price))
+            entry_price_saved = position['entry_price']
+            pnl_pct_actual = (sell_price - entry_price_saved) / entry_price_saved * 100
+            pnl_usd = position.get('usd_invested', 0) * pnl_pct_actual / 100
+
+            # Record trade
+            position['trades'].append({
+                'action': 'SELL',
+                'price': sell_price,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'pnl_pct': round(pnl_pct_actual, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'auto': True,
+                'reason': f'TP_{tp_pct}%',
+            })
+            position['state'] = 'cash'
+            position['entry_price'] = 0
+            position['entry_time'] = ''
+            position['base_amount'] = 0
+            position['usd_invested'] = 0
+            save_position(asset, position)
+
+            emoji = '+' if pnl_usd >= 0 else ''
+            send_telegram(
+                f"<b>TAKE PROFIT {asset}</b>\n"
+                f"Sold at ${sell_price:,.2f} (+{pnl_pct_actual:.2f}%)\n"
+                f"PnL: ${emoji}{pnl_usd:.2f}\n"
+                f"Entry: ${entry_price_saved:,.2f}\n"
+                f"Target was: +{tp_pct}%"
+            )
+            print(f"  TP SOLD {asset} at ${sell_price:,.2f} | PnL: ${pnl_usd:+.2f} ({pnl_pct_actual:+.2f}%)")
+            return True
+        else:
+            print(f"  [!] TP sell order failed: status={status}")
+            return False
+
+    return False
 
 
 # ============================================================
@@ -897,10 +1000,12 @@ def _handle_config_command():
         det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
         bull_cfg = cfg.get('bull', {})
         bear_cfg = cfg.get('bear', {})
+        tp_pct = cfg.get('take_profit_pct', 0)
+        tp_str = f"TP={tp_pct}%" if tp_pct > 0 else "TP=OFF"
         lines.append(
             f"{enabled} <b>{asset}</b> | {det_label} | "
             f"bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% | "
-            f"bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto}"
+            f"bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str}"
         )
     buttons = [[('⚙️ Edit Config', '/setup')]]
     send_telegram_with_buttons("\n".join(lines), buttons)
@@ -971,7 +1076,7 @@ def _handle_optimize_command(msg):
             send_telegram(f"⏳ Optimization already running (PID {_optimize_proc.pid}). /optstatus to check.")
             return
 
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crypto_trading_system_doohan.py')
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crypto_trading_system_ed.py')
 
         # Build horizon arg from trading config (per-asset configured horizons)
         trading_config = load_trading_config()
@@ -1396,8 +1501,10 @@ def _setup_send_menu(asset, cfg):
         f"Detector: {det_label}\n"
         f"Bull: {bull_cfg.get('horizon','?')}h | conf>={bull_cfg.get('min_confidence','?')}% | max=${bull_cfg.get('max_position_usd',0):,.0f}\n"
         f"Bear: {bear_cfg.get('horizon','?')}h | conf>={bear_cfg.get('min_confidence','?')}% | max=${bear_cfg.get('max_position_usd',0):,.0f}\n"
-        f"Auto-trade: {'🔵 ON' if auto else '🔴 OFF'}"
+        f"Auto-trade: {'🔵 ON' if auto else '🔴 OFF'}\n"
+        f"Take-profit: {'🔵 ON (' + str(cfg.get('take_profit_pct', 0)) + '%)' if cfg.get('take_profit_pct', 0) > 0 else '🔴 OFF'}"
     )
+    tp_label = f"TP: ON ({cfg.get('take_profit_pct', 0)}%)" if cfg.get('take_profit_pct', 0) > 0 else "TP: OFF"
     buttons = [
         [('🔀 Toggle ON/OFF', f'/cfg_{asset}_toggle'),
          ('🔀 Auto-trade', f'/cfg_{asset}_auto')],
@@ -1405,6 +1512,7 @@ def _setup_send_menu(asset, cfg):
          ('📊 Bear Confidence', f'/cfg_{asset}_bear_conf')],
         [('💰 Bull Max Pos', f'/cfg_{asset}_bull_max'),
          ('💰 Bear Max Pos', f'/cfg_{asset}_bear_max')],
+        [(tp_label, f'/cfg_{asset}_tp')],
         [('⬅️ Back', '/cfg_back')],
     ]
     send_telegram_with_buttons(text, buttons)
@@ -1540,6 +1648,18 @@ def _setup_handle(text, trading_cfg):
             save_position(asset, pos)
             st = "🔵 ON" if pos['auto_trade'] else "🔴 OFF"
             send_telegram(f"✅ {asset} auto-trade → {st}")
+            _setup_send_menu(asset, cfg[asset])
+            return
+
+        # /cfg_{ASSET}_tp — toggle take-profit
+        if text_l == f'/cfg_{asset}_tp':
+            current_tp = cfg[asset].get('take_profit_pct', 0)
+            if current_tp > 0:
+                cfg[asset]['take_profit_pct'] = 0
+                send_telegram(f"TP OFF for {asset}")
+            else:
+                cfg[asset]['take_profit_pct'] = 1.0
+                send_telegram(f"TP ON for {asset} (1%)")
             _setup_send_menu(asset, cfg[asset])
             return
 
@@ -1771,11 +1891,13 @@ def _send_startup_telegram(trading_cfg):
         bear_cfg = c.get('bear', {})
         det = c.get('regime_detector', {})
         det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+        tp_pct = c.get('take_profit_pct', 0)
+        tp_str = f"TP: {tp_pct}%" if tp_pct > 0 else "TP: OFF"
         asset_lines.append(
             f"  {a}: {det_label}\n"
             f"    BULL: {bull_cfg.get('horizon','?')}h @ {bull_cfg.get('min_confidence','?')}% | ${bull_cfg.get('max_position_usd', c.get('max_position_usd', 0)):,.0f}\n"
             f"    BEAR: {bear_cfg.get('horizon','?')}h @ {bear_cfg.get('min_confidence','?')}% | ${bear_cfg.get('max_position_usd', 0):,.0f}\n"
-            f"    {icon}"
+            f"    {icon} | {tp_str}"
         )
 
     send_telegram(
@@ -1801,8 +1923,10 @@ def run_loop(trading_cfg, dry_run=False):
             bear_cfg = cfg.get('bear', {})
             det = cfg.get('regime_detector', {})
             det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+            tp_pct = cfg.get('take_profit_pct', 0)
+            tp_str = f"TP={tp_pct}%" if tp_pct > 0 else "TP=OFF"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
-                  f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {pos['state'].upper()}")
+                  f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {pos['state'].upper()}")
     print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop /regime")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
@@ -1869,6 +1993,12 @@ def run_loop(trading_cfg, dry_run=False):
                             changes = sync_positions(trading_cfg, notify=True)
                             if changes:
                                 print(f"  Position sync: {len(changes)} changes")
+
+                            # Check take-profit for invested positions
+                            for asset, cfg in trading_cfg.items():
+                                if cfg.get('enabled') and cfg.get('take_profit_pct', 0) > 0:
+                                    if _check_take_profit(asset, trading_cfg, dry_run=dry_run):
+                                        print(f"  Take profit triggered for {asset} — re-running signals")
 
                             # Hot-reload trading config
                             if _reload_trading_config(trading_cfg):
@@ -2075,6 +2205,14 @@ def main():
                 if bear_max_inp:
                     try:
                         cfg.setdefault('bear', {})['max_position_usd'] = float(bear_max_inp)
+                    except ValueError:
+                        pass
+
+                tp_input = input(f"    Take profit % (0=off, current={cfg.get('take_profit_pct', 0)}): ").strip()
+                if tp_input:
+                    try:
+                        tp_val = float(tp_input)
+                        cfg['take_profit_pct'] = tp_val if tp_val > 0 else 0
                     except ValueError:
                         pass
 
