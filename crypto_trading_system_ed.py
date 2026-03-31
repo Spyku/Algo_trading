@@ -4783,6 +4783,38 @@ def _run_mode_r(assets, horizons, args):
             print(f"  Baseline WINS by {-diff:+.2f}%")
     print(f"  {'='*100}")
 
+    # Return best regime for HRS pipeline (R → S)
+    return {asset: best_regime} if best_regime else {}
+
+
+def _apply_mode_r_to_config(r_results):
+    """Write Mode R's winning horizons to regime_config_ed.json so Mode S picks them up."""
+    if not r_results:
+        return
+    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    try:
+        with open(tcfg_path) as f:
+            regime_config = json.load(f)
+    except Exception:
+        return
+
+    for asset, best in r_results.items():
+        if not best:
+            continue
+        bull_h = best['bull_h']
+        bear_h = best['bear_h']
+        if asset not in regime_config:
+            continue
+        old_bull = regime_config[asset].get('bull', {}).get('horizon')
+        old_bear = regime_config[asset].get('bear', {}).get('horizon')
+        if old_bull != bull_h or old_bear != bear_h:
+            regime_config[asset]['bull']['horizon'] = bull_h
+            regime_config[asset]['bear']['horizon'] = bear_h
+            print(f"\n  Mode R → Config: {asset} horizons updated: bull={old_bull}h→{bull_h}h, bear={old_bear}h→{bear_h}h")
+
+    with open(tcfg_path, 'w') as f:
+        json.dump(regime_config, f, indent=2)
+
 
 # ============================================================
 # MAIN MENU
@@ -5131,7 +5163,8 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
-        _run_mode_r(assets_list, horizons, _r_args)
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
     elif mode in ('HRS', 'DVRS'):
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
@@ -5140,7 +5173,8 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
-        _run_mode_r(assets_list, horizons, _r_args)
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
