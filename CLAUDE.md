@@ -283,9 +283,31 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 ```json
 {
   "BTC": { "detector": "sma_cross(48,200)", "bull": "7h@95%/$12k", "bear": "8h@90%/$6k", "enabled": true },
-  "ETH": { "detector": "sma_cross(24,100)", "bull": "7h@90%/$2k", "bear": "8h@95%/$1k", "enabled": true }
+  "ETH": { "detector": "sma_cross(24,100)", "bull": "6h@85%/$12k", "bear": "8h@65%/$6k", "enabled": true }
 }
 ```
+
+## Ed Backtest Results (2026-03-31)
+
+### BTC (4 months, B&H: -24.93%)
+- **Winner:** sma48>sma200 bull=7h@95% bear=8h@90% → **+50.35%**, 78 trades, 69% WR
+- Best baseline: 8h_only +21.55%
+
+### ETH — 2-month RS (B&H: -23.93%)
+- **Mode R winner:** sma24>sma100 bull=6h bear=8h → +59.58%, 38 trades, 74% WR
+- **Mode S winner:** bull=6h@85% bear=8h@65% → **+70.01%**, 57 trades, 67% WR
+- Best baseline: 8h_only +47.21%
+- R→S pipeline fix confirmed: R updated config to 6h/8h before S ran
+
+### ETH — 4-month RS (B&H: -33.30%)
+- **Mode R winner:** rsi>45 bull=6h bear=7h → +89.82%, 91 trades, 68% WR
+- Note: 4mo prefers 6h/7h while 2mo prefers 6h/8h. Bull=6h consistent across both.
+
+### SOL (4 months)
+- **Winner:** sma_cross bull=6h@95% bear=8h@90% → +31.60%, 79 trades, 61% WR
+
+### LINK (4 months) — WEAK, not worth trading
+- Best horizon: 5h +3.97% (only positive). All others negative.
 
 ---
 

@@ -425,11 +425,19 @@ MIN_TRADES = 8                  # reject unreliable configs
 ## Pending Work
 
 ### Running
-1. **Ein HRS BTC on Laptop** -- 15-minute candle test (grid 12h-120h)
-2. **LINK Ed HRS on Desktop** -- Ed hourly regime optimization
+1. **ETH RS 1-month on Desktop** -- `RS ETH 6,7,8h --replay 720` to compare 1mo vs 2mo results
 
 ### TODO
-1. **Eli HRS BTC** -- `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` -- 30-minute candle test (after Ein finishes)
+1. **Eli HRS BTC** -- `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` -- 30-minute candle test
+2. **Ein results review** -- Check Ein (15min) BTC results from laptop run
+3. **Consider ETH-only trading** -- ETH consistently outperforms BTC in backtests. Evaluate dropping BTC.
+
+### Completed (2026-03-31)
+- **ETH RS 2-month** -- Mode R: sma24>sma100 bull=6h bear=8h +59.58% (74% WR). Mode S: 6h@85%/8h@65% → +70.01% (67% WR). R→S pipeline fix confirmed working.
+- **HRS R→S pipeline fix** -- Mode R now writes winning horizons to config before Mode S runs. Previously S ignored R's findings and used pre-set horizons.
+- **LINK HRS complete** -- Weak results. Best: 5h +3.97%. All other horizons negative. Not worth trading.
+- **Take-profit analysis** -- No TP is best. TP=1% boosts WR (67→72%) but cuts return nearly in half (+81→+49%). Model SELL signals capture bigger moves.
+- **No-embargo-in-live confirmed** -- Per Lopez de Prado. Embargo for backtesting only. Reverted live embargo change.
 
 ### Completed (2026-03-29)
 - **Ed V1.0 tested and bug-fixed** -- Fixed: max_position_usd always 0 (BUY never executed), shared position files with Doohan, unnecessary model loading, stale variable refs. All signal generation tests pass.
