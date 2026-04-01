@@ -328,7 +328,8 @@ def execute_maker_buy(symbol, quote_size_usd, max_wait_sec=60, max_retries=3):
             print(f"    [!] Limit order failed (status={status}), falling back to market")
             return place_market_buy(symbol, quote_size_usd)
 
-        order_id = order.get('id', order.get('venue_order_id', ''))
+        data = order.get('data', order)
+        order_id = data.get('venue_order_id', data.get('id', ''))
         if not order_id:
             print(f"    [!] No order ID returned, falling back to market")
             return place_market_buy(symbol, quote_size_usd)
@@ -342,17 +343,18 @@ def execute_maker_buy(symbol, quote_size_usd, max_wait_sec=60, max_retries=3):
 
             s, o = get_order_status(order_id)
             if s == 200 and o:
-                order_status = o.get('status', '')
+                od = o.get('data', o)
+                order_status = od.get('status', od.get('state', ''))
                 if order_status == 'filled':
-                    print(f"    Maker buy FILLED at ${float(o.get('average_fill_price', limit_price)):,.2f} (0% fee)")
-                    return s, o
+                    avg = float(od.get('average_fill_price', limit_price))
+                    print(f"    Maker buy FILLED at ${avg:,.2f} (0% fee)")
+                    return s, od
                 elif order_status in ('cancelled', 'rejected'):
                     print(f"    Order {order_status}, retrying...")
                     break
                 elif order_status == 'partially_filled':
-                    # Keep waiting
-                    filled = float(o.get('filled_quantity', 0))
-                    total = float(o.get('quantity', 1))
+                    filled = float(od.get('filled_quantity', 0))
+                    total = float(od.get('quantity', 1))
                     print(f"    Partially filled: {filled/total*100:.0f}%")
 
         # Not filled — cancel and retry
@@ -387,7 +389,8 @@ def execute_maker_sell(symbol, base_size, max_wait_sec=60, max_retries=3):
             print(f"    [!] Limit order failed (status={status}), falling back to market")
             return place_market_sell(symbol, base_size)
 
-        order_id = order.get('id', order.get('venue_order_id', ''))
+        data = order.get('data', order)
+        order_id = data.get('venue_order_id', data.get('id', ''))
         if not order_id:
             print(f"    [!] No order ID returned, falling back to market")
             return place_market_sell(symbol, base_size)
@@ -401,16 +404,18 @@ def execute_maker_sell(symbol, base_size, max_wait_sec=60, max_retries=3):
 
             s, o = get_order_status(order_id)
             if s == 200 and o:
-                order_status = o.get('status', '')
+                od = o.get('data', o)
+                order_status = od.get('status', od.get('state', ''))
                 if order_status == 'filled':
-                    print(f"    Maker sell FILLED at ${float(o.get('average_fill_price', limit_price)):,.2f} (0% fee)")
-                    return s, o
+                    avg = float(od.get('average_fill_price', limit_price))
+                    print(f"    Maker sell FILLED at ${avg:,.2f} (0% fee)")
+                    return s, od
                 elif order_status in ('cancelled', 'rejected'):
                     print(f"    Order {order_status}, retrying...")
                     break
                 elif order_status == 'partially_filled':
-                    filled = float(o.get('filled_quantity', 0))
-                    total = float(o.get('quantity', 1))
+                    filled = float(od.get('filled_quantity', 0))
+                    total = float(od.get('quantity', 1))
                     print(f"    Partially filled: {filled/total*100:.0f}%")
 
         # Not filled — cancel and retry
