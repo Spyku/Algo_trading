@@ -431,6 +431,17 @@ MIN_TRADES = 8                  # reject unreliable configs
 1. **Eli HRS BTC** -- `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` -- 30-minute candle test
 2. **Ein results review** -- Check Ein (15min) BTC results from laptop run
 3. **Consider ETH-only trading** -- ETH consistently outperforms BTC in backtests. Evaluate dropping BTC.
+4. **Bear regime model quality** -- Live results Apr 1-3: 2W/4L, -$596. BTC 8h bear model has 50% accuracy / -1.8% return (coin flip). ETH bear model unclear. Best models (BTC 7h 78.6%, ETH 5h 83.3%) are bull-regime and barely trade due to 95% min_confidence. Need to re-evaluate bear regime model selection — are we trading with losing models?
+5. **ETH regime config overrides** -- `regime_config_ed.json` has loose top-level `"horizon": 8, "min_confidence": 75` on ETH that may override bull/bear config. Investigate and clean up.
+
+### Completed (2026-04-03)
+- **Ed V2 trader critical bug fixes** -- 6 bugs fixed in `crypto_revolut_ed_v2.py`:
+  1. **Clock drift** — Windows clock ahead of Revolut server → all API calls rejected (409). Fix: NTP sync on startup + auto-correct from 409 response timestamp.
+  2. **`get_balances()` silent failures** — returned `{}` on any API error, callers saw 0 balance. Fix: 3 retries, returns `None` on failure, logs full error.
+  3. **Ghost sells** — sell flipped position to cash even when exchange returned 0 balance (nothing actually sold). Fix: position only updates if sell confirmed executed.
+  4. **Sync blind to locked funds** — sync checked `total`, sell checked `available`. If funds locked by open order, sync was happy but sell saw 0. Fix: sync now detects `available != total` and cancels stale orders.
+  5. **No stale order cleanup** — orphaned limit orders from crashed processes locked funds. Fix: `cancel_all_open_orders()` on startup via `/orders/active` endpoint.
+  6. **Maker orders placed at ask** — never filled on quiet markets. Fix: place at mid-price, re-price every 10s, market fallback after 120s.
 
 ### Completed (2026-03-31)
 - **ETH RS 2-month** -- Mode R: sma24>sma100 bull=6h bear=8h +59.58% (74% WR). Mode S: 6h@85%/8h@65% → +70.01% (67% WR). R→S pipeline fix confirmed working.

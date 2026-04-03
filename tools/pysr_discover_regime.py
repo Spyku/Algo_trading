@@ -1,8 +1,18 @@
 """
-PySR Regime Discovery — Discover optimal bull/bear switching formula
+PySR Regime Discovery — Discover bull/bear regime detection formula
 ====================================================================
 Uses symbolic regression on HISTORICAL data to find a formula that predicts
-when to use a short horizon (bull) vs long horizon (bear).
+whether the market is in a bull or bear regime.
+
+The question is NOT "which horizon is better this hour?" (too noisy).
+The question IS "is the market trending up or down?" — then we apply the
+known horizon mapping (e.g., bull=7h, bear=8h from the regime backtest).
+
+Label strategies:
+  --label forward48   (default) Forward 48h return > 0 = bull
+  --label forward24   Forward 24h return > 0 = bull
+  --label forward72   Forward 72h return > 0 = bull
+  --label sma48_200   SMA(48) > SMA(200) = bull (learn to predict the winning detector)
 
 Anti-leakage design:
   The regime backtest uses the last N months for evaluation.
@@ -14,15 +24,16 @@ Anti-leakage design:
   --months 6:            PySR = months 12->6 ago,   backtest = months 6->0
 
 Usage:
-  python tools/pysr_discover_regime.py                          # BTC, bull=6h, bear=8h, 4-month gap
-  python tools/pysr_discover_regime.py --asset ETH              # ETH
-  python tools/pysr_discover_regime.py --bull 6 --bear 10       # custom horizon pair
-  python tools/pysr_discover_regime.py --months 2               # 2-month backtest gap
-  python tools/pysr_discover_regime.py --iterations 80          # longer PySR run
+  python tools/pysr_discover_regime.py                              # BTC, forward48h label, 4-month gap
+  python tools/pysr_discover_regime.py --label sma48_200            # learn to predict sma48>sma200
+  python tools/pysr_discover_regime.py --label forward72            # 72h forward return label
+  python tools/pysr_discover_regime.py --asset ETH                  # ETH
+  python tools/pysr_discover_regime.py --months 2                   # 2-month backtest gap
+  python tools/pysr_discover_regime.py --iterations 80              # longer PySR run
 
 Output:
-  models/pysr_regime_{ASSET}_{BULL}h_{BEAR}h.json    -- discovered formulas + metadata
-  models/pysr_regime_{ASSET}_{BULL}h_{BEAR}h_report.txt
+  models/pysr_regime_{ASSET}_{LABEL}.json              -- discovered formulas + metadata
+  models/pysr_regime_{ASSET}_{LABEL}_report.txt
 """
 
 import sys
@@ -45,11 +56,14 @@ PYSR_WINDOW_HOURS = 6 * 30 * 24  # 6 months = 4320 hours
 MONTHS_TO_HOURS = {1: 720, 2: 1440, 3: 2160, 4: 2880, 6: 4320}
 
 
+LABEL_STRATEGIES = ['forward24', 'forward48', 'forward72', 'sma48_200']
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='PySR regime formula discovery')
     p.add_argument('--asset', type=str, default='BTC')
-    p.add_argument('--bull', type=int, default=6, help='Bull horizon (shorter)')
-    p.add_argument('--bear', type=int, default=8, help='Bear horizon (longer)')
+    p.add_argument('--label', type=str, default='forward48', choices=LABEL_STRATEGIES,
+                   help='Label strategy: forward24/48/72 (return-based) or sma48_200 (learn the detector)')
     p.add_argument('--months', type=int, default=4, choices=[1, 2, 3, 4, 6],
                    help='Backtest gap (PySR window is 6 months before this)')
     p.add_argument('--iterations', type=int, default=40)
@@ -124,28 +138,30 @@ def build_regime_features(df):
     return out
 
 
-def build_labels(df, bull_h, bear_h):
+def build_labels(df, label_strategy):
     """
-    Label = 1 if the bear (longer) horizon captures a bigger directional move.
-    Label = 0 if the bull (shorter) horizon is better (choppy market).
+    Build bull/bear regime labels. Label = 1 means BULL, 0 means BEAR.
 
-    Uses fee-adjusted forward returns to determine which horizon wins.
+    Strategies:
+      forward24/48/72: forward N-hour return > 0 = bull (market going up)
+      sma48_200: SMA(48) > SMA(200) = bull (learn to predict the winning detector)
     """
-    fee = TRADING_FEE * 2  # round-trip fee
+    if label_strategy.startswith('forward'):
+        hours = int(label_strategy.replace('forward', ''))
+        forward_ret = df['close'].shift(-hours) / df['close'] - 1
+        labels = (forward_ret > 0).astype(float)
+        desc = f'forward {hours}h return > 0'
 
-    # Forward returns at each horizon
-    ret_bull = df['close'].shift(-bull_h) / df['close'] - 1
-    ret_bear = df['close'].shift(-bear_h) / df['close'] - 1
+    elif label_strategy == 'sma48_200':
+        sma48 = df['close'].rolling(48).mean()
+        sma200 = df['close'].rolling(200).mean()
+        labels = (sma48 > sma200).astype(float)
+        desc = 'SMA(48) > SMA(200)'
 
-    # Profit after fees (only if positive, otherwise loss)
-    profit_bull = ret_bull.abs() - fee
-    profit_bear = ret_bear.abs() - fee
+    else:
+        raise ValueError(f"Unknown label strategy: {label_strategy}")
 
-    # Label = 1 when bear horizon captures more profit
-    # (i.e., the move is sustained/trending, longer horizon is better)
-    labels = (profit_bear > profit_bull).astype(float)
-
-    return labels
+    return labels, desc
 
 
 def main():
@@ -153,9 +169,11 @@ def main():
     backtest_hours = MONTHS_TO_HOURS[args.months]
     total_needed = PYSR_WINDOW_HOURS + backtest_hours
 
+    label_strategy = args.label
+
     print(f"\n{'='*70}")
     print(f"  PySR REGIME DISCOVERY: {args.asset}")
-    print(f"  Bull horizon: {args.bull}h | Bear horizon: {args.bear}h")
+    print(f"  Label: {label_strategy} (1=bull, 0=bear)")
     print(f"  PySR window: 6 months ({PYSR_WINDOW_HOURS}h)")
     print(f"  Backtest gap: {args.months} months ({backtest_hours}h)")
     print(f"  Total data needed: {total_needed}h ({total_needed/720:.0f} months)")
@@ -205,8 +223,9 @@ def main():
     print(f"  Features: {len(feature_cols)}")
 
     # ── Build labels ──
-    print(f"  Building labels (bull={args.bull}h vs bear={args.bear}h)...")
-    labels = build_labels(df_pysr, args.bull, args.bear)
+    print(f"  Building labels ({label_strategy})...")
+    labels, label_desc = build_labels(df_pysr, label_strategy)
+    print(f"  Label definition: {label_desc}")
 
     # Combine and drop NaN
     combined = features[feature_cols].copy()
@@ -221,9 +240,9 @@ def main():
     X = X[valid]
     y = y[valid]
 
-    bear_pct = y.mean() * 100
+    bull_pct = y.mean() * 100
     print(f"  Training samples: {len(X)}")
-    print(f"  Label distribution: {bear_pct:.1f}% bear (use {args.bear}h) / {100-bear_pct:.1f}% bull (use {args.bull}h)")
+    print(f"  Label distribution: {bull_pct:.1f}% bull / {100-bull_pct:.1f}% bear")
 
     # Subsample if too large
     max_samples = 3000
@@ -279,7 +298,7 @@ def main():
 
     print(f"\n  {'='*70}")
     print(f"  TOP {args.top} DISCOVERED REGIME EXPRESSIONS")
-    print(f"  Formula > 0.5 => bear (use {args.bear}h) | <= 0.5 => bull (use {args.bull}h)")
+    print(f"  Formula > 0.5 => BULL | <= 0.5 => BEAR")
     print(f"  {'='*70}")
     print(f"  {'#':>4s} | {'Score':>8s} | {'Loss':>10s} | {'Complexity':>10s} | Expression")
     print(f"  {'-'*75}")
@@ -303,39 +322,40 @@ def main():
             pred = model.predict(X, index=eq_sorted.index[i])
             pred_labels = (pred > 0.5).astype(float)
             acc = (pred_labels == y).mean() * 100
-            # Also compute: when it says bull, what % of time bull_h actually wins?
-            bull_mask = pred_labels == 0
-            bear_mask = pred_labels == 1
-            bull_acc = (y[bull_mask] == 0).mean() * 100 if bull_mask.sum() > 0 else 0
-            bear_acc = (y[bear_mask] == 1).mean() * 100 if bear_mask.sum() > 0 else 0
+
+            # When formula says bull, how often is it actually bull?
+            bull_mask = pred_labels == 1
+            bear_mask = pred_labels == 0
+            bull_precision = (y[bull_mask] == 1).mean() * 100 if bull_mask.sum() > 0 else 0
+            bear_precision = (y[bear_mask] == 0).mean() * 100 if bear_mask.sum() > 0 else 0
             bull_pct = bull_mask.mean() * 100
 
             res['accuracy'] = round(acc, 1)
-            res['bull_accuracy'] = round(bull_acc, 1)
-            res['bear_accuracy'] = round(bear_acc, 1)
+            res['bull_precision'] = round(bull_precision, 1)
+            res['bear_precision'] = round(bear_precision, 1)
             res['bull_pct'] = round(bull_pct, 1)
 
             print(f"    #{i+1}: {acc:.1f}% overall | "
-                  f"bull({args.bull}h)={bull_acc:.0f}% correct ({bull_pct:.0f}% of time) | "
-                  f"bear({args.bear}h)={bear_acc:.0f}% correct ({100-bull_pct:.0f}% of time)")
+                  f"says BULL {bull_pct:.0f}% of time (correct {bull_precision:.0f}%) | "
+                  f"says BEAR {100-bull_pct:.0f}% of time (correct {bear_precision:.0f}%)")
         except Exception as e:
             print(f"    #{i+1}: evaluation error: {e}")
 
     # ── Save results ──
-    tag = f"{args.asset}_{args.bull}h_{args.bear}h"
+    tag = f"{args.asset}_{label_strategy}"
     json_path = os.path.join(ENGINE_DIR, 'models', f'pysr_regime_{tag}.json')
     report_path = os.path.join(ENGINE_DIR, 'models', f'pysr_regime_{tag}_report.txt')
 
     output = {
         'asset': args.asset,
-        'bull_horizon': args.bull,
-        'bear_horizon': args.bear,
+        'label_strategy': label_strategy,
+        'label_description': label_desc,
         'discovery_method': 'historical',
         'pysr_window': f'{dt_start} to {dt_end}',
         'backtest_gap_months': args.months,
         'backtest_window': f'{bt_start} to {bt_end}',
         'training_samples': len(X),
-        'bear_label_pct': round(bear_pct, 1),
+        'bull_label_pct': round(bull_pct, 1),
         'feature_names': feature_cols,
         'expressions': results,
         'created': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -347,22 +367,24 @@ def main():
 
     # Report
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write(f"PySR Regime Discovery: {args.asset} bull={args.bull}h bear={args.bear}h\n")
+        f.write(f"PySR Regime Discovery: {args.asset} label={label_strategy}\n")
+        f.write(f"Label: {label_desc}\n")
         f.write(f"PySR window: {dt_start} to {dt_end}\n")
         f.write(f"Backtest gap: {args.months} months ({bt_start} to {bt_end})\n")
-        f.write(f"Samples: {len(X)} | Bear: {bear_pct:.1f}%\n\n")
+        f.write(f"Samples: {len(X)} | Bull: {bull_pct:.1f}%\n\n")
         for i, res in enumerate(results):
             f.write(f"#{i+1} (score={res['score']:.4f}, loss={res['loss']:.6f}, "
                     f"complexity={res['complexity']})\n")
             f.write(f"  {res['equation']}\n")
             if 'accuracy' in res:
                 f.write(f"  Accuracy: {res['accuracy']}% | "
-                        f"Bull: {res['bull_accuracy']}% | Bear: {res['bear_accuracy']}%\n")
+                        f"Bull precision: {res['bull_precision']}% | Bear precision: {res['bear_precision']}%\n")
             f.write("\n")
     print(f"  Saved: {report_path}")
 
-    print(f"\n  Usage: formula > 0.5 => use {args.bear}h (bear), <= 0.5 => use {args.bull}h (bull)")
-    print(f"  Next: run backtest_regime_master.py --months {args.months} to compare against hand-crafted detectors")
+    print(f"\n  Formula > 0.5 => BULL, <= 0.5 => BEAR")
+    print(f"  Then apply: BULL => use bull horizon, BEAR => use bear horizon")
+    print(f"  Next: plug best formula into regime_config_ed.json as pysr detector")
     print(f"{'='*70}\n")
 
 

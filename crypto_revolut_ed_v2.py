@@ -125,14 +125,32 @@ def _load_signing_key():
     raw = pk.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
     return SigningKey(raw)
 
+_clock_offset_ms = 0  # Adjusted if local clock drifts from server
+
+def _sync_clock_ntp():
+    """Get clock offset vs NTP. Returns offset in ms (negative = local clock is ahead)."""
+    import socket, struct
+    try:
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(3)
+        data = b'\x1b' + 47 * b'\0'
+        client.sendto(data, ('pool.ntp.org', 123))
+        data, _ = client.recvfrom(1024)
+        ntp_time = struct.unpack('!12I', data)[10] - 2208988800
+        offset = (ntp_time * 1000) - int(time.time() * 1000)
+        return offset
+    except Exception:
+        return 0
+
 def revx_api(method, path, query='', body=None):
+    global _clock_offset_ms
     config = _load_revx_config()
     sk = _load_signing_key()
     if not sk or not config.get('api_key'):
         return 0, {'error': 'API not configured'}
     body_str = json.dumps(body, separators=(',', ':')) if body else ''
     full_path = f"/api/1.0{path}"
-    ts = str(int(time.time() * 1000))
+    ts = str(int(time.time() * 1000) + _clock_offset_ms)
     msg = f"{ts}{method}{full_path}{query}{body_str}".encode('utf-8')
     sig = base64.b64encode(sk.sign(msg).signature).decode()
     url = f"{REVX_BASE_URL}{path}"
@@ -150,17 +168,35 @@ def revx_api(method, path, query='', body=None):
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
-            return e.code, json.loads(e.read().decode())
+            err_body = json.loads(e.read().decode())
         except:
-            return e.code, {'error': str(e)}
+            err_body = {'error': str(e)}
+        # Auto-correct clock drift on 409 "timestamp in the future"
+        if e.code == 409 and 'timestamp' in err_body:
+            server_ts = err_body.get('timestamp', 0)
+            if server_ts:
+                local_ts = int(time.time() * 1000)
+                _clock_offset_ms = server_ts - local_ts
+                print(f"    🕐 Clock drift detected: {_clock_offset_ms:+d}ms — auto-corrected")
+        return e.code, err_body
     except Exception as e:
         return 0, {'error': str(e)}
 
-def get_balances():
-    status, data = revx_api('GET', '/balances')
-    if status == 200:
-        return {b['currency']: {'available': float(b['available']), 'total': float(b['total'])} for b in data}
-    return {}
+def get_balances(retries=3):
+    for attempt in range(1, retries + 1):
+        status, data = revx_api('GET', '/balances')
+        if status == 200:
+            result = {b['currency']: {'available': float(b['available']), 'total': float(b['total'])} for b in data}
+            # Log any asset where available != total (funds locked by open order)
+            for cur, bal in result.items():
+                if bal['total'] > 0 and bal['available'] != bal['total']:
+                    print(f"    ⚠ {cur} balance: available={bal['available']:.6f} != total={bal['total']:.6f} (funds locked?)")
+            return result
+        if attempt < retries:
+            print(f"    ⚠ get_balances failed (status={status}, data={data}, attempt {attempt}/{retries}) — retrying in 3s...")
+            time.sleep(3)
+    print(f"    ❌ get_balances failed after {retries} attempts (last status={status}, data={data})")
+    return None
 
 def get_asset_price(symbol):
     """Get price from Revolut X. Handles actual API response formats."""
@@ -279,6 +315,32 @@ def cancel_order(venue_order_id):
     return revx_api('DELETE', f'/orders/{venue_order_id}')
 
 
+def cancel_all_open_orders(symbol=None):
+    """Cancel all open orders, optionally filtered by symbol. Returns count cancelled."""
+    status, data = revx_api('GET', '/orders/active')
+    if status != 200:
+        print(f"    [!] Failed to list open orders (status={status})")
+        return 0
+    orders = data if isinstance(data, list) else data.get('data', data) if isinstance(data, dict) else []
+    if not isinstance(orders, list):
+        return 0
+    cancelled = 0
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        order_status = o.get('status', o.get('state', ''))
+        if order_status not in ('open', 'pending', 'partially_filled', 'new'):
+            continue
+        if symbol and o.get('symbol', '') != symbol:
+            continue
+        oid = o.get('venue_order_id', o.get('id', ''))
+        if oid:
+            cancel_order(oid)
+            print(f"    Cancelled order {oid} ({o.get('side', '?')} {o.get('symbol', '?')})")
+            cancelled += 1
+    return cancelled
+
+
 def get_best_bid_ask(symbol):
     """Get best bid and ask from order book."""
     try:
@@ -302,129 +364,83 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def execute_maker_buy(symbol, quote_size_usd, max_wait_sec=60, max_retries=3):
-    """Execute a maker buy with retry logic.
+def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=10):
+    """Try maker at mid-price, re-price every check_interval, market fallback after maker_window.
 
-    1. Get best bid price
-    2. Place post-only limit order at bid
-    3. Wait for fill (check every 5 sec)
-    4. If not filled after max_wait_sec, cancel and retry at new bid
-    5. After max_retries, fall back to market order
-
-    Returns: (status, order_data) same format as place_market_buy
+    Places at mid-price for best fill probability while staying maker (0% fee).
+    Re-checks and re-prices to follow the market. Falls back to market after maker_window.
+    Returns: (status, order_data) same format as place_market_buy/sell
     """
-    for attempt in range(max_retries):
+    is_buy = (side == 'buy')
+    place_limit = place_limit_buy if is_buy else place_limit_sell
+    place_market = place_market_buy if is_buy else place_market_sell
+    side_label = 'buy' if is_buy else 'sell'
+
+    elapsed = 0
+    attempt = 0
+
+    while elapsed < maker_window:
+        attempt += 1
         bid, ask = get_best_bid_ask(symbol)
-        if bid <= 0:
-            print(f"    [!] Cannot get bid price for {symbol}, falling back to market")
-            return place_market_buy(symbol, quote_size_usd)
+        if bid <= 0 or ask <= 0:
+            print(f"    [!] Cannot get price for {symbol}, going market")
+            return place_market(symbol, size)
 
-        # Place limit buy at bid price
-        limit_price = bid
-        print(f"    Maker buy attempt {attempt+1}/{max_retries}: {symbol} at ${limit_price:,.2f} (bid)")
-        status, order = place_limit_buy(symbol, quote_size_usd, limit_price)
+        mid = round((bid + ask) / 2, 2)
+        spread_bps = (ask - bid) / bid * 10000
+        print(f"    Maker {side_label} #{attempt}: {symbol} at ${mid:,.2f} (mid) bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
 
+        status, order = place_limit(symbol, size, mid)
         if status != 200 or not order:
-            print(f"    [!] Limit order failed (status={status}), falling back to market")
-            return place_market_buy(symbol, quote_size_usd)
+            print(f"    [!] Limit order failed (status={status}), going market")
+            return place_market(symbol, size)
 
         data = order.get('data', order)
         order_id = data.get('venue_order_id', data.get('id', ''))
         if not order_id:
-            print(f"    [!] No order ID returned, falling back to market")
-            return place_market_buy(symbol, quote_size_usd)
+            print(f"    [!] No order ID returned, going market")
+            return place_market(symbol, size)
 
-        # Wait for fill
-        elapsed = 0
-        check_interval = 5
-        while elapsed < max_wait_sec:
-            time.sleep(check_interval)
-            elapsed += check_interval
+        time.sleep(check_interval)
+        elapsed += check_interval
 
-            s, o = get_order_status(order_id)
-            if s == 200 and o:
-                od = o.get('data', o)
-                order_status = od.get('status', od.get('state', ''))
-                if order_status == 'filled':
-                    avg = float(od.get('average_fill_price', limit_price))
-                    print(f"    Maker buy FILLED at ${avg:,.2f} (0% fee)")
-                    return s, od
-                elif order_status in ('cancelled', 'rejected'):
-                    print(f"    Order {order_status}, retrying...")
-                    break
-                elif order_status == 'partially_filled':
-                    filled = float(od.get('filled_quantity', 0))
-                    total = float(od.get('quantity', 1))
-                    print(f"    Partially filled: {filled/total*100:.0f}%")
+        s, o = get_order_status(order_id)
+        if s == 200 and o:
+            od = o.get('data', o)
+            order_status = od.get('status', od.get('state', ''))
+            if order_status == 'filled':
+                avg = float(od.get('average_fill_price', mid))
+                print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee)")
+                return s, od
+            elif order_status == 'partially_filled':
+                filled_qty = float(od.get('filled_quantity', 0))
+                total_qty = float(od.get('quantity', 1))
+                pct = filled_qty / total_qty * 100 if total_qty > 0 else 0
+                print(f"    Partially filled: {pct:.0f}% — waiting...")
+                # Give partial fills extra time
+                time.sleep(check_interval)
+                elapsed += check_interval
+                s2, o2 = get_order_status(order_id)
+                if s2 == 200 and o2:
+                    od2 = o2.get('data', o2)
+                    if od2.get('status', od2.get('state', '')) == 'filled':
+                        avg = float(od2.get('average_fill_price', mid))
+                        print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee)")
+                        return s2, od2
 
-        # Not filled — cancel and retry
+        # Cancel and re-price to current mid
         cancel_order(order_id)
-        print(f"    Order not filled after {max_wait_sec}s, cancelled")
 
-    # All retries exhausted — fall back to market
-    print(f"    Maker buy failed after {max_retries} attempts, falling back to MARKET order")
-    return place_market_buy(symbol, quote_size_usd)
+    print(f"    Not filled after {maker_window}s, going MARKET")
+    return place_market(symbol, size)
 
 
-def execute_maker_sell(symbol, base_size, max_wait_sec=60, max_retries=3):
-    """Execute a maker sell with retry logic.
+def execute_maker_buy(symbol, quote_size_usd):
+    return _execute_maker_order(symbol, quote_size_usd, 'buy')
 
-    Same logic as execute_maker_buy but places at ask price.
-    Falls back to market order after max_retries.
 
-    Returns: (status, order_data) same format as place_market_sell
-    """
-    for attempt in range(max_retries):
-        bid, ask = get_best_bid_ask(symbol)
-        if ask <= 0:
-            print(f"    [!] Cannot get ask price for {symbol}, falling back to market")
-            return place_market_sell(symbol, base_size)
-
-        # Place limit sell at ask price
-        limit_price = ask
-        print(f"    Maker sell attempt {attempt+1}/{max_retries}: {symbol} at ${limit_price:,.2f} (ask)")
-        status, order = place_limit_sell(symbol, base_size, limit_price)
-
-        if status != 200 or not order:
-            print(f"    [!] Limit order failed (status={status}), falling back to market")
-            return place_market_sell(symbol, base_size)
-
-        data = order.get('data', order)
-        order_id = data.get('venue_order_id', data.get('id', ''))
-        if not order_id:
-            print(f"    [!] No order ID returned, falling back to market")
-            return place_market_sell(symbol, base_size)
-
-        # Wait for fill
-        elapsed = 0
-        check_interval = 5
-        while elapsed < max_wait_sec:
-            time.sleep(check_interval)
-            elapsed += check_interval
-
-            s, o = get_order_status(order_id)
-            if s == 200 and o:
-                od = o.get('data', o)
-                order_status = od.get('status', od.get('state', ''))
-                if order_status == 'filled':
-                    avg = float(od.get('average_fill_price', limit_price))
-                    print(f"    Maker sell FILLED at ${avg:,.2f} (0% fee)")
-                    return s, od
-                elif order_status in ('cancelled', 'rejected'):
-                    print(f"    Order {order_status}, retrying...")
-                    break
-                elif order_status == 'partially_filled':
-                    filled = float(od.get('filled_quantity', 0))
-                    total = float(od.get('quantity', 1))
-                    print(f"    Partially filled: {filled/total*100:.0f}%")
-
-        # Not filled — cancel and retry
-        cancel_order(order_id)
-        print(f"    Order not filled after {max_wait_sec}s, cancelled")
-
-    # All retries exhausted — fall back to market
-    print(f"    Maker sell failed after {max_retries} attempts, falling back to MARKET order")
-    return place_market_sell(symbol, base_size)
+def execute_maker_sell(symbol, base_size):
+    return _execute_maker_order(symbol, base_size, 'sell')
 
 
 # ============================================================
@@ -464,6 +480,9 @@ def sync_positions(trading_cfg, notify=True):
     - Notifies only on state changes (not on balance updates)
     """
     balances = get_balances()
+    if balances is None:
+        print("  ⚠ Position sync skipped — balance API unreachable")
+        return []
     if not balances:
         return []
 
@@ -522,6 +541,15 @@ def sync_positions(trading_cfg, notify=True):
             # Always refresh actual held amount from exchange (silent)
             pos['base_amount'] = actual_amount
             updated = True
+
+            # Detect locked funds (stale open orders) and cancel them
+            available_amount = balances.get(asset, {}).get('available', 0)
+            if available_amount <= 0 < actual_amount:
+                print(f"  ⚠ SYNC: {asset} funds locked (available=0, total={actual_amount:.6f}) — cancelling stale orders")
+                cancelled = cancel_all_open_orders(cfg.get('symbol', f'{asset}-USD'))
+                if cancelled > 0:
+                    send_telegram(f"🧹 {asset}: cancelled {cancelled} stale order(s) — funds unlocked")
+                    changes.append(f"🧹 {asset}: cancelled {cancelled} stale order(s)")
 
         if updated:
             save_position(asset, pos)
@@ -785,6 +813,19 @@ def process_asset(asset, trading_cfg, dry_run=False):
         if not dry_run and position.get('auto_trade'):
             # Pre-trade balance check
             balances = get_balances()
+            if balances is None:
+                print(f"    ❌ Cannot buy {asset} — balance API unreachable")
+                send_telegram(f"❌ {asset} BUY aborted: balance API failed")
+                return {
+                    'asset': asset, 'action': 'BUY', 'confidence': confidence,
+                    'reason': 'api_failure', 'price': price, 'executed': False,
+                    'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                    'sig_short': sig_short, 'sig_long': sig_long,
+                    'position': position, 'strategy': strategy,
+                    'min_confidence': min_conf,
+                    'gamma': '', 'regime': regime_label,
+                    'horizon': regime_horizon or '',
+                }
             usd_avail = balances.get('USD', {}).get('available', 0)
             print(f"    Pre-trade USD: ${usd_avail:,.2f}")
 
@@ -838,8 +879,46 @@ def process_asset(asset, trading_cfg, dry_run=False):
         if not dry_run and position.get('auto_trade'):
             # Get ACTUAL holdings from exchange — sell everything
             balances = get_balances()
+            if balances is None:
+                print(f"    ❌ Cannot sell {asset} — balance API unreachable, keeping position")
+                send_telegram(f"❌ {asset} SELL aborted: balance API failed (position kept as invested)")
+                return {
+                    'asset': asset, 'action': 'SELL', 'confidence': confidence,
+                    'reason': 'api_failure', 'price': price, 'executed': False,
+                    'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                    'sig_short': sig_short, 'sig_long': sig_long,
+                    'position': position, 'strategy': strategy,
+                    'min_confidence': min_conf,
+                    'gamma': '', 'regime': regime_label,
+                    'horizon': regime_horizon or '',
+                }
             actual_held = balances.get(asset, {}).get('available', 0)
-            print(f"    Pre-trade: {actual_held:.6f} {asset} (selling ALL)")
+            total_held = balances.get(asset, {}).get('total', 0)
+            print(f"    Pre-trade: {actual_held:.6f} {asset} available, {total_held:.6f} total (selling ALL)")
+
+            # If available=0 but total>0, funds are locked by an open order — cancel it first
+            if actual_held <= 0 < total_held:
+                print(f"    ⚠ {asset} balance locked (available=0, total={total_held:.6f}) — cancelling open orders...")
+                send_telegram(f"⚠️ {asset} balance locked — cancelling open orders before sell")
+                cancelled = cancel_all_open_orders(symbol)
+                if cancelled > 0:
+                    time.sleep(2)
+                    balances = get_balances()
+                    if balances is None:
+                        print(f"    ❌ Cannot re-check balance after cancel — aborting sell")
+                        send_telegram(f"❌ {asset} SELL aborted: balance API failed after order cancel")
+                        return {
+                            'asset': asset, 'action': 'SELL', 'confidence': confidence,
+                            'reason': 'api_failure', 'price': price, 'executed': False,
+                            'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                            'sig_short': sig_short, 'sig_long': sig_long,
+                            'position': position, 'strategy': strategy,
+                            'min_confidence': min_conf,
+                            'gamma': '', 'regime': regime_label,
+                            'horizon': regime_horizon or '',
+                        }
+                    actual_held = balances.get(asset, {}).get('available', 0)
+                    print(f"    After cancel: {actual_held:.6f} {asset} available")
 
             if actual_held > 0:
                 use_maker = trading_cfg.get('use_maker_orders', False)
@@ -855,30 +934,36 @@ def process_asset(asset, trading_cfg, dry_run=False):
                     # Post-trade verification
                     time.sleep(2)
                     post_bal = get_balances()
-                    usd_now = post_bal.get('USD', {}).get('available', 0)
-                    crypto_left = post_bal.get(asset, {}).get('total', 0)
-                    print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD")
+                    if post_bal:
+                        usd_now = post_bal.get('USD', {}).get('available', 0)
+                        crypto_left = post_bal.get(asset, {}).get('total', 0)
+                        print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD")
                 else:
                     send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
             else:
                 print(f"    ⚠ Nothing to sell (exchange balance = 0)")
+                send_telegram(f"⚠️ {asset} SELL skipped: exchange balance = 0 (position kept as invested)")
 
-        pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
-        pnl_usd = position['usd_invested'] * pnl_pct / 100
-        pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
+        if not dry_run and position.get('auto_trade') and not executed:
+            # Auto-trade sell failed or nothing to sell — keep position as invested
+            pass
+        else:
+            pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
+            pnl_usd = position['usd_invested'] * pnl_pct / 100
+            pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
 
-        position['trades'].append({
-            'action': 'SELL', 'price': price,
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-            'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-            'auto': executed,
-        })
-        position['state'] = 'cash'
-        position['entry_price'] = 0
-        position['entry_time'] = ''
-        position['base_amount'] = 0
-        position['usd_invested'] = 0
-        save_position(asset, position)
+            position['trades'].append({
+                'action': 'SELL', 'price': price,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                'auto': executed,
+            })
+            position['state'] = 'cash'
+            position['entry_price'] = 0
+            position['entry_time'] = ''
+            position['base_amount'] = 0
+            position['usd_invested'] = 0
+            save_position(asset, position)
 
     # Get gamma from the primary horizon model
     gamma_val = ''
@@ -2155,6 +2240,21 @@ def run_loop(trading_cfg, dry_run=False):
     print(f"{'='*60}")
 
     _flush_old_updates()
+
+    # Sync clock with NTP to prevent "timestamp in the future" errors
+    global _clock_offset_ms
+    offset = _sync_clock_ntp()
+    if abs(offset) > 500:
+        _clock_offset_ms = offset
+        print(f"  Clock drift: {offset:+d}ms — corrected for API calls")
+    else:
+        print(f"  Clock sync OK ({offset:+d}ms)")
+
+    # Cancel any stale open orders from previous runs
+    stale = cancel_all_open_orders()
+    if stale > 0:
+        print(f"  Cancelled {stale} stale open order(s) from previous run")
+        send_telegram(f"🧹 Startup: cancelled {stale} stale open order(s)")
 
     # Initial sync — detect any existing positions on exchange
     print("\n  Initial position sync from Revolut X...")
