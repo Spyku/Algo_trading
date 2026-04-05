@@ -443,6 +443,9 @@ MIN_TRADES = 8                  # reject unreliable configs
   5. **No stale order cleanup** — orphaned limit orders from crashed processes locked funds. Fix: `cancel_all_open_orders()` on startup via `/orders/active` endpoint.
   6. **Maker orders placed at ask** — never filled on quiet markets. Fix: place at mid-price, re-price every 10s, market fallback after 120s.
 
+### Completed (2026-04-05)
+- **Maker order pricing fix** — mid-price strategy (from 2026-04-03) still never filled: buys sat between bid/ask, sells chased price down. Fix: penny-improvement at `bid+0.01` for both buy and sell. Buy jumps ahead of bid queue; sell undercuts entire ask side. `post_only` ensures 0% maker fee. If spread too tight for sell, goes market immediately instead of wasting 60s. Also: stale orders cancelled before each maker attempt (prevents fund locking), error body now logged on limit failures, maker window reduced to 60s.
+
 ### Completed (2026-03-31)
 - **ETH RS 2-month** -- Mode R: sma24>sma100 bull=6h bear=8h +59.58% (74% WR). Mode S: 6h@85%/8h@65% → +70.01% (67% WR). R→S pipeline fix confirmed working.
 - **HRS R→S pipeline fix** -- Mode R now writes winning horizons to config before Mode S runs. Previously S ignored R's findings and used pre-set horizons.

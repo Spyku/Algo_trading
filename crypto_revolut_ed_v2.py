@@ -364,17 +364,24 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=10):
-    """Try maker at mid-price, re-price every check_interval, market fallback after maker_window.
+def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=10):
+    """Try maker with aggressive pricing, re-price every check_interval, market fallback.
 
-    Places at mid-price for best fill probability while staying maker (0% fee).
-    Re-checks and re-prices to follow the market. Falls back to market after maker_window.
+    Buy at bid+0.01 (penny ahead of best bid) — top of bid queue.
+    Sell at bid+0.01 (penny above best bid) — undercuts the entire ask side.
+    Both stay maker via post_only. If post_only rejects (spread too tight), go market.
     Returns: (status, order_data) same format as place_market_buy/sell
     """
     is_buy = (side == 'buy')
     place_limit = place_limit_buy if is_buy else place_limit_sell
     place_market = place_market_buy if is_buy else place_market_sell
     side_label = 'buy' if is_buy else 'sell'
+
+    # Cancel any stale open orders for this symbol to free locked funds
+    stale = cancel_all_open_orders(symbol)
+    if stale > 0:
+        print(f"    Cleared {stale} stale order(s) for {symbol}")
+        time.sleep(1)
 
     elapsed = 0
     attempt = 0
@@ -386,13 +393,27 @@ def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=10
             print(f"    [!] Cannot get price for {symbol}, going market")
             return place_market(symbol, size)
 
-        mid = round((bid + ask) / 2, 2)
         spread_bps = (ask - bid) / bid * 10000
-        print(f"    Maker {side_label} #{attempt}: {symbol} at ${mid:,.2f} (mid) bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
+        if is_buy:
+            limit_price = round(bid + 0.01, 2)
+            # Safety: don't cross the ask (post_only would reject)
+            if limit_price >= ask:
+                limit_price = bid
+        else:
+            # Aggressive: sell at bid+0.01 — undercuts entire ask side
+            # post_only ensures we stay maker; if spread is too tight it rejects
+            limit_price = round(bid + 0.01, 2)
+            if limit_price >= ask:
+                # Spread is 1 penny or less — can't be maker, go market now
+                print(f"    Maker {side_label}: spread too tight ({spread_bps:.1f}bps), going market")
+                return place_market(symbol, size)
 
-        status, order = place_limit(symbol, size, mid)
+        print(f"    Maker {side_label} #{attempt}: {symbol} at ${limit_price:,.2f} bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
+
+        status, order = place_limit(symbol, size, limit_price)
         if status != 200 or not order:
-            print(f"    [!] Limit order failed (status={status}), going market")
+            err_detail = order if isinstance(order, dict) else {}
+            print(f"    [!] Limit order failed (status={status}, error={err_detail}), going market")
             return place_market(symbol, size)
 
         data = order.get('data', order)
@@ -409,7 +430,7 @@ def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=10
             od = o.get('data', o)
             order_status = od.get('status', od.get('state', ''))
             if order_status == 'filled':
-                avg = float(od.get('average_fill_price', mid))
+                avg = float(od.get('average_fill_price', limit_price))
                 print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee)")
                 return s, od
             elif order_status == 'partially_filled':
@@ -424,11 +445,11 @@ def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=10
                 if s2 == 200 and o2:
                     od2 = o2.get('data', o2)
                     if od2.get('status', od2.get('state', '')) == 'filled':
-                        avg = float(od2.get('average_fill_price', mid))
+                        avg = float(od2.get('average_fill_price', limit_price))
                         print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee)")
                         return s2, od2
 
-        # Cancel and re-price to current mid
+        # Cancel and re-price
         cancel_order(order_id)
 
     print(f"    Not filled after {maker_window}s, going MARKET")

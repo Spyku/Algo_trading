@@ -231,8 +231,9 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 | `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `crypto_trading_system_ed.py` | **Production** | Ed V1.0: Regime-switching (1h candles). All Doohan modes + Mode R (regime backtest). Reads `crypto_ed_production.csv`. |
 | `crypto_revolut_ed.py` | **Live** | Ed auto-trader — reads `regime_config_ed.json`, switches horizon per bull/bear regime. |
+| `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy at bid+0.01, sell at bid+0.01 (undercut ask side). post_only ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. |
 | `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. |
-| `start_ed.bat` | **Live** | Launches Ed trader with auto-restart + log tee. |
+| `start_ed_v2.bat` | **Live** | Launches Ed V2 trader with auto-restart + log tee. |
 | `crypto_trading_system_ein.py` | **Testing** | Ein V1.0: 15-minute candles. Horizons 4-10 candles (1h-2h30). Candle-based features (no 'h' suffix). Grid windows 12h-120h. No trader yet. |
 | `crypto_trading_system_eli.py` | **Testing** | Eli V1.0: 30-minute candles. Horizons 4-10 candles (2h-5h). Same as Ein but 2x candle length. Grid windows 12h-120h. No trader yet. |
 | `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery. Historical window (6mo before backtest). Anti-leakage. |
