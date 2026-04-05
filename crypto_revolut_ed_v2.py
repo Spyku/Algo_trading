@@ -364,12 +364,12 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=10):
-    """Try maker with aggressive pricing, re-price every check_interval, market fallback.
+def _execute_maker_order(symbol, size, side, maker_window=30, check_interval=5):
+    """Try maker order, market fallback after maker_window.
 
-    Buy at bid+0.01 (penny ahead of best bid) — top of bid queue.
-    Sell at bid+0.01 (penny above best bid) — undercuts the entire ask side.
-    Both stay maker via post_only. If post_only rejects (spread too tight), go market.
+    Buy at bid+0.01 — top of bid queue, filled by incoming market sells.
+    Sell at ask-0.01 — top of ask queue, filled by incoming market buys.
+    Short window (30s) + fast checks (5s) — don't waste time, go market if no fill.
     Returns: (status, order_data) same format as place_market_buy/sell
     """
     is_buy = (side == 'buy')
@@ -396,15 +396,11 @@ def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=10)
         spread_bps = (ask - bid) / bid * 10000
         if is_buy:
             limit_price = round(bid + 0.01, 2)
-            # Safety: don't cross the ask (post_only would reject)
             if limit_price >= ask:
                 limit_price = bid
         else:
-            # Aggressive: sell at bid+0.01 — undercuts entire ask side
-            # post_only ensures we stay maker; if spread is too tight it rejects
-            limit_price = round(bid + 0.01, 2)
-            if limit_price >= ask:
-                # Spread is 1 penny or less — can't be maker, go market now
+            limit_price = round(ask - 0.01, 2)
+            if limit_price <= bid:
                 print(f"    Maker {side_label}: spread too tight ({spread_bps:.1f}bps), going market")
                 return place_market(symbol, size)
 
