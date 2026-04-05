@@ -364,18 +364,19 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=30, check_interval=5):
+def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=3):
     """Try maker order, market fallback after maker_window.
 
     Buy at bid+0.01 — top of bid queue, filled by incoming market sells.
-    Sell at ask-0.01 — top of ask queue, filled by incoming market buys.
-    Short window (30s) + fast checks (5s) — don't waste time, go market if no fill.
+    Sell: starts at ask-0.01, steps down toward bid+0.01 each retry (20 attempts).
+    Progressively undercuts to maximise fill chance while saving fees.
     Returns: (status, order_data) same format as place_market_buy/sell
     """
     is_buy = (side == 'buy')
     place_limit = place_limit_buy if is_buy else place_limit_sell
     place_market = place_market_buy if is_buy else place_market_sell
     side_label = 'buy' if is_buy else 'sell'
+    max_attempts = maker_window // check_interval
 
     # Cancel any stale open orders for this symbol to free locked funds
     stale = cancel_all_open_orders(symbol)
@@ -399,10 +400,14 @@ def _execute_maker_order(symbol, size, side, maker_window=30, check_interval=5):
             if limit_price >= ask:
                 limit_price = bid
         else:
-            limit_price = round(ask - 0.01, 2)
-            if limit_price <= bid:
+            # Slide from ask-0.01 down to bid+0.01 over max_attempts
+            top = ask - 0.01
+            bottom = bid + 0.01
+            if top <= bottom:
                 print(f"    Maker {side_label}: spread too tight ({spread_bps:.1f}bps), going market")
                 return place_market(symbol, size)
+            progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
+            limit_price = round(top - progress * (top - bottom), 2)
 
         print(f"    Maker {side_label} #{attempt}: {symbol} at ${limit_price:,.2f} bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
 
