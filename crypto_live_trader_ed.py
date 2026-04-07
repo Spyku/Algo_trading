@@ -152,6 +152,11 @@ def _evaluate_detector(det_type, params, df, asset):
         elif det_type == 'pysr':
             return _evaluate_pysr_detector(params, df, asset)
 
+        elif det_type == 'named':
+            # Mode S writes detector by name. Must match the dict in
+            # crypto_trading_system_ed.py::_build_regime_indicators_and_detectors.
+            return _evaluate_named_detector(params.get('name', ''), df)
+
         else:
             print(f"  [!] Unknown regime detector type: {det_type}")
             return True  # default bull
@@ -159,6 +164,56 @@ def _evaluate_detector(det_type, params, df, asset):
     except Exception as e:
         print(f"  [!] Regime detection error: {e}")
         return True  # default bull
+
+
+def _evaluate_named_detector(name, df):
+    """Evaluate a named detector. Must mirror the dict in
+    crypto_trading_system_ed.py::_build_regime_indicators_and_detectors.
+    Supported names: sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h.
+    """
+    import numpy as _np
+    if not name:
+        return True
+    try:
+        if name == 'sma24>sma100':
+            if len(df) < 110: return True
+            return df['close'].rolling(24).mean().iloc[-1] > df['close'].rolling(100).mean().iloc[-1]
+
+        if name == 'sma168>sma480':
+            if len(df) < 490: return True
+            return df['close'].rolling(168).mean().iloc[-1] > df['close'].rolling(480).mean().iloc[-1]
+
+        if name == 'price>sma72':
+            if len(df) < 82: return True
+            return df['close'].iloc[-1] > df['close'].rolling(72).mean().iloc[-1]
+
+        if name == 'vol_calm':
+            # Andersen-Bollerslev deseasonalized 24h vol vs its 30d 70th percentile
+            if len(df) < 800: return True
+            d = df.copy()
+            if 'datetime' in d.columns:
+                d['datetime'] = pd.to_datetime(d['datetime'])
+                d = d.set_index('datetime').sort_index()
+            d['logret_1h'] = _np.log(d['close'] / d['close'].shift(1))
+            d['abs_logret'] = d['logret_1h'].abs()
+            d['hour'] = d.index.hour
+            d['seasonal_factor'] = d.groupby('hour')['abs_logret'].transform(
+                lambda s: s.rolling(30, min_periods=10).mean()
+            )
+            d['abs_logret_deseason'] = d['abs_logret'] / d['seasonal_factor'].replace(0, _np.nan)
+            vol = d['abs_logret_deseason'].rolling(24).std()
+            q70 = vol.rolling(720, min_periods=240).quantile(0.70)
+            return float(vol.iloc[-1]) < float(q70.iloc[-1])
+
+        if name == 'tsmom_672h':
+            if len(df) < 680: return True
+            return _np.log(df['close'].iloc[-1] / df['close'].iloc[-672]) > 0
+
+        print(f"  [!] Unknown named detector: {name}")
+        return True
+    except Exception as e:
+        print(f"  [!] Named detector '{name}' error: {e}")
+        return True
 
 
 def _evaluate_pysr_detector(params, df, asset):

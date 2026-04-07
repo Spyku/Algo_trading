@@ -6,11 +6,10 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 Automated ML trading system for crypto (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h — optimized via Mode H). Executes trades on Revolut X via Ed25519-signed API.
 
-**Production systems:**
-- **Doohan V1.7.1** — Fixed-horizon trading + PySR (`crypto_trading_system_doohan.py`). Stable production. PySR anti-leakage safeguards (2026-03-25).
-- **Ed V1.0** — Regime-switching trading (`crypto_trading_system_ed.py`). Dynamic bull/bear horizon selection via external config (`config/regime_config_ed.json`). Mode R regime backtest. Runs alongside Doohan. (2026-03-29).
+**Production:**
+- **Ed V2** — Regime-switching trading (`crypto_trading_system_ed.py` + `crypto_revolut_ed_v2.py`). Dynamic bull/bear horizon selection via external config (`config/regime_config_ed.json`). Maker-order pricing at `bid+0.01` with `post_only` for 0% fees. Mode R regime backtest. Currently ETH-only.
 
-Deku and all prior versions archived (2026-03-24).
+Doohan V1.7.1, Deku, CASCA and all prior versions archived (Doohan retired 2026-04, others 2026-03-24). See `archive/`.
 
 **Owner:** Alex, Lausanne, Switzerland (CET/CEST timezone)
 
@@ -58,32 +57,26 @@ pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
 # Arguments are order-independent: MODE, ASSETS, HORIZONS can appear in any order.
 # Run --help for full usage.
 
-# === Doohan (production) — exhaustive grid + Optuna refine + PySR + embargo fix ===
-python crypto_trading_system_doohan.py P BTC 6h                  # Mode P — PySR feature discovery (~30-120 min)
-python crypto_trading_system_doohan.py H BTC 5,6,7,8h           # Mode H — full horizon sweep (D+V per horizon)
-python crypto_trading_system_doohan.py H BTC 5,6,7h --skip      # Mode H — skip D where results exist, re-run V only
-python crypto_trading_system_doohan.py DV BTC 6h                 # Mode DV — grid + validate for single horizon
-python crypto_trading_system_doohan.py D BTC 6h                  # Mode D — grid optimization only
-python crypto_trading_system_doohan.py D BTC 6h --trials 200     # Custom trial count
-python crypto_trading_system_doohan.py V BTC 6h                  # Mode V — re-validate existing D results
-python crypto_trading_system_doohan.py S BTC 5,8h                # Mode S — strategy comparison (multi-horizon)
-python crypto_trading_system_doohan.py DVS BTC 6h                # Full pipeline: grid → validate → strategy
-python crypto_trading_system_doohan.py --help                    # Show all modes, options, examples
+# === Ed (production) — regime-switching, dynamic bull/bear horizon selection ===
+python crypto_trading_system_ed.py P BTC 6h                    # Mode P — PySR feature discovery (~30-120 min)
+python crypto_trading_system_ed.py H BTC 5,6,7,8h              # Mode H — horizon sweep
+python crypto_trading_system_ed.py DV BTC 6h                   # Mode DV — grid + validate
+python crypto_trading_system_ed.py D BTC 6h                    # Mode D — grid optimization only
+python crypto_trading_system_ed.py V BTC 6h                    # Mode V — re-validate existing D results
+python crypto_trading_system_ed.py R BTC 5,6,7,8h              # Mode R — regime backtest (all detectors)
+python crypto_trading_system_ed.py R BTC --replay 2880         # Mode R — 4-month replay
+python crypto_trading_system_ed.py HRS ETH 5,6,7,8h --replay 1440  # Full pipeline (H→R→S), writes regime config
+python crypto_trading_system_ed.py --help                       # Show all modes, options, examples
 
-# === Auto-trader (Doohan — production) ===
-python crypto_revolut_doohan.py --loop              # Live trading loop
-python crypto_revolut_doohan.py --dry-run --loop    # Signals only, no trades
-python crypto_revolut_doohan.py --status            # Show positions
+# === Auto-trader (Ed V2 — production) ===
+start_ed_v2.bat                                     # Auto-restart launcher (recommended)
+python crypto_revolut_ed_v2.py --loop               # Live trading loop
+python crypto_revolut_ed_v2.py --dry-run --loop     # Signals only, no trades
+python crypto_revolut_ed_v2.py --status             # Show positions
 
 # === Optimizer bot (remote optimization via Telegram) ===
 python crypto_optimizer_bot.py                      # Start optimizer bot (separate from trader bot)
 
-# === Ed (regime-switching) — dynamic bull/bear horizon selection ===
-python crypto_trading_system_ed.py R BTC 5,6,7,8h              # Mode R — regime backtest (all detectors)
-python crypto_trading_system_ed.py R BTC --replay 2880         # Mode R — 4-month replay
-python crypto_trading_system_ed.py R BTC --conf 85 --top 20    # Mode R — custom conf + top N
-python crypto_revolut_ed.py --loop                              # Ed live trading loop
-python crypto_revolut_ed.py --dry-run --loop                    # Ed signals only, no trades
 python tools/pysr_discover_regime.py --bull 6 --bear 8          # PySR regime formula discovery
 
 # === Ein (15-minute candles) — testing only, no trader ===
@@ -106,9 +99,7 @@ python tools/backtest_regime_master.py --no-combos             # single-horizon 
 python tools/backtest_regime_master.py --asset ETH             # test other assets
 ```
 
-**Telegram commands (Doohan trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/optimize BTC` `/optstatus`
-
-**Telegram commands (Ed trader):** Same as Doohan + `/regime` (show current bull/bear state per asset)
+**Telegram commands (Ed V2 trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/regime` (show current bull/bear state per asset)
 
 **Telegram commands (Optimizer bot):** `/optimize` (interactive menu) `/queue` `/cancel` `/status` `/results` `/help` `/stop`
 
@@ -116,33 +107,25 @@ python tools/backtest_regime_master.py --asset ETH             # test other asse
 
 ## Architecture
 
-### Production File Chains
+### Production File Chain
 
 ```
-# Doohan (stable production — fixed horizons)
-crypto_trading_system_doohan.py  (Doohan V1.7.1 — Modes P/D/V/H/S)
+crypto_trading_system_ed.py  (Ed V1.0 — Modes P/D/V/H/S/R/HRS)
   └── hardware_config.py
-crypto_revolut_doohan.py  (auto-trader — reads trading_config_doohan.json)
-  └── crypto_live_trader_doohan.py  (signal generation)
-        └── crypto_trading_system_doohan.py
-
-# Ed (regime-switching — dynamic horizons)
-crypto_trading_system_ed.py  (Ed V1.0 — Modes P/D/V/H/S/R)
-  └── hardware_config.py
-crypto_revolut_ed.py  (auto-trader — reads regime_config_ed.json)
+crypto_revolut_ed_v2.py  (Ed V2 auto-trader — reads regime_config_ed.json)
   └── crypto_live_trader_ed.py  (regime-aware signal generation)
         └── crypto_trading_system_ed.py
 
-# Shared
+# Optimizer
 crypto_optimizer_bot.py  (Telegram bot for remote optimization)
-  └── crypto_trading_system_doohan.py  (spawned as subprocess)
+  └── crypto_trading_system_ed.py  (spawned as subprocess)
 ```
 
-Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
+Doohan V1.7.1 retired 2026-04. Deku, CASCA, V1.1-V1.7 archived 2026-03-24. All legacy systems in `archive/`.
 
 ### Key Concepts
 
-- **Variable horizons:** Each asset has its own optimal prediction horizon (5h, 6h, 7h, 8h), stored in `trading_config_doohan.json`. Mode H sweeps horizons to find the best per asset. The trader reads the configured horizon and uses `Xh_only` strategy.
+- **Regime switching:** Bull/bear detector picks which model (horizon + confidence + position size) to use per asset. Per-asset detector + bull/bear pair stored in `regime_config_ed.json`. Mode H/HRS sweeps horizons to find the best per regime.
 - **Label overlap embargo (V1.7+):** Adjacent rows share overlapping future windows used for labeling. Fix: `EMBARGO_CANDLES = horizon`, so `train_end = i - horizon`. Without this, training data leaks label information. Pre-embargo APFs were inflated 5-26×; post-embargo realistic range is 1.0-3.0. **IMPORTANT: Embargo applies to backtesting/cross-validation ONLY, never to live signal generation.** In live trading, all labels use known past prices — no future leakage exists. Removing training rows wastes valid data. Per Lopez de Prado: purging/embargo apply to train/test splits for evaluation, not to live deployment.
 - **No model persistence:** System retrains from scratch every prediction. No .pkl files. Intentional design.
 - **Temporal decay:** Exponential sample weighting `w_i = gamma^(age_in_hours)`. Per-model gamma stored in production CSV. Newest sample weight=1, oldest=gamma^(n-1). gamma=0.995 → half-life ~6 days, gamma=0.999 → ~29 days.
@@ -167,14 +150,10 @@ Deku, CASCA, Doohan V1.1-V1.7, and all legacy systems archived (2026-03-24).
 ```
 data/{asset}_hourly_data.csv           <- price data (Binance via ccxt)
 data/macro_data/*.csv                  <- VIX, DXY, S&P500, Fear&Greed, etc. (yfinance)
-models/crypto_doohan_v1_7_1_best_models.csv    <- top 6 candidates per (asset, horizon) from Mode D
-models/crypto_doohan_v1_7_1_production.csv     <- refined production model (written by Mode V)
-models/crypto_doohan_v1_7_1_grid_{ASSET}_{H}h.csv <- full grid results (324 evals)
-models/crypto_ed_production.csv                <- Ed production model (shared with Doohan models)
-config/trading_config_doohan.json      <- per-asset: horizon, min_confidence, strategy, max_position, enabled
-config/position_{ASSET}.json           <- Doohan position tracking
-config/position_ed_{ASSET}.json        <- Ed position tracking (separate from Doohan)
+models/crypto_ed_best_models.csv       <- top 6 candidates per (asset, horizon) from Mode D
+models/crypto_ed_production.csv        <- Ed production model (written by Mode V)
 config/regime_config_ed.json           <- Ed: per-asset regime detector, bull/bear horizon+confidence+position
+config/position_ed_{ASSET}.json        <- Ed position tracking
 config/revolut_x_config.json           <- Revolut X API key
 config/private.pem                     <- Ed25519 signing key
 config/telegram_config.json            <- Telegram bot token (trader)
@@ -197,7 +176,7 @@ MAX_DIAG_HOURS = 4320       # 6 months data cap for Mode D
 REPLAY_HOURS = 200          # Modes B, D signal replay
 REPLAY_HOURS_S = 400        # Mode S — longer window for more trades in strategy selection
 
-# Doohan V1.7.1 (production)
+# Ed (production) — same grid params
 GRID_COMBOS = ['RF+LGBM', 'XGB+LGBM', 'RF+XGB']  # 3 viable combos
 GRID_WINDOWS = [72, 100, 150, 200, 250, 300]       # 250h sweet spot for most assets
 GRID_FEATURES = [5, 10, 15, 20, 25, 30]            # feature counts to test
@@ -217,31 +196,28 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system_doohan.py` | **Production** | Doohan V1.7.1 + PySR: Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine + PySR symbolic features. Modes P/D/V/H/S. Variable horizons. Refined-only production selection. Order-independent CLI with `--help`. |
-| `crypto_revolut_doohan.py` | **Live** | Auto-trader — reads `trading_config_doohan.json` (horizon per asset) + `crypto_doohan_v1_7_1_production.csv` |
-| `crypto_live_trader_doohan.py` | **Live** | Signal generation library — NOT run directly. Reports current market price (not label-shifted). |
+| `crypto_trading_system_ed.py` | **Production** | Ed V1.0: Regime-switching (1h candles). Modes P/D/V/H/S/R/HRS. Embargo-fixed grid (3×6×6×3=324 evals) + 50-trial Optuna refine + PySR symbolic features. Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. |
+| `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy/sell at `bid+0.01`. `post_only` ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. Reads `regime_config_ed.json`. |
+| `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. Reports current market price (not label-shifted). |
+| `start_ed_v2.bat` | **Live** | Launches Ed V2 trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
+| `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus. Sequential job queue, subprocess execution. Separate bot token (`config/telegram_optimizer_config.json`). Below-normal priority. Spawns `crypto_trading_system_ed.py`. |
+| `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
 | `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
-| `crypto_trading_system_doohan_v1_7_3.py` | **Archived** | PySR code merged into production (2026-03-25). |
-| `crypto_trading_system_doohan_v1_8.py` | **Archived** | LSTM test (2026-03-26). Failed — not adopted. |
-| `pysr_discover_features.py` | Active | Offline PySR discovery. Uses historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
-| `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus to select mode/assets/horizons. Sequential job queue, subprocess execution with real-time progress. Separate bot token (`config/telegram_optimizer_config.json`). Runs at below-normal priority. |
-| `crypto_trading_system_doohan_v1_7_2.py` | **Archived** | Regularization test. Wash — not adopted. |
-| `start_trader.bat` | **Live** | Launches trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
-| `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
-| `crypto_trading_system_ed.py` | **Production** | Ed V1.0: Regime-switching (1h candles). All Doohan modes + Mode R (regime backtest). Reads `crypto_ed_production.csv`. |
-| `crypto_revolut_ed.py` | **Live** | Ed auto-trader — reads `regime_config_ed.json`, switches horizon per bull/bear regime. |
-| `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy at bid+0.01, sell at bid+0.01 (undercut ask side). post_only ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. |
-| `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. |
-| `start_ed_v2.bat` | **Live** | Launches Ed V2 trader with auto-restart + log tee. |
-| `crypto_trading_system_ein.py` | **Testing** | Ein V1.0: 15-minute candles. Horizons 4-10 candles (1h-2h30). Candle-based features (no 'h' suffix). Grid windows 12h-120h. No trader yet. |
-| `crypto_trading_system_eli.py` | **Testing** | Eli V1.0: 30-minute candles. Horizons 4-10 candles (2h-5h). Same as Ein but 2x candle length. Grid windows 12h-120h. No trader yet. |
-| `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery. Historical window (6mo before backtest). Anti-leakage. |
+| `pysr_discover_features.py` | Active | Offline PySR discovery. Historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
+| `backtest_full_month.py` | Active | 1-month backtest harness. |
+| `test_btc_horizons.py` | Active | BTC horizon comparison sanity check. |
+| `test_btc_accuracy.py` | Active | BTC accuracy diagnostic. |
+| `sell_btc_now.py` | Utility | Manual BTC liquidation script. |
+| `crypto_trading_system_ein.py` | **Testing** | Ein V1.0: 15-minute candles. Horizons 4-10 candles (1h-2h30). Grid windows 12h-120h. No trader yet. |
+| `crypto_trading_system_eli.py` | **Testing** | Eli V1.0: 30-minute candles. Horizons 4-10 candles (2h-5h). Grid windows 12h-120h. No trader yet. |
+| `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery. Historical window. Anti-leakage. |
 | `tools/backtest_regime_master.py` | Active | Hand-crafted regime detector backtest. 21 detectors × all horizon pairs. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
 | `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
+| `crypto_trading_system_doohan.py` (+ all `_doohan*`, `crypto_revolut_doohan.py`, `crypto_live_trader_doohan.py`, `start_trader.bat`, `start_ed.bat`, `crypto_revolut_ed.py`) | **Archived** | Doohan V1.7.1 retired 2026-04. Replaced by Ed V2 (regime-switching). |
 
-All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to `archive/` (2026-03-24).
+All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
 ---
 
@@ -253,40 +229,27 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 | `both_agree` | BUY when both horizons agree; SELL when either says SELL |
 | `either_agree` | BUY when either says BUY; SELL when either says SELL |
 
-**Mode V/H writes the best `horizon` and `min_confidence` to `trading_config_doohan.json`. The trader reads the configured horizon and automatically uses `Xh_only` strategy.**
+**Mode HRS writes the best bull/bear horizon + confidence to `regime_config_ed.json`. The Ed V2 trader reads the configured regime detector and switches between bull/bear models per cycle.**
 
 ---
 
-## Mode H Results (Doohan Production — 2026-03-27)
-
-| Asset | Best H | Models | Window | Gamma | Features | Return | Trades | WR | Conf | B&H | Status |
-|-------|--------|--------|--------|-------|----------|--------|--------|----|------|-----|--------|
-| **BTC** | **6h** | XGB+LGBM | 88h | 0.9986 | 12 | +8.78% | 26 | 85% | 70% | -1.88% | Refined+PySR |
-| **ETH** | **7h** | RF+LGBM | 247h | 0.9997 | 8 | +23.58% | 16 | 62% | 90% | +6.57% | Refined+PySR |
-| **SOL** | **8h** | RF+XGB | 250h | 0.9970 | 17 | +22.43% | 32 | 69% | 75% | +4.53% | Grid+PySR |
-| **XRP** | **8h** | XGB+LGBM | 150h | 0.9950 | 17 | +9.99% | 18 | 78% | 80% | +0.51% | Grid+PySR |
-| **LINK** | **8h** | RF+LGBM | 300h | 0.9990 | 25 | +7.77% | 14 | 86% | 90% | -3.16% | Grid+PySR |
-
-## Current Trading Config (Doohan)
+## Current Regime Config (Ed V2 — 2026-04-08)
 
 ```json
 {
-  "BTC": { "horizon": 8, "min_confidence": 90, "max_position_usd": 12000, "enabled": true },
-  "ETH": { "horizon": 7, "min_confidence": 90, "max_position_usd": 2000, "enabled": true },
+  "ETH": { "detector": "named:sma168>sma480", "bull": "7h@75%/$12k", "bear": "8h@85%/$12k", "enabled": true },
+  "BTC": { "enabled": false, "note": "sold 2026-04-06, underperforming over 1-month backtest" },
+  "XRP": { "enabled": false },
   "SOL": { "enabled": false },
-  "XRP": { "horizon": 8, "min_confidence": 80, "enabled": false },
-  "LINK": { "horizon": 8, "min_confidence": 90, "enabled": false }
+  "LINK": { "enabled": false },
+  "DOGE": { "enabled": false },
+  "ADA": { "enabled": false },
+  "AVAX": { "enabled": false },
+  "DOT": { "enabled": false }
 }
 ```
 
-## Current Regime Config (Ed)
-
-```json
-{
-  "BTC": { "detector": "sma_cross(48,200)", "bull": "7h@95%/$12k", "bear": "8h@90%/$6k", "enabled": true },
-  "ETH": { "detector": "sma_cross(24,100)", "bull": "6h@85%/$12k", "bear": "8h@65%/$6k", "enabled": true }
-}
-```
+ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R→S handoff fix + Option C joint detector sweep (2026-04-07 evening), ETH RS rerun selected detector `sma168>sma480` with bull=7h@75% / bear=8h@85% → Mode S +60.72%, 66 trades, 65% WR. 6h vs 7h reliability comparison still pending Mode V replay 4320h run.
 
 ## Ed Backtest Results (2026-03-31)
 
@@ -314,27 +277,54 @@ All Deku files, Doohan V1.1-V1.7, CASCA, backtests, and testing scripts moved to
 
 ## Critical Rules
 
-1. **Never modify `crypto_trading_system_doohan.py` without testing first.** It is production. The live trader imports from it by exact filename.
+1. **Never modify `crypto_trading_system_ed.py` without testing first.** It is production. The live trader imports from it by exact filename.
 2. **CSV merge logic:** When saving to production CSV, always filter by BOTH coin AND horizon.
 3. **`generate_signals()` needs `feature_override`:** When feature_set is D, caller must pass `feature_override=config['optimal_features'].split(',')`.
 4. **All timestamps in live trader use Europe/Zurich** via `_to_local()` helper.
-5. **`trading_config_doohan.json` has `horizon` and `min_confidence` per asset** — set by Mode V/H. Global `MIN_CONFIDENCE=75` is only a fallback.
-6. **SSL fix on Windows:** `ssl._create_unverified_context()` applied in both `crypto_revolut_doohan.py` and `crypto_live_trader_doohan.py`.
+5. **`regime_config_ed.json` has `detector` + `bull`/`bear` blocks per asset** — set by Mode HRS. Each block holds horizon, min_confidence, max_position_usd. Global `MIN_CONFIDENCE=75` is only a fallback.
+6. **SSL fix on Windows:** `ssl._create_unverified_context()` applied in `crypto_revolut_ed_v2.py` and `crypto_live_trader_ed.py`.
 7. **Production scoring:** Mode V/H selects best model using `return × (win_rate/100)` for positive returns, raw return for negatives. All candidates (D + refined) compete equally. This favors consistent winners over high-return low-win-rate configs.
-8. **Leakage check before any production promotion:** Before writing to production CSV or pushing code that affects live trading, verify no data leakage exists (PySR, feature engineering, or otherwise). For PySR: confirm `discovery_method == "historical"` in JSON metadata. This is enforced in code by `_check_pysr_leakage()` but must also be checked manually for any new feature engineering.
+8. **Leakage check before any production promotion:** Before writing to production CSV or pushing code that affects live trading, verify no data leakage exists (PySR, feature engineering, or otherwise). For PySR: confirm `discovery_method == "historical"` in JSON metadata. Enforced in code by `_check_pysr_leakage()`.
 9. **NEVER add embargo in live signal generation.** Embargo (`train_end = i - horizon`) is for backtesting/cross-validation ONLY. In `generate_live_signal()` the training window must be `df.iloc[train_start:i]` — all available data. Per Lopez de Prado: purging/embargo apply to evaluation splits, not live deployment.
-10. **Ed position files are separate from Doohan** — `position_ed_{ASSET}.json` vs `position_{ASSET}.json`. Both traders can run simultaneously without conflict.
+10. **Ed V2 maker order rules:** place limits at `bid+0.01` with `post_only`, re-price every 10s, market fallback at 60-120s. Always cancel stale orders before placing new ones (prevents fund locking). NTP-sync clock on startup.
+11. **Stale config cleanup:** ETH block in `regime_config_ed.json` is now clean (no top-level legacy keys). SOL/LINK/XRP/DOGE/ADA/AVAX/DOT still have legacy `strategy`/`horizon`/`min_confidence`/`max_position_usd` at top level but are all `enabled: false` — left as-is intentionally.
 
 ---
 
 ## Pending Work
 
-### Running
-1. **Ein HRS BTC on Laptop** — `python crypto_trading_system_ein.py HRS BTC 4,5,6,7,8,9,10` — 15-minute candle test
-2. **LINK Ed HRS on Desktop** — `python crypto_trading_system_ed.py HRS LINK ...` — Ed hourly regime optimization
-
 ### TODO
-1. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test (after Ein finishes)
+
+**HIGHEST PRIORITY:**
+1. **🔥 Mode V ETH 6h vs 7h `--replay 4320` (6 months) — RUNNING (~6.7h job)** — Compare old strong 6h@90% bull vs new 7h@75% bull across real rallies/crashes. Decide whether to keep 7h or revert to 6h.
+2. **Out-of-sample replay on the new detector** — Run R/RS on a different 2-month window to test reliability of `sma168>sma480` 7h/8h selection.
+
+**Other:**
+3. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
+4. **Ein results review** — Check Ein (15min) BTC results from laptop run
+5. **(stretch) Full joint horizon sweep in Mode S** — Extend Option C to detector × bull_conf × bear_conf × bull_h × bear_h = 2,940 evals. Would surface 6h-based combos that current Mode S never tests.
+
+### Completed (2026-04-08)
+- **ETH live trader verified** — Confirmed via `/regime` that Ed V2 reads new config: detector `sma168>sma480` (named branch), bull 7h@75%, bear 8h@85%. Hot-reload working, named-detector evaluation firing without errors.
+- **ETH config cleanup** — ETH block in `regime_config_ed.json` is clean (no stale top-level keys). Disabled assets left as-is intentionally.
+
+### Completed (2026-04-07)
+- **R→S detector handoff fix (Option C)** — Extracted shared `_build_regime_indicators_and_detectors()` helper so Mode R + Mode S use the same indicator/detector dict. Mode S rewritten as joint sweep over all 5 detectors × 49 conf combos = 245 evals. Winner written to config as `{type: "named", params: {name: <detector>}}`.
+- **Named-detector branch wired into live trader** — `crypto_live_trader_ed.py` `_evaluate_detector` now dispatches `type=='named'` to `_evaluate_named_detector` with implementations for all 5 detectors (incl. Andersen-Bollerslev deseasonalized `vol_calm`).
+- **ETH RS rerun with fixed pipeline** — `sma168>sma480` 7h@75% / 8h@85% → +60.72%, 66 trades, 65% WR, alpha +49.98% (`ed_v1_20260407_160841.log`). Config updated and live.
+- **Mode V `--replay` argument support** — `run_mode_v` / `_backtest_one_config` / CLI dispatcher now accept `replay_hours`. Telegram optimizer bot's `REPLAY_MODES` extended to include V/DV/DVS/S so the menu prompts for replay before launching.
+- **Detector set trimmed 14 → 5** — Removed all RSI (5), drawdown (4), `macd>0`, and 9 redundant SMA/momentum variants. Final: `sma24>sma100`, `sma168>sma480`, `price>sma72`, `vol_calm`, `tsmom_672h`.
+- **Literature-grounded detectors added** — `vol_calm` (Andersen-Bollerslev deseasonalized intraday vol), `tsmom_672h` (Liu & Tsyvinski 2021 RFS). SMA windows extended to 168/240/480h.
+- **Mode R top_n default → 200** (`crypto_trading_system_ed.py:4551`).
+- **ETH-only trading** — BTC disabled and position sold (45% WR, avg loss > avg win over 1-month backtest). Full $12k → ETH.
+- **ETH HRS 2-month** — bull=6h@90% (RF+XGB, +7.4%, 87.5% WR), bear=7h@75% (XGB+LGBM, +1.9%, 63.6% WR).
+- **ETH position doubled** — $6k → $12k per trade both regimes.
+
+### Completed (2026-04-05)
+- **Maker order penny-improvement fix** — `bid+0.01` for both buy and sell with `post_only`. Stale orders cancelled before each maker attempt. Maker window reduced to 60s.
+
+### Completed (2026-04-03)
+- **Ed V2 release** — 6 critical bug fixes in `crypto_revolut_ed_v2.py`: clock drift (NTP sync + 409 auto-correct), `get_balances()` silent failures, ghost sells, locked funds blind sync, stale order cleanup, maker order pricing.
 
 ### Completed (2026-03-29)
 - **BTC Ed regime fully optimized** — sma48>sma200, bull=7h@95%, bear=8h@90% → +50.35% over 4 months (78 trades, 69% WR). Ed live on BTC.

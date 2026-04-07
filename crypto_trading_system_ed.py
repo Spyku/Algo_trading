@@ -3634,7 +3634,7 @@ def _simulate_with_threshold(signals, conf_threshold):
     }
 
 
-def run_mode_v(assets_list, horizons=None):
+def run_mode_v(assets_list, horizons=None, replay_hours=None):
     """
     Mode V: Live backtest + Optuna refine + final comparison.
     1. Backtest top 6 from Mode D at conf 70/80/90%
@@ -3643,9 +3643,12 @@ def run_mode_v(assets_list, horizons=None):
     4. Backtest the 3 refined configs at conf 70/80/90%
     5. Show combined summary: D candidates vs refined
     6. Save best overall to production CSV
+
+    replay_hours: override MODE_G_REPLAY_HOURS (default 336h = 2 weeks).
     """
     if horizons is None:
         horizons = list(AVAILABLE_HORIZONS)
+    _replay = replay_hours or MODE_G_REPLAY_HOURS
 
     candidates_csv = _get_models_csv_path()
     if not os.path.exists(candidates_csv):
@@ -3656,7 +3659,7 @@ def run_mode_v(assets_list, horizons=None):
 
     print("=" * 80)
     print(f"  MODE V: LIVE BACKTEST + REFINE — {','.join(assets_list)} {','.join(str(h)+'h' for h in horizons)}")
-    print(f"  Period: last {MODE_G_REPLAY_HOURS} hours (2 weeks), every hour")
+    print(f"  Period: last {_replay} hours ({_replay/168:.1f} weeks), every hour")
     print(f"  Ranking by: conf>={MODE_G_PRIMARY_CONF}% return")
     print(f"  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best")
     print(f"  Candidates: {candidates_csv}")
@@ -3737,7 +3740,7 @@ def run_mode_v(assets_list, horizons=None):
 
             results = {}
             for label, cfg in configs.items():
-                results[label] = _backtest_one_config(asset, horizon, label, cfg)
+                results[label] = _backtest_one_config(asset, horizon, label, cfg, replay_hours=_replay)
 
             # ── STEP 2: Pick top 3 for refine ──
             doohan_results = [(lbl, r) for lbl, r in results.items()
@@ -3779,7 +3782,7 @@ def run_mode_v(assets_list, horizons=None):
                             'n_features': rcfg['n_features'],
                             'source': 'refined',
                         }
-                        results[label] = _backtest_one_config(asset, horizon, label, cfg)
+                        results[label] = _backtest_one_config(asset, horizon, label, cfg, replay_hours=_replay)
 
             all_results[key] = results
 
@@ -3878,7 +3881,7 @@ def run_mode_v(assets_list, horizons=None):
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE V — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE V — D + Refined — Last {_replay//24} days (scored by return × win_rate)")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -3964,12 +3967,13 @@ def run_mode_v(assets_list, horizons=None):
     return all_results
 
 
-def _backtest_one_config(asset, horizon, label, cfg):
+def _backtest_one_config(asset, horizon, label, cfg, replay_hours=None):
     """Backtest a single config at all confidence thresholds. Returns results dict."""
     models = cfg['combo'].split('+')
     features = cfg['features']
     window = cfg['window']
     gamma = cfg['gamma']
+    _replay = replay_hours or MODE_G_REPLAY_HOURS
 
     print(f"\n{'─' * 70}")
     print(f"  {label}: {asset}")
@@ -3980,7 +3984,7 @@ def _backtest_one_config(asset, horizon, label, cfg):
         asset_name=asset,
         model_names=models,
         window_size=window,
-        replay_hours=MODE_G_REPLAY_HOURS,
+        replay_hours=_replay,
         feature_override=features,
         horizon=horizon,
         gamma=gamma,
@@ -4143,18 +4147,21 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 # ============================================================
 def run_mode_s(assets_list, horizons, args=None):
     """
-    Ed Mode S: Given a regime detector and bull/bear horizon pair (from regime_config_ed.json
-    or Mode R), optimize confidence thresholds per regime independently.
+    Ed Mode S (Option C — full joint sweep): Given a bull/bear horizon pair from
+    regime_config_ed.json (set by Mode R), jointly sweep ALL regime detectors ×
+    bull_conf × bear_conf (N detectors × 7 × 7 = 49N combos). Pick the winning
+    (detector, bull_conf, bear_conf) triple and write it to config.
 
-    Sweeps bull_conf × bear_conf (7×7 = 49 combos), picks the best, writes config.
+    No longer reads `regime_detector` from config — Mode S re-discovers it as part
+    of the joint sweep, so the R→S handoff only needs to pass horizons.
 
     Flow:
-        1. Read regime_config_ed.json for detector + horizon pair
+        1. Read regime_config_ed.json for bull/bear horizons
         2. Generate signals for bull_h and bear_h
-        3. Build regime indicators
-        4. Sweep confidence per regime (65-95%)
-        5. Pick best combo by return × win_rate scoring
-        6. Write optimized config to regime_config_ed.json
+        3. Build regime indicators + detector dict (shared helper)
+        4. For each detector × bull_conf × bear_conf, simulate
+        5. Pick best by return × win_rate scoring
+        6. Write winning detector + confidences to regime_config_ed.json
     """
     replay = int(getattr(args, 'replay', 0)) or 2880
     top_n = int(getattr(args, 'top', 0)) or 15
@@ -4180,9 +4187,6 @@ def run_mode_s(assets_list, horizons, args=None):
 
     for asset in assets_list:
         acfg = regime_config.get(asset, {})
-        detector = acfg.get('regime_detector', {})
-        det_type = detector.get('type', 'sma_cross')
-        det_params = detector.get('params', {})
         bull_h = acfg.get('bull', {}).get('horizon')
         bear_h = acfg.get('bear', {}).get('horizon')
 
@@ -4190,10 +4194,8 @@ def run_mode_s(assets_list, horizons, args=None):
             print(f"\n  {asset}: no bull/bear horizons in config — skipping")
             continue
 
-        det_label = f"{det_type}({det_params.get('fast','?')}/{det_params.get('slow','?')})" if det_type == 'sma_cross' else det_type
-
         print(f"\n{'='*80}")
-        print(f"  {asset} — detector: {det_label} | bull={bull_h}h | bear={bear_h}h")
+        print(f"  {asset} — bull={bull_h}h | bear={bear_h}h | joint sweep over ALL detectors")
         print(f"{'='*80}")
 
         # ── Generate signals for both horizons ──
@@ -4230,62 +4232,16 @@ def run_mode_s(assets_list, horizons, args=None):
 
         all_dts = sorted(set().union(*[set(s.keys()) for s in signals_cache.values()]))
 
-        # ── Build regime detector ──
+        # ── Build regime indicators + detectors (shared helper) ──
         print(f"\n  Building regime indicators...")
-        df_raw = load_data(asset)
-        df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
-        df_ind = df_raw.set_index('datetime').sort_index()
+        ind, detectors = _build_regime_indicators_and_detectors(asset)
 
-        for w in [24, 48, 72, 100, 200]:
-            df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
-        delta = df_ind['close'].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df_ind['rsi14'] = 100 - (100 / (1 + rs))
-        for w in [24, 48, 72]:
-            df_ind[f'high_{w}'] = df_ind['high'].rolling(w).max()
-            df_ind[f'dd_{w}'] = (df_ind['close'] / df_ind[f'high_{w}'] - 1) * 100
-        df_ind['ema12'] = df_ind['close'].ewm(span=12).mean()
-        df_ind['ema26'] = df_ind['close'].ewm(span=26).mean()
-        df_ind['macd_line'] = df_ind['ema12'] - df_ind['ema26']
-        ind = df_ind.to_dict('index')
+        # ── Joint sweep: every detector × every (bull_conf, bear_conf) combo ──
+        n_combos = len(detectors) * len(CONF_LEVELS) * len(CONF_LEVELS)
+        print(f"\n  Sweeping {len(detectors)} detectors × {len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf "
+              f"= {n_combos} combos...")
 
-        def safe(dt, fn, default=True):
-            if dt not in ind:
-                return default
-            try:
-                return fn(ind[dt])
-            except (KeyError, TypeError):
-                return default
-
-        # Build detector function from config
-        if det_type == 'sma_cross':
-            fast = int(det_params.get('fast', 24))
-            slow = int(det_params.get('slow', 100))
-            det_fn = lambda dt, _f=fast, _s=slow: safe(dt, lambda r: r[f'sma{_f}'] > r[f'sma{_s}'])
-        elif det_type == 'rsi':
-            level = float(det_params.get('level', 50))
-            det_fn = lambda dt, _l=level: safe(dt, lambda r: r['rsi14'] > _l)
-        elif det_type == 'drawdown':
-            thresh = float(det_params.get('threshold', -3))
-            window = int(det_params.get('window', 48))
-            det_fn = lambda dt, _w=window, _t=thresh: safe(dt, lambda r: r[f'dd_{_w}'] > _t)
-        elif det_type == 'macd':
-            det_fn = lambda dt: safe(dt, lambda r: r['macd_line'] > 0)
-        else:
-            det_fn = lambda dt: True  # fallback: always bull
-
-        # Count regime distribution
-        bull_count = sum(1 for dt in all_dts if det_fn(dt))
-        bear_count = len(all_dts) - bull_count
-        print(f"  Regime split: {bull_count} bull ({bull_count/len(all_dts)*100:.0f}%) / "
-              f"{bear_count} bear ({bear_count/len(all_dts)*100:.0f}%)")
-
-        # ── Sweep confidence combos ──
-        print(f"\n  Sweeping {len(CONF_LEVELS)}×{len(CONF_LEVELS)} = {len(CONF_LEVELS)**2} confidence combos...")
-
-        def _sim(bull_conf, bear_conf):
+        def _sim(det_fn, bull_conf, bear_conf):
             cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
             trades, wins = 0, 0
             bull_trades, bear_trades = 0, 0
@@ -4343,52 +4299,54 @@ def run_mode_s(assets_list, horizons, args=None):
             return ret, trades, wr, bh, bull_trades, bear_trades
 
         results = []
-        for bc in CONF_LEVELS:
-            for rc in CONF_LEVELS:
-                ret, tr, wr, bh, bt, rt = _sim(bc, rc)
-                score = ret * (wr / 100) if ret > 0 else ret
-                results.append({
-                    'bull_conf': bc, 'bear_conf': rc,
-                    'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
-                    'alpha': ret - bh, 'score': score,
-                    'bull_trades': bt, 'bear_trades': rt,
-                })
+        for det_name, det_fn in detectors.items():
+            bull_count = sum(1 for dt in all_dts if det_fn(dt))
+            bull_pct = bull_count / len(all_dts) * 100 if all_dts else 0
+            for bc in CONF_LEVELS:
+                for rc in CONF_LEVELS:
+                    ret, tr, wr, bh, bt, rt = _sim(det_fn, bc, rc)
+                    score = ret * (wr / 100) if ret > 0 else ret
+                    results.append({
+                        'detector': det_name,
+                        'bull_conf': bc, 'bear_conf': rc,
+                        'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
+                        'alpha': ret - bh, 'score': score,
+                        'bull_trades': bt, 'bear_trades': rt,
+                        'bull_pct': bull_pct,
+                    })
 
         results.sort(key=lambda x: x['score'], reverse=True)
 
         # ── Results ──
-        print(f"\n  {'='*100}")
-        print(f"  TOP {top_n} CONFIDENCE COMBOS — {asset} ({det_label}, bull={bull_h}h, bear={bear_h}h)")
-        print(f"  {'='*100}")
-        print(f"  {'#':>3}  {'BullC':>6}  {'BearC':>6}  {'Return':>8}  {'Trades':>7}  {'WR':>5}  "
-              f"{'Alpha':>7}  {'Score':>7}  {'BullTr':>7}  {'BearTr':>7}")
-        print(f"  {'-'*3}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
+        print(f"\n  {'='*112}")
+        print(f"  TOP {top_n} (DETECTOR × CONFIDENCE) COMBOS — {asset} (bull={bull_h}h, bear={bear_h}h)")
+        print(f"  {'='*112}")
+        print(f"  {'#':>3}  {'Detector':>16}  {'BullC':>6}  {'BearC':>6}  {'Return':>8}  {'Trades':>7}  "
+              f"{'WR':>5}  {'Alpha':>7}  {'Score':>7}  {'Bull%':>6}")
+        print(f"  {'-'*3}  {'-'*16}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
 
         for i, r in enumerate(results[:top_n]):
-            print(f"  {i+1:>3}  {r['bull_conf']:>5}%  {r['bear_conf']:>5}%  {r['return']:>+7.2f}%  "
-                  f"{r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  {r['score']:>7.2f}  "
-                  f"{r['bull_trades']:>7}  {r['bear_trades']:>7}")
-
-        # Fixed confidence baseline (90/90)
-        fixed_90 = next((r for r in results if r['bull_conf'] == 90 and r['bear_conf'] == 90), None)
+            print(f"  {i+1:>3}  {r['detector']:>16}  {r['bull_conf']:>5}%  {r['bear_conf']:>5}%  "
+                  f"{r['return']:>+7.2f}%  {r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  "
+                  f"{r['score']:>7.2f}  {r['bull_pct']:>5.0f}%")
 
         winner = results[0]
-        print(f"\n  {'='*100}")
-        print(f"  WINNER: bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"\n  {'='*112}")
+        print(f"  WINNER: detector={winner['detector']}  bull={bull_h}h@{winner['bull_conf']}%  "
+              f"bear={bear_h}h@{winner['bear_conf']}%")
         print(f"  Return: {winner['return']:+.2f}%  Trades: {winner['trades']}  WR: {winner['wr']:.0f}%  "
               f"Alpha: {winner['alpha']:+.2f}%")
-        if fixed_90:
-            diff = winner['return'] - fixed_90['return']
-            print(f"  vs fixed 90/90: {fixed_90['return']:+.2f}% → improvement: {diff:+.2f}%")
-        print(f"  {'='*100}")
+        print(f"  {'='*112}")
 
-        # ── Write to config ──
+        # ── Write winning detector + confidences to config ──
+        regime_config[asset]['regime_detector'] = {'type': 'named', 'params': {'name': winner['detector']}}
         regime_config[asset]['bull']['min_confidence'] = winner['bull_conf']
         regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
         with open(tcfg_path, 'w') as f:
             json.dump(regime_config, f, indent=2)
-        print(f"\n  Config updated: {asset} bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"\n  Config updated: {asset} detector={winner['detector']} "
+              f"bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
 
     print(f"\n{'='*80}")
     print(f"  MODE S COMPLETE")
@@ -4540,6 +4498,54 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
 # MODE R: REGIME BACKTEST
 # ============================================================
 
+def _build_regime_indicators_and_detectors(asset):
+    """Shared helper used by Mode R and Mode S.
+
+    Builds the regime indicator dataframe (SMAs, deseasonalized vol per
+    Andersen-Bollerslev, TSMOM per Liu & Tsyvinski) and the detector dict.
+    Single source of truth — keeps R and S in sync."""
+    df_raw = load_data(asset)
+    df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
+    df_ind = df_raw.set_index('datetime').sort_index()
+
+    for w in [24, 48, 72, 100, 168, 200, 240, 480]:
+        df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
+
+    # Deseasonalized realized volatility (Andersen-Bollerslev 1997/1998)
+    df_ind['logret_1h'] = np.log(df_ind['close'] / df_ind['close'].shift(1))
+    df_ind['abs_logret'] = df_ind['logret_1h'].abs()
+    df_ind['hour'] = df_ind.index.hour
+    df_ind['seasonal_factor'] = (
+        df_ind.groupby('hour')['abs_logret']
+              .transform(lambda s: s.rolling(30, min_periods=10).mean())
+    )
+    df_ind['abs_logret_deseason'] = df_ind['abs_logret'] / df_ind['seasonal_factor'].replace(0, np.nan)
+    df_ind['vol_24h_deseason'] = df_ind['abs_logret_deseason'].rolling(24).std()
+    df_ind['vol_24h_deseason_q70'] = df_ind['vol_24h_deseason'].rolling(720, min_periods=240).quantile(0.70)
+
+    # Time-Series Momentum (Liu & Tsyvinski 2021 RFS crypto replication)
+    df_ind['tsmom_672h'] = np.log(df_ind['close'] / df_ind['close'].shift(672))
+
+    ind = df_ind.to_dict('index')
+
+    def safe(dt, fn, default=True):
+        if dt not in ind:
+            return default
+        try:
+            return fn(ind[dt])
+        except (KeyError, TypeError):
+            return default
+
+    detectors = {
+        'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
+        'sma168>sma480':  lambda dt: safe(dt, lambda r: r['sma168'] > r['sma480']),
+        'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
+        'vol_calm':       lambda dt: safe(dt, lambda r: r['vol_24h_deseason'] < r['vol_24h_deseason_q70']),
+        'tsmom_672h':     lambda dt: safe(dt, lambda r: r['tsmom_672h'] > 0),
+    }
+    return ind, detectors
+
+
 def _run_mode_r(assets, horizons, args):
     """Regime-switching backtest: test bull/bear horizon combos with regime detectors."""
     import json as _json
@@ -4548,7 +4554,7 @@ def _run_mode_r(assets, horizons, args):
     asset = assets[0] if assets else 'BTC'
     replay = int(getattr(args, 'replay', 0)) or 2880  # default 4 months
     conf = int(getattr(args, 'conf', 0)) or 90
-    top_n = int(getattr(args, 'top', 0)) or 15
+    top_n = int(getattr(args, 'top', 0)) or 200
 
     # Determine available horizons from production CSV
     df_models = pd.read_csv(PRODUCTION_CSV)
@@ -4598,52 +4604,7 @@ def _run_mode_r(assets, horizons, args):
 
     # ── Step 2: Build regime indicators ──
     print(f"\n  Step 2: Building regime indicators...")
-    df_raw = load_data(asset)
-    df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
-    df_ind = df_raw.set_index('datetime').sort_index()
-
-    for w in [24, 48, 72, 100, 200]:
-        df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
-    delta = df_ind['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df_ind['rsi14'] = 100 - (100 / (1 + rs))
-    for w in [24, 48, 72]:
-        df_ind[f'high_{w}'] = df_ind['high'].rolling(w).max()
-        df_ind[f'dd_{w}'] = (df_ind['close'] / df_ind[f'high_{w}'] - 1) * 100
-    df_ind['ema12'] = df_ind['close'].ewm(span=12).mean()
-    df_ind['ema26'] = df_ind['close'].ewm(span=26).mean()
-    df_ind['macd_line'] = df_ind['ema12'] - df_ind['ema26']
-
-    ind = df_ind.to_dict('index')
-
-    def safe(dt, fn, default=True):
-        if dt not in ind:
-            return default
-        try:
-            return fn(ind[dt])
-        except (KeyError, TypeError):
-            return default
-
-    detectors = {
-        'sma24>sma72':    lambda dt: safe(dt, lambda r: r['sma24'] > r['sma72']),
-        'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
-        'sma48>sma100':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma100']),
-        'sma48>sma200':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma200']),
-        'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
-        'price>sma100':   lambda dt: safe(dt, lambda r: r['close'] > r['sma100']),
-        'rsi>55':         lambda dt: safe(dt, lambda r: r['rsi14'] > 55),
-        'rsi>50':         lambda dt: safe(dt, lambda r: r['rsi14'] > 50),
-        'rsi>45':         lambda dt: safe(dt, lambda r: r['rsi14'] > 45),
-        'dd48>-2%':       lambda dt: safe(dt, lambda r: r['dd_48'] > -2),
-        'dd48>-3%':       lambda dt: safe(dt, lambda r: r['dd_48'] > -3),
-        'dd72>-3%':       lambda dt: safe(dt, lambda r: r['dd_72'] > -3),
-        'dd72>-5%':       lambda dt: safe(dt, lambda r: r['dd_72'] > -5),
-        'macd>0':         lambda dt: safe(dt, lambda r: r['macd_line'] > 0),
-        'sma24>100+rsi>45': lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100'] and r['rsi14'] > 45),
-        'dd48>-3+rsi>45':   lambda dt: safe(dt, lambda r: r['dd_48'] > -3 and r['rsi14'] > 45),
-    }
+    ind, detectors = _build_regime_indicators_and_detectors(asset)
 
     # Also load PySR regime if available
     for bull_h in test_horizons:
@@ -5190,7 +5151,7 @@ Examples:
                     print(f"{'#'*60}")
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
             if mode in ('DVS', 'DV'):
-                run_mode_v([asset], horizons)
+                run_mode_v([asset], horizons, replay_hours=flag_replay or None)
                 if mode == 'DVS':
                     class _Args: pass
                     _r_args = _Args()
@@ -5198,7 +5159,7 @@ Examples:
                     _r_args.top = flag_top
                     run_mode_s([asset], horizons, _r_args)
     elif mode == 'V':
-        run_mode_v(assets_list, horizons)
+        run_mode_v(assets_list, horizons, replay_hours=flag_replay or None)
     elif mode == 'H':
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
 

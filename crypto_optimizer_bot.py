@@ -265,7 +265,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'R', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'V', 'DV', 'DVS', 'R', 'S', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
