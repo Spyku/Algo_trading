@@ -18,6 +18,7 @@ Usage:
 import os
 import sys
 import time
+import math
 import json
 import uuid
 import base64
@@ -364,7 +365,7 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=3):
+def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=3):
     """Try maker order, market fallback after maker_window.
 
     Buy at bid+0.01 — top of bid queue, filled by incoming market sells.
@@ -400,20 +401,34 @@ def _execute_maker_order(symbol, size, side, maker_window=60, check_interval=3):
             if limit_price >= ask:
                 limit_price = bid
         else:
-            # Slide from ask-0.01 down to bid+0.01 over max_attempts
+            # BUG 2 fix: SELL post_only requires price STRICTLY above best bid.
+            # Slide from ask-0.01 down to bid+0.02 (2 cents above bid for tick-race safety).
             top = ask - 0.01
-            bottom = bid + 0.01
-            if top <= bottom:
+            bottom = bid + 0.02
+            if top < bottom:
+                top = bottom
+            if top <= bid:
                 print(f"    Maker {side_label}: spread too tight ({spread_bps:.1f}bps), going market")
                 return place_market(symbol, size)
             progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
             limit_price = round(top - progress * (top - bottom), 2)
+            if limit_price <= bid:
+                limit_price = round(bid + 0.02, 2)
 
         print(f"    Maker {side_label} #{attempt}: {symbol} at ${limit_price:,.2f} bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
 
         status, order = place_limit(symbol, size, limit_price)
         if status != 200 or not order:
             err_detail = order if isinstance(order, dict) else {}
+            err_msg = str(err_detail).lower()
+            # BUG 2 fix: post_only rejection means price crossed (race condition).
+            # Retry the loop instead of falling through to market — we still have time.
+            if 'post only' in err_msg or 'post_only' in err_msg:
+                print(f"    [!] post_only rejected (price crossed), retrying with fresh quote")
+                cancel_all_open_orders(symbol)
+                time.sleep(1)
+                elapsed += 1
+                continue
             print(f"    [!] Limit order failed (status={status}, error={err_detail}), going market")
             return place_market(symbol, size)
 
@@ -856,6 +871,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
                 send_telegram(f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum")
             else:
                 buy_amount = min(max_usd, usd_avail)
+                # BUG 1 fix: Revolut rejects maker orders where amount > balance even by $0.01
+                # (rounding in qty*price). Floor to cents and subtract $0.01 safety margin.
+                buy_amount = math.floor(buy_amount * 100) / 100 - 0.01
                 if buy_amount < max_usd:
                     print(f"    Partial buy: ${buy_amount:,.2f} of ${max_usd:,.2f} (limited by balance)")
                 use_maker = trading_cfg.get('use_maker_orders', False)
