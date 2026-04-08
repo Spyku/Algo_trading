@@ -469,17 +469,22 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 ### TODO
 
 **HIGHEST PRIORITY:**
-1. **🔥 Mode V ETH 6h vs 7h `--replay 4320` (6 months) — RUNNING (~6.7h job)** — Compare old strong 6h@90% bull vs new 7h@75% bull across real rallies/crashes. Decide whether to keep 7h or revert to 6h.
-2. **Out-of-sample replay on the new detector** — Run R/RS on a different 2-month window to test reliability of `sma168>sma480` 7h/8h selection.
+1. **Restart Ed V2 trader** to load BUG 1/2/3 fixes + maker_window 120s (commit cbc42a9).
+2. **RS ETH `--replay 2880` OOS** — running in background, report results when complete.
 
 **Other:**
 3. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
 4. **Ein results review** — Check Ein (15min) BTC results from laptop run
-5. **(stretch) Full joint horizon sweep in Mode S** — Extend Option C to detector × bull_conf × bear_conf × bull_h × bear_h = 2,940 evals. Would surface 6h-based combos that current Mode S never tests.
+5. **(stretch) Full joint horizon sweep in Mode S** — Extend Option C to detector × bull_conf × bear_conf × bull_h × bear_h = 2,940 evals.
 
 ### Completed (2026-04-08)
-- **ETH live trader verified** — `/regime` confirms Ed V2 reads new config: detector `sma168>sma480` (named branch), bull 7h@75%, bear 8h@85%. Hot-reload working, named-detector evaluation firing without errors.
-- **ETH regime config cleanup** — ETH block in `regime_config_ed.json` is clean (no stale top-level keys). Legacy keys on disabled assets (SOL/LINK/XRP/DOGE/ADA/AVAX/DOT) left as-is intentionally.
+- **BUG 1 — maker buy balance rounding** — Floor `buy_amount` to cents minus $0.01 safety margin (Revolut rejects qty×price > balance by even $0.01). Was causing market fallback on buys.
+- **BUG 2 — maker sell post_only race** — SELL floor raised `bid+0.01` → `bid+0.02` with second guard after rounding; on `post_only` rejection, retry loop with fresh quote instead of market fallback. Root cause confirmed via 2 Revolut rejection emails (08:51:05 / 08:51:12). 7 cancelled sells this morning.
+- **Maker window 60s → 120s** (40 attempts at 3s).
+- **BUG 3 — `Unknown regime detector type: named`** — code fix already in fac33a4; trader restart pending.
+- **Mode V ETH 6h vs 7h `--replay 4320` complete** — 7h winner +24.73% / 64% WR vs 6h +23.17% / 78% WR. Kept 7h.
+- **ETH live trader verified** — `/regime` confirms named-detector branch and hot-reload.
+- **ETH regime config cleanup** — ETH block clean; legacy keys on disabled assets left as-is.
 
 ### Completed (2026-04-07)
 - **R→S detector handoff fix (Option C — full joint sweep)** — Extracted shared `_build_regime_indicators_and_detectors()` helper so Mode R + Mode S use a single source of truth for indicators and detector dict. Mode S rewritten as joint sweep over all 5 detectors × 49 conf combos = 245 evals. Winner written to config as `{type: "named", params: {name: <detector>}}`.

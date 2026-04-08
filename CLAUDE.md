@@ -296,8 +296,8 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 ### TODO
 
 **HIGHEST PRIORITY:**
-1. **🔥 Mode V ETH 6h vs 7h `--replay 4320` (6 months) — RUNNING (~6.7h job)** — Compare old strong 6h@90% bull vs new 7h@75% bull across real rallies/crashes. Decide whether to keep 7h or revert to 6h.
-2. **Out-of-sample replay on the new detector** — Run R/RS on a different 2-month window to test reliability of `sma168>sma480` 7h/8h selection.
+1. **Restart Ed V2 trader** to load BUG 1/2/3 fixes + maker_window 120s (commit cbc42a9).
+2. **RS ETH `--replay 2880` OOS** — running in background, report results when complete.
 
 **Other:**
 3. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
@@ -305,8 +305,13 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 5. **(stretch) Full joint horizon sweep in Mode S** — Extend Option C to detector × bull_conf × bear_conf × bull_h × bear_h = 2,940 evals. Would surface 6h-based combos that current Mode S never tests.
 
 ### Completed (2026-04-08)
-- **ETH live trader verified** — Confirmed via `/regime` that Ed V2 reads new config: detector `sma168>sma480` (named branch), bull 7h@75%, bear 8h@85%. Hot-reload working, named-detector evaluation firing without errors.
-- **ETH config cleanup** — ETH block in `regime_config_ed.json` is clean (no stale top-level keys). Disabled assets left as-is intentionally.
+- **BUG 1 fix — maker buy balance rounding** — Floor `buy_amount` to cents minus $0.01 safety margin before passing to maker buy (Revolut rejects when qty×price > balance by even $0.01).
+- **BUG 2 fix — maker sell post_only race** — SELL price floor raised from `bid+0.01` to `bid+0.02` with second guard after rounding; on `post_only` rejection, retry loop with fresh quote instead of immediate market fallback. Confirmed via 2 Revolut rejection emails (08:51:05 / 08:51:12).
+- **Maker window extended 60s → 120s** (40 attempts).
+- **BUG 3 — `Unknown regime detector type: named`** — already fixed in `crypto_live_trader_ed.py` (commit fac33a4); needs trader restart to load.
+- **6h vs 7h decision** — Mode V `--replay 4320` complete: 7h winner D #1 XGB+LGBM w=300 γ=0.999 f=25 @70% → +24.73%, 66 trades, 64% WR vs 6h Refined #1 +23.17%, 78% WR. Stayed on 7h (higher raw return).
+- **ETH live trader verified** — `/regime` confirms named-detector branch firing, hot-reload working.
+- **ETH config cleanup** — ETH block clean; disabled assets left as-is.
 
 ### Completed (2026-04-07)
 - **R→S detector handoff fix (Option C)** — Extracted shared `_build_regime_indicators_and_detectors()` helper so Mode R + Mode S use the same indicator/detector dict. Mode S rewritten as joint sweep over all 5 detectors × 49 conf combos = 245 evals. Winner written to config as `{type: "named", params: {name: <detector>}}`.
