@@ -310,8 +310,8 @@ def _show_mode_menu():
         [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
         [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
         [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
-        [('P - PySR', 'opt_mode_P')],
-        [('Cancel', 'opt_cancel')],
+        [('P - PySR', 'opt_mode_P'), ('SV3 - Joint H-Sweep', 'opt_mode_SV3')],
+        [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
 
@@ -420,6 +420,10 @@ def _handle_menu_callback(data):
     if data == 'opt_cancel':
         _menu_reset()
         send_telegram("Cancelled.")
+        return
+
+    if data == 'opt_help':
+        _handle_help()
         return
 
     # Mode selection
