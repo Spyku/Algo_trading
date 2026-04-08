@@ -50,6 +50,7 @@ if not os.path.exists(PYTHON_EXE):
     PYTHON_EXE = sys.executable
 
 SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed.py')
+SCRIPT_PATH_V3 = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed_v3.py')
 PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
 TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
@@ -64,13 +65,14 @@ MODES = {
     'H':    'Horizon Sweep',
     'R':    'Regime Backtest',
     'S':    'Regime Confidence',
+    'SV3':  'S V3 Joint H-Sweep',
     'RS':   'Regime + Confidence',
     'HRS':  'Full Ed Pipeline',
     'DVRS': 'DV + Regime + Conf',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'RS': 60, 'HRS': 120, 'DVRS': 120}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'SV3': 240, 'RS': 60, 'HRS': 120, 'DVRS': 120}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -265,7 +267,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'V', 'DV', 'DVS', 'R', 'S', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'V', 'DV', 'DVS', 'R', 'S', 'SV3', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -595,7 +597,10 @@ def _run_job(job):
     # Build command
     assets_arg = ','.join(job.assets)
     h_arg = ','.join(str(h) for h in job.horizons) + 'h'
-    cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
+    if job.mode == 'SV3':
+        cmd = [PYTHON_EXE, '-u', SCRIPT_PATH_V3, 'S', assets_arg, h_arg]
+    else:
+        cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
     if hasattr(job, 'replay') and job.replay:
         cmd.extend(['--replay', str(job.replay)])
 
