@@ -1832,7 +1832,12 @@ def _setup_send_menu(asset, cfg):
     pos = load_position(asset)
     auto = pos.get('auto_trade', False)
     det = cfg.get('regime_detector', {})
-    det_label = f"{det.get('type','?')}({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})" if det.get('type') == 'sma_cross' else det.get('type', '?')
+    if det.get('type') == 'sma_cross':
+        det_label = f"sma_cross({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})"
+    elif det.get('type') == 'named':
+        det_label = det.get('params', {}).get('name', 'named')
+    else:
+        det_label = det.get('type', '?')
     bull_cfg = cfg.get('bull', {})
     bear_cfg = cfg.get('bear', {})
 
@@ -2282,11 +2287,11 @@ def run_loop(trading_cfg, dry_run=False):
             bear_cfg = cfg.get('bear', {})
             det = cfg.get('regime_detector', {})
             if det.get('type') == 'sma_cross':
-            det_label = f"sma_cross({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})"
-        elif det.get('type') == 'named':
-            det_label = det.get('params', {}).get('name', 'named')
-        else:
-            det_label = det.get('type', '?')
+                det_label = f"sma_cross({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})"
+            elif det.get('type') == 'named':
+                det_label = det.get('params', {}).get('name', 'named')
+            else:
+                det_label = det.get('type', '?')
             tp_pct = cfg.get('take_profit_pct', 0)
             tp_str = f"TP={tp_pct}%" if tp_pct > 0 else "TP=OFF"
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
