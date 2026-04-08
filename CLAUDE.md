@@ -296,13 +296,18 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 ### TODO
 
 **HIGHEST PRIORITY:**
-1. **Restart Ed V2 trader** to load BUG 1/2/3 fixes + maker_window 120s (commit cbc42a9).
-2. **RS ETH `--replay 2880` OOS** — running in background, report results when complete.
+1. **Restart optimizer bot** to load SV3 + Help buttons (commits a900d98, c0e674d).
+2. **Run SV3 ETH `--replay 2880`** — Ed V3 joint H-sweep test (1,960 evals, ~4h). If results beat current Mode S winner, push to prod.
+3. **RS ETH `--replay 2880` OOS** — running on Yoga since 06:57, ~50%, report results when complete.
 
 **Other:**
-3. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
-4. **Ein results review** — Check Ein (15min) BTC results from laptop run
-5. **(stretch) Full joint horizon sweep in Mode S** — Extend Option C to detector × bull_conf × bear_conf × bull_h × bear_h = 2,940 evals. Would surface 6h-based combos that current Mode S never tests.
+4. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
+5. **Ein results review** — Check Ein (15min) BTC results from laptop run
+
+### Completed (2026-04-08 — soir)
+- **Ed V3 (research)** — `crypto_trading_system_ed_v3.py` Mode S full joint H-sweep: 5 detectors × 8 horizon pairs `(6,6)(6,7)(6,8)(7,7)(7,8)(8,8)(7,6)(8,7)` × 49 conf combos = 1,960 evals/asset. Writes to `regime_config_ed_v3.json` (zero prod impact).
+- **Telegram optimizer bot** — Added `SV3` button (S V3 Joint H-Sweep) + `Help` button in mode menu.
+- **Telegram trader** — Hourly update shows real detector name (e.g. `sma168>sma480`) instead of `named`; added `/help` line after date.
 
 ### Completed (2026-04-08)
 - **BUG 1 fix — maker buy balance rounding** — Floor `buy_amount` to cents minus $0.01 safety margin before passing to maker buy (Revolut rejects when qty×price > balance by even $0.01).
