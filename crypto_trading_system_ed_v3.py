@@ -4157,7 +4157,7 @@ def run_mode_s(assets_list, horizons, args=None):
     replay = int(getattr(args, 'replay', 0)) or 2880
     top_n = int(getattr(args, 'top', 0)) or 15
 
-    HORIZON_PAIRS = [(6,6),(6,7),(6,8),(7,7),(7,8),(8,8),(7,6),(8,7)]
+    HORIZON_PAIRS = [(b,r) for b in (5,6,7,8) for r in (5,6,7,8)]  # 16 pairs, full 5-8 grid
     HORIZON_SET = sorted(set(h for pair in HORIZON_PAIRS for h in pair))
 
     # Read prod config for asset structure, write winner to v3 file (no prod impact)
