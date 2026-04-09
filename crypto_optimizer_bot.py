@@ -66,7 +66,7 @@ MODES = {
     'R':    'Regime Backtest',
     'S':    'Regime Confidence',
     'SV3':  'S V3 Joint H-Sweep',
-    'BLOWOFF': 'Blow-off Filter Sweep',
+    'BLOWOFF': 'Momentum Decay Sweep',
     'RS':   'Regime + Confidence',
     'HRS':  'Full Ed Pipeline',
     'DVRS': 'DV + Regime + Conf',
@@ -312,7 +312,7 @@ def _show_mode_menu():
         [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
         [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
         [('P - PySR', 'opt_mode_P'), ('SV3 - Joint H-Sweep', 'opt_mode_SV3')],
-        [('BLOWOFF - Filter Sweep', 'opt_mode_BLOWOFF')],
+        [('BLOWOFF - Momentum Decay', 'opt_mode_BLOWOFF')],
         [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
@@ -608,7 +608,7 @@ def _run_job(job):
         if hasattr(job, 'replay') and job.replay:
             cmd.extend(['--replay', str(job.replay)])
     elif job.mode == 'BLOWOFF':
-        blowoff_path = os.path.join(ENGINE_DIR, 'tools', 'test_blowoff_filters.py')
+        blowoff_path = os.path.join(ENGINE_DIR, 'tools', 'test_momentum_decay.py')
         cmd = [PYTHON_EXE, '-u', blowoff_path, '--asset', job.assets[0]]
         if hasattr(job, 'replay') and job.replay:
             cmd.extend(['--replay', str(job.replay)])
