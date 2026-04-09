@@ -66,13 +66,14 @@ MODES = {
     'R':    'Regime Backtest',
     'S':    'Regime Confidence',
     'SV3':  'S V3 Joint H-Sweep',
+    'BLOWOFF': 'Blow-off Filter Sweep',
     'RS':   'Regime + Confidence',
     'HRS':  'Full Ed Pipeline',
     'DVRS': 'DV + Regime + Conf',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'SV3': 240, 'RS': 60, 'HRS': 120, 'DVRS': 120}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'SV3': 240, 'BLOWOFF': 30, 'RS': 60, 'HRS': 120, 'DVRS': 120}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -267,7 +268,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'V', 'DV', 'DVS', 'R', 'S', 'SV3', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'V', 'DV', 'DVS', 'R', 'S', 'SV3', 'BLOWOFF', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -311,6 +312,7 @@ def _show_mode_menu():
         [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
         [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
         [('P - PySR', 'opt_mode_P'), ('SV3 - Joint H-Sweep', 'opt_mode_SV3')],
+        [('BLOWOFF - Filter Sweep', 'opt_mode_BLOWOFF')],
         [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
@@ -603,10 +605,17 @@ def _run_job(job):
     h_arg = ','.join(str(h) for h in job.horizons) + 'h'
     if job.mode == 'SV3':
         cmd = [PYTHON_EXE, '-u', SCRIPT_PATH_V3, 'S', assets_arg, h_arg]
+        if hasattr(job, 'replay') and job.replay:
+            cmd.extend(['--replay', str(job.replay)])
+    elif job.mode == 'BLOWOFF':
+        blowoff_path = os.path.join(ENGINE_DIR, 'tools', 'test_blowoff_filters.py')
+        cmd = [PYTHON_EXE, '-u', blowoff_path, '--asset', job.assets[0]]
+        if hasattr(job, 'replay') and job.replay:
+            cmd.extend(['--replay', str(job.replay)])
     else:
         cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
-    if hasattr(job, 'replay') and job.replay:
-        cmd.extend(['--replay', str(job.replay)])
+        if hasattr(job, 'replay') and job.replay:
+            cmd.extend(['--replay', str(job.replay)])
 
     print(f"  CMD: {' '.join(cmd)}")
 
