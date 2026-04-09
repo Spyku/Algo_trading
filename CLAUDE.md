@@ -296,13 +296,19 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 ### TODO
 
 **HIGHEST PRIORITY:**
-1. **Restart optimizer bot** to load SV3 + Help buttons (commits a900d98, c0e674d).
-2. **Run SV3 ETH `--replay 2880`** — Ed V3 joint H-sweep test (1,960 evals, ~4h). If results beat current Mode S winner, push to prod.
-3. **RS ETH `--replay 2880` OOS** — running on Yoga since 06:57, ~50%, report results when complete.
+1. **Run SV3 ETH `--replay 2880`** with full 5–8 grid (16 pairs, 3,920 evals). The 8 Apr SV3 run that completed was 1440h with only 8 horizon pairs — 2880h full-grid still pending.
+2. **Investigate signal nondeterminism** — Three RS ETH 1440h reruns (7 Apr 15:24, 7 Apr 16:08, 9 Apr 16:03) produced winners +49.98% / +60.72% / +52.36% with shifting bear horizons (8h@90% → 8h@85% → 6h@85%). ~11pp swing from same script + same window. Pin seeds in XGB/LGBM/RF signal generators OR add a "run sweep N times and average" wrapper before trusting any single winner. See finding below.
+3. **Parity sanity check (optional, lower urgency)** — On 9 Apr RS run, `sma168>sma480 7h@80%/6h@85%` = +52.36%; V3 8 Apr top-15 had same config at +54.66% — within run-to-run noise, so V3 ≈ RS structurally. The earlier "V3 isn't a true superset" worry was mostly seed jitter, not a simulator divergence.
 
 **Other:**
 4. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
 5. **Ein results review** — Check Ein (15min) BTC results from laptop run
+
+### Completed (2026-04-09)
+- **SV3 ETH 1440h** (`optimizer_20260408_155122.log`, finished 8 Apr 22:51 via Telegram). Winner: `vol_calm 7h@80%/6h@80%` → +57.68% / 63 trades / 75% WR / alpha +46.90%. Written to `regime_config_ed_v3.json` (research only — no prod impact).
+- **RS ETH 1440h rerun** (`ed_v1_20260409_160324.log`). Winner: `sma168>sma480 7h@80%/6h@85%` → +52.36% / 62 trades / 71% WR / alpha +49.25%. Used to confirm RS↔V3 structural parity and to surface nondeterminism (see TODO #2).
+- **Momentum-decay / blowoff filter sweep ETH 2880h** (`optimizer_20260409_024812.log`). Baseline +10.32%; best filter `A_6h ≥5% force_sell` → +10.91% (+0.58pp). Not actionable.
+- **Prod confirmed** — `regime_config_ed.json` ETH = `sma168>sma480 6h@90%/8h@90%` from 4mo OOS sweep (`rs_eth_oos_4mo_20260408_065746.log`, +96.27%). Defensible: longer window damps the seed jitter that plagues 1440h sweeps.
 
 ### Completed (2026-04-08 — soir)
 - **Ed V3 (research)** — `crypto_trading_system_ed_v3.py` Mode S full joint H-sweep: 5 detectors × 8 horizon pairs `(6,6)(6,7)(6,8)(7,7)(7,8)(8,8)(7,6)(8,7)` × 49 conf combos = 1,960 evals/asset. Writes to `regime_config_ed_v3.json` (zero prod impact).
