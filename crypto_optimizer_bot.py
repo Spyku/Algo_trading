@@ -64,16 +64,14 @@ MODES = {
     'DV':   'Grid + Validate',
     'H':    'Horizon Sweep',
     'R':    'Regime Backtest',
-    'S':    'Regime Confidence',
-    'SV3':  'S V3 Joint H-Sweep',
-    'BLOWOFF': 'Momentum Decay Sweep',
-    'RS':   'Regime + Confidence',
+    'S':    'Joint Sweep (V3)',
+    'RS':   'Regime + Joint Sweep',
     'HRS':  'Full Ed Pipeline',
     'DVRS': 'DV + Regime + Conf',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 30, 'SV3': 240, 'BLOWOFF': 30, 'RS': 60, 'HRS': 120, 'DVRS': 120}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'RS': 90, 'HRS': 150, 'DVRS': 150}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -268,7 +266,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'D', 'V', 'DV', 'DVS', 'R', 'S', 'SV3', 'BLOWOFF', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'D', 'V', 'DV', 'DVS', 'R', 'S', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -309,10 +307,9 @@ def _show_mode_menu():
     buttons = [
         [('D - Grid', 'opt_mode_D'), ('V - Validate', 'opt_mode_V')],
         [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
-        [('R - Regime', 'opt_mode_R'), ('S - Confidence', 'opt_mode_S')],
-        [('RS - Regime+Conf', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
-        [('P - PySR', 'opt_mode_P'), ('SV3 - Joint H-Sweep', 'opt_mode_SV3')],
-        [('BLOWOFF - Momentum Decay', 'opt_mode_BLOWOFF')],
+        [('R - Regime', 'opt_mode_R'), ('S - Joint Sweep', 'opt_mode_S')],
+        [('RS - Regime+Sweep', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
+        [('P - PySR', 'opt_mode_P'), ('DVRS - DV+R+S', 'opt_mode_DVRS')],
         [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
