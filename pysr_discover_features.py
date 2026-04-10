@@ -37,14 +37,15 @@ import pandas as pd
 # Add engine to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from crypto_trading_system_doohan import (
+from crypto_trading_system_ed import (
     load_data, build_all_features, PREDICTION_HORIZON
 )
 
 MAX_DIAG_HOURS = 6 * 30 * 24  # 4320 hours = 6 months (same cap as Mode D)
 
 
-def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
+def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
+                      max_corr=0.7):
     """Run PySR symbolic regression to discover feature formulas.
 
     Uses the 6 months BEFORE Mode D's window to prevent data leakage.
@@ -55,6 +56,7 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
         n_top: Number of top expressions to save
         iterations: PySR iterations (more = better but slower)
         populations: Number of populations for genetic algorithm
+        max_corr: Maximum pairwise correlation between kept expressions (0.7 = diverse)
 
     Returns:
         Tuple of (results_list, pysr_rows) where results_list contains dicts
@@ -130,9 +132,9 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
         population_size=50,
         binary_operators=["+", "-", "*", "/"],
         unary_operators=["log", "abs", "sqrt", "tanh"],
-        maxsize=15,               # max expression complexity
-        maxdepth=5,               # max tree depth
-        parsimony=0.003,          # penalty for complexity (higher = simpler formulas)
+        maxsize=25,               # max expression complexity (was 15)
+        maxdepth=8,               # max tree depth (was 5)
+        parsimony=0.002,          # penalty for complexity (lower = allows more complex formulas)
         ncycles_per_iteration=300,
         weight_optimize=0.001,    # constant optimization weight
         adaptive_parsimony_scaling=100.0,
@@ -168,7 +170,7 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
     print(f"  {'#':>3} | {'Score':>8} | {'Loss':>10} | {'Complexity':>10} | Expression")
     print(f"  {'─'*80}")
 
-    for i, (_, row) in enumerate(equations.head(n_top * 2).iterrows()):
+    for i, (_, row) in enumerate(equations.head(n_top * 5).iterrows()):
         # Skip trivially simple expressions (just a single feature)
         if row['complexity'] <= 2:
             continue
@@ -185,8 +187,72 @@ def discover_features(asset, horizon, n_top=5, iterations=40, populations=30):
         results.append(result)
         print(f"  {len(results):>3} | {row['score']:>8.4f} | {row['loss']:>10.6f} | {row['complexity']:>10} | {expr}")
 
-        if len(results) >= n_top:
+        # Collect extra candidates when dedup is active (many will be dropped)
+        candidate_limit = n_top * 3 if max_corr < 1.0 else n_top
+        if len(results) >= candidate_limit:
             break
+
+    # Deduplicate: drop expressions too correlated with already-kept ones
+    if len(results) > 1 and max_corr < 1.0:
+        import sympy
+        kept = [results[0]]
+        kept_vals = []
+        # Compute values for first expression
+        try:
+            sym0 = sympy.sympify(results[0].get('sympy_format', results[0]['equation']))
+            sym_vars0 = list(sym0.free_symbols)
+            func0 = sympy.lambdify(sym_vars0, sym0, modules=['numpy'])
+            missing0 = [str(s) for s in sym_vars0 if str(s) not in all_cols]
+            if not missing0:
+                args0 = [X[:, all_cols.index(str(s))] for s in sym_vars0]
+                v0 = func0(*args0)
+                v0 = np.where(np.isfinite(v0), v0, 0.0)
+                kept_vals.append(v0)
+            else:
+                kept_vals.append(None)
+        except Exception:
+            kept_vals.append(None)
+
+        for r in results[1:]:
+            try:
+                sym_r = sympy.sympify(r.get('sympy_format', r['equation']))
+                sym_vars_r = list(sym_r.free_symbols)
+                func_r = sympy.lambdify(sym_vars_r, sym_r, modules=['numpy'])
+                missing_r = [str(s) for s in sym_vars_r if str(s) not in all_cols]
+                if missing_r:
+                    kept.append(r)
+                    kept_vals.append(None)
+                    continue
+                args_r = [X[:, all_cols.index(str(s))] for s in sym_vars_r]
+                v_r = func_r(*args_r)
+                v_r = np.where(np.isfinite(v_r), v_r, 0.0)
+            except Exception:
+                kept.append(r)
+                kept_vals.append(None)
+                continue
+
+            # Check correlation against all kept expressions
+            too_similar = False
+            for kv in kept_vals:
+                if kv is None:
+                    continue
+                if np.std(v_r) < 1e-10 or np.std(kv) < 1e-10:
+                    continue
+                corr = abs(np.corrcoef(v_r, kv)[0, 1])
+                if corr > max_corr:
+                    too_similar = True
+                    break
+            if too_similar:
+                print(f"    SKIP (corr>{max_corr:.1f}): {r['equation'][:60]}")
+            else:
+                kept.append(r)
+                kept_vals.append(v_r)
+
+            if len(kept) >= n_top:
+                break
+
+        print(f"\n  After dedup: {len(kept)}/{len(results)} expressions kept (max_corr={max_corr})")
+        results = kept
 
     print(f"\n  {len(results)} expressions saved")
     return results, pysr_rows
@@ -230,14 +296,16 @@ def main():
     parser.add_argument('asset', type=str, help='Asset name (e.g., BTC)')
     parser.add_argument('horizon', type=str, help='Horizon (e.g., 6h)')
     parser.add_argument('--top', type=int, default=5, help='Number of top expressions to save (default: 5)')
-    parser.add_argument('--iterations', type=int, default=40, help='PySR iterations (default: 40, more=better but slower)')
+    parser.add_argument('--iterations', type=int, default=100, help='PySR iterations (default: 100, more=better but slower)')
     parser.add_argument('--populations', type=int, default=30, help='Number of populations (default: 30)')
+    parser.add_argument('--max-corr', type=float, default=0.7, help='Max correlation between kept expressions (default: 0.7)')
 
     args = parser.parse_args()
     horizon = int(args.horizon.replace('h', ''))
 
     results, pysr_rows = discover_features(args.asset, horizon, n_top=args.top,
-                                iterations=args.iterations, populations=args.populations)
+                                iterations=args.iterations, populations=args.populations,
+                                max_corr=args.max_corr)
 
     if results:
         # Get feature names for saving
@@ -245,7 +313,7 @@ def main():
         _, all_cols = build_all_features(df_raw, asset_name=args.asset, horizon=horizon, verbose=False)
         save_results(args.asset, horizon, results, all_cols, pysr_rows=pysr_rows)
         print(f"\n  Done! Now run Mode DV to test these features:")
-        print(f"  python crypto_trading_system_doohan.py DV {args.asset} {horizon}h")
+        print(f"  python crypto_trading_system_ed.py DV {args.asset} {horizon}h")
     else:
         print("\n  No useful expressions found. Try increasing --iterations.")
 
