@@ -84,6 +84,15 @@ def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
         all_cols = [c for c in all_cols if not c.startswith('pysr_')]
         print(f"  Excluded {len(pysr_cols)} existing PySR columns from inputs")
 
+    # Short-history features (GDELT: only ~3 months of data) would kill the historical
+    # window via dropna. Fill NaN with 0 for these columns so PySR can still use the
+    # full 12-month window — PySR will simply see 0 for periods before GDELT coverage.
+    gdelt_cols = [c for c in all_cols if c.startswith('gp_')]
+    if gdelt_cols:
+        for gc in gdelt_cols:
+            df_full[gc] = df_full[gc].fillna(0.0)
+        print(f"  GDELT: {len(gdelt_cols)} columns filled NaN→0 (short history, ~3 months)")
+
     df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
 
     # Anti-leakage: use the 6 months BEFORE Mode D's window (months 12→6 ago)
