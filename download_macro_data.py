@@ -471,6 +471,141 @@ def download_derivatives_data():
 
 
 # ============================================================
+# 7. GDELT GEOPOLITICAL DATA (free, no API key)
+# ============================================================
+def download_gdelt_geopolitical():
+    """
+    Download geopolitical tension data from GDELT DOC 2.0 API (free, no key).
+    Queries for Iran/conflict/war/sanctions articles — returns:
+      - volume: % of all GDELT articles matching query (15-min resolution)
+      - tone:   average tone score (negative=bad news, positive=good news)
+    GDELT DOC API limits: max 3-month lookback, rate limit ~5 req/min.
+    We download in 3-month chunks going back to 2022, sleeping between requests.
+    Saves to data/macro_data/gdelt_geopolitical.csv (hourly, aggregated from 15-min).
+    """
+    import urllib.request
+    import urllib.parse
+    import ssl
+    import time
+
+    print(f"\n  Downloading GDELT geopolitical data...")
+    ctx = ssl._create_unverified_context()
+
+    # Queries: Iran-specific + broader geopolitical conflict terms
+    queries = {
+        'iran': 'Iran (war OR conflict OR sanctions OR ceasefire OR Hormuz OR nuclear OR attack OR strike OR missile)',
+        'geopolitical': '(geopolitical risk OR trade war OR tariff OR sanctions OR military conflict OR escalation)',
+    }
+
+    # GDELT DOC API max lookback is 3 months; we paginate in 3-month chunks
+    from datetime import datetime, timedelta
+    end_date = datetime.utcnow()
+    start_date = datetime(2024, 1, 1)  # GDELT DOC API practical limit ~2y back
+
+    all_rows = []
+
+    for qname, query in queries.items():
+        print(f"    Query '{qname}'...")
+        cursor = end_date
+        chunk_count = 0
+
+        while cursor > start_date:
+            chunk_start = max(cursor - timedelta(days=89), start_date)
+            days_back = (end_date - chunk_start).days
+            timespan = f"{days_back * 24}h"
+
+            # Cap at 3 months (2160h)
+            hours_back = min(days_back * 24, 2160)
+            timespan = f"{hours_back}h"
+
+            for mode in ['timelinevol', 'timelinetone']:
+                params = urllib.parse.urlencode({
+                    'query': query,
+                    'mode': mode,
+                    'format': 'json',
+                    'timespan': timespan,
+                })
+                url = f'https://api.gdeltproject.org/api/v2/doc/doc?{params}'
+
+                for attempt in range(3):
+                    try:
+                        time.sleep(12)  # respect rate limit
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                            raw = resp.read().decode()
+
+                        if not raw or raw.startswith('The specified'):
+                            print(f"      {mode}: empty response, skipping")
+                            break
+
+                        data = json.loads(raw)
+                        tl = data.get('timeline', [])
+                        if not tl:
+                            break
+
+                        pts = tl[0].get('data', [])
+                        value_key = 'vol' if mode == 'timelinevol' else 'tone'
+
+                        for p in pts:
+                            dt = pd.to_datetime(p['date'])
+                            all_rows.append({
+                                'datetime': dt,
+                                'query': qname,
+                                'metric': value_key,
+                                'value': float(p['value']),
+                            })
+
+                        print(f"      {mode}: {len(pts)} points (back to {pts[0]['date'][:10] if pts else '?'})")
+                        break  # success
+
+                    except urllib.error.HTTPError as e:
+                        if e.code == 429:
+                            wait = 30 * (attempt + 1)
+                            print(f"      Rate limited, waiting {wait}s...")
+                            time.sleep(wait)
+                        else:
+                            print(f"      HTTP {e.code}: {e.reason}")
+                            break
+                    except Exception as e:
+                        print(f"      Error: {e}")
+                        break
+
+            # Move cursor back; GDELT returns max 3 months so one chunk is enough per query
+            cursor = chunk_start - timedelta(days=1)
+            chunk_count += 1
+            if chunk_count >= 1:
+                break  # GDELT DOC API only allows ~3 months lookback anyway
+
+    if not all_rows:
+        print("  No GDELT data downloaded!")
+        return None
+
+    # Pivot: rows → columns (iran_vol, iran_tone, geopolitical_vol, geopolitical_tone)
+    raw_df = pd.DataFrame(all_rows)
+    raw_df['col'] = raw_df['query'] + '_' + raw_df['metric']
+    pivot = raw_df.pivot_table(index='datetime', columns='col', values='value', aggfunc='mean')
+
+    # Resample 15-min → hourly (mean vol, mean tone)
+    pivot.index = pd.to_datetime(pivot.index)
+    hourly = pivot.resample('1h').mean()
+
+    # Forward-fill small gaps (up to 4h)
+    hourly = hourly.ffill(limit=4)
+
+    # Strip timezone so _load_macro_csv().tz_localize(None) won't fail
+    if hourly.index.tz is not None:
+        hourly.index = hourly.index.tz_localize(None)
+
+    # Save
+    outfile = os.path.join(MACRO_DIR, 'gdelt_geopolitical.csv')
+    hourly.to_csv(outfile)
+    print(f"  Saved: {outfile} ({len(hourly)} rows, {list(hourly.columns)})")
+    print(f"  Date range: {hourly.index[0]} to {hourly.index[-1]}")
+
+    return hourly
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -495,6 +630,9 @@ def main():
 
     # 6. Derivatives data (funding rate + open interest)
     deriv_df = download_derivatives_data()
+
+    # 7. GDELT geopolitical data
+    gdelt_df = download_gdelt_geopolitical()
 
     # Summary
     print(f"\n{'='*60}")

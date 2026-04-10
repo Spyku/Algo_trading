@@ -863,7 +863,8 @@ def _load_macro_csv(filename):
         return None
     try:
         df = pd.read_csv(path, parse_dates=[0], index_col=0)
-        df.index = pd.to_datetime(df.index).tz_localize(None)
+        idx = pd.to_datetime(df.index)
+        df.index = idx.tz_localize(None) if idx.tz is None else idx.tz_convert(None)
         _macro_cache[filename] = df
         return df
     except Exception as e:
@@ -913,6 +914,28 @@ def _compute_fear_greed_features(fg_df, prefix='fg_'):
         features[f'{prefix}ma{w}d'] = fg.rolling(w, min_periods=3).mean()
     features[f'{prefix}extreme_fear'] = (fg < 20).astype(float)
     features[f'{prefix}extreme_greed'] = (fg > 80).astype(float)
+    return features
+
+
+def _compute_gdelt_features(gdelt_df, prefix='gp_'):
+    """Compute geopolitical tension features from GDELT data.
+    Input columns: iran_vol, iran_tone, geopolitical_vol, geopolitical_tone
+    Output features: volume spikes, tone shifts, rolling z-scores."""
+    features = pd.DataFrame(index=gdelt_df.index)
+    for col in gdelt_df.columns:
+        s = gdelt_df[col].astype(float)
+        tag = f"{prefix}{col}"
+        # Raw value
+        features[f'{tag}'] = s
+        # Z-score (rolling 168h = 1 week)
+        roll_mean = s.rolling(168, min_periods=24).mean()
+        roll_std = s.rolling(168, min_periods=24).std()
+        features[f'{tag}_zscore'] = (s - roll_mean) / (roll_std + 1e-10)
+        # Short-term change (spike detection)
+        features[f'{tag}_chg4h'] = s.diff(4)
+        features[f'{tag}_chg24h'] = s.diff(24)
+        # Spike flag (> 2 std above mean)
+        features[f'{tag}_spike'] = ((s - roll_mean) / (roll_std + 1e-10) > 2.0).astype(float)
     return features
 
 
@@ -982,9 +1005,23 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             all_cols.extend(new_cols)
             added += len(new_cols)
 
-    df = df.drop(columns=['_merge_date'], errors='ignore')
+    # GDELT geopolitical features (hourly — merge on datetime, not date)
+    gdelt_df = _load_macro_csv('gdelt_geopolitical.csv')
+    if gdelt_df is not None:
+        gp_feats = _compute_gdelt_features(gdelt_df, prefix='gp_')
+        gp_feats['_merge_hour'] = gp_feats.index.floor('h')
+        df['_merge_hour'] = pd.to_datetime(df['datetime']).dt.floor('h')
+        df = df.merge(gp_feats, on='_merge_hour', how='left')
+        df = df.drop(columns=['_merge_hour'], errors='ignore')
+        new_cols = [c for c in gp_feats.columns if c != '_merge_hour']
+        all_cols.extend(new_cols)
+        added += len(new_cols)
+
+    df = df.drop(columns=['_merge_date', '_merge_hour'], errors='ignore')
     if '_merge_date' in all_cols:
         all_cols.remove('_merge_date')
+    if '_merge_hour' in all_cols:
+        all_cols.remove('_merge_hour')
     all_cols = list(dict.fromkeys(all_cols))
     all_cols = [c for c in all_cols if c in df.columns]
     macro_cols = [c for c in all_cols if c not in base_cols]
@@ -3132,7 +3169,7 @@ def _build_combo_list():
     return combo_options
 
 
-def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False):
+def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False, replay_hours=None):
     """
     DOOHAN V1.6 Mode D: Exhaustive grid search.
 
@@ -3182,9 +3219,10 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         if df_raw is None:
             continue
 
-        # Step 1: Build ALL features, cap at 6 months
-        MAX_DIAG_HOURS = 6 * 30 * 24
-        print(f"\n  Building all features (horizon={horizon}h)...")
+        # Step 1: Build ALL features, cap at replay_hours or 6 months
+        MAX_DIAG_HOURS = replay_hours if replay_hours else 6 * 30 * 24
+        period_label = f"{replay_hours}h" if replay_hours else "last 6mo"
+        print(f"\n  Building all features (horizon={horizon}h, period={period_label})...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         n_pysr = _compute_pysr_features(df_full, all_cols, asset_name, horizon)
@@ -3205,7 +3243,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         total_rows = len(df_full)
         if total_rows > MAX_DIAG_HOURS:
             df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows ({period_label})")
 
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
@@ -4147,21 +4185,22 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 # ============================================================
 def run_mode_s(assets_list, horizons, args=None):
     """
-    Ed Mode S (Option C — full joint sweep): Given a bull/bear horizon pair from
-    regime_config_ed.json (set by Mode R), jointly sweep ALL regime detectors ×
-    bull_conf × bear_conf (N detectors × 7 × 7 = 49N combos). Pick the winning
-    (detector, bull_conf, bear_conf) triple and write it to config.
+    Ed Mode S — FULL JOINT SWEEP (V3 logic in production).
 
-    No longer reads `regime_detector` from config — Mode S re-discovers it as part
-    of the joint sweep, so the R→S handoff only needs to pass horizons.
+    Jointly sweeps detector × bull_h × bear_h × bull_conf × bear_conf.
+    Discovers the global optimum across the entire search space instead of
+    relying on Mode R's greedy sequential horizon selection.
+
+    When called after Mode R (RS/HRS/DVRS), Mode R's horizon picks are
+    informational only — Mode S re-discovers horizons as part of its sweep.
 
     Flow:
-        1. Read regime_config_ed.json for bull/bear horizons
-        2. Generate signals for bull_h and bear_h
+        1. Determine available horizons from production models (or CLI)
+        2. Generate signals for ALL unique horizons
         3. Build regime indicators + detector dict (shared helper)
-        4. For each detector × bull_conf × bear_conf, simulate
+        4. For each detector × horizon_pair × bull_conf × bear_conf, simulate
         5. Pick best by return × win_rate scoring
-        6. Write winning detector + confidences to regime_config_ed.json
+        6. Write winning detector + horizons + confidences to regime_config_ed.json
     """
     replay = int(getattr(args, 'replay', 0)) or 2880
     top_n = int(getattr(args, 'top', 0)) or 15
@@ -4177,35 +4216,40 @@ def run_mode_s(assets_list, horizons, args=None):
 
     CONF_LEVELS = [65, 70, 75, 80, 85, 90, 95]
 
-    print(f"\n{'='*80}")
-    print(f"  MODE S: REGIME CONFIDENCE OPTIMIZATION")
-    print(f"  Assets: {', '.join(assets_list)} | Replay: {replay}h")
-    print(f"  Confidence sweep: {CONF_LEVELS}")
-    print(f"{'='*80}")
-
     df_models = pd.read_csv(PRODUCTION_CSV)
 
     for asset in assets_list:
-        acfg = regime_config.get(asset, {})
-        bull_h = acfg.get('bull', {}).get('horizon')
-        bear_h = acfg.get('bear', {}).get('horizon')
+        # Determine horizons: use CLI horizons if provided, else from production models
+        if horizons:
+            available_h = sorted([h for h in horizons
+                                  if len(df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]) > 0])
+        else:
+            available_h = sorted(df_models[df_models['coin'] == asset]['horizon'].unique())
 
-        if not bull_h or not bear_h:
-            print(f"\n  {asset}: no bull/bear horizons in config — skipping")
+        if len(available_h) < 1:
+            print(f"\n  {asset}: no production models found — skipping")
             continue
 
+        # Build all horizon pairs (including same-horizon pairs)
+        horizon_pairs = [(b, r) for b in available_h for r in available_h]
+        n_det = 5  # sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h
+        n_combos = n_det * len(horizon_pairs) * len(CONF_LEVELS) * len(CONF_LEVELS)
+
         print(f"\n{'='*80}")
-        print(f"  {asset} — bull={bull_h}h | bear={bear_h}h | joint sweep over ALL detectors")
+        print(f"  MODE S: JOINT SWEEP (V3)")
+        print(f"  Asset: {asset} | Replay: {replay}h | Horizons: {available_h}")
+        print(f"  {n_det} detectors × {len(horizon_pairs)} h-pairs × "
+              f"{len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf = {n_combos:,} combos")
         print(f"{'='*80}")
 
-        # ── Generate signals for both horizons ──
+        # ── Generate signals for ALL unique horizons ──
         signals_cache = {}
-        for h in [bull_h, bear_h]:
-            if h in signals_cache:
-                continue
+        sig_error = False
+        for h in available_h:
             rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
             if len(rows) == 0:
                 print(f"  ERROR: No production model for {asset} {h}h")
+                sig_error = True
                 break
             row = rows.sort_values('combined_score', ascending=False).iloc[0]
             feats = row['optimal_features'].split(',') if pd.notna(row.get('optimal_features', '')) else None
@@ -4226,7 +4270,7 @@ def run_mode_s(assets_list, horizons, args=None):
             signals_cache[h] = result
             print(f"    {h}h: {len(result)} signals ({sum(1 for s in result.values() if s['signal']=='BUY')} BUY)")
 
-        if len(signals_cache) < len(set([bull_h, bear_h])):
+        if sig_error or len(signals_cache) < len(available_h):
             print(f"  Skipping {asset} — missing signals")
             continue
 
@@ -4236,12 +4280,10 @@ def run_mode_s(assets_list, horizons, args=None):
         print(f"\n  Building regime indicators...")
         ind, detectors = _build_regime_indicators_and_detectors(asset)
 
-        # ── Joint sweep: every detector × every (bull_conf, bear_conf) combo ──
-        n_combos = len(detectors) * len(CONF_LEVELS) * len(CONF_LEVELS)
-        print(f"\n  Sweeping {len(detectors)} detectors × {len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf "
-              f"= {n_combos} combos...")
+        print(f"\n  Sweeping {n_combos:,} combos...")
 
-        def _sim(det_fn, bull_conf, bear_conf):
+        # ── Joint sweep: detector × horizon_pair × bull_conf × bear_conf ──
+        def _sim(det_fn, bull_h, bear_h, bull_conf, bear_conf):
             cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
             trades, wins = 0, 0
             bull_trades, bear_trades = 0, 0
@@ -4302,51 +4344,64 @@ def run_mode_s(assets_list, horizons, args=None):
         for det_name, det_fn in detectors.items():
             bull_count = sum(1 for dt in all_dts if det_fn(dt))
             bull_pct = bull_count / len(all_dts) * 100 if all_dts else 0
-            for bc in CONF_LEVELS:
-                for rc in CONF_LEVELS:
-                    ret, tr, wr, bh, bt, rt = _sim(det_fn, bc, rc)
-                    score = ret * (wr / 100) if ret > 0 else ret
-                    results.append({
-                        'detector': det_name,
-                        'bull_conf': bc, 'bear_conf': rc,
-                        'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
-                        'alpha': ret - bh, 'score': score,
-                        'bull_trades': bt, 'bear_trades': rt,
-                        'bull_pct': bull_pct,
-                    })
+            for (bull_h, bear_h) in horizon_pairs:
+                for bc in CONF_LEVELS:
+                    for rc in CONF_LEVELS:
+                        ret, tr, wr, bh, bt, rt = _sim(det_fn, bull_h, bear_h, bc, rc)
+                        score = ret * (wr / 100) if ret > 0 else ret
+                        results.append({
+                            'detector': det_name,
+                            'bull_h': bull_h, 'bear_h': bear_h,
+                            'bull_conf': bc, 'bear_conf': rc,
+                            'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
+                            'alpha': ret - bh, 'score': score,
+                            'bull_trades': bt, 'bear_trades': rt,
+                            'bull_pct': bull_pct,
+                        })
 
         results.sort(key=lambda x: x['score'], reverse=True)
 
+        if not results:
+            print(f"  ERROR: No valid results for {asset} — skipping config update")
+            continue
+
         # ── Results ──
-        print(f"\n  {'='*112}")
-        print(f"  TOP {top_n} (DETECTOR × CONFIDENCE) COMBOS — {asset} (bull={bull_h}h, bear={bear_h}h)")
-        print(f"  {'='*112}")
-        print(f"  {'#':>3}  {'Detector':>16}  {'BullC':>6}  {'BearC':>6}  {'Return':>8}  {'Trades':>7}  "
-              f"{'WR':>5}  {'Alpha':>7}  {'Score':>7}  {'Bull%':>6}")
-        print(f"  {'-'*3}  {'-'*16}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
+        print(f"\n  {'='*120}")
+        print(f"  TOP {top_n} JOINT SWEEP — {asset}")
+        print(f"  {'='*120}")
+        print(f"  {'#':>3}  {'Detector':>16}  {'BullH':>5}  {'BearH':>5}  {'BullC':>6}  {'BearC':>6}  "
+              f"{'Return':>8}  {'Trades':>7}  {'WR':>5}  {'Alpha':>7}  {'Score':>7}  {'Bull%':>6}")
+        print(f"  {'-'*3}  {'-'*16}  {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  "
+              f"{'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
 
         for i, r in enumerate(results[:top_n]):
-            print(f"  {i+1:>3}  {r['detector']:>16}  {r['bull_conf']:>5}%  {r['bear_conf']:>5}%  "
+            print(f"  {i+1:>3}  {r['detector']:>16}  {str(r['bull_h'])+'h':>5}  {str(r['bear_h'])+'h':>5}  "
+                  f"{r['bull_conf']:>5}%  {r['bear_conf']:>5}%  "
                   f"{r['return']:>+7.2f}%  {r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  "
                   f"{r['score']:>7.2f}  {r['bull_pct']:>5.0f}%")
 
         winner = results[0]
-        print(f"\n  {'='*112}")
-        print(f"  WINNER: detector={winner['detector']}  bull={bull_h}h@{winner['bull_conf']}%  "
-              f"bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"\n  {'='*120}")
+        print(f"  WINNER: detector={winner['detector']}  bull={winner['bull_h']}h@{winner['bull_conf']}%  "
+              f"bear={winner['bear_h']}h@{winner['bear_conf']}%")
         print(f"  Return: {winner['return']:+.2f}%  Trades: {winner['trades']}  WR: {winner['wr']:.0f}%  "
               f"Alpha: {winner['alpha']:+.2f}%")
-        print(f"  {'='*112}")
+        print(f"  {'='*120}")
 
-        # ── Write winning detector + confidences to config ──
+        # ── Write winning detector + horizons + confidences to config ──
+        if asset not in regime_config:
+            regime_config[asset] = {'enabled': True, 'symbol': f'{asset}-USD',
+                                    'bull': {}, 'bear': {}, 'use_maker_orders': True}
         regime_config[asset]['regime_detector'] = {'type': 'named', 'params': {'name': winner['detector']}}
+        regime_config[asset]['bull']['horizon'] = winner['bull_h']
         regime_config[asset]['bull']['min_confidence'] = winner['bull_conf']
+        regime_config[asset]['bear']['horizon'] = winner['bear_h']
         regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
         with open(tcfg_path, 'w') as f:
             json.dump(regime_config, f, indent=2)
         print(f"\n  Config updated: {asset} detector={winner['detector']} "
-              f"bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+              f"bull={winner['bull_h']}h@{winner['bull_conf']}% / bear={winner['bear_h']}h@{winner['bear_conf']}%")
 
     print(f"\n{'='*80}")
     print(f"  MODE S COMPLETE")
@@ -4868,7 +4923,7 @@ Options:
   --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
   --skip              Mode H only: skip Mode D for horizons that already have results
   --resume            Resume interrupted Optuna study
-  --replay N          Mode R only: replay hours (default: 2880 = 4 months)
+  --replay N          Mode D/R/S/RS: data window in hours (D default: 4320=6mo, R default: 2880=4mo)
   --conf N            Mode R only: confidence threshold (default: 90)
   --top N             Mode R only: show top N results (default: 15)
   --help, -h          Show this help
@@ -5149,7 +5204,7 @@ Examples:
                     print(f"\n{'#'*60}")
                     print(f"  RUNNING {h}h HORIZON")
                     print(f"{'#'*60}")
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
+                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume, replay_hours=flag_replay or None)
             if mode in ('DVS', 'DV'):
                 run_mode_v([asset], horizons, replay_hours=flag_replay or None)
                 if mode == 'DVS':
