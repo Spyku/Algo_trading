@@ -296,13 +296,22 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 ### TODO
 
 **HIGHEST PRIORITY:**
-1. **Run SV3 ETH `--replay 2880`** with full 5–8 grid (16 pairs, 3,920 evals). The 8 Apr SV3 run that completed was 1440h with only 8 horizon pairs — 2880h full-grid still pending.
-2. **Investigate signal nondeterminism** — Three RS ETH 1440h reruns (7 Apr 15:24, 7 Apr 16:08, 9 Apr 16:03) produced winners +49.98% / +60.72% / +52.36% with shifting bear horizons (8h@90% → 8h@85% → 6h@85%). ~11pp swing from same script + same window. Pin seeds in XGB/LGBM/RF signal generators OR add a "run sweep N times and average" wrapper before trusting any single winner. See finding below.
-3. **Parity sanity check (optional, lower urgency)** — On 9 Apr RS run, `sma168>sma480 7h@80%/6h@85%` = +52.36%; V3 8 Apr top-15 had same config at +54.66% — within run-to-run noise, so V3 ≈ RS structurally. The earlier "V3 isn't a true superset" worry was mostly seed jitter, not a simulator divergence.
+1. **Check HRS ETH 6,7,8h --replay 1440 results** — Running overnight 2026-04-10. First full pipeline run with GDELT geopolitical features + V3 joint sweep in production Mode S. Check logs tomorrow morning (2026-04-11). This tests the entire new stack: GDELT features (iran_vol, iran_tone, geopolitical_tone), V3 joint sweep Mode S (global optimization instead of sequential R→S), and --replay 1440 (2-month window). Compare with previous RS results (+52-61%) and check if GDELT features rank in importance.
+2. **Investigate signal nondeterminism** — Three RS ETH 1440h reruns (7 Apr 15:24, 7 Apr 16:08, 9 Apr 16:03) produced winners +49.98% / +60.72% / +52.36% with shifting bear horizons (8h@90% → 8h@85% → 6h@85%). ~11pp swing from same script + same window. Pin seeds in XGB/LGBM/RF signal generators OR add a "run sweep N times and average" wrapper before trusting any single winner.
+3. **SV3 ETH `--replay 2880` full grid** — Now lower priority since V3 joint sweep is in production Mode S. The 8 Apr SV3 run was 1440h with only 8 horizon pairs — full-grid still pending but may be redundant.
 
 **Other:**
 4. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
 5. **Ein results review** — Check Ein (15min) BTC results from laptop run
+
+### Completed (2026-04-10)
+- **GDELT geopolitical features added** — `download_macro_data.py` now fetches GDELT DOC 2.0 data (iran_vol, iran_tone, geopolitical_tone) with rate-limit handling. `_compute_gdelt_features()` generates 15 features (raw, zscore, chg4h, chg24h, spike) per GDELT column. Wired into `build_all_features()` via hourly merge. Feature count: 51 base + 101 macro/sentiment/cross-asset/geopolitical = 152 total. GDELT features ranked #9-12 in LGBM importance on 6h/8h horizons (iran_vol_zscore #9/157 on 8h).
+- **V3 joint sweep ported to production Mode S** — Replaced sequential R→S (greedy: R locks horizons at ≥90% conf → S sweeps conf only, 245 combos) with full joint sweep (detector × bull_h × bear_h × bull_conf × bear_conf, 3,920 combos with 4 horizons). Discovers global optimum across all dimensions simultaneously. Source: `crypto_trading_system_ed_v3.py`.
+- **Mode D `--replay` parameter** — Replaces hardcoded `MAX_DIAG_HOURS = 6*30*24`. Available in CLI and Telegram bot (D added to `REPLAY_MODES`).
+- **Telegram bot menu cleanup** — Removed BLOWOFF and SV3 buttons (noise reduction). Updated S label to "Joint Sweep (V3)", RS to "Regime + Joint Sweep". Added DVRS button. Time estimates updated (S: 60min, RS: 90min, HRS: 150min).
+- **4 critical bugs fixed** — (1) GDELT CSV timezone: strip tz before save + `tz_convert(None)` on load for tz-aware data. (2) `_merge_hour` leaked into `all_cols` after GDELT merge. (3) Empty results IndexError in Mode S (`winner = results[0]` with no guard). (4) `_load_macro_csv()` crash on tz-aware CSV.
+- **Iran ceasefire confirmed as cause of bad late results** — Apr 8 2026 Iran/Hormuz ceasefire caused +8% ETH rally, pure geopolitical event not model deficiency. Motivated adding GDELT features.
+- **Mode D ETH 6,7,8h --replay 1440 run** — GDELT features validated. 152 features total. iran_vol_zscore ranked in top-12 importance.
 
 ### Completed (2026-04-09)
 - **SV3 ETH 1440h** (`optimizer_20260408_155122.log`, finished 8 Apr 22:51 via Telegram). Winner: `vol_calm 7h@80%/6h@80%` → +57.68% / 63 trades / 75% WR / alpha +46.90%. Written to `regime_config_ed_v3.json` (research only — no prod impact).
