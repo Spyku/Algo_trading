@@ -429,7 +429,15 @@ def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=3)
                 time.sleep(1)
                 elapsed += 1
                 continue
+            if 'already been placed' in err_msg or 'already_placed' in err_msg:
+                print(f"    [!] Duplicate order detected, cancelling all and retrying")
+                cancel_all_open_orders(symbol)
+                time.sleep(2)
+                elapsed += 2
+                continue
             print(f"    [!] Limit order failed (status={status}, error={err_detail}), going market")
+            cancel_all_open_orders(symbol)
+            time.sleep(1)
             return place_market(symbol, size)
 
         data = order.get('data', order)
@@ -465,10 +473,47 @@ def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=3)
                         print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee)")
                         return s2, od2
 
-        # Cancel and re-price
-        cancel_order(order_id)
+        # Cancel and re-price — verify cancel completed before placing new order
+        cs, _ = cancel_order(order_id)
+        time.sleep(1)
+        elapsed += 1
+        vs, vo = get_order_status(order_id)
+        if vs == 200 and vo:
+            vd = vo.get('data', vo)
+            vstatus = vd.get('status', vd.get('state', ''))
+            if vstatus == 'filled':
+                avg = float(vd.get('average_fill_price', limit_price))
+                print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee) (filled during cancel)")
+                return vs, vd
+            if vstatus not in ('cancelled', 'expired', 'rejected'):
+                print(f"    Cancel pending (status={vstatus}), force-cancelling all")
+                cancel_all_open_orders(symbol)
+                time.sleep(1)
+                elapsed += 1
+
+        # After partial fill, recalculate size from actual available balance
+        if is_buy:
+            bal = get_balances()
+            if bal:
+                usd_avail = bal.get('USD', {}).get('available', 0)
+                if usd_avail < MIN_TRADE_USD:
+                    print(f"    Remaining balance ${usd_avail:,.2f} < ${MIN_TRADE_USD} minimum, going market for residual")
+                    return place_market(symbol, usd_avail)
+                if usd_avail < size:
+                    print(f"    Balance updated after partial fill: ${size:,.2f} → ${usd_avail:,.2f}")
+                    size = math.floor(usd_avail * 100) / 100 - 0.01
+        else:
+            bal = get_balances()
+            if bal:
+                asset_name = symbol.split('-')[0]
+                crypto_avail = bal.get(asset_name, {}).get('available', 0)
+                if crypto_avail < size and crypto_avail > 0:
+                    print(f"    Balance updated after partial fill: {size:.6f} → {crypto_avail:.6f}")
+                    size = crypto_avail
 
     print(f"    Not filled after {maker_window}s, going MARKET")
+    cancel_all_open_orders(symbol)
+    time.sleep(1)
     return place_market(symbol, size)
 
 

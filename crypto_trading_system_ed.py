@@ -393,6 +393,7 @@ MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
 PRODUCTION_CSV = 'models/crypto_ed_production.csv'
+REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
 
 
 
@@ -3975,7 +3976,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                   f"g={prod_row['gamma']}  f={prod_row['n_features']}  conf>={best_conf}%")
 
         # Write trading config (horizon + min_confidence per asset)
-        tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+        tcfg_path = REGIME_CONFIG_PATH
         try:
             with open(tcfg_path) as f:
                 trading_config = json.load(f)
@@ -4206,7 +4207,7 @@ def run_mode_s(assets_list, horizons, args=None):
     top_n = int(getattr(args, 'top', 0)) or 15
 
     # Load regime config
-    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    tcfg_path = REGIME_CONFIG_PATH
     try:
         with open(tcfg_path) as f:
             regime_config = json.load(f)
@@ -4807,7 +4808,7 @@ def _apply_mode_r_to_config(r_results):
     """Write Mode R's winning horizons to regime_config_ed.json so Mode S picks them up."""
     if not r_results:
         return
-    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    tcfg_path = REGIME_CONFIG_PATH
     try:
         with open(tcfg_path) as f:
             regime_config = json.load(f)
