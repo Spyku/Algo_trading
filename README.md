@@ -508,7 +508,7 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 
 ### Completed (2026-04-03)
 - **Ed V2 trader critical bug fixes** — 6 bugs fixed in `crypto_revolut_ed_v2.py`:
-  1. **Clock drift** — Windows clock ahead of Revolut server → all API calls rejected (409). Fix: NTP sync on startup + auto-correct from 409 response timestamp.
+  1. **Clock drift** — Windows clock ahead of Revolut server → all API calls rejected (409). Fix: NTP sync on startup + auto-correct on 409. Updated 2026-04-13: 409 echo-back method replaced with NTP-based correction (echo-back re-applies stale offset on worsening drift) + periodic NTP sync every 5 min.
   2. **`get_balances()` silent failures** — returned `{}` on any API error. Fix: 3 retries, returns `None` on failure, logs full error.
   3. **Ghost sells** — sell flipped position to cash even when exchange returned 0 balance. Fix: position only updates if sell confirmed executed.
   4. **Sync blind to locked funds** — sync checked `total`, sell checked `available`. Fix: sync now detects `available != total` and cancels stale orders.
@@ -536,6 +536,7 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 |------|-----------|
 | **2026-04-08** | ETH live trader verified on new named-detector config (`sma168>sma480` 7h@75% / 8h@85%). Mode V 6m replay running for 6h vs 7h reliability comparison. |
 | **2026-04-07** | **Detector trim + R→S fix + named-detector wiring.** 14→5 detectors (literature-grounded `vol_calm`, `tsmom_672h`, `sma168>sma480` added). Mode S rewritten as Option C joint sweep (5×49=245). Mode V `--replay` arg added end-to-end. ETH RS rerun: `sma168>sma480` 7h/8h → +60.72%, 65% WR. ETH-only, BTC sold, $12k allocation. |
+| **2026-04-13** | Clock drift fix: NTP-based correction replaces broken echo-back method, periodic NTP sync every 5 min. Maker order bug fixes (partial fill balance, cancel verification, duplicate orders, locked funds). Noprod wrapper for safe experimentation. |
 | **2026-04-05** | Maker order penny-improvement fix (`bid+0.01`, post_only). |
 | **2026-04-03** | Ed V2 release — 6 critical bug fixes (clock drift, ghost sells, locked funds, stale orders, maker pricing). |
 | **2026-03-31** | ETH RS / HRS R→S pipeline fix. LINK HRS dropped (weak). Take-profit analysis (no TP wins). |
