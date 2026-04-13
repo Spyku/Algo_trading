@@ -978,7 +978,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
                     pass
             if cur_pnl < min_sell_pnl and hours_held < max_hold_h:
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
-                send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% < {min_sell_pnl}% (held {hours_held:.0f}h / {max_hold_h}h)")
+                send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)")
                 action = 'HOLD'
                 hold_override_active = True
             elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
