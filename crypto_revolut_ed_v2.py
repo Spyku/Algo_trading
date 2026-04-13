@@ -1102,7 +1102,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
 # ============================================================
 # TELEGRAM MESSAGE (MULTI-ASSET)
 # ============================================================
-def format_multi_asset_telegram(results, dry_run=False, balances=None):
+def format_multi_asset_telegram(results, dry_run=False, balances=None, trading_cfg=None):
     """Format combined Telegram message for all assets."""
     if balances is None:
         balances = {}
@@ -1205,9 +1205,10 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
             lines.append(f"  📦 ${position.get('usd_invested',0):,.0f} @ ${position['entry_price']:,.2f} → ${cur_usd:,.0f} ({emoji}{cur_pnl:+.1f}%)")
 
             # Show hold override status when active
-            _cfg_min_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
+            _asset_cfg = (trading_cfg or {}).get(asset, {})
+            _cfg_min_pnl = _asset_cfg.get('min_sell_pnl_pct', 0)
             if _cfg_min_pnl > 0 and cur_pnl < _cfg_min_pnl:
-                _max_h = trading_cfg.get('max_hold_hours', 10)
+                _max_h = _asset_cfg.get('max_hold_hours', 10)
                 _held_h = 0
                 if position.get('entry_time'):
                     try:
@@ -2319,7 +2320,7 @@ def run_all_once(trading_cfg, dry_run=False):
     # Send combined Telegram with inline buttons
     valid = [r for r in results if r is not None]
     if valid:
-        msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances)
+        msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances, trading_cfg=trading_cfg)
         send_telegram_with_buttons(msg, MAIN_BUTTONS)
 
     return results
