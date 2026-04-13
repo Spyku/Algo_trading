@@ -892,6 +892,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
     # Execute
     executed = False
     pnl_msg = ""
+    hold_override_active = False
 
     if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
         if not dry_run and position.get('auto_trade'):
@@ -979,6 +980,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
                 send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% < {min_sell_pnl}% (held {hours_held:.0f}h / {max_hold_h}h)")
                 action = 'HOLD'
+                hold_override_active = True
             elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
                 print(f"    ⚠ Failsafe: held {hours_held:.0f}h >= {max_hold_h}h, selling at {cur_pnl:+.2f}%")
                 send_telegram(f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%")
@@ -1093,6 +1095,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
         'min_confidence': min_conf,
         'gamma': gamma_val, 'regime': regime_label,
         'horizon': regime_horizon or '',
+        '_hold_override_active': hold_override_active,
     }
 
 
@@ -1162,7 +1165,12 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
                 act = f"🔴 SELL{r['pnl_msg']}"
         elif position['state'] == 'invested':
             cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
-            act = f"⏸ HOLD ({cur_pnl:+.1f}%)"
+            # Check if hold override is active (sell was blocked this cycle)
+            _min_pnl = r.get('_hold_override_active', False)
+            if _min_pnl:
+                act = f"🛡 HOLD (sell blocked, {cur_pnl:+.1f}%)"
+            else:
+                act = f"⏸ HOLD ({cur_pnl:+.1f}%)"
         else:
             act = f"⏸ HOLD (cash)"
 
@@ -1195,6 +1203,19 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None):
             cur_usd = position.get('usd_invested', 0) * (1 + cur_pnl / 100)
             emoji = '📈' if cur_pnl > 0 else '📉'
             lines.append(f"  📦 ${position.get('usd_invested',0):,.0f} @ ${position['entry_price']:,.2f} → ${cur_usd:,.0f} ({emoji}{cur_pnl:+.1f}%)")
+
+            # Show hold override status when active
+            _cfg_min_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
+            if _cfg_min_pnl > 0 and cur_pnl < _cfg_min_pnl:
+                _max_h = trading_cfg.get('max_hold_hours', 10)
+                _held_h = 0
+                if position.get('entry_time'):
+                    try:
+                        _edt = datetime.strptime(position['entry_time'].replace(' (synced)', ''), '%Y-%m-%d %H:%M')
+                        _held_h = (datetime.now() - _edt).total_seconds() / 3600
+                    except Exception:
+                        pass
+                lines.append(f"  🛡 Hold override: need {_cfg_min_pnl}% (at {cur_pnl:+.1f}%) | {_held_h:.0f}h / {_max_h}h")
 
         # Exchange balance (always show if holding)
         if actual_held > 0 and actual_usd > 5:
