@@ -1483,12 +1483,202 @@ def _handle_help_command():
         "/regime — Show current regime per asset\n"
         "/setup — Edit config (inline buttons)\n"
         "/sync — Sync positions from exchange\n"
+        "/buy [ASSET] [USD] — Manual maker buy (fresh price)\n"
+        "/sell [ASSET] — Manual maker sell all holdings\n"
         "/optimize BTC — Re-run Mode D optimization\n"
         "/pause — Pause trading (signals only)\n"
         "/resume — Resume trading\n"
         "/stop — Stop the trader",
         MAIN_BUTTONS
     )
+
+
+def _handle_manual_buy_command(msg, trading_cfg):
+    """Manual maker buy via Telegram. Fetches fresh price, executes maker order, updates position.
+    /buy           → first enabled asset, full max_position_usd
+    /buy ETH       → buy ETH with its max_position_usd
+    /buy ETH 500   → buy ETH with $500
+    """
+    parts = msg.split()
+    enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+    if not enabled:
+        send_telegram("❌ No enabled asset")
+        return
+    asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+    amount_usd = None
+    if len(parts) >= 3:
+        try:
+            amount_usd = float(parts[2])
+        except ValueError:
+            send_telegram(f"❌ Bad amount: {parts[2]}")
+            return
+    if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+        send_telegram(f"❌ {asset} not enabled")
+        return
+
+    cfg = trading_cfg[asset]
+    symbol = cfg.get('symbol', f'{asset}-USD')
+    pos = load_position(asset)
+    if pos['state'] == 'invested':
+        send_telegram(f"⚠️ {asset} already invested — /sell first")
+        return
+
+    bid, ask = get_best_bid_ask(symbol)
+    if bid <= 0 or ask <= 0:
+        send_telegram(f"❌ {asset} price unreachable")
+        return
+    spread_bps = (ask - bid) / bid * 10000
+
+    balances = get_balances()
+    if balances is None:
+        send_telegram("❌ Balance API failed")
+        return
+    usd_avail = balances.get('USD', {}).get('available', 0)
+    max_usd = cfg.get('bull', {}).get('max_position_usd', 0) or cfg.get('max_position_usd', 0)
+    if amount_usd is None:
+        amount_usd = min(max_usd, usd_avail) if max_usd else usd_avail
+    amount_usd = min(amount_usd, usd_avail)
+    amount_usd = math.floor(amount_usd * 100) / 100 - 0.01
+    if amount_usd < MIN_TRADE_USD:
+        send_telegram(f"❌ ${amount_usd:.2f} below ${MIN_TRADE_USD} min (USD avail ${usd_avail:,.2f})")
+        return
+
+    send_telegram(
+        f"🔵 <b>{asset} MAKER BUY</b>\n"
+        f"Price: bid ${bid:,.2f} / ask ${ask:,.2f} ({spread_bps:.1f}bps)\n"
+        f"Amount: ${amount_usd:,.2f}\n"
+        f"Executing..."
+    )
+
+    status, data = execute_maker_buy(symbol, amount_usd)
+    if status in (200, 201):
+        order = data.get('data', data)
+        mid = (bid + ask) / 2
+        fill_price = float(order.get('average_fill_price', mid))
+        filled_size = float(order.get('filled_size', amount_usd / fill_price if fill_price > 0 else 0))
+
+        pos['state'] = 'invested'
+        pos['base_amount'] = filled_size
+        pos['entry_price'] = fill_price
+        pos['usd_invested'] = amount_usd
+        pos['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        pos['trades'].append({
+            'action': 'BUY', 'price': fill_price,
+            'time': pos['entry_time'], 'usd': amount_usd, 'auto': False, 'manual': True,
+        })
+        save_position(asset, pos)
+
+        time.sleep(2)
+        pb = get_balances()
+        crypto = pb.get(asset, {}).get('total', filled_size) if pb else filled_size
+        usd_left = pb.get('USD', {}).get('available', 0) if pb else 0
+        send_telegram(
+            f"✅ <b>{asset} BUY filled</b>\n"
+            f"Fill: ${fill_price:,.2f}\n"
+            f"Size: {crypto:.6f} {asset}\n"
+            f"USD left: ${usd_left:,.2f}"
+        )
+    else:
+        send_telegram(f"❌ {asset} BUY failed: {status} {data}")
+
+
+def _handle_manual_sell_command(msg, trading_cfg):
+    """Manual maker sell via Telegram. Sells ALL available holdings via maker order.
+    /sell          → first enabled asset
+    /sell ETH      → sell ETH
+    """
+    parts = msg.split()
+    enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+    if not enabled:
+        send_telegram("❌ No enabled asset")
+        return
+    asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+    if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+        send_telegram(f"❌ {asset} not enabled")
+        return
+
+    cfg = trading_cfg[asset]
+    symbol = cfg.get('symbol', f'{asset}-USD')
+    pos = load_position(asset)
+
+    bid, ask = get_best_bid_ask(symbol)
+    if bid <= 0 or ask <= 0:
+        send_telegram(f"❌ {asset} price unreachable")
+        return
+    spread_bps = (ask - bid) / bid * 10000
+
+    balances = get_balances()
+    if balances is None:
+        send_telegram("❌ Balance API failed")
+        return
+    actual_held = balances.get(asset, {}).get('available', 0)
+    total_held = balances.get(asset, {}).get('total', 0)
+
+    if actual_held <= 0 < total_held:
+        send_telegram(f"⚠️ {asset} locked — cancelling open orders")
+        cancel_all_open_orders(symbol)
+        time.sleep(2)
+        balances = get_balances()
+        if balances is None:
+            send_telegram("❌ Balance API failed after cancel")
+            return
+        actual_held = balances.get(asset, {}).get('available', 0)
+
+    if actual_held <= 0:
+        send_telegram(f"❌ {asset} balance = 0")
+        return
+
+    entry_price = pos.get('entry_price', 0) if pos['state'] == 'invested' else 0
+    est_proceeds = actual_held * bid
+    pnl_txt = ""
+    if entry_price > 0:
+        est_pnl = (bid - entry_price) / entry_price * 100
+        pnl_txt = f"\nEntry: ${entry_price:,.2f} | PnL est: {est_pnl:+.2f}%"
+
+    send_telegram(
+        f"🔴 <b>{asset} MAKER SELL</b>\n"
+        f"Price: bid ${bid:,.2f} / ask ${ask:,.2f} ({spread_bps:.1f}bps)\n"
+        f"Size: {actual_held:.6f} {asset} (~${est_proceeds:,.2f}){pnl_txt}\n"
+        f"Executing..."
+    )
+
+    status, data = execute_maker_sell(symbol, actual_held)
+    if status in (200, 201):
+        order = data.get('data', data)
+        mid = (bid + ask) / 2
+        fill_price = float(order.get('average_fill_price', mid))
+
+        pnl_pct = 0
+        pnl_usd = 0
+        if entry_price > 0:
+            pnl_pct = (fill_price - entry_price) / entry_price * 100
+            pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
+
+        pos['trades'].append({
+            'action': 'SELL', 'price': fill_price,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+            'auto': False, 'manual': True,
+        })
+        pos['state'] = 'cash'
+        pos['entry_price'] = 0
+        pos['entry_time'] = ''
+        pos['base_amount'] = 0
+        pos['usd_invested'] = 0
+        save_position(asset, pos)
+
+        time.sleep(2)
+        pb = get_balances()
+        usd_now = pb.get('USD', {}).get('available', 0) if pb else 0
+        pnl_line = f"\nPnL: {pnl_pct:+.2f}% (${pnl_usd:+,.2f})" if entry_price > 0 else ""
+        send_telegram(
+            f"✅ <b>{asset} SELL filled</b>\n"
+            f"Fill: ${fill_price:,.2f}{pnl_line}\n"
+            f"USD: ${usd_now:,.2f}"
+        )
+    else:
+        send_telegram(f"❌ {asset} SELL failed: {status} {data}")
+
 
 # ---- /optimize: background Mode D re-optimization ----
 import subprocess
@@ -1680,6 +1870,7 @@ def send_telegram_with_buttons(message, buttons, parse_mode='HTML'):
 # Standard button layouts
 MAIN_BUTTONS = [
     [('📊 Status', '/status'), ('📈 Charts', '/chart')],
+    [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
     [('⚙️ Config', '/conf'), ('🔄 Sync', '/sync')],
 ]
 
@@ -2205,6 +2396,10 @@ def _telegram_command_loop(trading_cfg):
                 elif cmd == '/sync':
                     sync_positions(trading_cfg, notify=True)
                     send_telegram("🔄 <b>Synced</b>")
+                elif cmd == '/buy' or cmd.startswith('/buy '):
+                    _handle_manual_buy_command(msg, trading_cfg)
+                elif cmd == '/sell' or cmd.startswith('/sell '):
+                    _handle_manual_sell_command(msg, trading_cfg)
                 elif cmd == '/conf':
                     _handle_config_command()
                 elif cmd == '/regime':
@@ -2387,7 +2582,7 @@ def run_loop(trading_cfg, dry_run=False):
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str} | {pos['state'].upper()}")
-    print(f"  Telegram: /help /status /conf /setup /balance /sync /pause /resume /stop /regime")
+    print(f"  Telegram: /help /status /conf /setup /balance /sync /buy /sell /pause /resume /stop /regime")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
