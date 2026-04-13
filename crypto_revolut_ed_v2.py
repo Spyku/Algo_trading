@@ -173,12 +173,14 @@ def revx_api(method, path, query='', body=None):
         except:
             err_body = {'error': str(e)}
         # Auto-correct clock drift on 409 "timestamp in the future"
-        if e.code == 409 and 'timestamp' in err_body:
-            server_ts = err_body.get('timestamp', 0)
-            if server_ts:
-                local_ts = int(time.time() * 1000)
-                _clock_offset_ms = server_ts - local_ts
-                print(f"    🕐 Clock drift detected: {_clock_offset_ms:+d}ms — auto-corrected")
+        if e.code == 409 and 'timestamp' in str(err_body):
+            ntp_offset = _sync_clock_ntp()
+            if ntp_offset != 0:
+                _clock_offset_ms = ntp_offset
+                print(f"    🕐 Clock drift detected: {_clock_offset_ms:+d}ms — corrected via NTP")
+            else:
+                _clock_offset_ms -= 2000
+                print(f"    🕐 Clock drift: NTP unreachable, nudging offset to {_clock_offset_ms:+d}ms")
         return e.code, err_body
     except Exception as e:
         return 0, {'error': str(e)}
@@ -2453,6 +2455,12 @@ def run_loop(trading_cfg, dry_run=False):
                                 send_telegram("🔄 <b>Models updated</b> — re-running signals")
                                 run_all_once(trading_cfg, dry_run=dry_run)
                                 last_models_fp = _get_models_fingerprint(trading_cfg)
+
+                            # Periodic NTP clock sync
+                            ntp_off = _sync_clock_ntp()
+                            if abs(ntp_off) > 500:
+                                _clock_offset_ms = ntp_off
+                                print(f"    🕐 Periodic clock sync: {ntp_off:+d}ms")
 
                             last_sync = time.time()
                         except Exception as e:
