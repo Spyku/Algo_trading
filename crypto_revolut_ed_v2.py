@@ -963,6 +963,27 @@ def process_asset(asset, trading_cfg, dry_run=False):
             save_position(asset, position)
 
     elif action == 'SELL' and position['state'] == 'invested':
+        # Hold-until-profitable: block sell if unrealized P&L below threshold
+        min_sell_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
+        max_hold_h = trading_cfg.get('max_hold_hours', 10)
+        if min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
+            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
+            hours_held = 0
+            if position.get('entry_time'):
+                try:
+                    entry_dt = datetime.strptime(position['entry_time'].replace(' (synced)', ''), '%Y-%m-%d %H:%M')
+                    hours_held = (datetime.now() - entry_dt).total_seconds() / 3600
+                except Exception:
+                    pass
+            if cur_pnl < min_sell_pnl and hours_held < max_hold_h:
+                print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
+                send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% < {min_sell_pnl}% (held {hours_held:.0f}h / {max_hold_h}h)")
+                action = 'HOLD'
+            elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
+                print(f"    ⚠ Failsafe: held {hours_held:.0f}h >= {max_hold_h}h, selling at {cur_pnl:+.2f}%")
+                send_telegram(f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%")
+
+    if action == 'SELL' and position['state'] == 'invested':
         if not dry_run and position.get('auto_trade'):
             # Get ACTUAL holdings from exchange — sell everything
             balances = get_balances()

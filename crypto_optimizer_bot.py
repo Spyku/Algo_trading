@@ -66,12 +66,14 @@ MODES = {
     'R':    'Regime Backtest',
     'S':    'Joint Sweep (V3)',
     'RS':   'Regime + Joint Sweep',
+    'T':    'Threshold Sweep',
     'HRS':  'Full Ed Pipeline',
+    'HRST': 'Full + Threshold',
     'DVRS': 'DV + Regime + Conf',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'RS': 90, 'HRS': 150, 'DVRS': 150}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'T': 10, 'RS': 90, 'HRS': 150, 'HRST': 160, 'DVRS': 150}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -266,7 +268,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'D', 'V', 'DV', 'DVS', 'R', 'S', 'RS', 'HRS', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'D', 'V', 'DV', 'DVS', 'R', 'S', 'RS', 'T', 'HRS', 'HRST', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -309,6 +311,7 @@ def _show_mode_menu():
         [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
         [('R - Regime', 'opt_mode_R'), ('S - Joint Sweep', 'opt_mode_S')],
         [('RS - Regime+Sweep', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
+        [('T - Threshold', 'opt_mode_T'), ('HRST - Full+T', 'opt_mode_HRST')],
         [('P - PySR', 'opt_mode_P'), ('DVRS - DV+R+S', 'opt_mode_DVRS')],
         [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
@@ -432,7 +435,7 @@ def _handle_menu_callback(data):
         # Default asset selection
         _menu_state['selected_assets'] = {'BTC'}
         # Default horizon selection based on mode
-        if mode in ('H', 'HRS', 'DVRS', 'R', 'RS'):
+        if mode in ('H', 'HRS', 'HRST', 'DVRS', 'R', 'RS'):
             _menu_state['selected_horizons'] = set(HORIZONS)
         else:
             _menu_state['selected_horizons'] = {6}

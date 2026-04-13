@@ -4410,6 +4410,201 @@ def run_mode_s(assets_list, horizons, args=None):
 
 
 # ============================================================
+# MODE T: THRESHOLD SWEEP (hold-until-profitable optimization)
+# ============================================================
+def run_mode_t(assets_list, args=None):
+    """
+    Mode T — Sweep min_sell_pnl_pct × max_hold_hours to find the optimal
+    hold-until-profitable threshold.
+
+    Uses 0% trading fee (maker-first strategy) and reads the current regime
+    config for production horizons + confidences.
+
+    Saves winner to regime_config_ed.json (min_sell_pnl_pct, max_hold_hours).
+    """
+    replay = int(getattr(args, 'replay', 0)) or 2880
+
+    tcfg_path = REGIME_CONFIG_PATH
+    try:
+        with open(tcfg_path) as f:
+            regime_config = json.load(f)
+    except Exception as e:
+        print(f"  ERROR: Cannot read {tcfg_path}: {e}")
+        return
+
+    THRESHOLDS = [round(0.30 + i * 0.05, 2) for i in range(7)]  # 0.30 to 0.60
+    FAILSAFE_HOURS = [8, 10, 12]
+
+    df_models = pd.read_csv(PRODUCTION_CSV)
+
+    for asset in assets_list:
+        asset_cfg = regime_config.get(asset, {})
+        bull_h = asset_cfg.get('bull', {}).get('horizon')
+        bear_h = asset_cfg.get('bear', {}).get('horizon')
+        bull_conf = asset_cfg.get('bull', {}).get('min_confidence', 85)
+        bear_conf = asset_cfg.get('bear', {}).get('min_confidence', 65)
+
+        if not bull_h or not bear_h:
+            print(f"\n  {asset}: no regime config (run Mode S first) — skipping")
+            continue
+
+        test_horizons = sorted(set([bull_h, bear_h]))
+
+        print(f"\n{'='*80}")
+        print(f"  MODE T: THRESHOLD SWEEP (hold-until-profitable)")
+        print(f"  Asset: {asset} | Replay: {replay}h ({replay/720:.1f} months)")
+        print(f"  Production: bull={bull_h}h@{bull_conf}% | bear={bear_h}h@{bear_conf}%")
+        print(f"  Thresholds: {THRESHOLDS} | Failsafe: {FAILSAFE_HOURS}h")
+        print(f"  Fee: 0% (maker-first strategy)")
+        print(f"{'='*80}")
+
+        # Generate signals for production horizons only
+        signals_cache = {}
+        for h in test_horizons:
+            rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
+            if len(rows) == 0:
+                print(f"  ERROR: No production model for {asset} {h}h")
+                break
+            row = rows.sort_values('combined_score', ascending=False).iloc[0]
+            feats = row['optimal_features'].split(',') if pd.notna(row.get('optimal_features', '')) else None
+            gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
+
+            print(f"\n  Generating {h}h signals ({row['models']} w={int(row['best_window'])}h)...")
+            with _suppress_stderr():
+                sigs = generate_signals(asset, row['models'].split('+'),
+                                        int(row['best_window']), replay,
+                                        feature_override=feats, horizon=h, gamma=gamma)
+            signals_cache[h] = sigs
+            print(f"    {h}h: {len(sigs)} candles")
+
+        if len(signals_cache) < len(test_horizons):
+            print(f"  Skipping {asset} — missing signals")
+            continue
+
+        # Simulate for each horizon at its production confidence
+        def _sim_horizon(sigs, conf, min_pnl, max_hold_h):
+            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+            trades, trade_log, blocked = 0, [], 0
+            hold_since_entry = 0
+
+            for s in sigs:
+                price = s['close']
+                if in_pos:
+                    hold_since_entry += 1
+                if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
+                    held = cash / price  # 0% fee
+                    cash = 0
+                    in_pos = True
+                    entry_px = price
+                    trades += 1
+                    hold_since_entry = 0
+                elif s['signal'] == 'SELL' and in_pos:
+                    cur_pnl = (price / entry_px - 1) * 100
+                    override_expired = hold_since_entry >= max_hold_h
+                    if min_pnl <= 0 or cur_pnl >= min_pnl or override_expired:
+                        cash = held * price  # 0% fee
+                        trade_log.append(cur_pnl)
+                        held = 0
+                        in_pos = False
+                        trades += 1
+                        hold_since_entry = 0
+                    else:
+                        blocked += 1
+
+            final = cash if not in_pos else held * sigs[-1]['close']
+            if in_pos:
+                trade_log.append((sigs[-1]['close'] / entry_px - 1) * 100)
+            ret = (final / 1000.0 - 1) * 100
+            winners = sum(1 for t in trade_log if t > 0)
+            wr = (winners / len(trade_log) * 100) if trade_log else 0
+            return ret, len(trade_log), wr, blocked
+
+        # Run sweep per horizon
+        horizon_results = {}
+        for h in test_horizons:
+            conf = bull_conf if h == bull_h else bear_conf
+            sigs = signals_cache[h]
+
+            base_ret, base_tr, base_wr, _ = _sim_horizon(sigs, conf, 0, 999)
+            print(f"\n  {asset} {h}h (conf>={conf}%) — Baseline: {base_ret:+.2f}% | {base_tr} trades | WR {base_wr:.0f}%")
+
+            print(f"\n  {'Threshold':<12} {'Failsafe':>8} {'Return':>9} {'vs Base':>8} {'Trades':>7} {'WinRate':>8} {'Blocked':>8}")
+            print(f"  {'─'*12} {'─'*8} {'─'*9} {'─'*8} {'─'*7} {'─'*8} {'─'*8}")
+
+            best_score = base_ret * (base_wr / 100) if base_ret > 0 else base_ret
+            best = None
+
+            for t in THRESHOLDS:
+                for fh in FAILSAFE_HOURS:
+                    ret, tr, wr, bl = _sim_horizon(sigs, conf, t, fh)
+                    delta = ret - base_ret
+                    score = ret * (wr / 100) if ret > 0 else ret
+                    marker = ' ★' if score > best_score else (' ✓' if delta > 0 else '')
+                    if score > best_score:
+                        best_score = score
+                        best = (t, fh, ret, tr, wr)
+                    print(f"  {t:.2f}%        {fh:>7}h {ret:>+8.2f}% {delta:>+7.2f}% {tr:>7} {wr:>7.0f}% {bl:>8}{marker}")
+
+            if best:
+                horizon_results[h] = best
+                print(f"\n  ★ {h}h BEST: threshold={best[0]:.2f}%, failsafe={best[1]}h → {best[2]:+.2f}%")
+            else:
+                print(f"\n  No improvement over baseline for {h}h")
+
+        # Pick overall winner: average score across horizons
+        if not horizon_results:
+            print(f"\n  No improvement found for {asset} — config unchanged")
+            continue
+
+        # Find combo that's best on average across production horizons
+        best_avg = None
+        best_combo = None
+        for t in THRESHOLDS:
+            for fh in FAILSAFE_HOURS:
+                total = 0
+                for h in test_horizons:
+                    conf = bull_conf if h == bull_h else bear_conf
+                    ret, _, _, _ = _sim_horizon(signals_cache[h], conf, t, fh)
+                    total += ret
+                avg = total / len(test_horizons)
+                if best_avg is None or avg > best_avg:
+                    best_avg = avg
+                    best_combo = (t, fh)
+
+        # Compare with baseline average
+        base_avg = 0
+        for h in test_horizons:
+            conf = bull_conf if h == bull_h else bear_conf
+            ret, _, _, _ = _sim_horizon(signals_cache[h], conf, 0, 999)
+            base_avg += ret
+        base_avg /= len(test_horizons)
+
+        if best_avg > base_avg:
+            t_win, fh_win = best_combo
+            print(f"\n  {'='*80}")
+            print(f"  WINNER: min_sell_pnl={t_win:.2f}% | max_hold={fh_win}h")
+            print(f"  Avg return: {best_avg:+.2f}% (vs baseline {base_avg:+.2f}%, delta {best_avg - base_avg:+.2f}%)")
+            print(f"  {'='*80}")
+
+            regime_config[asset]['min_sell_pnl_pct'] = t_win
+            regime_config[asset]['max_hold_hours'] = fh_win
+
+            with open(tcfg_path, 'w') as f:
+                json.dump(regime_config, f, indent=2)
+            print(f"\n  Config updated: {asset} min_sell_pnl={t_win:.2f}% max_hold={fh_win}h")
+        else:
+            print(f"\n  No overall improvement — disabling hold override for {asset}")
+            regime_config[asset]['min_sell_pnl_pct'] = 0
+            regime_config[asset]['max_hold_hours'] = 10
+            with open(tcfg_path, 'w') as f:
+                json.dump(regime_config, f, indent=2)
+
+    print(f"\n{'='*80}")
+    print(f"  MODE T COMPLETE")
+    print(f"{'='*80}")
+
+
+# ============================================================
 # MODE H: HORIZON SWEEP (D+G per horizon, compare, save best)
 # ============================================================
 def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False):
@@ -4852,7 +5047,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'R', 'RS'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -4909,7 +5104,9 @@ Modes:
   S       Regime confidence optimization (sweep bull/bear confidence → write config)
   RS      R then S (find best regime pair → optimize confidence)
   H       Horizon sweep (D+V per horizon — produces models, no winner picking)
+  T       Threshold sweep (hold-until-profitable: min_sell_pnl × max_hold_hours)
   HRS     Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)
+  HRST    Full Ed pipeline + threshold: H → R → S → T
   DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
 
@@ -5068,7 +5265,7 @@ Examples:
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS'):
+        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS', 'HRST'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -5183,7 +5380,7 @@ Examples:
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
-    elif mode in ('HRS', 'DVRS'):
+    elif mode in ('HRS', 'DVRS', 'HRST'):
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
         class _Args: pass
         _r_args = _Args()
@@ -5193,6 +5390,13 @@ Examples:
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
+        if mode == 'HRST':
+            run_mode_t(assets_list, _r_args)
+    elif mode == 'T':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        run_mode_t(assets_list, _r_args)
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
     elif mode in ('D', 'DV', 'DVS'):
