@@ -1499,6 +1499,20 @@ def _handle_manual_buy_command(msg, trading_cfg):
     /buy ETH       → buy ETH with its max_position_usd
     /buy ETH 500   → buy ETH with $500
     """
+    print(f"\n  [/buy] command received: {msg!r}", flush=True)
+    try:
+        _manual_buy_impl(msg, trading_cfg)
+    except Exception as e:
+        import traceback
+        print(f"  [/buy] ERROR: {e}", flush=True)
+        traceback.print_exc()
+        try:
+            send_telegram(f"❌ /buy crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def _manual_buy_impl(msg, trading_cfg):
     parts = msg.split()
     enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
     if not enabled:
@@ -1587,6 +1601,20 @@ def _handle_manual_sell_command(msg, trading_cfg):
     /sell          → first enabled asset
     /sell ETH      → sell ETH
     """
+    print(f"\n  [/sell] command received: {msg!r}", flush=True)
+    try:
+        _manual_sell_impl(msg, trading_cfg)
+    except Exception as e:
+        import traceback
+        print(f"  [/sell] ERROR: {e}", flush=True)
+        traceback.print_exc()
+        try:
+            send_telegram(f"❌ /sell crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def _manual_sell_impl(msg, trading_cfg):
     parts = msg.split()
     enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
     if not enabled:
