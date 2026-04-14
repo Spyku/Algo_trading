@@ -965,9 +965,10 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
     elif action == 'SELL' and position['state'] == 'invested':
         # Hold-until-profitable: block sell if unrealized P&L below threshold
+        shield_on = trading_cfg.get('hold_shield', True)
         min_sell_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
         max_hold_h = trading_cfg.get('max_hold_hours', 10)
-        if min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
+        if shield_on and min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
             cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
             hours_held = 0
             if position.get('entry_time'):
@@ -1393,7 +1394,7 @@ def _handle_status_command(with_charts=False):
         for c, b in other:
             lines.append(f"  {c}: {b['available']:.6f}")
 
-    send_telegram_with_buttons("\n".join(lines), MAIN_BUTTONS)
+    send_telegram_with_buttons("\n".join(lines), _main_buttons())
 
     # Auto-send charts
     if with_charts:
@@ -1485,11 +1486,12 @@ def _handle_help_command():
         "/sync — Sync positions from exchange\n"
         "/buy [ASSET] [USD] — Manual maker buy (fresh price)\n"
         "/sell [ASSET] — Manual maker sell all holdings\n"
+        "/hold [ASSET] — Toggle 🛡 Hold Shield (10h hold)\n"
         "/optimize BTC — Re-run Mode D optimization\n"
         "/pause — Pause trading (signals only)\n"
         "/resume — Resume trading\n"
         "/stop — Stop the trader",
-        MAIN_BUTTONS
+        _main_buttons()
     )
 
 
@@ -1708,6 +1710,51 @@ def _manual_sell_impl(msg, trading_cfg):
         send_telegram(f"❌ {asset} SELL failed: {status} {data}")
 
 
+def _handle_hold_shield_command(msg, trading_cfg):
+    """Toggle Hold Shield (10h hold-until-profitable) for the specified asset.
+    /hold        → toggle for first enabled asset
+    /hold ETH    → toggle for ETH
+    """
+    print(f"\n  [/hold] command received: {msg!r}", flush=True)
+    try:
+        parts = msg.split()
+        enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+        if not enabled:
+            send_telegram("❌ No enabled asset")
+            return
+        asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+        if asset not in trading_cfg:
+            send_telegram(f"❌ {asset} not configured")
+            return
+        cfg = trading_cfg[asset]
+        current = cfg.get('hold_shield', True)
+        new_state = not current
+        cfg['hold_shield'] = new_state
+        save_trading_config(trading_cfg)
+        min_pnl = cfg.get('min_sell_pnl_pct', 0)
+        max_h = cfg.get('max_hold_hours', 0)
+        if new_state:
+            send_telegram_with_buttons(
+                f"🛡 <b>{asset} Hold Shield: ON</b>\n"
+                f"Blocks SELL until PnL ≥ {min_pnl}% or {max_h}h held",
+                _main_buttons(trading_cfg)
+            )
+        else:
+            send_telegram_with_buttons(
+                f"🛡 <b>{asset} Hold Shield: OFF</b>\n"
+                f"SELL signals execute immediately",
+                _main_buttons(trading_cfg)
+            )
+    except Exception as e:
+        import traceback
+        print(f"  [/hold] ERROR: {e}", flush=True)
+        traceback.print_exc()
+        try:
+            send_telegram(f"❌ /hold crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
 # ---- /optimize: background Mode D re-optimization ----
 import subprocess
 _optimize_proc = None  # subprocess.Popen or None
@@ -1896,10 +1943,32 @@ def send_telegram_with_buttons(message, buttons, parse_mode='HTML'):
 
 
 # Standard button layouts
+def _main_buttons(trading_cfg=None):
+    """Build main keyboard with dynamic Hold Shield state."""
+    shield_on = False
+    try:
+        cfg = trading_cfg if trading_cfg is not None else load_trading_config()
+        for a, c in cfg.items():
+            if c.get('enabled'):
+                shield_on = c.get('hold_shield', True) and c.get('min_sell_pnl_pct', 0) > 0
+                break
+    except Exception:
+        pass
+    shield_label = '🛡 Shield: ON' if shield_on else '🛡 Shield: OFF'
+    return [
+        [('📊 Status', '/status'), ('📈 Charts', '/chart')],
+        [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
+        [(shield_label, '/hold'), ('🔄 Sync', '/sync')],
+        [('⚙️ Config', '/conf')],
+    ]
+
+
+# Legacy static fallback (kept for code paths that import it)
 MAIN_BUTTONS = [
     [('📊 Status', '/status'), ('📈 Charts', '/chart')],
     [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
-    [('⚙️ Config', '/conf'), ('🔄 Sync', '/sync')],
+    [('🛡 Shield', '/hold'), ('🔄 Sync', '/sync')],
+    [('⚙️ Config', '/conf')],
 ]
 
 
@@ -2428,6 +2497,8 @@ def _telegram_command_loop(trading_cfg):
                     _handle_manual_buy_command(msg, trading_cfg)
                 elif cmd == '/sell' or cmd.startswith('/sell '):
                     _handle_manual_sell_command(msg, trading_cfg)
+                elif cmd == '/hold' or cmd.startswith('/hold '):
+                    _handle_hold_shield_command(msg, trading_cfg)
                 elif cmd == '/conf':
                     _handle_config_command()
                 elif cmd == '/regime':
@@ -2544,7 +2615,7 @@ def run_all_once(trading_cfg, dry_run=False):
     valid = [r for r in results if r is not None]
     if valid:
         msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances, trading_cfg=trading_cfg)
-        send_telegram_with_buttons(msg, MAIN_BUTTONS)
+        send_telegram_with_buttons(msg, _main_buttons(trading_cfg))
 
     return results
 
@@ -2610,7 +2681,7 @@ def run_loop(trading_cfg, dry_run=False):
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str} | {pos['state'].upper()}")
-    print(f"  Telegram: /help /status /conf /setup /balance /sync /buy /sell /pause /resume /stop /regime")
+    print(f"  Telegram: /help /status /conf /setup /balance /sync /buy /sell /hold /pause /resume /stop /regime")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
