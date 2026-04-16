@@ -307,15 +307,37 @@ def _show_mode_menu():
     _menu_state['step'] = 'mode'
     _menu_touch()
     buttons = [
+        [('🔧 Full Re-tune (HRS)', 'opt_mode_HRS')],
+        [('🔄 Regime Refresh (RS)', 'opt_mode_RS')],
+        [('⚡ Model Refresh (DV)', 'opt_mode_DV')],
+        [('🔬 PySR Discovery', 'opt_mode_P')],
+        [('Advanced ▸', 'opt_advanced')],
+        [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
+    ]
+    send_telegram_with_buttons(
+        "<b>Pick what to optimize:</b>\n\n"
+        "🔧 <b>Full Re-tune</b> — find best horizon + regime + model\n"
+        "🔄 <b>Regime Refresh</b> — keep model, re-find detector + conf\n"
+        "⚡ <b>Model Refresh</b> — keep regime, re-fit model\n"
+        "🔬 <b>PySR</b> — symbolic-regression feature discovery\n"
+        "▸ <b>Advanced</b> — individual modes (D/V/H/R/S/T + chains)",
+        buttons
+    )
+
+
+def _show_advanced_mode_menu():
+    _menu_state['step'] = 'mode'
+    _menu_touch()
+    buttons = [
         [('D - Grid', 'opt_mode_D'), ('V - Validate', 'opt_mode_V')],
         [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
         [('R - Regime', 'opt_mode_R'), ('S - Joint Sweep', 'opt_mode_S')],
         [('RS - Regime+Sweep', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
         [('T - Threshold', 'opt_mode_T'), ('HRST - Full+T', 'opt_mode_HRST')],
         [('P - PySR', 'opt_mode_P'), ('DVRS - DV+R+S', 'opt_mode_DVRS')],
-        [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
+        [('◂ Back', 'opt_back_main'), ('Cancel', 'opt_cancel')],
     ]
-    send_telegram_with_buttons("<b>Select optimization mode:</b>", buttons)
+    send_telegram_with_buttons("<b>Advanced — pick mode:</b>", buttons)
 
 
 def _show_asset_menu():
@@ -426,6 +448,14 @@ def _handle_menu_callback(data):
 
     if data == 'opt_help':
         _handle_help()
+        return
+
+    if data == 'opt_advanced':
+        _show_advanced_mode_menu()
+        return
+
+    if data == 'opt_back_main':
+        _show_mode_menu()
         return
 
     # Mode selection

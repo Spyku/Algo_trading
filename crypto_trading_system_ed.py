@@ -154,6 +154,7 @@ warnings.filterwarnings('ignore', message='.*does not have valid feature names.*
 
 import time
 import json
+import pickle
 import contextlib
 from datetime import datetime as _dt_log
 
@@ -389,7 +390,7 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 LABEL_MODE = 'fee_aware'
 
 # Mode V: live backtest validation of top 6 candidates
-MODE_G_REPLAY_HOURS = 336       # 2 full weeks
+MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
 PRODUCTION_CSV = 'models/crypto_ed_production.csv'
@@ -3220,9 +3221,9 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         if df_raw is None:
             continue
 
-        # Step 1: Build ALL features, cap at replay_hours or 6 months
-        MAX_DIAG_HOURS = replay_hours if replay_hours else 6 * 30 * 24
-        period_label = f"{replay_hours}h" if replay_hours else "last 6mo"
+        # Step 1: Build ALL features, cap at replay_hours or 2 months default
+        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24
+        period_label = f"{replay_hours}h" if replay_hours else "last 2mo"
         print(f"\n  Building all features (horizon={horizon}h, period={period_label})...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
@@ -3683,7 +3684,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
     5. Show combined summary: D candidates vs refined
     6. Save best overall to production CSV
 
-    replay_hours: override MODE_G_REPLAY_HOURS (default 336h = 2 weeks).
+    replay_hours: override MODE_G_REPLAY_HOURS (default 1440h = 2 months).
     """
     if horizons is None:
         horizons = list(AVAILABLE_HORIZONS)
@@ -4203,7 +4204,7 @@ def run_mode_s(assets_list, horizons, args=None):
         5. Pick best by return × win_rate scoring
         6. Write winning detector + horizons + confidences to regime_config_ed.json
     """
-    replay = int(getattr(args, 'replay', 0)) or 2880
+    replay = int(getattr(args, 'replay', 0)) or 1440
     top_n = int(getattr(args, 'top', 0)) or 15
 
     # Load regime config
@@ -4422,7 +4423,7 @@ def run_mode_t(assets_list, args=None):
 
     Saves winner to regime_config_ed.json (min_sell_pnl_pct, max_hold_hours).
     """
-    replay = int(getattr(args, 'replay', 0)) or 2880
+    replay = int(getattr(args, 'replay', 0)) or 1440
 
     tcfg_path = REGIME_CONFIG_PATH
     try:
@@ -4803,7 +4804,7 @@ def _run_mode_r(assets, horizons, args):
     from itertools import permutations as _perms
 
     asset = assets[0] if assets else 'BTC'
-    replay = int(getattr(args, 'replay', 0)) or 2880  # default 4 months
+    replay = int(getattr(args, 'replay', 0)) or 1440  # default 2 months
     conf = int(getattr(args, 'conf', 0)) or 90
     top_n = int(getattr(args, 'top', 0)) or 200
 
@@ -5032,6 +5033,232 @@ def _apply_mode_r_to_config(r_results):
 # MAIN MENU
 # ============================================================
 
+# ============================================================
+# MODE G — RALLY-COOLDOWN OR-GATE SWEEP (V7-style)
+# ============================================================
+def run_mode_g(assets_list, args):
+    """Sweeps (h_short, h_long, t_short, t_long, cd_hours) for the OR-gate that blocks
+    BUYs after a hot rally. STRICT pick: beats_3of3 windows AND plateau_score >= 0.7,
+    tiebreak by score_dd_aware. Writes winner to regime_config_ed.json under
+    [asset]['rally_cooldown']. If no STRICT winner: warn + leave config alone.
+    Per-asset signal cache: data/{asset}_sl_signals_*.pkl (90/60/30d preferred)."""
+    replay_h = int(getattr(args, 'replay', 0)) or 1440
+    if replay_h < 720:
+        print(f"  Mode G: --replay must be >= 720h (30d) for stable halves. Got {replay_h}")
+        return
+    days = replay_h / 24.0
+    half_days = days / 2.0
+
+    HORIZONS = [8, 10, 12, 14, 16, 18, 20, 24, 30, 36]
+    def thr_for(h):
+        if h in (8, 10, 12):       return [round(2.0 + 0.5*i, 2) for i in range(9)]
+        if h in (14, 16, 18, 20):  return [round(3.0 + 0.5*i, 2) for i in range(9)]
+        if h in (24, 30, 36):      return [round(4.0 + 0.5*i, 2) for i in range(11)]
+        raise ValueError(f"no thr grid for {h}")
+    CD_GRID = [6, 8, 10, 12, 14, 16, 18, 20, 24, 30, 36, 48]
+    FEE = 0.0011; MIN_SELL_PNL_PCT = 0.005; MAX_HOLD_HOURS = 10
+    PLATEAU_THR = 0.7
+
+    print("=" * 80)
+    print(f"  MODE G — Rally-cooldown sweep | window={days:.0f}d "
+          f"(halves {half_days:.0f}+{half_days:.0f}d, ref {days:.0f}d)")
+    print("=" * 80)
+
+    def simulate(sigs, rr_dict, h_s, h_l, t_s, t_l, cd_h):
+        cash = 1000.0; qty = 0.0; in_pos = False; entry = 0.0
+        hold = 0; trades = 0; skipped = 0; cd = 0
+        ec = [1000.0]
+        n = len(sigs)
+        rs_arr = rr_dict.get(h_s); rl_arr = rr_dict.get(h_l)
+        for i in range(n):
+            s = sigs[i]; price = s['close']
+            if cd_h > 0 and rs_arr is not None and rl_arr is not None:
+                rs = rs_arr[i]; rl = rl_arr[i]
+                if (rs == rs and rs >= t_s) or (rl == rl and rl >= t_l):
+                    cd = max(cd, cd_h)
+            ec.append(cash + qty * price if in_pos else cash)
+            if s['signal'] == 'BUY' and s['confidence'] >= s['conf_threshold'] and not in_pos:
+                if cd > 0:
+                    skipped += 1
+                else:
+                    fp = sigs[i+1]['close'] if i+1 < n else price
+                    qty = cash * (1 - FEE) / fp
+                    cash = 0.0; in_pos = True; entry = fp; hold = 0
+            elif s['signal'] == 'SELL' and in_pos:
+                fp = sigs[i+1]['close'] if i+1 < n else price
+                cur = (fp / entry - 1.0) * 100.0
+                if cur >= MIN_SELL_PNL_PCT * 100.0 or hold >= MAX_HOLD_HOURS:
+                    cash = qty * fp * (1 - FEE)
+                    trades += 1; in_pos = False; qty = 0.0; entry = 0.0; hold = 0
+            if in_pos: hold += 1
+            if cd > 0: cd -= 1
+        if in_pos:
+            cash = qty * sigs[-1]['close'] * (1 - FEE); trades += 1
+        pnl = (cash / 1000.0 - 1.0) * 100.0
+        arr = np.array(ec); peak = np.maximum.accumulate(arr); dd = (arr - peak) / peak
+        mdd = float(dd.min()) * 100.0 if len(dd) else 0.0
+        return dict(pnl_pct=pnl, dd_pct=mdd, trades=trades, skipped=skipped)
+
+    for asset in assets_list:
+        cache_path = None
+        for n in (90, 60, 30):
+            p = os.path.join('data', f'{asset.lower()}_sl_signals_{n}d.pkl')
+            if os.path.exists(p):
+                cache_path = p; break
+        if cache_path is None:
+            print(f"  {asset}: no signal cache (data/{asset.lower()}_sl_signals_*.pkl). "
+                  f"Run extend_caches_90d.py for {asset}. SKIPPING.")
+            continue
+
+        with open(cache_path, 'rb') as f:
+            signals = pickle.load(f)
+        for s in signals:
+            t = pd.Timestamp(s['datetime'])
+            s['datetime'] = t.tz_localize('UTC') if t.tzinfo is None else t.tz_convert('UTC')
+
+        end_t = signals[-1]['datetime']
+        t_h1_lo = end_t - pd.Timedelta(days=half_days)
+        t_h2_lo = end_t - pd.Timedelta(days=days)
+        sigs_h1 = [s for s in signals if s['datetime'] >= t_h1_lo]
+        sigs_h2 = [s for s in signals if t_h2_lo <= s['datetime'] < t_h1_lo]
+        sigs_ref = [s for s in signals if s['datetime'] >= t_h2_lo]
+
+        if len(sigs_h2) < 100:
+            print(f"  {asset}: cache too short — H2 has only {len(sigs_h2)} signals. SKIPPING.")
+            continue
+
+        def build_rr(ws):
+            df = pd.DataFrame([{'datetime': s['datetime'], 'close': s['close']} for s in ws])
+            df = df.sort_values('datetime').reset_index(drop=True)
+            return {h: ((df['close'] / df['close'].shift(h) - 1.0) * 100.0).values for h in HORIZONS}
+        rr_h1 = build_rr(sigs_h1); rr_h2 = build_rr(sigs_h2); rr_ref = build_rr(sigs_ref)
+
+        b_h1 = simulate(sigs_h1, {}, 8, 36, 9999, 9999, 0)
+        b_h2 = simulate(sigs_h2, {}, 8, 36, 9999, 9999, 0)
+        b_ref = simulate(sigs_ref, {}, 8, 36, 9999, 9999, 0)
+        print(f"  {asset} | sigs h1={len(sigs_h1)} h2={len(sigs_h2)} ref={len(sigs_ref)}")
+        print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
+              f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
+
+        pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
+        total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
+        print(f"  {asset} | sweeping {total:,} configs ...")
+
+        rows = []
+        t0 = time.time()
+        for h_s, h_l in pairs:
+            for t_s in thr_for(h_s):
+                for t_l in thr_for(h_l):
+                    for cd in CD_GRID:
+                        r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd)
+                        r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd)
+                        rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd)
+                        rows.append(dict(
+                            h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
+                            pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
+                            dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
+                            tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
+                            sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
+                        ))
+        print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
+
+        df = pd.DataFrame(rows)
+        df['beats_H1']  = df['pnl_H1']  > b_h1['pnl_pct']
+        df['beats_H2']  = df['pnl_H2']  > b_h2['pnl_pct']
+        df['beats_REF'] = df['pnl_REF'] > b_ref['pnl_pct']
+        df['beats_3of3'] = df['beats_H1'] & df['beats_H2'] & df['beats_REF']
+        df['avg_pnl_halves'] = (df['pnl_H1'] + df['pnl_H2']) / 2.0
+        df['worst_dd'] = np.maximum(df['dd_H1'].abs(), df['dd_H2'].abs())
+        df['score_dd_aware'] = df['avg_pnl_halves'] - 0.5 * df['worst_dd']
+
+        h_idx = {h: i for i, h in enumerate(HORIZONS)}
+        cd_idx = {c: i for i, c in enumerate(CD_GRID)}
+        key_to_idx = {(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                       float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
+        beats3 = df['beats_3of3'].values
+
+        def nb_idx(hs, hl, ts, tl, cd, dim, step):
+            if dim == 'hs':
+                i = h_idx[hs] + step
+                if not (0 <= i < len(HORIZONS)): return None
+                new = HORIZONS[i]
+                if new >= hl: return None
+                key = (new, hl, ts, tl, cd)
+            elif dim == 'hl':
+                i = h_idx[hl] + step
+                if not (0 <= i < len(HORIZONS)): return None
+                new = HORIZONS[i]
+                if new <= hs or tl not in thr_for(new): return None
+                key = (hs, new, ts, tl, cd)
+            elif dim == 'ts':
+                new = round(ts + 0.5 * step, 2)
+                if new not in thr_for(hs): return None
+                key = (hs, hl, new, tl, cd)
+            elif dim == 'tl':
+                new = round(tl + 0.5 * step, 2)
+                if new not in thr_for(hl): return None
+                key = (hs, hl, ts, new, cd)
+            elif dim == 'cd':
+                i = cd_idx[cd] + step
+                if not (0 <= i < len(CD_GRID)): return None
+                key = (hs, hl, ts, tl, CD_GRID[i])
+            return key_to_idx.get(key)
+
+        plateau = np.zeros(len(df))
+        for i, r in df.iterrows():
+            nbrs = []
+            for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
+                for step in (-1, 1):
+                    j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                               float(r['t_long']), int(r['cd']), dim, step)
+                    if j is not None: nbrs.append(j)
+            plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
+        df['plateau_score'] = plateau
+
+        os.makedirs('output', exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out_path = f'output/mode_g_{asset}_{ts}.csv'
+        df.to_csv(out_path, index=False)
+        print(f"  {asset} | wrote {out_path}")
+
+        strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
+        strict = strict.sort_values('score_dd_aware', ascending=False)
+        print(f"  {asset} | beats_3of3={int(df['beats_3of3'].sum())}  "
+              f"STRICT (3of3 + plateau>={PLATEAU_THR})={len(strict)}")
+        if len(strict) == 0:
+            print(f"  {asset} | NO STRICT WINNER — config not modified.")
+            continue
+
+        cols = ['h_short','h_long','t_short','t_long','cd',
+                'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_dd_aware','plateau_score']
+        print(f"  {asset} | top 5 STRICT:")
+        print(strict[cols].head(5).to_string(index=False,
+              formatters={c: '{:+.2f}'.format for c in cols
+                          if c.startswith(('pnl_','score_','plateau','worst'))}))
+
+        win = strict.iloc[0]
+        print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
+              f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
+
+        cfg = {}
+        if os.path.exists(REGIME_CONFIG_PATH):
+            with open(REGIME_CONFIG_PATH) as f:
+                cfg = json.load(f)
+        if asset not in cfg:
+            cfg[asset] = {'enabled': False, 'symbol': f'{asset}-USD'}
+        cfg[asset]['rally_cooldown'] = {
+            'enabled': True,
+            'h_short': int(win['h_short']),
+            'h_long': int(win['h_long']),
+            't_short_pct': float(win['t_short']),
+            't_long_pct': float(win['t_long']),
+            'cd_hours': int(win['cd']),
+        }
+        with open(REGIME_CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=2)
+        print(f"  {asset} | wrote rally_cooldown to {REGIME_CONFIG_PATH}")
+
+
 def main():
 
     has_macro = os.path.exists(MACRO_DIR)
@@ -5047,7 +5274,8 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T',
+                   'G', 'RSG', 'HRSG', 'DVRSG', 'HRSTG'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -5109,6 +5337,11 @@ Modes:
   HRST    Full Ed pipeline + threshold: H → R → S → T
   DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
+  G       Rally-cooldown gate sweep (writes rally_cooldown to regime_config_ed.json)
+  RSG     RS then G
+  HRSG    HRS then G
+  DVRSG   DVRS then G
+  HRSTG   HRST then G
 
 Assets:
   BTC,ETH,LINK,...   Comma-separated asset names (default: all)
@@ -5121,7 +5354,7 @@ Options:
   --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
   --skip              Mode H only: skip Mode D for horizons that already have results
   --resume            Resume interrupted Optuna study
-  --replay N          Mode D/R/S/RS: data window in hours (D default: 4320=6mo, R default: 2880=4mo)
+  --replay N          Mode D/V/R/S/T: data window in hours (default: 1440=2mo)
   --conf N            Mode R only: confidence threshold (default: 90)
   --top N             Mode R only: show top N results (default: 15)
   --help, -h          Show this help
@@ -5198,9 +5431,9 @@ Examples:
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'DVRS', 'H', 'HRS') else ""
         skip_str = " | --skip" if flag_skip and mode in ('H', 'HRS', 'DVRS') else ""
-        h_str = ','.join(str(h)+'h' for h in horizons)
+        h_str = '' if mode == 'G' else ' | ' + ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  ED: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  ED: Mode {mode} | {','.join(assets_list)}{h_str}{trials_str}{skip_str}")
         print("=" * 60)
 
     else:
@@ -5224,7 +5457,9 @@ Examples:
         print("  HRS. Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)")
         print("  R.  REGIME BACKTEST (bull/bear horizon switching with regime detectors)")
         print("  DVRS. Same as HRS for specified horizons")
-        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS: ").strip().upper()
+        print("  G.  RALLY-COOLDOWN gate sweep (writes rally_cooldown to regime_config)")
+        print("  RSG / HRSG / DVRSG / HRSTG. Chains G after RS / HRS / DVRS / HRST")
+        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS/G/RSG/HRSG/DVRSG/HRSTG: ").strip().upper()
 
 
         if mode not in VALID_MODES:
@@ -5392,6 +5627,34 @@ Examples:
         run_mode_s(assets_list, horizons, _r_args)
         if mode == 'HRST':
             run_mode_t(assets_list, _r_args)
+    elif mode in ('HRSG', 'DVRSG', 'HRSTG'):
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.conf = flag_conf
+        _r_args.top = flag_top
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
+        run_mode_s(assets_list, horizons, _r_args)
+        if mode == 'HRSTG':
+            run_mode_t(assets_list, _r_args)
+        run_mode_g(assets_list, _r_args)
+    elif mode == 'RSG':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.conf = flag_conf
+        _r_args.top = flag_top
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
+        run_mode_s(assets_list, horizons, _r_args)
+        run_mode_g(assets_list, _r_args)
+    elif mode == 'G':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        run_mode_g(assets_list, _r_args)
     elif mode == 'T':
         class _Args: pass
         _r_args = _Args()

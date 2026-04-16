@@ -367,7 +367,7 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=120, check_interval=3):
+def _execute_maker_order(symbol, size, side, maker_window=180, check_interval=10):
     """Try maker order, market fallback after maker_window.
 
     Buy at bid+0.01 — top of bid queue, filled by incoming market sells.
@@ -812,6 +812,55 @@ def _check_take_profit(asset, trading_cfg, dry_run=False):
 
 
 # ============================================================
+# RALLY-COOLDOWN GATE (V7: rr8>=3% OR rr36>=5.5% -> 30h block on BUYs)
+# ============================================================
+def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
+    """Trigger detection — must run EVERY tick, regardless of position state.
+    If rr_short or rr_long crosses threshold, extends rally_cooldown_until.
+    Returns (rs_pct, rl_pct, fresh_trigger_bool) for logging, or None if disabled."""
+    if not rc_cfg or not rc_cfg.get('enabled'):
+        return None
+    h_s = int(rc_cfg['h_short']); h_l = int(rc_cfg['h_long'])
+    t_s = float(rc_cfg['t_short_pct']); t_l = float(rc_cfg['t_long_pct'])
+    cd_h = int(rc_cfg['cd_hours'])
+    if df_raw is None or len(df_raw) < h_l + 1:
+        return None
+    closes = df_raw['close'].values
+    rs = (closes[-1] / closes[-1 - h_s] - 1.0) * 100.0
+    rl = (closes[-1] / closes[-1 - h_l] - 1.0) * 100.0
+    fired = False
+    if rs >= t_s or rl >= t_l:
+        now = datetime.now(timezone.utc)
+        new_until = now + timedelta(hours=cd_h)
+        cur_until_str = position.get('rally_cooldown_until', '')
+        cur_until = None
+        if cur_until_str:
+            try:
+                cur_until = datetime.fromisoformat(cur_until_str.replace('Z', '+00:00'))
+            except Exception:
+                cur_until = None
+        if cur_until is None or new_until > cur_until:
+            position['rally_cooldown_until'] = new_until.strftime('%Y-%m-%dT%H:%M:%SZ')
+            fired = cur_until is None or new_until > cur_until + timedelta(minutes=30)
+    return (rs, rl, fired)
+
+
+def _is_rally_cooldown_active(position):
+    """Returns (active, hours_left, until_str)."""
+    until_str = position.get('rally_cooldown_until', '')
+    if not until_str:
+        return False, 0.0, ''
+    try:
+        until = datetime.fromisoformat(until_str.replace('Z', '+00:00'))
+    except Exception:
+        return False, 0.0, until_str
+    now = datetime.now(timezone.utc)
+    if now >= until:
+        return False, 0.0, until_str
+    return True, (until - now).total_seconds() / 3600.0, until_str
+
+
+# ============================================================
 # PROCESS ONE ASSET
 # ============================================================
 def process_asset(asset, trading_cfg, dry_run=False):
@@ -875,6 +924,23 @@ def process_asset(asset, trading_cfg, dry_run=False):
     # Reload position (sync may have updated it)
     position = load_position(asset)
 
+    # Rally-cooldown trigger detection — runs EVERY tick (regardless of position state),
+    # so a rally that fires while invested still extends the cooldown for the next BUY.
+    rc_cfg = trading_cfg.get('rally_cooldown')
+    rc_update = _update_rally_cooldown(asset, df_raw, position, rc_cfg)
+    if rc_update is not None:
+        rs_pct, rl_pct, rc_fresh = rc_update
+        rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
+        h_s = int(rc_cfg['h_short']); h_l = int(rc_cfg['h_long'])
+        rc_tag = f"rr{h_s}={rs_pct:+.2f}% rr{h_l}={rl_pct:+.2f}%"
+        if rc_fresh:
+            rc_tag += f" | TRIGGER -> cd active {rc_hours_left:.1f}h"
+            send_telegram(f"⏸ {asset} rally trigger fired: {rc_tag}")
+        elif rc_active:
+            rc_tag += f" | cd {rc_hours_left:.1f}h left"
+        print(f"  {asset} rally-cd: {rc_tag}")
+        save_position(asset, position)
+
     # Log - show all available horizons
     sig_strs = []
     for h in sorted(sigs_by_horizon.keys()):
@@ -893,6 +959,14 @@ def process_asset(asset, trading_cfg, dry_run=False):
     executed = False
     pnl_msg = ""
     hold_override_active = False
+
+    if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
+        rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
+        if rc_active:
+            msg = f'rally_cooldown {rc_hours_left:.1f}h left'
+            print(f"    ⏸ {asset} BUY skipped — {msg}")
+            send_telegram(f"⏸ {asset} BUY skipped — {msg}")
+            action = 'HOLD'
 
     if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
         if not dry_run and position.get('auto_trade'):
@@ -1312,21 +1386,25 @@ def _handle_status_command(with_charts=False):
         enabled_assets.append(asset)
         pos = load_position(asset)
         symbol = cfg.get('symbol', f'{asset}-USD')
-        # Regime info for display
-        bull_cfg = cfg.get('bull', {})
-        bear_cfg = cfg.get('bear', {})
-        regime_label = f"bull={bull_cfg.get('horizon','?')}h|bear={bear_cfg.get('horizon','?')}h"
 
         # Get live price from exchange
         price = get_asset_price(symbol)
         actual_held = balances.get(asset, {}).get('total', 0)
         actual_usd = actual_held * price if price > 0 else 0
 
-        # Get last 4 hours + RSI from data
+        # Get last 4 hours + RSI + live regime from data
         last_prices = []
         rsi = 0
+        regime_label = f"bull={cfg.get('bull',{}).get('horizon','?')}h|bear={cfg.get('bear',{}).get('horizon','?')}h"
         try:
             df_raw = load_data(asset)
+            if df_raw is not None:
+                try:
+                    regime, active_cfg = detect_regime(asset, df_raw)
+                    icon = '🟢' if regime == 'bull' else '🔴'
+                    regime_label = f"{icon} {regime.upper()} {active_cfg.get('horizon','?')}h@{active_cfg.get('min_confidence','?')}%"
+                except Exception:
+                    pass
             if df_raw is not None and len(df_raw) >= 4:
                 recent = df_raw.tail(4)
                 for _, row in recent.iterrows():
@@ -1414,83 +1492,19 @@ _paused_flag = [False]  # mutable container for thread-safe access
 
 # ---- Simple command handlers ----
 
-def _handle_config_command():
-    """Show current trading config for all assets with setup button."""
-    trading_cfg = load_trading_config()
-    lines = ["⚙️ <b>Config</b>\n"]
-    for asset, cfg in trading_cfg.items():
-        enabled = "🔵" if cfg.get('enabled') else "🔴"
-        pos = load_position(asset)
-        auto = "AUTO" if pos.get('auto_trade') else "MANUAL"
-        det = cfg.get('regime_detector', {})
-        if det.get('type') == 'sma_cross':
-            det_label = f"sma_cross({det.get('params',{}).get('fast','')}/{det.get('params',{}).get('slow','')})"
-        elif det.get('type') == 'named':
-            det_label = det.get('params', {}).get('name', 'named')
-        else:
-            det_label = det.get('type', '?')
-        bull_cfg = cfg.get('bull', {})
-        bear_cfg = cfg.get('bear', {})
-        tp_pct = cfg.get('take_profit_pct', 0)
-        tp_str = f"TP={tp_pct}%" if tp_pct > 0 else "TP=OFF"
-        maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
-        lines.append(
-            f"{enabled} <b>{asset}</b> | {det_label} | "
-            f"bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% | "
-            f"bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str}"
-        )
-    buttons = [[('⚙️ Edit Config', '/setup')]]
-    send_telegram_with_buttons("\n".join(lines), buttons)
-
-def _handle_regime_command():
-    """Show current regime per enabled asset."""
-    trading_cfg = load_trading_config()
-    lines = ["🌡 <b>Regime Status</b>\n"]
-    for asset, cfg in trading_cfg.items():
-        if not cfg.get('enabled'):
-            continue
-        try:
-            df_raw = load_data(asset)
-            if df_raw is not None:
-                regime, active_cfg = detect_regime(asset, df_raw)
-                h = active_cfg.get('horizon', '?')
-                mc = active_cfg.get('min_confidence', '?')
-                mp = active_cfg.get('max_position_usd', 0)
-                icon = "🟢" if regime == 'bull' else "🔴"
-                lines.append(
-                    f"{icon} <b>{asset}</b>: {regime.upper()} | "
-                    f"horizon={h}h | conf>={mc}% | max=${mp:,.0f}"
-                )
-            else:
-                lines.append(f"⚪ <b>{asset}</b>: no data")
-        except Exception as e:
-            lines.append(f"⚪ <b>{asset}</b>: error ({e})")
-    send_telegram("\n".join(lines))
-
-def _handle_summary_command():
-    """Full summary: status + balance + charts for all enabled assets."""
-    _handle_status_command(with_charts=True)
-
 
 def _handle_help_command():
     """Send list of available commands."""
     send_telegram_with_buttons(
         "📱 <b>Commands</b>\n\n"
-        "/status — Positions, prices, P&L + balance\n"
-        "/summary — Status + balance + charts\n"
-        "/chart — 48h candlestick charts (all active)\n"
-        "/chart BTC — 48h chart for single asset\n"
-        "/conf — Show config\n"
-        "/regime — Show current regime per asset\n"
-        "/setup — Edit config (inline buttons)\n"
-        "/sync — Sync positions from exchange\n"
-        "/buy [ASSET] [USD] — Manual maker buy (fresh price)\n"
-        "/sell [ASSET] — Manual maker sell all holdings\n"
-        "/hold [ASSET] — Toggle 🛡 Hold Shield (10h hold)\n"
-        "/optimize BTC — Re-run Mode D optimization\n"
-        "/pause — Pause trading (signals only)\n"
-        "/resume — Resume trading\n"
-        "/stop — Stop the trader",
+        "/status — Positions, P&L, balance, regime\n"
+        "/chart [ASSET] [HORIZON] — e.g. /chart ETH 7d\n"
+        "/setup — View & edit config\n"
+        "/sync — Force-sync positions\n"
+        "/gate [ASSET on|off|clear] — V7 rally-cooldown gate\n"
+        "/pause /resume — Pause or resume signals\n"
+        "/stop — Stop the trader\n\n"
+        "💡 Buy/Sell/Shield via main buttons. Typed form accepts [ASSET] [USD] args.",
         _main_buttons()
     )
 
@@ -1958,8 +1972,7 @@ def _main_buttons(trading_cfg=None):
     return [
         [('📊 Status', '/status'), ('📈 Charts', '/chart')],
         [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
-        [(shield_label, '/hold'), ('🔄 Sync', '/sync')],
-        [('⚙️ Config', '/conf')],
+        [(shield_label, '/hold'), ('⚙️ Setup', '/setup')],
     ]
 
 
@@ -1967,36 +1980,62 @@ def _main_buttons(trading_cfg=None):
 MAIN_BUTTONS = [
     [('📊 Status', '/status'), ('📈 Charts', '/chart')],
     [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
-    [('🛡 Shield', '/hold'), ('🔄 Sync', '/sync')],
-    [('⚙️ Config', '/conf')],
+    [('🛡 Shield', '/hold'), ('⚙️ Setup', '/setup')],
 ]
 
 
+def _parse_horizon_arg(token):
+    """Parse horizon like '12h', '48h', '3d', '7d' → hours int. Returns None if invalid."""
+    import re
+    m = re.fullmatch(r'(\d+)([hd])', token.lower())
+    if not m:
+        return None
+    n = int(m.group(1))
+    hours = n if m.group(2) == 'h' else n * 24
+    if hours < 6 or hours > 30 * 24:
+        return None
+    return hours
+
+
 def _handle_chart_command(msg, trading_cfg):
-    """Generate and send a 24h chart with price + model predictions.
-    /chart       → all enabled assets (separate charts)
-    /chart BTC   → single asset
+    """Generate and send a chart with price + model predictions.
+    /chart              → 48h, all enabled assets
+    /chart BTC          → 48h, BTC only
+    /chart 12h          → 12h, all enabled
+    /chart BTC 7d       → 7d, BTC
+    Horizon accepts Nh (6..720) or Nd (1..30). Args are order-flexible.
     """
-    parts = msg.split()
-    if len(parts) >= 2:
-        asset = parts[1].upper()
-        if asset not in trading_cfg:
-            send_telegram(f"Unknown asset: {asset}. Use: {', '.join(trading_cfg.keys())}")
+    parts = msg.split()[1:]
+    asset_arg = None
+    hours = 48
+    for p in parts:
+        h = _parse_horizon_arg(p)
+        if h is not None:
+            hours = h
+            continue
+        a = p.upper()
+        if a in trading_cfg:
+            asset_arg = a
+        else:
+            send_telegram(f"Unknown arg: {p}. Use asset ({', '.join(trading_cfg.keys())}) or horizon (e.g. 12h, 7d).")
             return
-        assets_to_chart = [asset]
+
+    if asset_arg:
+        assets_to_chart = [asset_arg]
     else:
-        # No asset specified → all enabled
         assets_to_chart = [a for a, c in trading_cfg.items() if c.get('enabled')]
         if not assets_to_chart:
             send_telegram("No enabled assets to chart.")
             return
 
     for asset in assets_to_chart:
-        _generate_and_send_chart(asset)
+        _generate_and_send_chart(asset, hours=hours)
 
 
-def _generate_and_send_chart(asset):
-    """Generate and send a 48h candlestick chart with signal overlays."""
+def _generate_and_send_chart(asset, hours=48):
+    """Generate and send a candlestick chart with signal overlays.
+    hours: display window (6..720). One hourly candle per hour.
+    """
     try:
         df_raw = load_data(asset)
         if df_raw is None:
@@ -2006,19 +2045,19 @@ def _generate_and_send_chart(asset):
         send_telegram(f"Error loading {asset} data: {e}")
         return
 
-    df_price = df_raw.tail(48).copy()
+    df_price = df_raw.tail(hours).copy()
     if len(df_price) < 4:
         send_telegram(f"Not enough data for {asset}")
         return
 
-    # Load signal log (last 49h to catch signals at boundaries)
+    # Load signal log (slightly wider window to catch boundary signals)
     signals = []
     if os.path.exists(SIGNAL_LOG_FILE):
         try:
             import csv
             with open(SIGNAL_LOG_FILE, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
-                cutoff = (datetime.now(timezone.utc) - timedelta(hours=49)).strftime('%Y-%m-%d %H:%M:%S')
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours + 1)).strftime('%Y-%m-%d %H:%M:%S')
                 for row in reader:
                     if row['asset'] == asset and row['timestamp'] >= cutoff:
                         signals.append(row)
@@ -2031,19 +2070,22 @@ def _generate_and_send_chart(asset):
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
         from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
 
-        # Colors
-        c_bg     = '#0e1117'
-        c_card   = '#141922'
-        c_buy    = '#3b82f6'
-        c_sell   = '#ef4444'
-        c_green  = '#3b82f6'   # blue — user is colorblind
-        c_red    = '#ef4444'
-        c_gold   = '#eab308'
-        c_text   = '#e2e8f0'
-        c_muted  = '#64748b'
-        c_grid   = '#1e293b'
-        c_wick   = '#475569'
+        # Palette — candles use neutral up/down; signal markers use distinctive shapes.
+        c_bg      = '#0e1117'
+        c_card    = '#141922'
+        c_up      = '#3b82f6'   # up candle — blue (colorblind-safe)
+        c_down    = '#ef4444'   # down candle — red
+        c_buy     = '#06b6d4'   # BUY marker — cyan (distinct from up candle blue)
+        c_sell    = '#f97316'   # SELL marker — orange (distinct from down candle red)
+        c_ok      = '#22c55e'   # ✓ correct
+        c_bad     = '#94a3b8'   # ✗ wrong (muted, not alarming)
+        c_pend    = '#eab308'   # ⏳ pending
+        c_text    = '#e2e8f0'
+        c_muted   = '#64748b'
+        c_grid    = '#1e293b'
+        c_wick    = '#475569'
 
         times = pd.to_datetime(df_price['datetime'])
         opens = df_price['open'].values
@@ -2051,68 +2093,87 @@ def _generate_and_send_chart(asset):
         lows = df_price['low'].values
         closes = df_price['close'].values
 
-        fig, ax = plt.subplots(figsize=(12, 6), facecolor=c_bg)
+        # Figure size scales slightly with horizon
+        fig_w = 12 if hours <= 72 else 14 if hours <= 7 * 24 else 16
+        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor=c_bg)
         ax.set_facecolor(c_card)
 
-        # Candlesticks
-        bar_width = timedelta(minutes=40)
+        # Candlesticks — bar width scaled to horizon density
+        bar_minutes = max(8, min(40, int(2400 / hours)))
+        bar_width = timedelta(minutes=bar_minutes)
+        price_range = highs.max() - lows.min()
+        doji_min = price_range * 0.001
+
         for i in range(len(times)):
             t = times.iloc[i]
             o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-            color = c_green if c >= o else c_red
-            # Wick
+            color = c_up if c >= o else c_down
             ax.plot([t, t], [l, h], color=c_wick, linewidth=0.8, zorder=2)
-            # Body
             body_bottom = min(o, c)
-            body_height = abs(c - o)
-            if body_height < (highs.max() - lows.min()) * 0.001:
-                body_height = (highs.max() - lows.min()) * 0.001  # doji minimum
+            body_height = max(abs(c - o), doji_min)
             ax.bar(t, body_height, bottom=body_bottom, width=bar_width,
                    color=color, edgecolor=color, linewidth=0.5, zorder=3, alpha=0.85)
 
-        # Only show signals where action CHANGED (transitions, not repeated hourly)
-        price_range = highs.max() - lows.min()
-        offset_y = price_range * 0.03
-
-        # Filter to transitions only (action changed from previous signal)
+        # Signals: keep only transitions (action changed from previous non-HOLD)
         transition_signals = []
         prev_action = None
         for sig in signals:
             action = sig['action']
             if action == 'HOLD':
-                prev_action = action
                 continue
             if action != prev_action:
                 transition_signals.append(sig)
             prev_action = action
 
+        offset_y = price_range * 0.04
+        badge_pad = price_range * 0.015
+        has_ok = has_bad = has_pend = False
+
         for sig in transition_signals:
             try:
                 sig_time = pd.to_datetime(sig['timestamp'])
                 action = sig['action']
-
-                # Find nearest candle
                 time_diffs = abs(times - sig_time)
                 nearest_idx = time_diffs.argmin()
                 snap_time = times.iloc[nearest_idx]
                 snap_price = closes[nearest_idx]
 
-                # Validate prediction: did price move in predicted direction?
-                future_closes = closes[nearest_idx + 1:nearest_idx + 5]
-                if len(future_closes) >= 4:
-                    future_price = future_closes[-1]
-                    correct = (future_price > snap_price) if action == 'BUY' else (future_price < snap_price)
+                # Correctness: within next 4 candles, did price move ≥0.3% in predicted direction?
+                future = closes[nearest_idx + 1:nearest_idx + 5]
+                if len(future) >= 2:
+                    if action == 'BUY':
+                        correct = future.max() >= snap_price * 1.003
+                    else:
+                        correct = future.min() <= snap_price * 0.997
+                    badge = '✓' if correct else '✗'
+                    badge_color = c_ok if correct else c_bad
+                    if correct:
+                        has_ok = True
+                    else:
+                        has_bad = True
                 else:
-                    correct = None
+                    badge = '⏳'
+                    badge_color = c_pend
+                    has_pend = True
 
-                color = c_green if correct else c_red if correct is not None else c_gold
                 if action == 'BUY':
-                    marker, y_pos = '^', lows[nearest_idx] - offset_y
+                    marker = '^'
+                    marker_color = c_buy
+                    y_marker = lows[nearest_idx] - offset_y
+                    y_badge = y_marker - badge_pad
+                    va = 'top'
                 else:
-                    marker, y_pos = 'v', highs[nearest_idx] + offset_y
+                    marker = 'v'
+                    marker_color = c_sell
+                    y_marker = highs[nearest_idx] + offset_y
+                    y_badge = y_marker + badge_pad
+                    va = 'bottom'
 
-                ax.scatter(snap_time, y_pos, color=color, marker=marker,
-                           s=200, zorder=6, edgecolors='white', linewidth=0.8)
+                ax.scatter(snap_time, y_marker, color=marker_color, marker=marker,
+                           s=180, zorder=6, edgecolors='white', linewidth=0.9)
+                ax.annotate(badge, xy=(snap_time, y_badge),
+                            ha='center', va=va, fontsize=11, fontweight='bold',
+                            color=badge_color, zorder=7)
             except Exception:
                 continue
 
@@ -2120,25 +2181,42 @@ def _generate_and_send_chart(asset):
         last_price = closes[-1]
         ax.axhline(y=last_price, color=c_muted, linewidth=0.6, linestyle='--', alpha=0.5, zorder=1)
         ax.annotate(f'${last_price:,.2f}', xy=(times.iloc[-1], last_price),
-                    fontsize=8, color=c_text, fontweight='bold',
+                    fontsize=9, color=c_text, fontweight='bold',
                     xytext=(10, 0), textcoords='offset points', va='center')
 
-        # 24h change
-        price_24h_ago = closes[0] if len(closes) >= 24 else closes[0]
-        pct_change = (last_price / price_24h_ago - 1) * 100
-        change_color = c_green if pct_change >= 0 else c_red
+        # Change over window
+        first_price = closes[0]
+        pct_change = (last_price / first_price - 1) * 100
+
+        # Human label for horizon
+        if hours % 24 == 0 and hours >= 24:
+            h_label = f'{hours // 24}d'
+        else:
+            h_label = f'{hours}h'
 
         ax.set_title(f'{asset}/USD  ${last_price:,.2f}  ({pct_change:+.1f}%)',
                      fontsize=14, fontweight='bold', color=c_text, loc='left')
-        ax.text(0.99, 1.02, '48h', transform=ax.transAxes, fontsize=10,
+        ax.text(0.99, 1.02, h_label, transform=ax.transAxes, fontsize=10,
                 color=c_muted, ha='right', va='bottom')
 
-        # X axis: show date + time
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b\n%H:%M'))
-        ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        # X axis formatting scales with horizon
+        if hours <= 24:
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=max(1, hours // 8)))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        elif hours <= 72:
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b\n%H:%M'))
+        elif hours <= 7 * 24:
+            ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+        else:
+            step = max(1, (hours // 24) // 8)
+            ax.xaxis.set_major_locator(mdates.DayLocator(interval=step))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
+
         ax.tick_params(axis='x', colors=c_muted, labelsize=8)
         ax.tick_params(axis='y', colors=c_muted, labelsize=9)
-        # Smart y-axis: decimal places for low-price assets
+
         if price_range < 1:
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.4f}'))
         elif price_range < 10:
@@ -2151,34 +2229,36 @@ def _generate_and_send_chart(asset):
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-        # Y padding
-        ax.set_ylim(lows.min() - price_range * 0.08, highs.max() + price_range * 0.08)
+        ax.set_ylim(lows.min() - price_range * 0.10, highs.max() + price_range * 0.10)
 
-        # Legend — only show if there are signals
-        if transition_signals:
-            legend_elements = [
-                Line2D([0], [0], marker='^', color='w', markerfacecolor=c_green,
-                       markersize=9, label='BUY ✓', linestyle='None'),
-                Line2D([0], [0], marker='v', color='w', markerfacecolor=c_red,
-                       markersize=9, label='SELL ✗', linestyle='None'),
-                Line2D([0], [0], marker='o', color='w', markerfacecolor=c_gold,
-                       markersize=8, label='Pending', linestyle='None'),
-            ]
-            ax.legend(handles=legend_elements, loc='upper right', fontsize=8,
-                      facecolor=c_card, edgecolor=c_grid, labelcolor=c_text,
-                      framealpha=0.9, ncol=3, columnspacing=1.0,
-                      bbox_to_anchor=(1.0, -0.08))
+        # Legend INSIDE the chart — always visible, explains markers + badges
+        legend_elements = [
+            Line2D([0], [0], marker='^', color='w', markerfacecolor=c_buy,
+                   markeredgecolor='white', markersize=10, label='BUY', linestyle='None'),
+            Line2D([0], [0], marker='v', color='w', markerfacecolor=c_sell,
+                   markeredgecolor='white', markersize=10, label='SELL', linestyle='None'),
+        ]
+        if has_ok:
+            legend_elements.append(Patch(facecolor='none', edgecolor='none', label='✓ correct (+0.3% in 4h)'))
+        if has_bad:
+            legend_elements.append(Patch(facecolor='none', edgecolor='none', label='✗ wrong'))
+        if has_pend:
+            legend_elements.append(Patch(facecolor='none', edgecolor='none', label='⏳ pending'))
 
-        plt.tight_layout()
-        chart_path = os.path.join('charts', f'{asset}_telegram_24h.png')
+        leg = ax.legend(handles=legend_elements, loc='upper left', fontsize=9,
+                        facecolor=c_card, edgecolor=c_grid, labelcolor=c_text,
+                        framealpha=0.92, ncol=1, handletextpad=0.6)
+        leg.set_zorder(10)
+
+        chart_path = os.path.join('charts', f'{asset}_telegram_{hours}h.png')
         os.makedirs('charts', exist_ok=True)
-        fig.savefig(chart_path, dpi=150, facecolor=c_bg, bbox_inches='tight')
+        fig.savefig(chart_path, dpi=150, facecolor=c_bg)
         plt.close(fig)
 
         n_transitions = len(transition_signals)
-        caption = f"{asset}/USD 48h | {n_transitions} signals | {pct_change:+.1f}%"
+        caption = f"{asset}/USD {h_label} | {n_transitions} signals | {pct_change:+.1f}%"
         send_telegram_photo(chart_path, caption=caption)
-        print(f"  Chart sent for {asset}")
+        print(f"  Chart sent for {asset} ({h_label})")
 
     except Exception as e:
         send_telegram(f"Chart error: {e}")
@@ -2246,7 +2326,7 @@ def _setup_send_menu(asset, cfg):
 
 def _setup_send_strategy_picker(asset, cfg):
     """Strategy is controlled by regime detector — no manual picker."""
-    send_telegram(f"📐 <b>{asset}</b>: Strategy is controlled by the regime detector. Use /conf to see current regime settings.")
+    send_telegram(f"📐 <b>{asset}</b>: Strategy is controlled by the regime detector. Use /setup to see current regime settings.")
     _setup_send_menu(asset, cfg)
 
 def _setup_send_confidence_picker(asset, cfg, regime='bull'):
@@ -2451,6 +2531,90 @@ def _setup_handle(text, trading_cfg):
                 send_telegram(f"💰 Type the max position amount in USD for <b>{asset}</b> ({regime.upper()}) (e.g. 2500):")
                 return
 
+# ---- Rally-cooldown gate (V7) command ----
+
+def _handle_gate_command(msg, trading_cfg):
+    """Toggle V7 rally-cooldown gate per asset, or clear an active cooldown window.
+    Forms:
+      /gate                        -> status + buttons
+      /gate on | off               -> toggle on all enabled assets
+      /gate ETH on | off | clear   -> per-asset
+    """
+    parts = msg.split()
+    enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+
+    def _show_status():
+        lines = ["🛡 <b>Rally-Cooldown Gate (V7)</b>", ""]
+        rows = []
+        for a in enabled:
+            rc = trading_cfg[a].get('rally_cooldown') or {}
+            on = bool(rc.get('enabled'))
+            pos = load_position(a)
+            until_str = pos.get('rally_cooldown_until', '')
+            cd_left = ''
+            cd_active = False
+            if until_str:
+                try:
+                    until = datetime.fromisoformat(until_str.replace('Z', '+00:00'))
+                    now = datetime.now(timezone.utc)
+                    if until > now:
+                        cd_active = True
+                        cd_left = f" | cd {(until - now).total_seconds()/3600:.1f}h left"
+                except Exception:
+                    pass
+            state = "🟢 ON" if on else "⚪ OFF"
+            lines.append(f"<b>{a}</b>: {state}{cd_left}")
+            if rc:
+                lines.append(f"   trig: rr{rc.get('h_short')}h≥{rc.get('t_short_pct')}% OR "
+                             f"rr{rc.get('h_long')}h≥{rc.get('t_long_pct')}% → {rc.get('cd_hours')}h")
+            row = [(f"{a} {'OFF' if on else 'ON'}", f"/gate {a} {'off' if on else 'on'}")]
+            if cd_active:
+                row.append((f"Clear {a} cd", f"/gate {a} clear"))
+            rows.append(row)
+        send_telegram_with_buttons("\n".join(lines), rows)
+
+    if len(parts) == 1:
+        _show_status(); return
+
+    # /gate on | off  → all enabled
+    if len(parts) == 2 and parts[1].lower() in ('on', 'off'):
+        on = parts[1].lower() == 'on'
+        for a in enabled:
+            trading_cfg[a].setdefault('rally_cooldown', {
+                'h_short': 8, 'h_long': 36, 't_short_pct': 3.0, 't_long_pct': 5.5, 'cd_hours': 30
+            })
+            trading_cfg[a]['rally_cooldown']['enabled'] = on
+        save_trading_config(trading_cfg)
+        send_telegram(f"🛡 Gate {'ON' if on else 'OFF'} for: {', '.join(enabled)}")
+        _show_status(); return
+
+    # /gate ASSET on|off|clear
+    if len(parts) >= 3:
+        asset = parts[1].upper()
+        action = parts[2].lower()
+        if asset not in trading_cfg:
+            send_telegram(f"❌ {asset} not configured"); return
+        if action in ('on', 'off'):
+            trading_cfg[asset].setdefault('rally_cooldown', {
+                'h_short': 8, 'h_long': 36, 't_short_pct': 3.0, 't_long_pct': 5.5, 'cd_hours': 30
+            })
+            trading_cfg[asset]['rally_cooldown']['enabled'] = (action == 'on')
+            save_trading_config(trading_cfg)
+            send_telegram(f"🛡 {asset} gate {action.upper()}")
+            _show_status(); return
+        if action == 'clear':
+            pos = load_position(asset)
+            if pos.get('rally_cooldown_until'):
+                pos['rally_cooldown_until'] = ''
+                save_position(asset, pos)
+                send_telegram(f"🧹 {asset} cooldown window cleared (one-time override)")
+            else:
+                send_telegram(f"ℹ️ {asset} has no active cooldown")
+            _show_status(); return
+
+    send_telegram("Usage: /gate | /gate on|off | /gate ETH on|off|clear")
+
+
 # ---- Command loop ----
 
 def _telegram_command_loop(trading_cfg):
@@ -2478,8 +2642,6 @@ def _telegram_command_loop(trading_cfg):
                     _stop_event.set()
                 elif cmd == '/status':
                     _handle_status_command()
-                elif cmd == '/summary':
-                    _handle_summary_command()
                 elif cmd == '/pause':
                     with _paused_lock:
                         _paused_flag[0] = True
@@ -2499,10 +2661,6 @@ def _telegram_command_loop(trading_cfg):
                     _handle_manual_sell_command(msg, trading_cfg)
                 elif cmd == '/hold' or cmd.startswith('/hold '):
                     _handle_hold_shield_command(msg, trading_cfg)
-                elif cmd == '/conf':
-                    _handle_config_command()
-                elif cmd == '/regime':
-                    _handle_regime_command()
                 elif cmd.startswith('/chart'):
                     _handle_chart_command(msg, trading_cfg)
                 elif cmd == '/setup' or cmd.startswith('/cfg_'):
@@ -2514,6 +2672,8 @@ def _telegram_command_loop(trading_cfg):
                     _handle_optimize_command(msg)
                 elif cmd == '/optstatus':
                     _handle_optstatus_command()
+                elif cmd == '/gate' or cmd.startswith('/gate '):
+                    _handle_gate_command(msg, trading_cfg)
                 elif cmd == '/help':
                     _handle_help_command()
         except Exception:
@@ -2652,7 +2812,7 @@ def _send_startup_telegram(trading_cfg):
         f"🚀 <b>Ed V2 Trader Started</b>\n\n"
         + "\n".join(asset_lines) + "\n\n"
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"📱 /help for all commands | /regime for current state"
+        f"📱 /help for all commands | /status for current state"
     )
 
 
@@ -2681,7 +2841,7 @@ def run_loop(trading_cfg, dry_run=False):
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str} | {pos['state'].upper()}")
-    print(f"  Telegram: /help /status /conf /setup /balance /sync /buy /sell /hold /pause /resume /stop /regime")
+    print(f"  Telegram: /help /status /chart /setup /sync /pause /resume /stop (+ buy/sell/hold via buttons)")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
