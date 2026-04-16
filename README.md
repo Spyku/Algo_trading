@@ -469,6 +469,16 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 ### TODO
 
 **HIGHEST PRIORITY:**
+
+0a. **Rally-cooldown BUY gate — fine-tune V6 + pick winner + wire to prod** — Core hypothesis already validated: after a large ETH rally, price tends to revert within 24h; blocking BUY for a cooldown window improves PnL. V6 (rr10≥5 OR rr24≥7, cd=24h) beat V0 on all 3 windows (+3.58 / +13.55 / −11.48 vs +1.11 / +2.24 / −16.70); 77–79% of skips were followed by a 24h price drop.
+   - **Scope:** fine-tune V6's OR-of-two-rolling-returns structure inside current crisis regime (not re-open mode choice). Workflow: (1) test if sweep finds anything beating V6, (2) promote only relevant horizons, (3) wire to prod, (4) demote if decays.
+   - **Sweep design (`audit_v6_v2.py`):** structure FIXED to `block BUYs for C hours when rr(Hshort)≥Tshort OR rr(Hlong)≥Tlong`. Horizon pairs = all 15 (Hshort<Hlong) from {10,12,14,16,18,24}h. Horizon-scaled thresholds: 10/12h→{3,4,5,6}; 14/16h→{4,5,6,7}; 18h→{5,6,7,8}; 24h→{5,6,7,8,9}. Cooldowns={10,12,18,24}h.
+   - **Windows:** two non-overlapping 30d halves (H1=days 0–30 back, H2=days 30–60 back) + 60d reference. No 90d (straddles regime change the detector should handle).
+   - **Scoring:** PnL%. Winner must beat V0 on BOTH halves. Trades + skipped-BUYs reported for eyeball churn-check only, no hard filter.
+   - **Next step:** run sweep → review winner + churn → wire into [crypto_revolut_ed_v2.py process_asset](G:/Autres ordinateurs/My laptop/engine/crypto_revolut_ed_v2.py) BUY path (compute rr(Hshort) and rr(Hlong) at top-of-hour; if either ≥ threshold, set cooldown; block BUY while cd>0, SELL unaffected; persist cd state to disk).
+   - **Artifacts (prior):** `backtest_rally_cooldown_multi.py`, `audit_v6.py`, `rally_cooldown_summary_{30d,60d,90d}.csv`, `rally_cooldown_stability.csv`. **Caches:** `data/eth_5m_backtest_90d.csv` (26,497 rows), `data/eth_sl_signals_90d.pkl` (2,186 hourly signals).
+
+0b. **Remove `/optimize` + `/optstatus` from trader bot** — Trader should not launch optimizations; that belongs to the optimizer bot. Already hidden from `/help`; next step is to delete `_handle_optimize_command`, `_handle_optstatus_command`, dispatcher branches, and related globals in `crypto_revolut_ed_v2.py`.
 1. **Restart optimizer bot** to load SV3 + Help buttons (commits a900d98, c0e674d).
 2. **Run SV3 ETH `--replay 2880`** — Ed V3 joint H-sweep test. If results beat current Mode S winner, push to prod.
 3. **RS ETH `--replay 2880` OOS** — running on Yoga since 06:57, report results when complete.
@@ -476,6 +486,22 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 **Other:**
 4. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
 5. **Ein results review** — Check Ein (15min) BTC results from laptop run
+
+### Completed (2026-04-16)
+- **V7 rally-cooldown gate in production** (ETH) + Mode G optimizer + `/gate` Telegram command. Block BUYs for 30h after `rr_8h ≥ 3%` OR `rr_36h ≥ 5.5%`. State persists in position file.
+- **Optimizer bot menu simplified** — 3-profile front door (Full Re-tune / Regime Refresh / Model Refresh) + PySR + Advanced submenu.
+- **`/optimize` removed from trader bot** — Optimizer lives in its own bot now.
+- **Bull/gate icons recolored blue** — `/status` and `/gate` now use 🔵 (matches BUY=🔵 / SELL=🔴 convention).
+- **11 audit-pass bugs fixed** — Position file race (lock + atomic write), `regime_config_ed.json` non-atomic write (5 sites), partial-fill `usd_invested` mismatch, optimizer-bot blocking stdout (queue-based reader), confirm-button double-click, hold-shield naive-local time (UTC ISO), `'DVS'`/`SV3`/`BLOWOFF` dead code, silent feature drop in `generate_live_signal`, PySR regime detector silent 0.0 substitution. See `CLAUDE.md` for line-by-line breakdown.
+- **Adaptive cooldown tested and rejected** (`compare_gate_adaptive.py`) — lifting V7 cooldown early on price reversion costs −8.8% to −23.7% PnL on 90d. Keep fixed 30h.
+- **Chain-order verified** (`compare_chain_order.py`) — G-last vs joint optimization is noise-level over 6-fold walk-forward. Keep G-last.
+
+### Completed (2026-04-14)
+- **Stop-loss / profit-lock backtest (ETH prod, 30d, 5m res)** — **Verdict: keep prod as-is.** Ran 8 variants via `backtest_sl_variants.py`. Baseline A (no SL) won every dimension: +1.11% PnL / −8.71% DD. Disaster −7%/−10% (B, C) never fired → identical to baseline. Profit-lock D/E/F and trailing G/H all catastrophic (−11% to −20%). Scalping tiny locked gains chops big winners; full loss price still paid on bad setups via failsafe.
+- **Hold Shield toggle** — `/hold` Telegram command + dynamic "🛡 Shield: ON/OFF" button. Persists per-asset to `regime_config_ed.json`. Test suite `test_hold_shield.py` passes.
+- **Chart overhaul** — `/chart` accepts horizon (`/chart`, `/chart ETH`, `/chart 12h`, `/chart ETH 7d`). Markers clarified (cyan ▲ BUY / orange ▼ SELL + ✓/✗/⏳ badge), legend inside chart, horizon-scaled axis.
+- **Manual `/buy` `/sell` maker commands** — Fresh-quote maker orders via Telegram with full instrumentation. Silent 30-min log stall traced to Windows stdout buffering (fixed with `flush=True`).
+- **Telegram HTML fix** — `<` → `vs` in hold override message (HTTP 400 fix).
 
 ### Completed (2026-04-08 — soir)
 - **Ed V3 (research)** — `crypto_trading_system_ed_v3.py` Mode S full joint H-sweep: 5 detectors × 8 horizon pairs × 49 conf combos = 1,960 evals/asset. Writes to `regime_config_ed_v3.json` (zero prod impact).
@@ -534,6 +560,7 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 
 | Date | Milestone |
 |------|-----------|
+| **2026-04-16** | V7 rally-cooldown gate in production (ETH). Mode G optimizer + `/gate` Telegram command. Optimizer-bot menu simplified to 3 profiles + Advanced. `/optimize` removed from trader bot. 11 audit-pass bugs fixed across position state, config writes, fill accounting, timezone math, optimizer concurrency, and silent ML-feature drift. |
 | **2026-04-08** | ETH live trader verified on new named-detector config (`sma168>sma480` 7h@75% / 8h@85%). Mode V 6m replay running for 6h vs 7h reliability comparison. |
 | **2026-04-07** | **Detector trim + R→S fix + named-detector wiring.** 14→5 detectors (literature-grounded `vol_calm`, `tsmom_672h`, `sma168>sma480` added). Mode S rewritten as Option C joint sweep (5×49=245). Mode V `--replay` arg added end-to-end. ETH RS rerun: `sma168>sma480` 7h/8h → +60.72%, 65% WR. ETH-only, BTC sold, $12k allocation. |
 | **2026-04-13** | Clock drift fix: NTP-based correction replaces broken echo-back method, periodic NTP sync every 5 min. Maker order bug fixes (partial fill balance, cancel verification, duplicate orders, locked funds). Noprod wrapper for safe experimentation. |

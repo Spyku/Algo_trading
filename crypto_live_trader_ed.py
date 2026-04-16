@@ -246,15 +246,21 @@ def _evaluate_pysr_detector(params, df, asset):
         # Evaluate expression using sympy
         import sympy
         local_dict = {}
+        bad_feats = []
         for fname in feat_names:
             if fname in features.columns:
                 val = features[fname].iloc[-1]
                 if np.isfinite(val):
                     local_dict[fname] = val
                 else:
+                    bad_feats.append(f"{fname}(NaN)")
                     local_dict[fname] = 0.0
             else:
+                bad_feats.append(f"{fname}(missing)")
                 local_dict[fname] = 0.0
+        if bad_feats:
+            print(f"  [!] PySR regime model {model_file}: {len(bad_feats)} unusable features {bad_feats[:5]} -- defaulting to BULL")
+            return True
 
         result = float(sympy.sympify(equation).evalf(subs=local_dict))
         return result <= threshold  # <= threshold = bull, > threshold = bear
@@ -367,7 +373,11 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose)
     _compute_pysr_features(df_full, all_cols, asset_name, horizon, verbose=False)
     feature_cols = [f for f in feature_list if f in all_cols]
+    missing_feats = [f for f in feature_list if f not in all_cols]
+    if missing_feats:
+        print(f"  [!] {asset_name} {horizon}h: {len(missing_feats)} configured features unavailable: {missing_feats[:5]}{'...' if len(missing_feats) > 5 else ''}")
     if not feature_cols:
+        print(f"  [!] {asset_name} {horizon}h: no configured features matched -- falling back to FEATURE_SET_A")
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]
 
     df = df_full.dropna(subset=feature_cols + ['label']).reset_index(drop=True)

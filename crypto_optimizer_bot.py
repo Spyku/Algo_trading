@@ -26,6 +26,7 @@ import time
 import re
 import uuid
 import threading
+import queue
 import subprocess
 import urllib.request
 from datetime import datetime
@@ -50,7 +51,6 @@ if not os.path.exists(PYTHON_EXE):
     PYTHON_EXE = sys.executable
 
 SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed.py')
-SCRIPT_PATH_V3 = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed_v3.py')
 PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
 TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
@@ -268,7 +268,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'D', 'V', 'DV', 'DVS', 'R', 'S', 'RS', 'T', 'HRS', 'HRST', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'D', 'V', 'DV', 'R', 'S', 'RS', 'T', 'HRS', 'HRST', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -483,11 +483,7 @@ def _handle_menu_callback(data):
             if not _menu_state['selected_assets']:
                 send_telegram("Select at least one asset.")
                 return
-            # Skip horizon menu for modes that don't need it
-            if _menu_state['mode'] in ('P',):
-                _show_horizon_menu()
-            else:
-                _show_horizon_menu()
+            _show_horizon_menu()
             return
         elif asset in ASSETS:
             s = _menu_state['selected_assets']
@@ -533,6 +529,9 @@ def _handle_menu_callback(data):
 
     # Confirm
     if data == 'opt_confirm':
+        if _menu_state.get('step') != 'confirm':
+            return  # already consumed (double-click protection)
+        _menu_state['step'] = None
         _enqueue_job()
         _menu_reset()
         return
@@ -633,19 +632,9 @@ def _run_job(job):
     # Build command
     assets_arg = ','.join(job.assets)
     h_arg = ','.join(str(h) for h in job.horizons) + 'h'
-    if job.mode == 'SV3':
-        cmd = [PYTHON_EXE, '-u', SCRIPT_PATH_V3, 'S', assets_arg, h_arg]
-        if hasattr(job, 'replay') and job.replay:
-            cmd.extend(['--replay', str(job.replay)])
-    elif job.mode == 'BLOWOFF':
-        blowoff_path = os.path.join(ENGINE_DIR, 'tools', 'test_momentum_decay.py')
-        cmd = [PYTHON_EXE, '-u', blowoff_path, '--asset', job.assets[0]]
-        if hasattr(job, 'replay') and job.replay:
-            cmd.extend(['--replay', str(job.replay)])
-    else:
-        cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
-        if hasattr(job, 'replay') and job.replay:
-            cmd.extend(['--replay', str(job.replay)])
+    cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
+    if hasattr(job, 'replay') and job.replay:
+        cmd.extend(['--replay', str(job.replay)])
 
     print(f"  CMD: {' '.join(cmd)}")
 
@@ -677,10 +666,38 @@ def _run_job(job):
     current_asset = job.assets[0] if job.assets else ''
     current_horizon = job.horizons[0] if job.horizons else 6
 
-    for raw_line in proc.stdout:
+    # Read stdout in a daemon thread so /cancel can interrupt even if the
+    # subprocess goes silent or stalls.
+    line_q: queue.Queue = queue.Queue()
+
+    def _reader():
+        try:
+            for raw in proc.stdout:
+                line_q.put(raw)
+        finally:
+            line_q.put(None)  # sentinel: stdout closed
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    while True:
         if job.status == 'cancelled':
             proc.terminate()
             break
+        try:
+            raw_line = line_q.get(timeout=1.0)
+        except queue.Empty:
+            # No new output — fall through to send a heartbeat progress edit.
+            now = time.time()
+            if now - last_progress_update >= progress_interval and job.progress_msg_id:
+                elapsed = (time.time() - start_time) / 60
+                edit_telegram_message(
+                    job.progress_msg_id,
+                    f"<b>Running:</b> {job.label()}\n\nPhase: {phase}\nElapsed: {elapsed:.1f} min"
+                )
+                last_progress_update = now
+            continue
+        if raw_line is None:
+            break  # subprocess stdout closed
 
         line = raw_line.decode('utf-8', errors='replace').rstrip()
         try:

@@ -533,11 +533,52 @@ def execute_maker_sell(symbol, base_size):
 def _position_file(asset):
     return f'config/position_ed_v2_{asset}.json'
 
+_position_lock = threading.Lock()
+
+
+def _now_utc_iso():
+    """Current time as UTC ISO 8601 with Z suffix — what new entry_time writes use."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _parse_entry_time_utc(s):
+    """Parse entry_time string to a UTC-aware datetime.
+
+    Accepts both the new format ('2026-04-16T01:00:00Z' / '+00:00') and the
+    legacy naive-local format ('2026-04-16 01:00' optionally with ' (synced)').
+    Legacy strings are interpreted as local time and converted to UTC. Returns
+    None if the string is empty or unparseable.
+    """
+    if not s:
+        return None
+    s = s.replace(' (synced)', '').strip()
+    if not s:
+        return None
+    try:
+        if 'T' in s or 'Z' in s or '+' in s[10:]:
+            return datetime.fromisoformat(s.replace('Z', '+00:00')).astimezone(timezone.utc)
+        naive_local = datetime.strptime(s, '%Y-%m-%d %H:%M')
+        return naive_local.astimezone().astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _format_entry_time_local(s):
+    """Format an entry_time string for human display in local time."""
+    dt = _parse_entry_time_utc(s)
+    if dt is None:
+        return s or ''
+    return dt.astimezone().strftime('%Y-%m-%d %H:%M')
+
 def load_position(asset):
     path = _position_file(asset)
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
+    with _position_lock:
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"  [!] Corrupted position file {path}: {e}. Falling back to cash state.")
     return {
         'asset': asset, 'state': 'cash', 'entry_price': 0,
         'entry_time': '', 'base_amount': 0, 'usd_invested': 0,
@@ -546,8 +587,12 @@ def load_position(asset):
 
 def save_position(asset, pos):
     os.makedirs('config', exist_ok=True)
-    with open(_position_file(asset), 'w') as f:
-        json.dump(pos, f, indent=2)
+    path = _position_file(asset)
+    tmp = path + '.tmp'
+    with _position_lock:
+        with open(tmp, 'w') as f:
+            json.dump(pos, f, indent=2)
+        os.replace(tmp, path)
 
 
 # ============================================================
@@ -591,7 +636,7 @@ def sync_positions(trading_cfg, notify=True):
             pos['state'] = 'invested'
             pos['base_amount'] = actual_amount
             pos['entry_price'] = price  # approximate
-            pos['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)'
+            pos['entry_time'] = _now_utc_iso() + ' (synced)'
             pos['usd_invested'] = actual_usd
             pos['trades'].append({
                 'action': 'BUY', 'price': price,
@@ -1007,7 +1052,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
                     order = data.get('data', data)
                     position['base_amount'] = float(order.get('filled_size', buy_amount / price))
                     position['entry_price'] = float(order.get('average_fill_price', price))
-                    position['usd_invested'] = buy_amount
+                    position['usd_invested'] = position['base_amount'] * position['entry_price']
                     executed = True
 
                     # Post-trade verification
@@ -1027,7 +1072,7 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
         if executed or (not dry_run and not position.get('auto_trade')):
             position['state'] = 'invested'
-            position['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+            position['entry_time'] = _now_utc_iso()
             if not executed:
                 position['usd_invested'] = max_usd
             position['trades'].append({
@@ -1045,12 +1090,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
         if shield_on and min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
             cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
             hours_held = 0
-            if position.get('entry_time'):
-                try:
-                    entry_dt = datetime.strptime(position['entry_time'].replace(' (synced)', ''), '%Y-%m-%d %H:%M')
-                    hours_held = (datetime.now() - entry_dt).total_seconds() / 3600
-                except Exception:
-                    pass
+            entry_dt_utc = _parse_entry_time_utc(position.get('entry_time'))
+            if entry_dt_utc is not None:
+                hours_held = (datetime.now(timezone.utc) - entry_dt_utc).total_seconds() / 3600
             if cur_pnl < min_sell_pnl and hours_held < max_hold_h:
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
                 send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)")
@@ -1285,12 +1327,9 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None, trading_c
             if _cfg_min_pnl > 0 and cur_pnl < _cfg_min_pnl:
                 _max_h = _asset_cfg.get('max_hold_hours', 10)
                 _held_h = 0
-                if position.get('entry_time'):
-                    try:
-                        _edt = datetime.strptime(position['entry_time'].replace(' (synced)', ''), '%Y-%m-%d %H:%M')
-                        _held_h = (datetime.now() - _edt).total_seconds() / 3600
-                    except Exception:
-                        pass
+                _edt_utc = _parse_entry_time_utc(position.get('entry_time'))
+                if _edt_utc is not None:
+                    _held_h = (datetime.now(timezone.utc) - _edt_utc).total_seconds() / 3600
                 lines.append(f"  🛡 Hold override: need {_cfg_min_pnl}% (at {cur_pnl:+.1f}%) | {_held_h:.0f}h / {_max_h}h")
 
         # Exchange balance (always show if holding)
@@ -1401,7 +1440,7 @@ def _handle_status_command(with_charts=False):
             if df_raw is not None:
                 try:
                     regime, active_cfg = detect_regime(asset, df_raw)
-                    icon = '🟢' if regime == 'bull' else '🔴'
+                    icon = '🔵' if regime == 'bull' else '🔴'
                     regime_label = f"{icon} {regime.upper()} {active_cfg.get('horizon','?')}h@{active_cfg.get('min_confidence','?')}%"
                 except Exception:
                     pass
@@ -1446,7 +1485,7 @@ def _handle_status_command(with_charts=False):
             cur_value = actual_usd if actual_usd > 0 else pos.get('usd_invested', 0) * (1 + cur_pnl / 100)
             emoji = '📈' if cur_pnl > 0 else '📉'
             lines.append(f"  {emoji} INVESTED ${pos.get('usd_invested',0):,.0f} → ${cur_value:,.0f} ({cur_pnl:+.1f}%)")
-            lines.append(f"  Entry: ${pos['entry_price']:,.2f} | {pos.get('entry_time', '')}")
+            lines.append(f"  Entry: ${pos['entry_price']:,.2f} | {_format_entry_time_local(pos.get('entry_time', ''))}")
             if actual_held > 0:
                 lines.append(f"  Held: {actual_held:.6f} {asset}")
         else:
@@ -1590,11 +1629,11 @@ def _manual_buy_impl(msg, trading_cfg):
         pos['state'] = 'invested'
         pos['base_amount'] = filled_size
         pos['entry_price'] = fill_price
-        pos['usd_invested'] = amount_usd
-        pos['entry_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        pos['usd_invested'] = filled_size * fill_price
+        pos['entry_time'] = _now_utc_iso()
         pos['trades'].append({
             'action': 'BUY', 'price': fill_price,
-            'time': pos['entry_time'], 'usd': amount_usd, 'auto': False, 'manual': True,
+            'time': pos['entry_time'], 'usd': pos['usd_invested'], 'auto': False, 'manual': True,
         })
         save_position(asset, pos)
 
@@ -1768,82 +1807,6 @@ def _handle_hold_shield_command(msg, trading_cfg):
         except Exception:
             pass
 
-
-# ---- /optimize: background Mode D re-optimization ----
-import subprocess
-_optimize_proc = None  # subprocess.Popen or None
-_optimize_lock = threading.Lock()
-
-def _handle_optimize_command(msg):
-    """Launch Mode D optimization as a background subprocess."""
-    global _optimize_proc
-    parts = msg.strip().split()
-    # Parse: /optimize BTC  or  /optimize BTC,ETH  or  /optimize (defaults to BTC)
-    assets = parts[1].upper() if len(parts) > 1 else 'BTC'
-
-    with _optimize_lock:
-        if _optimize_proc is not None and _optimize_proc.poll() is None:
-            send_telegram(f"⏳ Optimization already running (PID {_optimize_proc.pid}). /optstatus to check.")
-            return
-
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crypto_trading_system_ed.py')
-
-        # Build horizon arg from trading config (per-asset configured horizons)
-        trading_config = load_trading_config()
-        asset_list = [a.strip() for a in assets.split(',')]
-        horizons_set = set()
-        for a in asset_list:
-            h = trading_config.get(a, {}).get('horizon')
-            if h:
-                horizons_set.add(h)
-        if not horizons_set:
-            horizons_set = set(AVAILABLE_HORIZONS)
-        h_arg = ','.join(str(h) for h in sorted(horizons_set)) + 'h'
-
-        cmd = [sys.executable, script, 'DV', assets, h_arg]
-
-        # Run at below-normal priority on Windows
-        creation_flags = 0
-        if sys.platform == 'win32':
-            creation_flags = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
-
-        _optimize_proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            creationflags=creation_flags,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
-        )
-        print(f"  OPTIMIZE: launched Mode DV for {assets} {h_arg} (PID {_optimize_proc.pid})")
-        send_telegram(f"🚀 <b>Mode DV started</b>\n{assets} {h_arg} (PID {_optimize_proc.pid})\nTrader stays live. Models hot-reload when done.")
-
-        # Monitor in background thread
-        def _monitor():
-            global _optimize_proc
-            proc = _optimize_proc
-            proc.wait()
-            rc = proc.returncode
-            if rc == 0:
-                print(f"  OPTIMIZE: completed successfully")
-                send_telegram("✅ <b>Mode D complete</b>\nNew models saved. Hot-reload will pick them up.")
-            else:
-                # Grab last few lines of output for error context
-                out = proc.stdout.read().decode('utf-8', errors='replace') if proc.stdout else ''
-                tail = '\n'.join(out.strip().splitlines()[-5:])
-                print(f"  OPTIMIZE: failed (exit code {rc})")
-                send_telegram(f"❌ <b>Mode D failed</b> (exit {rc})\n<pre>{tail}</pre>")
-            with _optimize_lock:
-                _optimize_proc = None
-
-        threading.Thread(target=_monitor, daemon=True).start()
-
-def _handle_optstatus_command():
-    """Check if optimization is running."""
-    with _optimize_lock:
-        if _optimize_proc is not None and _optimize_proc.poll() is None:
-            send_telegram(f"⏳ Optimization running (PID {_optimize_proc.pid})")
-        else:
-            send_telegram("No optimization running.")
 
 # ---- Signal logging for /chart ----
 SIGNAL_LOG_DIR = 'config'
@@ -2562,7 +2525,7 @@ def _handle_gate_command(msg, trading_cfg):
                         cd_left = f" | cd {(until - now).total_seconds()/3600:.1f}h left"
                 except Exception:
                     pass
-            state = "🟢 ON" if on else "⚪ OFF"
+            state = "🔵 ON" if on else "🔴 OFF"
             lines.append(f"<b>{a}</b>: {state}{cd_left}")
             if rc:
                 lines.append(f"   trig: rr{rc.get('h_short')}h≥{rc.get('t_short_pct')}% OR "
@@ -2668,10 +2631,6 @@ def _telegram_command_loop(trading_cfg):
                         _setup_start(trading_cfg)
                     if cmd.startswith('/cfg_'):
                         _setup_handle(msg, trading_cfg)
-                elif cmd.startswith('/optimize'):
-                    _handle_optimize_command(msg)
-                elif cmd == '/optstatus':
-                    _handle_optstatus_command()
                 elif cmd == '/gate' or cmd.startswith('/gate '):
                     _handle_gate_command(msg, trading_cfg)
                 elif cmd == '/help':
@@ -3029,7 +2988,7 @@ def main():
                 print(f"    State: {pos['state'].upper()} | Bull max: ${bull_c.get('max_position_usd',0):,.0f} | Bear max: ${bear_c.get('max_position_usd',0):,.0f}")
                 print(f"    Auto-trade: {pos.get('auto_trade', False)}")
                 if pos['state'] == 'invested':
-                    print(f"    Entry: ${pos['entry_price']:,.2f} at {pos['entry_time']}")
+                    print(f"    Entry: ${pos['entry_price']:,.2f} at {_format_entry_time_local(pos['entry_time'])}")
                 sells = [t for t in pos.get('trades', []) if t.get('action') == 'SELL']
                 if sells:
                     total = sum(t.get('pnl_usd', 0) for t in sells)

@@ -397,6 +397,13 @@ PRODUCTION_CSV = 'models/crypto_ed_production.csv'
 REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
 
 
+def _atomic_write_json(path, data):
+    """Write JSON atomically: temp file + os.replace, so a crash mid-write can't corrupt the target."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
 
 def _compute_optuna_score(result):
     """Compute Optuna objective score from eval result tuple based on selected metric.
@@ -4400,8 +4407,7 @@ def run_mode_s(assets_list, horizons, args=None):
         regime_config[asset]['bear']['horizon'] = winner['bear_h']
         regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
-        with open(tcfg_path, 'w') as f:
-            json.dump(regime_config, f, indent=2)
+        _atomic_write_json(tcfg_path, regime_config)
         print(f"\n  Config updated: {asset} detector={winner['detector']} "
               f"bull={winner['bull_h']}h@{winner['bull_conf']}% / bear={winner['bear_h']}h@{winner['bear_conf']}%")
 
@@ -4590,15 +4596,13 @@ def run_mode_t(assets_list, args=None):
             regime_config[asset]['min_sell_pnl_pct'] = t_win
             regime_config[asset]['max_hold_hours'] = fh_win
 
-            with open(tcfg_path, 'w') as f:
-                json.dump(regime_config, f, indent=2)
+            _atomic_write_json(tcfg_path, regime_config)
             print(f"\n  Config updated: {asset} min_sell_pnl={t_win:.2f}% max_hold={fh_win}h")
         else:
             print(f"\n  No overall improvement — disabling hold override for {asset}")
             regime_config[asset]['min_sell_pnl_pct'] = 0
             regime_config[asset]['max_hold_hours'] = 10
-            with open(tcfg_path, 'w') as f:
-                json.dump(regime_config, f, indent=2)
+            _atomic_write_json(tcfg_path, regime_config)
 
     print(f"\n{'='*80}")
     print(f"  MODE T COMPLETE")
@@ -5025,8 +5029,7 @@ def _apply_mode_r_to_config(r_results):
             regime_config[asset]['bear']['horizon'] = bear_h
             print(f"\n  Mode R → Config: {asset} horizons updated: bull={old_bull}h→{bull_h}h, bear={old_bear}h→{bear_h}h")
 
-    with open(tcfg_path, 'w') as f:
-        json.dump(regime_config, f, indent=2)
+    _atomic_write_json(tcfg_path, regime_config)
 
 
 # ============================================================
@@ -5254,8 +5257,7 @@ def run_mode_g(assets_list, args):
             't_long_pct': float(win['t_long']),
             'cd_hours': int(win['cd']),
         }
-        with open(REGIME_CONFIG_PATH, 'w') as f:
-            json.dump(cfg, f, indent=2)
+        _atomic_write_json(REGIME_CONFIG_PATH, cfg)
         print(f"  {asset} | wrote rally_cooldown to {REGIME_CONFIG_PATH}")
 
 
