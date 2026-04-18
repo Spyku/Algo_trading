@@ -861,7 +861,8 @@ def _check_take_profit(asset, trading_cfg, dry_run=False):
 # ============================================================
 def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     """Trigger detection — must run EVERY tick, regardless of position state.
-    If rr_short or rr_long crosses threshold, extends rally_cooldown_until.
+    Scans the last cd_hours bars so rallies that fired while the engine was
+    offline are still captured (implied cooldown-until adjusted for elapsed time).
     Returns (rs_pct, rl_pct, fresh_trigger_bool) for logging, or None if disabled."""
     if not rc_cfg or not rc_cfg.get('enabled'):
         return None
@@ -871,12 +872,28 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     if df_raw is None or len(df_raw) < h_l + 1:
         return None
     closes = df_raw['close'].values
+    now = datetime.now(timezone.utc)
+
+    # Current-window values (returned for logging)
     rs = (closes[-1] / closes[-1 - h_s] - 1.0) * 100.0
     rl = (closes[-1] / closes[-1 - h_l] - 1.0) * 100.0
+
+    # Catch-up scan: check each of the last cd_h bars. If a past bar would have
+    # triggered, compute the implied cooldown-until (trigger_time + cd_h) and
+    # keep the latest still-active one.
+    max_lookback = min(cd_h, len(closes) - h_l - 1)
+    best_until = None
+    for bars_ago in range(max_lookback + 1):
+        end_idx = -1 - bars_ago
+        rs_k = (closes[end_idx] / closes[end_idx - h_s] - 1.0) * 100.0
+        rl_k = (closes[end_idx] / closes[end_idx - h_l] - 1.0) * 100.0
+        if rs_k >= t_s or rl_k >= t_l:
+            implied_until = now - timedelta(hours=bars_ago) + timedelta(hours=cd_h)
+            if implied_until > now and (best_until is None or implied_until > best_until):
+                best_until = implied_until
+
     fired = False
-    if rs >= t_s or rl >= t_l:
-        now = datetime.now(timezone.utc)
-        new_until = now + timedelta(hours=cd_h)
+    if best_until is not None:
         cur_until_str = position.get('rally_cooldown_until', '')
         cur_until = None
         if cur_until_str:
@@ -884,9 +901,9 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
                 cur_until = datetime.fromisoformat(cur_until_str.replace('Z', '+00:00'))
             except Exception:
                 cur_until = None
-        if cur_until is None or new_until > cur_until:
-            position['rally_cooldown_until'] = new_until.strftime('%Y-%m-%dT%H:%M:%SZ')
-            fired = cur_until is None or new_until > cur_until + timedelta(minutes=30)
+        if cur_until is None or best_until > cur_until:
+            position['rally_cooldown_until'] = best_until.strftime('%Y-%m-%dT%H:%M:%SZ')
+            fired = cur_until is None or best_until > cur_until + timedelta(minutes=30)
     return (rs, rl, fired)
 
 
