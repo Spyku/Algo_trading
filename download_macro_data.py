@@ -232,20 +232,21 @@ def download_cross_asset():
 # ============================================================
 # 5. ON-CHAIN DATA (Bitcoin blockchain metrics)
 # ============================================================
-def download_onchain_data():
+def download_onchain_data(asset='btc'):
     """
-    Download Bitcoin on-chain metrics from free APIs (no API key needed).
+    Download on-chain metrics from free APIs (no API key needed).
     Sources:
       - CoinMetrics Community API: active addresses, hash rate, tx count, MVRV,
-        fees (native BTC), exchange inflow/outflow
-      - BGeometrics: SOPR
-    Saves to data/macro_data/onchain_btc.csv (daily frequency).
+        fees (native units), exchange inflow/outflow
+      - BGeometrics: SOPR (BTC only on free tier — skipped for other assets)
+    Saves to data/macro_data/onchain_{asset}.csv (daily frequency).
     """
     import urllib.request
     import ssl
     import time
 
-    print(f"\n  Downloading Bitcoin on-chain data...")
+    asset = asset.lower()
+    print(f"\n  Downloading {asset.upper()} on-chain data...")
 
     # SSL fix for Windows
     ctx = ssl._create_unverified_context()
@@ -257,7 +258,7 @@ def download_onchain_data():
     cm_metrics = 'AdrActCnt,HashRate,TxCnt,CapMVRVCur,FeeTotNtv,FlowInExNtv,FlowOutExNtv'
     cm_url = (
         f"https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-        f"?assets=btc&metrics={cm_metrics}&frequency=1d"
+        f"?assets={asset}&metrics={cm_metrics}&frequency=1d"
         f"&start_time={start_date}&page_size=10000"
     )
 
@@ -279,7 +280,7 @@ def download_onchain_data():
                 'HashRate': 'hashrate',
                 'TxCnt': 'tx_count',
                 'CapMVRVCur': 'mvrv',
-                'FeeTotNtv': 'fees_btc',
+                'FeeTotNtv': 'fees_native',
                 'FlowInExNtv': 'exchange_inflow',
                 'FlowOutExNtv': 'exchange_outflow',
             }
@@ -306,29 +307,32 @@ def download_onchain_data():
     except Exception as e:
         print(f"ERROR: {e}")
 
-    # --- BGeometrics: SOPR (free, no key, 8 req/hour) ---
-    print(f"    BGeometrics: SOPR...", end=' ')
-    try:
-        time.sleep(1)  # polite rate limiting
-        bg_url = "https://bitcoin-data.com/v1/sopr"
-        req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
-            data = json.loads(resp.read().decode())
+    # --- BGeometrics: SOPR (free, no key, 8 req/hour) — BTC only ---
+    if asset != 'btc':
+        print(f"    BGeometrics: SOPR skipped (BTC-only on free tier)")
+    else:
+        print(f"    BGeometrics: SOPR...", end=' ')
+        try:
+            time.sleep(1)  # polite rate limiting
+            bg_url = "https://bitcoin-data.com/v1/sopr"
+            req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
 
-        if data:
-            bg_df = pd.DataFrame(data)
-            bg_df['date'] = pd.to_datetime(bg_df['d'])
-            bg_df = bg_df.set_index('date').sort_index()
-            bg_df['sopr'] = pd.to_numeric(bg_df['sopr'], errors='coerce')
+            if data:
+                bg_df = pd.DataFrame(data)
+                bg_df['date'] = pd.to_datetime(bg_df['d'])
+                bg_df = bg_df.set_index('date').sort_index()
+                bg_df['sopr'] = pd.to_numeric(bg_df['sopr'], errors='coerce')
 
-            # Filter to start_date
-            bg_df = bg_df[bg_df.index >= start_date]
-            all_data['sopr'] = bg_df['sopr']
-            print(f"{len(bg_df)} days")
-        else:
-            print("NO DATA")
-    except Exception as e:
-        print(f"ERROR: {e}")
+                # Filter to start_date
+                bg_df = bg_df[bg_df.index >= start_date]
+                all_data['sopr'] = bg_df['sopr']
+                print(f"{len(bg_df)} days")
+            else:
+                print("NO DATA")
+        except Exception as e:
+            print(f"ERROR: {e}")
 
     if not all_data:
         print("  No on-chain data downloaded!")
@@ -341,7 +345,7 @@ def download_onchain_data():
     onchain_df = onchain_df.ffill()  # fill gaps
 
     # Save
-    outfile = os.path.join(MACRO_DIR, 'onchain_btc.csv')
+    outfile = os.path.join(MACRO_DIR, f'onchain_{asset}.csv')
     onchain_df.to_csv(outfile)
     print(f"\n  Saved: {outfile} ({len(onchain_df)} rows, {len(onchain_df.columns)} columns)")
     print(f"  Columns: {list(onchain_df.columns)}")
@@ -625,8 +629,9 @@ def main():
     # 4. Cross-asset pairs
     cross_df = download_cross_asset()
 
-    # 5. On-chain data (Bitcoin)
-    onchain_df = download_onchain_data()
+    # 5. On-chain data (BTC + ETH)
+    for _asset in ['btc', 'eth']:
+        download_onchain_data(asset=_asset)
 
     # 6. Derivatives data (funding rate + open interest)
     deriv_df = download_derivatives_data()

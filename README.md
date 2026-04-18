@@ -13,6 +13,337 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 
 ---
 
+## Engine Reference — Full Inventory (2026-04-17)
+
+Compiled from 4 parallel audits across `crypto_trading_system_ed.py`, `crypto_revolut_ed_v2.py`, `crypto_live_trader_ed.py`, CLAUDE.md, README.md, `config/regime_config_ed.json`, and all `models/*.csv`.
+
+### 1. ENGINE ARCHITECTURE — MODES
+
+| Mode | What it does | Output |
+|---|---|---|
+| **P** | PySR symbolic-regression feature discovery. Runs genetic-program symbolic regression offline on the historical window (months 12→6 ago, anti-leakage). Production Mode D auto-loads the JSON as computed feature columns. ~30–120 min per (asset, horizon). | `models/pysr_{asset}_{h}h.json` |
+| **D** | Grid optimization. Exhaustive sweep of 3 combos × 6 windows × 6 feature-counts × 3 gammas = 324 configs per horizon. Saves top 6 candidates. The expensive core step. | `models/crypto_hourly_best_models.csv` |
+| **V** | Validate + Optuna refine. Live-backtests top 6 D candidates at conf 70/80/90%, picks top 3, runs 50-trial Optuna refine (gamma±0.020, features±5, window±20h), writes winner. **Always prefer V-refined over raw D.** | Production row in `crypto_ed_production.csv` |
+| **H** | Horizon sweep — runs D+V for each horizon in the list, compares, picks the best per asset. Typical call: `H BTC 5,6,7,8h`. | Best horizon per asset |
+| **R** | Regime-detector backtest — sweeps named detectors (SMA, RSI, vol, tsmom, etc.) × horizon pairs; greedy per-regime horizon selection. Feeds Mode S. | Winner detector+horizons |
+| **S** | Strategy joint sweep — full detector × bull_h × bear_h × bull_conf × bear_conf search in one shot. Preferred over R's greedy search when compute allows. | Updates `regime_config_ed.json` |
+| **T** | Hold-shield tuning — sweeps `min_sell_pnl_pct × max_hold_hours`. Uses 0% fee assumption (maker-first). | Config update |
+| **G** | Rally-cooldown BUY gate — sweeps `(h_short, h_long, t_short, t_long, cd_hours)` over 49,716 configs. STRICT pick: beats_3of3 windows AND plateau_score ≥ 0.7. Current winner: `h_short=8, t_short=3%, h_long=36, t_long=5.5%, cd=30h`. | Config update |
+
+**Chains in use:** DV, HRS, DVRS, HRSTG, RSG. Default `--replay = 1440h` (2 months) when omitted.
+
+**Production dispatch path:** HRSTG = Horizon sweep → Regime → Strategy (detector+conf) → hold-shield Tune → rally-cooldown Gate.
+
+### 2. FEATURES — WHAT'S COMPUTED AND WHAT WINS
+
+130+ feature universe, ~100 computed live, 18–25 actually selected by LGBM importance for ETH production.
+
+**2.1 Technical (51 total, all live)**
+
+| Group | Count | Examples | Selected? |
+|---|---|---|---|
+| Log returns | 14 | `logret_{1..240}h` | `logret_120h` (75%), `logret_240h`, `logret_72h` |
+| Spreads | 6 | `spread_24h_4h`, `spread_120h_12h` | occasional |
+| MAs | 4 | `price_to_sma100h`, `sma20_to_sma50h` | `price_to_sma100h` (70%) |
+| Momentum | 2 | `rsi_14h`, `stoch_k_14h` | occasional |
+| Volatility | 6 + 2 GK | `volatility_{12,48}h`, `atr_pct_14h`, `gk_volatility` | `volatility_48h` (55%) |
+| ADX trend | 3 | `adx_14h`, `plus/minus_di_14h` | `adx_14h` (60%) |
+| Temporal | 4 | `hour_{sin,cos}`, `dow_{sin,cos}` | `hour_cos` (100% of top models) |
+| Derivatives of price | 7 | velocity, accel, jerk | occasional |
+| Bollinger/Z | 2 | `bb_position_20h`, `zscore_50h` | rare |
+| Volume | 1 | `volume_ratio_h` | rare |
+
+**2.2 Macro (72 total, ~40 live when CSVs present)**
+
+Sources: VIX, DXY, SP500, NASDAQ, GOLD, US10Y, EURUSD, USDJPY, OIL → each with zscore + chg{1,5,10}d + vol{5,20}d, plus 6 VIX-regime flags.
+
+- **Actually winning:** `m_sp500_chg1d` (70%), `m_nasdaq_chg1d` (55%), `m_dxy_chg*`, `m_us10y_chg*` (20–30%)
+- **DXY note:** delisted March 2026, code uses `DX-Y.NYB` fallback
+
+**2.3 Cross-asset (16 total, heavy hitters)**
+
+- `xa_dax_relstr5d` (80% of top models) — BTC/ETH relative strength vs European equities
+- `xa_sp500_relstr5d` (75%)
+- Correlations (10d, 30d) weaker
+
+**2.4 PySR-discovered (5 formulas per horizon, ETH only)**
+
+- Stored per horizon in `models/pysr_ETH_{5,6}h.json`
+- `pysr_2` and `pysr_5` selected ~50% of the time; others 20–30%
+- Encode nonlinear interactions between momentum + cross-asset + seasonal terms
+- Evaluated via SymPy in `_compute_pysr_features()` at `crypto_trading_system_ed.py:1060-1150`
+
+**2.5 Sentiment (16 total, partial)**
+
+- **Fear & Greed:** `fg_chg5d` selected 40% of top models. Works.
+- **GDELT:** completely dead. Code exists in `_compute_gdelt_features()` but `data/macro_data/gdelt.csv` is never written or loaded. The HRST BTC crash this morning was mid-GDELT download — reactivating GDELT is a separate project.
+
+**2.6 Fully dead feature groups (code exists, never wired)**
+
+- **On-chain BTC** — CoinMetrics (`active_addresses`, `MVRV`, `SOPR`, `hashrate`, `tx_count`, exchange flows) downloaded by `download_macro_data.py` but never fed into `build_all_features()`. Completely orphaned. Biggest untapped feature source.
+- **Derivatives / funding rate** — loaded as `_funding_rate` (underscore = non-feature), used only as a regime gate candidate, never in training.
+- **Feature Set B** — defined but `ACTIVE_FEATURE_SET='A'`; production actually uses Set D (dynamic, per-horizon selection).
+
+**2.7 Feature grades 1–5 (from Topic 2 deep-dive)**
+
+Grading basis: frequency across the 48 production models (from `crypto_ed_production.csv`). Grade 5 = picked in ≥50%, Grade 1 = never or <5%.
+
+*Technical (price/volatility/momentum):*
+
+| Feature | What it is | % of models | Grade |
+|---|---|---|---|
+| `hour_cos` | Cosine of hour-of-day (circadian cycle) | 73% | 5 |
+| `price_to_sma100h` | Price relative to 100h SMA (trend strength) | 73% | 5 |
+| `logret_120h` | 5-day log return | 69% | 5 |
+| `sma20_to_sma50h` | Short-vs-medium MA crossover | 58% | 5 |
+| `adx_14h` | Trend strength (ADX) | 50% | 5 |
+| `vol_ratio_12_48` | 12h/48h realised-vol ratio | 40% | 4 |
+| `logret_240h` | 10-day log return | 38% | 4 |
+| `logret_72h` | 3-day log return | 35% | 4 |
+| `logret_24h` | 1-day log return | 35% | 4 |
+| `volatility_48h` / `gk_volatility_48h` | 48h realised vol (plain and Garman-Klass) | 31% each | 4 |
+| `volatility_12h` | 12h realised vol | 31% | 4 |
+| `spread_120h_12h` | MA spread, medium-vs-short | 31% | 4 |
+| `plus_di_14h` | Upside directional index | 25% | 3 |
+| `spread_240h_24h` | MA spread, long-vs-day | 21% | 3 |
+| `atr_pct_14h` | 14h ATR % | 19% | 3 |
+| `bb_position_20h` | Bollinger position | 19% | 3 |
+| `price_accel_24h` | 24h acceleration | 17% | 3 |
+| `minus_di_14h` | Downside DI | 17% | 3 |
+| `price_to_sma50h` | Price vs 50h SMA | 15% | 3 |
+| `zscore_50h` | Z-score on 50h window | 13% | 2 |
+| `spread_24h_4h` | Very-short spread | 13% | 2 |
+| `logret_6h` / `logret_8h` / `spread_120h_8h` | Short-window variants | 8–10% | 2 |
+| `hour_sin`, `stoch_k_14h`, `gk_volatility_14h`, `logret_7h`, `price_accel_12h`, `spread_48h_12h` | Minor | 8% | 2 |
+| `rsi_14h`, `logret_{2h,5h,8h,12h,48h}`, `dow_sin`, `intraday_range`, `volume_ratio_h`, `price_accel_4h`, `spread_48h_4h`, `price_to_sma20h` | Rare or never | ≤6% | 1 |
+
+*Macro (external markets):*
+
+| Feature | What it is | % | Grade |
+|---|---|---|---|
+| `m_nasdaq_chg1d` | NASDAQ 1-day change | 46% | 4 |
+| `m_sp500_chg1d` | S&P 1-day change | 40% | 4 |
+| `m_vix_chg1d` | VIX 1-day change | 38% | 4 |
+| `m_dxy_chg1d` | DXY 1-day change | 15% | 3 |
+| `m_gold_chg1d` | Gold 1-day change | 13% | 2 |
+| `m_gold_chg10d`, `m_dxy_chg5d`, `m_gold_vol5d`, `m_oil_chg5d`, `m_sp500_chg5d`, `m_us10y_chg5d`, `m_vix_chg5d`, `m_eurusd_*`, `m_vix_vol5d` | Longer-window macro variants | ≤6% | 1 |
+
+**Verdict on macro:** only the 1-day equity/VIX changes earn their keep. Everything longer-window or on FX/commodity sub-dimensions is basically dead weight.
+
+*Cross-asset:*
+
+| Feature | What it is | % | Grade |
+|---|---|---|---|
+| `xa_dax_relstr5d` | BTC/ETH 5-day relative strength vs DAX | 44% | 4 |
+| `xa_eth_usd_relstr5d` | Relative strength vs ETH | 38% | 4 |
+| `xa_sp500_relstr5d` | vs S&P | 38% | 4 |
+| `xa_nasdaq_relstr5d` | vs NASDAQ | 29% | 3 |
+| `xa_dax_corr10d` | 10-day correlation vs DAX | 27% | 3 |
+| `xa_sp500_corr10d` | vs S&P | 17% | 3 |
+| `xa_eth_usd_corr30d`, `xa_nasdaq_corr10d`, `xa_btc_usd_relstr5d`, `xa_eth_usd_corr10d` | Minor | ≤8% | 1–2 |
+
+**Verdict:** relative-strength (5-day momentum differential) is the signal; plain correlations are weaker.
+
+*Sentiment:*
+
+| Feature | What it is | % | Grade |
+|---|---|---|---|
+| `fg_chg5d` | Fear & Greed 5-day change | 23% | 3 |
+| `fg_chg10d` | 10-day change | 13% | 2 |
+| `fg_zscore` | Z-score | 10% | 2 |
+| `fg_value`, `fg_chg1d`, `fg_ma5d` | Raw, short-window, smoothed | ≤2% | 1 |
+| GDELT (geopolitical tone/volume, 7+ features) | Never loaded into `build_all_features()` | 0% | 1 (DEAD) |
+
+*PySR symbolic features:*
+
+| Feature | % | Grade |
+|---|---|---|
+| `pysr_5` | 42% | 4 |
+| `pysr_4` | 35% | 4 |
+| `pysr_2` | 33% | 4 |
+| `pysr_3` | 29% | 3 |
+| `pysr_1` | 21% | 3 |
+
+**Verdict:** all 5 PySR formulas earn their spot (none below 20%). Genetic programming found real nonlinear combinations.
+
+*On-chain (MVRV, SOPR, hashrate, active addresses, netflow…):*
+
+All Grade 1 (DEAD). `download_macro_data.py` has the download skeleton but no loader in `build_all_features()`. CSVs get written and never read. This is a real opportunity — these are the most-cited on-chain signals in crypto academic literature.
+
+*Derivatives:*
+
+`funding_rate`: Grade 1 as a feature. Loaded as `_funding_rate` with the underscore deliberately excluding it from the feature matrix. Only used as an optional regime gate in `crypto_live_trader_ed.py`, and even that path isn't active. BTC-only data source; would need per-asset sourcing to generalise.
+
+### 3. MACHINE LEARNING — WHAT TRAINS AND WHAT DOMINATES
+
+**3.1 Current production ensemble combos (3)**
+
+Per `crypto_trading_system_ed.py:3000-3005`:
+
+- RF + LGBM
+- XGB + LGBM
+- RF + XGB
+
+Binary vote; confidence = `buy_votes / total_votes × 100`.
+
+**3.2 Models tested and dropped — why**
+
+| Model | Status | Why dropped / not used |
+|---|---|---|
+| **LSTM** (solo + as partner) | Dropped | 0 valid solo results. `LSTM+LGBM ≡ RF+LGBM` — LSTM voted essentially randomly; partner carried all signal. Sequence modeling doesn't add over hand-crafted lags on hourly data. |
+| **TabPFN / tabular transformers** | Dropped | Failed — no usable signal. Pretrained tabular transformers don't fit our feature distribution; training from scratch lacks data. |
+| **RF+GB, RF+LR, GB+LR** (combos) | Dropped | 0 wins across V1.6–V1.7.1. Removed from `ALL_MODELS`. |
+| **Gradient Boosting solo** | Not in `ALL_MODELS` | Dominated by LGBM (same family, LGBM faster + GPU). |
+| **SVM** | Not in `ALL_MODELS` | Doesn't scale to 50k rows with 100+ features; kernel tuning unstable. |
+| **LR solo** | Dropped post-embargo | Historically won `crypto_hourly_best_models.csv` pre-embargo — turned out to be leakage artifact. Post-embargo: 0 wins. |
+| **V1.7.2 regularization sweep** | Wash | Signal/noise too low for fine reg tuning. |
+| **Multi-timeframe fusion** | Dropped | Worse than single-TF. |
+| **CPCV validation** | Incompatible | Conflicts with temporal-decay (gamma) weighting. |
+
+**3.3 PySR role**
+
+- **For features (P mode):** ACTIVE — per-horizon formulas on ETH, feeding into D/V grid as synthetic features. Working.
+- **For regime detection (pysr detector type):** code exists (`crypto_live_trader_ed.py:219-250`) but not used in any asset's live config. Tested 2026-03-29: forward48, sma48_200, forward72 labels — best accuracy 58%, too weak. Hand-crafted `tsmom_672h` won over PySR-discovered regime.
+
+**3.4 Named regime detectors (catalog)**
+
+Defined at `crypto_trading_system_ed.py:4795-4801`. Five survivors after trimming from 16:
+
+- `sma24>sma100`
+- `sma168>sma480`
+- `price>sma72`
+- `vol_calm` (Andersen-Bollerslev deseasonalized 24h vol < 70th pct over 30d)
+- `tsmom_672h` — time-series momentum 28d (Liu & Tsyvinski 2021) — **currently active on ETH**
+
+**Dropped detector families:** 5 RSI variants, 4 drawdown variants, MACD>0, 9 redundant SMA/momentum variants. No academic support for RSI/drawdown as regime classifier in crypto literature.
+
+**3.5 Should we test other ML models?**
+
+- **Worth testing: CatBoost.** Only candidate genuinely likely to beat LGBM. Optimized for categorical features, often wins on structured data with minimal tuning. Cheap to drop into `ALL_MODELS` as a 4th combo partner (`RF+CatBoost`, `CatBoost+LGBM`).
+- **Maybe worth revisiting: HistGradientBoosting (sklearn).** Similar spirit to LGBM but different split logic; could diversify the tree-based stack.
+- **Not worth revisiting:** tabular transformers (FT-Transformer, SAINT) — same scaling problems as TabPFN on our ~50k-row datasets. ExtraTrees — variance-reduction version of RF; RF already in combos.
+- **Definitively closed:** LSTM, TabPFN, LR solo, SVM, plain GB solo.
+
+### 4. HORIZONS — 5 / 6 / 7 / 8 h
+
+- Mode H sweeps all four, picks best per asset via `return × (win_rate/100)` score.
+- **4h dropped** — all Mode D candidates negative post-embargo fix (CPCV PBO=1.0, overfit).
+- **ETH production:** bull=6h@85%, bear=8h@65%. This asymmetry is intentional (see §6).
+- **6h vs 7h tradeoff (2026-04-08, partially unresolved):** 7h D#1 XGB+LGBM +24.73% / 64% WR vs 6h Refined#1 +23.17% / 78% WR. Picked 7h initially for raw return; later Mode S joint sweep put bull back to 6h at higher confidence.
+- Full 5,6,7,8h HRST BTC run was kicked off this morning but crashed at GDELT step — needs restart.
+
+**4.1 Horizon distribution + deep-dive on 4h / 10h / 12h / 14h (from Topic 4)**
+
+Production CSV distribution:
+
+| Horizon | Model count | Share |
+|---|---|---|
+| 5h, 6h, 8h | 9 each | 56% combined |
+| 7h | 8 | 17% |
+| 4h | 2 | 4% |
+| 10h | 4 | 8% |
+| 12h | 4 | 8% |
+| 14h | 2 | 4% |
+| 16h | 1 | 2% |
+
+Code reality:
+
+- `crypto_trading_system_ed.py:5428` — Ed default sweep is `[5, 6, 7, 8]`. That's why HRST BTC this morning is testing those four.
+- `crypto_trading_system_ed.py:4818` — Mode R/S default test horizons extend to `[4, 5, 6, 7, 8, 10, 12]` when not specified. So 10h and 12h get tested opportunistically; 14h only when explicitly requested.
+
+Per-horizon verdict:
+
+- **4h — UNRELIABLE.** Dropped historically: "All Mode D candidates negative post-embargo" (CLAUDE.md 2026-03-24). The embargo fix killed 4h because label overlap with horizon-4 is severe — there's simply not enough time between training end and evaluation to keep signal fresh. The 2 rows present in production CSV are legacy pre-embargo survivors. **Do not revive.**
+- **10h — LIKELY USEFUL, UNDER-TESTED.** Has 4 models in CSV, appears in default Mode R/S sweeps. No dedicated experiment against 5–8h. Worth a pairwise test on a long replay (2880h+) before committing.
+- **12h — SAME STATUS AS 10h.** 4 models in CSV, default-swept. Same recommendation: run a head-to-head.
+- **14h — BARELY TESTED.** Only 2 models, not in default sweeps. No evidence either way. For the rally-cooldown `h_long` parameter (Mode G), 14 is a tested value — but as a prediction horizon it's essentially untried.
+
+**Recommended experiment:** a dedicated `HRS BTC 5,6,7,8,10,12,14` run on a 2880h window to see if longer horizons dominate the 5–8h band on BTC specifically. BTC tends to trend on longer timescales than ETH — the current 5–8h concentration may be an artefact of ETH-focused tuning bleeding into BTC runs.
+
+### 5. RISK MANAGEMENT & GATES
+
+| Mechanism | State | Evidence | Verdict |
+|---|---|---|---|
+| Stop-Loss / Take-Profit | OFF | 8 variants tested 2026-04-14 (`backtest_sl_variants.py`). Baseline (no SL) won: +1.11% PnL / −8.71% DD. Profit-lock and trailing all −11% to −20%. Disaster −7%/−10% never fired. | Keep OFF. Signal edge > risk mitigation. |
+| V7 Rally-Cooldown BUY Gate | ON | 49,716-config grid. H1 +10.42% / H2 +18.01% / 60d +31.84% / worst DD −3.63%. STRICT plateau-ridge winner. | Keep ON. |
+| Adaptive cooldown lift | Rejected | 0 triggers on 30d, −8.8% to −23.7% on 90d vs fixed 30h | Dropped. |
+| Hold-shield (`min_sell_pnl` + `max_hold`) | ON | ETH: 0.5% / 10h. Failsafe force-sell at 10h. | Keep. |
+| Regime filter (bull/bear) | ON | Mode R/S validated `tsmom_672h` for ETH | Keep, regime-conditional params. |
+| Min-confidence thresholds | ON | Per-regime: bull 85% / bear 65%. Global fallback 75. | Keep, per regime. |
+| Dynamic confidence raises in bear | Rejected (2026-03-29) | All variants lost money — blocked winning contrarian trades | Dropped. |
+| Maker orders (`bid+0.01`, `post_only`) | ON | 4 bugs fixed. 180s/10s window tuned 2026-04-15. | Keep. |
+| NTP clock sync | ON | Fixed 2026-04-13 after echo-back bug. Startup + every 5min + on 409. | Keep. |
+| Trailing stops | Rejected (2026-03-29) | Baseline signal exits beat all variants on 336h | Dropped. |
+| Blow-off filter (6 families × 4 actions) | Experimental only | Best variant +0.58pp — "not actionable" | Not wired. |
+| Momentum-decay signals (5 signals) | Experimental only | Commit `bfdd115` "replaces blowoff in bot" but not live | Not wired. |
+
+### 6. REGIME-CONDITIONAL ASYMMETRY (critical for future work)
+
+Current ETH asymmetry:
+
+| | Bull | Bear |
+|---|---|---|
+| Horizon | 6h (short) | 8h (longer) |
+| Min confidence | 85% | 65% |
+| Max position | $12k | $12k |
+
+Pattern observed across backtests: bull reliably 6h; bear drifts 7h–8h. Bull wins high (85–90% WR); bear is lower-conviction filler. Rationale: bear needs longer horizon to capture reversals + lower confidence threshold because signals are noisier.
+
+**Confidence threshold per regime — DO NOT unify.** 2026-03-29 test: raising bear confidence across board blocked winning contrarian trades. Per-regime thresholds are load-bearing.
+
+**Rally-cooldown regime-conditionality: UNTESTED.** V7 params swept globally; no bull/bear split tried. Open hypothesis worth Mode G re-sweep with regime split.
+
+**6.1 What doesn't work — deeper (from Topic 6)**
+
+Going beyond the "dropped" one-liners in Agent 4's output to surface the lessons:
+
+*Trend-following risk rules fight the model.* Stop-loss / take-profit (all 8 variants), trailing stops (0.25–1%), profit-lock (+0.5/+0.22) — every one lost vs. the no-SL baseline:
+
+- Profit-lock variants: −11% to −20% PnL on 30-day window. Root cause: scalping sub-0.3% winners by locking in micro-gains surrenders the fat tail of 2–5% winners that drive P&L. Meanwhile, hold-shield already caps losses at ~2–3% on disaster paths, so the "loss mitigation" benefit of SL is zero.
+- Trailing stops: similar. Baseline signal exits beat all variants for both BTC (+$826) and ETH (+$207) on 336h.
+- **Lesson for future:** the model's signal quality IS the risk edge. Any rule that overrides SELL timing will chop winners. Only exception: a disaster brake at −5% to −7% that never fires in normal operation — free insurance, but no backtest uplift since it never triggers.
+
+*Regime confidence asymmetry cannot be inverted.* Raising `min_confidence` in bear was tested (2026-03-29). Every variant lost money because it blocked the contrarian bear-rally trades that are the bear book's only positive-expectancy setups. The current bull=85% / bear=65% split is counterintuitive but battle-tested — higher confidence in the calm regime, lower in the volatile regime (precisely because in bear the low-confidence signals contain more actionable mean-reversion).
+
+*Ensemble size has sharply diminishing returns.*
+
+- LSTM + LGBM = RF + LGBM (identical results). LSTM voted randomly; partner carried all the signal. **Lesson:** marginal model additions don't help once you have one strong tree-based learner in the stack.
+- Multi-model ensembles (RF+GB+LGBM, RF+GB+LR+LGBM) rarely win in production CSVs — single LR or LGBM often wins outright. **Lesson:** ensemble-averaging dilutes a strong base model when the added models are weaker. The "committee of experts" intuition is wrong here.
+- V1.7.2 regularization added `ra`/`rl` params; was a wash. **Lesson:** the signal-to-noise ratio at this timescale doesn't support fine regularization tuning — either it matters catastrophically (embargo) or it matters imperceptibly.
+
+*PySR for regime labels (as opposed to features) fails.* Tested forward48, sma48_200, forward72 regime labels. Best accuracy 58% — too weak. PySR's strength is finding compact algebraic interactions of continuous inputs. Binary regime classification is not that problem. **Lesson:** keep PySR for feature synthesis (where it works: `pysr_2/4/5` at 33–42% selection); use explicit named detectors (`tsmom_672h`, `sma168>sma480`) for regime binary classification.
+
+*4h horizon is structurally broken.* Post-embargo, nothing survives. Label overlap dominates. **Lesson:** horizon must exceed embargo window with enough margin for the prediction target to be genuinely future-unknown. 4h is at the edge and doesn't clear it.
+
+*Adaptive rules beat fixed rules only when they have enough data.* Adaptive rally-cooldown lift (early removal on reversion) — tested on 90d: lost −8.8% to −23.7% vs fixed 30h. **Lesson:** added parameters need enough events to learn from. 90 days contained too few rally-then-reversion cases to estimate the reversion threshold reliably. A fixed-duration rule with one tuned parameter beat an adaptive rule with three.
+
+*Blow-off filters didn't beat the no-filter baseline.* 6 filter families × 4 actions tested. Best improvement: +0.58pp (+10.32% baseline → +10.91% with filter). Not actionable. The V7 rally-cooldown gate, which does something similar (block BUYs after recent strength), did win — because its trigger (`rr_8h ≥ 3%`) is a softer, earlier, more probabilistic condition than RSI>70 or %B>1.0. **Lesson:** blow-off tops are hard to identify from price alone because distribution cutoffs (like RSI>70) fire after the move is already done. Momentum acceleration features (`rr_8h` + `rr_36h`) catch it earlier.
+
+### 7. WHAT'S DROPPED / ARCHIVED (WHOLE VERSIONS)
+
+- **BTC trading** — disabled 2026-04-06 (45% WR, avg loss > avg win on 1-month OOS). Position liquidated.
+- **CASCA, Deku, Doohan V1.1–V1.7** — all archived when embargo fix (2026-03-24) revealed pre-embargo APFs were 5–26× inflated. V1.7.1 is the last surviving member.
+- **4h horizon** — all negative post-embargo.
+- **V1.7.2 regularization sweep** — wash, V1.7.1 unregularized more stable.
+- **Multi-timeframe fusion** — worse than single-TF.
+- **CPCV validation** — incompatible with temporal decay (gamma).
+- **SV3 horizon sweep (partial)** — superseded by Mode S joint sweep in production.
+- **`/optimize` + `/optstatus` in trader bot** — removed 2026-04-16; optimizer lives in its own bot.
+
+### 8. DEAD / UNVERIFIED / WORTH REVISITING
+
+| Item | State | Opportunity |
+|---|---|---|
+| On-chain features (MVRV, SOPR, hashrate, tx_count, exchange flows) | Code exists, never wired | Biggest untapped source. 1–2 weeks to wire into `build_all_features()`. |
+| GDELT sentiment | Code exists, loader missing | Sourcing GDELT cleanly (rate limits, cache) is the work. |
+| Funding rate as feature | Loaded, never trained | Experimental feature in next Mode D sweep. |
+| Feature Set B (macro-heavy) | Defined, unused | Could outperform Set A in macro-driven regimes. |
+| PySR for regime (not features) | Tested, rejected 58% acc | Probably not worth revisiting until new labels. |
+| Other assets (BTC, SOL, ADA, XRP, DOGE, LINK, AVAX, DOT) | Production rows exist, disabled | Re-enable after BTC 45%-WR issue solved — may need per-asset PySR discovery. |
+| Signal nondeterminism | Demoted 2026-04-17 | Only actionable if reproduced on pinned code. |
+
+---
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)

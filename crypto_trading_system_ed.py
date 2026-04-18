@@ -948,6 +948,25 @@ def _compute_gdelt_features(gdelt_df, prefix='gp_'):
     return features
 
 
+def _compute_onchain_features(oc_df, prefix='oc_'):
+    """Compute on-chain feature derivations.
+    Input columns (daily): active_addresses, mvrv, fees_native, exchange_inflow,
+    exchange_outflow, hashrate, tx_count, exchange_netflow, [sopr for BTC].
+    Per column: chg1d, chg5d, chg10d, zscore30d, ratio_ma30d."""
+    features = pd.DataFrame(index=oc_df.index)
+    for col in oc_df.columns:
+        s = oc_df[col].astype(float)
+        tag = f"{prefix}{col}"
+        roll_mean_30 = s.rolling(30, min_periods=10).mean()
+        roll_std_30 = s.rolling(30, min_periods=10).std()
+        features[f'{tag}_chg1d'] = s.pct_change(1) * 100
+        features[f'{tag}_chg5d'] = s.pct_change(5) * 100
+        features[f'{tag}_chg10d'] = s.pct_change(10) * 100
+        features[f'{tag}_zscore30d'] = (s - roll_mean_30) / (roll_std_30 + 1e-10)
+        features[f'{tag}_ratio_ma30d'] = s / (roll_mean_30 + 1e-10)
+    return features
+
+
 def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     features = pd.DataFrame(index=cross_df.index)
     if target_col not in cross_df.columns:
@@ -1011,6 +1030,19 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             xa_feats['_merge_date'] = xa_feats.index.normalize()
             df = df.merge(xa_feats, on='_merge_date', how='left')
             new_cols = [c for c in xa_feats.columns if c != '_merge_date']
+            all_cols.extend(new_cols)
+            added += len(new_cols)
+
+    # On-chain features (daily — merge on date with ffill)
+    onchain_asset_map = {'BTC': 'btc', 'ETH': 'eth'}
+    oc_key = onchain_asset_map.get(asset_name)
+    if oc_key is not None:
+        oc_df = _load_macro_csv(f'onchain_{oc_key}.csv')
+        if oc_df is not None:
+            oc_feats = _compute_onchain_features(oc_df, prefix='oc_')
+            oc_feats['_merge_date'] = oc_feats.index.normalize()
+            df = df.merge(oc_feats, on='_merge_date', how='left')
+            new_cols = [c for c in oc_feats.columns if c != '_merge_date']
             all_cols.extend(new_cols)
             added += len(new_cols)
 

@@ -15,6 +15,89 @@ Doohan V1.7.1, Deku, CASCA and all prior versions archived (Doohan retired 2026-
 
 ---
 
+## Engine Reference Card (2026-04-17)
+
+**Base knowledge for current models + future analysis.** Built from live audit of `crypto_ed_production.csv` (48 models) + CLAUDE.md / README history. Do not delete — update in place when new evidence arrives.
+
+### Feature grades (5=best, 1=worst/dead)
+
+Grades = frequency of feature selection across the 48 production models.
+
+**Technical — winners (5):** `hour_cos` (73%), `price_to_sma100h` (73%), `logret_120h` (69%), `sma20_to_sma50h` (58%), `adx_14h` (50%).
+**Technical — strong (4):** `vol_ratio_12_48`, `logret_240h`, `logret_72h`, `logret_24h`, `volatility_48h`, `gk_volatility_48h`, `volatility_12h`, `spread_120h_12h` (31-40%).
+**Technical — useful (3):** `plus_di_14h`, `spread_240h_24h`, `atr_pct_14h`, `bb_position_20h`, `price_accel_24h`, `minus_di_14h`, `price_to_sma50h` (15-25%).
+**Technical — marginal (2):** `zscore_50h`, `spread_24h_4h`, `hour_sin`, `stoch_k_14h`, short-window logret/spread variants (8-13%).
+**Technical — dead (1):** `rsi_14h`, `logret_{2h,5h,8h,12h,48h}`, `dow_sin`, `intraday_range`, `volume_ratio_h`, `price_accel_4h`, `spread_48h_4h`, `price_to_sma20h` (≤6%).
+
+**Macro — useful (4):** `m_nasdaq_chg1d` (46%), `m_sp500_chg1d` (40%), `m_vix_chg1d` (38%).
+**Macro — marginal (3):** `m_dxy_chg1d` (15%).
+**Macro — dead (1):** all 5d/10d/vol variants, `m_gold_*` (except 1d), `m_oil_*`, `m_eurusd_*`, `m_us10y_*`. Only 1-day equity/VIX changes earn their keep.
+
+**Cross-asset — strong (4):** `xa_dax_relstr5d` (44%), `xa_eth_usd_relstr5d` (38%), `xa_sp500_relstr5d` (38%).
+**Cross-asset — useful (3):** `xa_nasdaq_relstr5d` (29%), `xa_dax_corr10d` (27%), `xa_sp500_corr10d` (17%).
+**Cross-asset — dead (1):** `xa_eth_usd_corr30d`, `xa_nasdaq_corr10d`, `xa_btc_usd_relstr5d`, `xa_eth_usd_corr10d` (≤8%). **Rule of thumb: relative-strength > correlation.**
+
+**Sentiment — useful (3):** `fg_chg5d` (23%).
+**Sentiment — marginal (2):** `fg_chg10d`, `fg_zscore`.
+**Sentiment — dead (1):** `fg_value`, `fg_chg1d`, `fg_ma5d`. **GDELT (7+ features): DEAD — downloaded but never loaded in `build_all_features()`.**
+
+**PySR (all earn a spot, 4):** `pysr_5` (42%), `pysr_4` (35%), `pysr_2` (33%), `pysr_3` (29%), `pysr_1` (21%). Genetic programming found real nonlinear combinations.
+
+**On-chain — DEAD (1):** MVRV, SOPR, hashrate, active addresses, exchange netflow, fees, tx count — download skeleton exists in `download_macro_data.py`, no loader in `build_all_features()`. **Biggest unrealised opportunity.**
+
+**Derivatives — DEAD as feature (1):** `_funding_rate` loaded with underscore to exclude from feature matrix. Only available as regime gate (not active). BTC-only source.
+
+### Horizon status
+
+Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14h = 2**, 16h = 1.
+
+- **5h, 6h, 7h, 8h** — core band, default sweep in Ed ([line 5428](crypto_trading_system_ed.py#L5428)). Current production: ETH bull=6h, bear=8h.
+- **4h — broken.** All Mode D candidates negative post-embargo. Label overlap dominates — horizon too close to embargo window. The 2 rows in CSV are pre-embargo legacy. **Do not revive.**
+- **10h, 12h — under-tested.** In default Mode R/S sweep ([line 4818](crypto_trading_system_ed.py#L4818)) but no dedicated head-to-head vs 5-8h. **Action: run `HRS BTC 5,6,7,8,10,12` on 2880h.**
+- **14h — barely tested.** Not in default sweeps. Only 2 legacy rows. Worth including in BTC sweep since BTC trends on longer timescales than ETH.
+
+### What works (in production, with evidence)
+
+- **Ed V2 regime-switching (2026-04-07).** ETH bull=6h@85% / bear=8h@65%, HRS replay showed bull +7.4% @ 87.5% WR, bear +1.9% @ 63.6% WR.
+- **V7 rally-cooldown BUY gate (2026-04-16).** `h_short=8, t_short=3%, h_long=36, t_long=5.5%, cd=30h`. Grid of 49,716 configs; winner: H1 +10.42% / H2 +18.01% / 60d +31.84% / worst DD −3.63%. Plateau ridge = robust.
+- **Named detector `tsmom_672h`.** 28-day time-series momentum (Liu & Tsyvinski 2021). Winner of Mode S joint sweep.
+- **Hold-shield (0.5% PnL / 10h max).** Prevents premature loss-cutting; 10h failsafe caps disaster paths at −2 to −3%.
+- **Maker orders (bid+0.01, post_only, 180s/10s reprice).** 0% fees. Multiple bug fixes landed (penny-improvement, post-only race, buy-balance rounding).
+- **Embargo fix (`train_end = i - horizon`).** Killed inflated pre-embargo APFs (5-26×) — realistic 1-3× post-fix.
+
+### What doesn't work (tested and abandoned)
+
+- **All stop-loss / take-profit / profit-lock / trailing-stop variants.** 8+ variants tested; baseline (no SL) won every dimension. Scalping sub-0.3% winners surrenders the fat tail; hold-shield already caps losses. **Only exception worth considering: −5% to −7% disaster brake as free insurance.**
+- **Raising bear min-confidence.** Blocks contrarian bear-rally trades — every variant lost. Current bull=85%/bear=65% is correct.
+- **LSTM as ensemble partner.** Voted randomly; RF+LGBM ≡ LSTM+LGBM. Single strong tree-based learner dominates.
+- **V1.7.2 regularization.** Wash; signal/noise too low for fine regularization tuning.
+- **PySR for regime labels (not features).** 58% accuracy — too weak. Keep PySR for feature synthesis only.
+- **4h horizon.** Structurally broken post-embargo.
+- **Adaptive rally-cooldown lift.** −8.8 to −23.7% vs fixed 30h on 90d.
+- **Blow-off filters (RSI>70, %B>1, etc.).** Best filter +0.58pp — not actionable. V7 rally-cooldown works because `rr_8h ≥ 3%` catches the move earlier than distribution cutoffs.
+- **BTC trading.** Disabled 2026-04-06 (45% WR, avg loss > avg win on 1m OOS). Needs re-evaluation.
+- **Multi-timeframe fusion, TabPFN, CPCV, GB/RF solo, GB+LR.** All dominated in tests.
+
+### Regime-conditional asymmetries (important for future models)
+
+- **ETH horizon asymmetry:** bull=6h / bear=8h. Longer horizon in bear = more confirmation needed in volatile regime.
+- **ETH confidence asymmetry:** bull=85% / bear=65%. Counterintuitive but battle-tested — bear's low-confidence signals are mean-reversion setups that *should* fire.
+- **No per-regime SL/TP found useful.** All rules that override SELL timing lose.
+- **No per-regime feature set found useful yet.** Open question: should bear use more macro, bull more technical? Not tested.
+
+### Key lessons for future model design
+
+1. **Model signal quality IS the risk edge.** Don't override SELL timing with price-based rules.
+2. **Relative-strength > correlation** for cross-asset features.
+3. **1-day macro changes > multi-day macro variants.** Longer windows smooth out the signal.
+4. **Feature count should be dynamic (Set D) not static.** Per-horizon selection via LGBM importance beats fixed sets A or B.
+5. **Ensemble dilutes a strong base model.** Don't stack weak models onto LGBM.
+6. **Trigger early, don't wait for distribution cutoffs.** `rr_8h ≥ 3%` beats `RSI > 70`.
+7. **Horizon must clear embargo window with margin.** 4h is at the edge and fails; 5h+ works.
+8. **On-chain features are the biggest untapped source** — all coded, none loaded.
+
+---
+
 ## Machine Setup
 
 **One shared engine folder** synced via Google Drive — both machines use the same code, data, and models. Only the venv is local per machine.
@@ -301,7 +384,7 @@ ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R
 0a. ~~**Rally-cooldown BUY gate**~~ — **DONE 2026-04-16.** V7 `(h_short=8, h_long=36, t_short=3%, t_long=5.5%, cd=30h)` in production via `_update_rally_cooldown()` / `_is_rally_cooldown_active()` in `crypto_revolut_ed_v2.py`. See Completed 2026-04-16 section for full details. Mode G added for re-optimization.
 
 0b. ~~**Remove `/optimize` and `/optstatus` from trader bot**~~ — **DONE 2026-04-16.** Deleted `_handle_optimize_command` + `_handle_optstatus_command` + `_optimize_proc`/`_optimize_lock` globals + dispatcher branches + unused `subprocess` import from `crypto_revolut_ed_v2.py`. Optimizer lives in its own bot.
-1. **Investigate signal nondeterminism** — Three RS ETH 1440h reruns (7 Apr 15:24, 7 Apr 16:08, 9 Apr 16:03) produced winners +49.98% / +60.72% / +52.36% with shifting bear horizons (8h@90% → 8h@85% → 6h@85%). ~11pp swing from same script + same window. Pin seeds in XGB/LGBM/RF signal generators OR add a "run sweep N times and average" wrapper before trusting any single winner.
+1. **Investigate signal nondeterminism (demoted 2026-04-17)** — Original claim: three RS ETH 1440h reruns (7 Apr 15:24 / 16:08, 9 Apr 16:03) produced winners +49.98% / +60.72% / +52.36% from "same script + same window". Re-audit on 2026-04-17 weakened the evidence: run 3 had a real commit (`fac33a4` R->S handoff fix) between it and runs 1/2; Google Drive version history for `crypto_trading_system_ed.py` shows edits on 7 Apr around the runs (v25-27 timestamped late afternoon Europe time), so runs 1/2 may not have shared identical code either. Logs from those dates no longer exist (earliest log = 10 Apr). Not actionable until reproduced with a controlled back-to-back rerun on pinned code + fixed `--replay` end date. Close unless reproduced.
 2. **SV3 ETH `--replay 2880` full grid** — Now lower priority since V3 joint sweep is in production Mode S. The 8 Apr SV3 run was 1440h with only 8 horizon pairs — full-grid still pending but may be redundant.
 
 **Other:**
