@@ -1,128 +1,43 @@
 """
-Doohan — Production ML Trading System
+Ed — Production ML Trading System
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
-130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
-Variable horizon per asset (5h, 6h, 7h, 8h etc.)
+ML trading system for BTC, ETH, XRP, SOL, LINK (5 assets post-2026-04-19 prune).
+130+ features -> walk-forward ML -> BUY/SELL/HOLD signals.
+Variable horizon per asset (5h, 6h, 7h, 8h, etc.) with regime-switching.
 
-Exhaustive grid search:
-  Grid: 3 combos × 6 windows × 6 features × 3 gammas = 324 evals (~20 min)
-     - Combos: RF+LGBM, XGB+LGBM, RF+XGB
-     - Windows: 72, 100, 150, 200, 250, 300
-     - Features: 10, 13, 17, 20, 25, 30
-     - Gammas: 0.999, 0.997, 0.995
+Pipeline:
+  Mode D: Exhaustive grid (3 combos × 6 windows × 6 features × 3 gammas = 324 evals)
+    - Combos: RF+LGBM, XGB+LGBM, RF+XGB
+    - Windows: 72, 100, 150, 200, 250, 300
+    - Features: 10, 13, 17, 20, 25, 30 (LGBM importance ranking)
+    - Gammas: 0.999, 0.997, 0.995
+  Mode V: Backtest top 6 → 50-trial Optuna refine per top 3 → pick winner
+  Mode R: Regime backtest (bull/bear horizon pairs × 5 detectors)
+  Mode S: Joint sweep (detector × horizon_pair × confidence_pair = 1960 evals)
+  Mode T: Per-regime shield sweep + auto-chains G (rally-cooldown)
+  Mode G: Standalone rally-cooldown sweep (49,716 configs, cache-fed)
+  Mode P: PySR symbolic-regression feature discovery (historical window, no leakage)
+  Chains: HRS = H→R→S | HRST = H→R→S→T(+G) | DVRS = DV→R→S | RS = R→S
 
-Modes:
-  P.   PySR feature discovery (symbolic regression → new features)
-  D.   Diagnose — grid optimization (combo × window × gamma × features)
-  V.   Validate — backtest top 6 → refine top 3 → pick production model
-  DV.  Diagnose + Validate (standard pipeline)
-  S.   Strategy comparison (both_agree / either_agree / Xh_only)
-  DS.  Diagnose + Strategy
-  DVS. Full pipeline: Diagnose → Validate → Strategy
-  H.   Horizon sweep (DV per horizon → compare → save best)
+Core contract:
+  - Embargo: train_end = i - horizon (dynamic, kills label overlap). Backtest only.
+  - Fee: BACKTEST_FEE_PER_LEG = 0.0005 (5 bps, realistic maker blend) for ALL sim code.
+  - Production scoring: return × (win_rate/100) for positives, raw return for negatives.
+  - Iterative T↔G: up to 4 passes until config fingerprint stable.
 
-CLI Usage:
+CLI (order-independent):
+  python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440
+  python crypto_trading_system_ed.py T ETH --replay 1440 --max-iter 4
+  python crypto_trading_system_ed.py G ETH --replay 1440 --rank recent
   python crypto_trading_system_ed.py P BTC 6h
-  python crypto_trading_system_ed.py DV BTC 8h
-  python crypto_trading_system_ed.py H BTC 5,6,7,8h
-  python crypto_trading_system_ed.py D BTC,ETH 6,7h
+  python crypto_trading_system_ed.py --help
 
 Outputs:
-  models/crypto_ed_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_ed_production.csv         (best live performer from Mode V)
-  config/regime_config_ed.json                  (horizon + min_confidence per asset)
-  logs/ed_v1_*.log                             (auto-saved terminal output)
-
-============================================================
-TODO (V1.7.1 → production readiness):
-============================================================
-  1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode V should select the production model
-     from refined configs only (not raw D candidates). D candidates are still used
-     for diagnostics and as input to pick top 3 for refinement.
-
-  2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_ed.py DV BTC 7h
-       python crypto_trading_system_ed.py DV BTC 8h
-     Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
-
-  3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode S for strategy selection, expand to all 9 assets.
-
-  4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
-     for all horizons. Should use train_end = i - horizon like V1.7.1.
-
-  5. WIRE INTO LIVE TRADER — Once winner is validated:
-       - Update crypto_live_trader_doohan.py to read V1.7.1 production CSV
-       - Update crypto_revolut_doohan.py to point to V1.7.1 configs
-       - Or promote V1.7.1 as new Doohan production version
-
-============================================================
-Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
-============================================================
-
-  EMBARGO (most critical difference):
-    V1.7.1:  train_end = i - horizon          (dynamic, scales with prediction horizon)
-    V1.6:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Deku:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Impact:  Pre-embargo APFs were inflated 5-26×. Post-embargo realistic range is 1.0-3.0.
-             V1.6 and Deku results are NOT comparable to V1.7.1 due to label overlap leakage.
-
-  SEARCH METHOD:
-    V1.7.1:  Exhaustive grid (324 evals) + 50-trial Optuna refine per top 3
-    V1.6:    Exhaustive grid (432 evals) + 30-trial Optuna refine per top 3
-    Deku:    Optuna TPE+Hyperband (150 trials, auto-extend to 200/250)
-
-  COMBOS:
-    V1.7.1:  3 combos — RF+LGBM, XGB+LGBM, RF+XGB (dead combos dropped)
-    V1.6:    6 combos — RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
-    Deku:    26 combos — all pairs + triples + quads + quint of RF/GB/XGB/LR/LGBM
-
-  WINDOWS:
-    V1.7.1:  [72, 100, 150, 200, 250, 300]  (36/48 dropped — embargo eats too much)
-    V1.6:    [72, 100, 150, 200]
-    Deku:    [24, 36, 48, 72, 100, 150, 200]  (Optuna picks from these)
-
-  REFINE:
-    V1.7.1:  50 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    V1.6:    30 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    Deku:    N/A (Optuna does continuous search, no separate refine phase)
-
-  BACKTEST:
-    V1.7.1:  336h (2 weeks)
-    V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode S replay)
-
-  SCORING:
-    V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
-    V1.6:    APF (same formula)
-    Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
-
-  HOLDOUT:
-    V1.7.1:  N/A (uses Mode V live backtest instead)
-    V1.6:    N/A (uses Mode V live backtest instead)
-    Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
-
-  FEATURES:
-    V1.7.1:  Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    V1.6:    Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    Deku:    Optuna picks n_features from LGBM-ranked list (continuous range)
-
-  GAMMAS:
-    V1.7.1:  Grid tests [0.995, 0.997, 0.999]
-    V1.6:    Grid tests [0.995, 0.997, 0.999]
-    Deku:    Optuna continuous (0.994, 1.0)
-
-  MODELS:
-    V1.7.1:  RF, XGB, LGBM (GB/LR only in combos that include them — but none do)
-    V1.6:    RF, GB, XGB, LR, LGBM (all 5 available in combos)
-    Deku:    RF, GB, XGB, LR, LGBM (all 5, 26 ensemble combinations)
-
-  WALK-FORWARD STEP:
-    V1.7.1:  DIAG_STEP = 36 (same as Deku)
-    V1.6:    DIAG_STEP = 36
-    Deku:    DIAG_STEP = 36
+  models/crypto_ed_best_models.csv   (top 6 candidates from Mode D)
+  models/crypto_ed_production.csv    (winner per (asset, horizon))
+  config/regime_config_ed.json       (per-asset: detector, bull/bear horizon+conf+shield, gate, brake)
+  output/rally_cd_<asset>_*.csv      (Mode G sweep details)
+  logs/ed_v1_*.log                   (auto-saved terminal output)
 """
 
 import sys
@@ -379,7 +294,7 @@ N_FEATURES_RANGE = {
 }
 N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
 
-# Doohan V1.4.1: Continuous search spaces
+# Optuna refine search spaces (continuous, ±window/±gamma/±features around Mode D winners)
 DOOHAN_GAMMA_MIN = 0.995
 DOOHAN_GAMMA_MAX = 0.999
 DOOHAN_FEAT_MIN = 10
@@ -1056,17 +971,9 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             all_cols.extend(new_cols)
             added += len(new_cols)
 
-    # GDELT geopolitical features (hourly — merge on datetime, not date)
-    gdelt_df = _load_macro_csv('gdelt_geopolitical.csv')
-    if gdelt_df is not None:
-        gp_feats = _compute_gdelt_features(gdelt_df, prefix='gp_')
-        gp_feats['_merge_hour'] = gp_feats.index.floor('h')
-        df['_merge_hour'] = pd.to_datetime(df['datetime']).dt.floor('h')
-        df = df.merge(gp_feats, on='_merge_hour', how='left')
-        df = df.drop(columns=['_merge_hour'], errors='ignore')
-        new_cols = [c for c in gp_feats.columns if c != '_merge_hour']
-        all_cols.extend(new_cols)
-        added += len(new_cols)
+    # GDELT geopolitical features — DISABLED (Grade 1: 0/33 models ever selected, 21 dead features)
+    # Kept as code for potential future use. Download still available in download_macro_data.py.
+    # if gdelt_df is not None: ...
 
     df = df.drop(columns=['_merge_date', '_merge_hour'], errors='ignore')
     if '_merge_date' in all_cols:
@@ -2549,7 +2456,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
     # ========================================================
     if sorted_results:
         import csv
-        csv_path = f'{MODELS_DIR}/diagnostic_results_doohan_{asset_name}.csv'
+        csv_path = f'{MODELS_DIR}/diagnostic_results_ed_{asset_name}.csv'
         sorted_for_csv = sorted(sorted_results, key=lambda x: (-x[10], -x[4]))  # APF desc, then return desc
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -3170,7 +3077,7 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
 DEKU_DEFAULT_TRIALS = 150
 DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 
-# Doohan V1.6: Exhaustive grid search
+# Mode D: Exhaustive grid search
 # 6 combos × 4 windows × 6 feature counts × 5 gammas = 720 evals
 # LGBM dominates all combos it's in; XGB dominates RF/GB/LR.
 # 6 distinct signal groups identified from prior testing.
@@ -3357,7 +3264,7 @@ def _build_combo_list():
 
 def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False, replay_hours=None):
     """
-    DOOHAN V1.6 Mode D: Exhaustive grid search.
+    Mode D: Exhaustive grid search.
 
     Pipeline:
     1. Download fresh data + LGBM importance ranking
@@ -3398,7 +3305,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         t_asset = time.time()
 
         print(f"\n{'='*70}")
-        print(f"  DOOHAN OPTIMIZATION: {asset_name} ({horizon}h)")
+        print(f"  ED OPTIMIZATION: {asset_name} ({horizon}h)")
         print(f"{'='*70}")
 
         df_raw = load_data(asset_name)
@@ -3935,7 +3842,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
 
             configs = {}
 
-            # Doohan candidates from Mode D
+            # Candidates from Mode D grid
             asset_candidates = df_candidates[mask].sort_values(
                 'rank' if 'rank' in df_candidates.columns else 'combined_score',
                 ascending='rank' in df_candidates.columns)

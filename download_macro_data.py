@@ -966,11 +966,8 @@ def main():
     else:
         print("  Derivatives: fresh — skipping")
 
-    # 7. GDELT geopolitical data
-    if _is_fresh(os.path.join(MACRO_DIR, 'gdelt_geopolitical.csv')):
-        print("  GDELT: fresh — skipping")
-    else:
-        gdelt_df = download_gdelt_geopolitical()
+    # 7. GDELT geopolitical data — DISABLED (0/33 models ever selected, slow rate-limited download)
+    # gdelt_df = download_gdelt_geopolitical()
 
     # 8. Stablecoin flows
     if _is_fresh(os.path.join(MACRO_DIR, 'stablecoin_flows.csv')):
