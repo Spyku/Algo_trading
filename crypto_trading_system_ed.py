@@ -828,14 +828,18 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label', '_forward_return']
     df = df[keep_cols].copy()
 
-    nan_counts = df[feature_cols + ['label']].isna().sum()
-    nan_cols = nan_counts[nan_counts > 0]
-    if verbose and len(nan_cols) > 0:
+    # Only drop rows where CORE features are NaN (base technical + label).
+    # Sparse features (OI, orderbook, IV) keep their NaN — LGBM handles missing natively.
+    sparse_prefixes = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+    core_cols = [c for c in feature_cols if not any(c.startswith(p) for p in sparse_prefixes)]
+
+    if verbose:
         print(f"    Rows before dropna: {len(df)}")
 
-    df = df.dropna().reset_index(drop=True)
+    df = df.dropna(subset=core_cols + ['label']).reset_index(drop=True)
     if verbose:
-        print(f"    Rows after dropna: {len(df)}")
+        n_sparse = len([c for c in feature_cols if any(c.startswith(p) for p in sparse_prefixes)])
+        print(f"    Rows after dropna: {len(df)} (core only; {n_sparse} sparse features keep NaN)")
     return df, feature_cols
 
 
@@ -3427,7 +3431,9 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
             print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows ({period_label})")
 
-        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+        sparse_prefixes = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+        core_cols_d = [c for c in all_cols if not any(c.startswith(p) for p in sparse_prefixes)]
+        df_clean = df_full.dropna(subset=core_cols_d + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
 
         if len(df_clean) < 500:
@@ -3442,8 +3448,9 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         ranked_features = importance_df['feature'].tolist()
         print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features ranked")
 
-        # Prepare data for Optuna — columns in rank order
-        df_optuna = df_clean.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
+        # Prepare data for Optuna — columns in rank order (keep sparse NaN for LGBM)
+        core_ranked = [c for c in ranked_features if not any(c.startswith(p) for p in sparse_prefixes)]
+        df_optuna = df_clean.dropna(subset=core_ranked + ['label']).reset_index(drop=True)
         features_np_all = df_optuna[ranked_features].values.astype(np.float64)
         labels_np_all = df_optuna['label'].values.astype(np.int32)
         closes_np_all = df_optuna['close'].values.astype(np.float64)
@@ -3919,7 +3926,9 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                         all_cols.remove(pc)
                         if pc in df_full.columns:
                             df_full.drop(columns=[pc], inplace=True)
-            df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+            sparse_prefixes_v = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+            core_cols_v = [c for c in all_cols if not any(c.startswith(p) for p in sparse_prefixes_v)]
+            df_clean = df_full.dropna(subset=core_cols_v + ['label']).reset_index(drop=True)
             importance_df = _test_lgbm_importance(df_clean, all_cols, gamma=1.0)
             ranked_features = importance_df['feature'].tolist()
             print(f"  [Ranking done: {time.time()-t0:.1f}s] — {len(ranked_features)} features ranked")
@@ -4246,7 +4255,9 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
     total_rows = len(df_full_r)
     if total_rows > MAX_DIAG_HOURS:
         df_full_r = df_full_r.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-    df_clean_r = df_full_r.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
+    sparse_prefixes_r = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+    core_ranked_r = [c for c in ranked_features if not any(c.startswith(p) for p in sparse_prefixes_r)]
+    df_clean_r = df_full_r.dropna(subset=core_ranked_r + ['label']).reset_index(drop=True)
 
     # Prepare fold 1 data (same as Mode D)
     features_np_all = df_clean_r[ranked_features].values.astype(np.float64)
