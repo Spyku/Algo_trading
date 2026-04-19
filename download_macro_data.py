@@ -18,6 +18,7 @@ Usage:
 import os
 import sys
 import json
+import time
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -25,6 +26,17 @@ from datetime import datetime, timedelta
 # Create output folder
 MACRO_DIR = 'data/macro_data'
 os.makedirs(MACRO_DIR, exist_ok=True)
+
+# Freshness threshold — skip re-download if file updated within this many seconds
+FRESHNESS_SECONDS = 3600  # 1 hour
+
+
+def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
+    """Return True if file exists and was modified within max_age_seconds."""
+    if not os.path.exists(filepath):
+        return False
+    age = time.time() - os.path.getmtime(filepath)
+    return age < max_age_seconds
 
 
 # ============================================================
@@ -918,34 +930,58 @@ def main():
     print("=" * 60)
 
     # 1. Macro indicators
-    macro_df = download_yfinance_data()
+    if _is_fresh(os.path.join(MACRO_DIR, 'macro_daily.csv')):
+        print("\n  Macro data: fresh (< 1h) — skipping")
+        macro_df = None
+    else:
+        macro_df = download_yfinance_data()
 
     # 2. Fear & Greed
-    fg_df = download_fear_greed()
+    if _is_fresh(os.path.join(MACRO_DIR, 'fear_greed.csv')):
+        print("  Fear & Greed: fresh — skipping")
+    else:
+        fg_df = download_fear_greed()
 
     # 3. Hourly proxy for DAX system
-    create_hourly_macro(macro_df)
+    if macro_df is not None:
+        create_hourly_macro(macro_df)
 
     # 4. Cross-asset pairs
-    cross_df = download_cross_asset()
+    if _is_fresh(os.path.join(MACRO_DIR, 'cross_asset.csv')):
+        print("  Cross-asset: fresh — skipping")
+    else:
+        cross_df = download_cross_asset()
 
     # 5. On-chain data (BTC + ETH)
     for _asset in ['btc', 'eth']:
-        download_onchain_data(asset=_asset)
+        if _is_fresh(os.path.join(MACRO_DIR, f'onchain_{_asset}.csv')):
+            print(f"  On-chain {_asset.upper()}: fresh — skipping")
+        else:
+            download_onchain_data(asset=_asset)
 
     # 6. Derivatives data (funding rate + open interest — BTC + ETH)
-    deriv_df = download_derivatives_data(assets=['BTC', 'ETH'])
+    stale_assets = [a for a in ['BTC', 'ETH'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
+    if stale_assets:
+        deriv_df = download_derivatives_data(assets=stale_assets)
+    else:
+        print("  Derivatives: fresh — skipping")
 
     # 7. GDELT geopolitical data
-    gdelt_df = download_gdelt_geopolitical()
+    if _is_fresh(os.path.join(MACRO_DIR, 'gdelt_geopolitical.csv')):
+        print("  GDELT: fresh — skipping")
+    else:
+        gdelt_df = download_gdelt_geopolitical()
 
     # 8. Stablecoin flows
-    stable_df = download_stablecoin_flows()
+    if _is_fresh(os.path.join(MACRO_DIR, 'stablecoin_flows.csv')):
+        print("  Stablecoins: fresh — skipping")
+    else:
+        stable_df = download_stablecoin_flows()
 
-    # 9. Options IV snapshot
+    # 9. Options IV snapshot (always append — accumulates)
     iv_df = download_options_iv_skew()
 
-    # 10. Orderbook snapshot
+    # 10. Orderbook snapshot (always append — accumulates)
     ob_df = download_orderbook_snapshot()
 
     # 11. Whale flows (needs API key)
