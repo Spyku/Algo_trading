@@ -331,15 +331,14 @@ ACTIVE_FEATURE_SET = 'A'
 # ASSET CONFIGURATION
 # ============================================================
 ASSETS = {
+    # Crypto universe pruned 2026-04-19: dropped DOGE/ADA/AVAX/DOT (weak priors, no
+    # diversification edge vs ETH). Kept: ETH (prod), BTC (standby), SOL (testing),
+    # LINK (standby), XRP (decorrelation candidate).
     'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
     'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
     'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'data/doge_hourly_data.csv', 'start': '2019-07-01T00:00:00Z'},
     'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
     'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_hourly_data.csv', 'start': '2019-01-01T00:00:00Z'},
-    'ADA':   {'source': 'binance', 'ticker': 'ADA/USDT',  'file': 'data/ada_hourly_data.csv',  'start': '2018-04-01T00:00:00Z'},
-    'AVAX':  {'source': 'binance', 'ticker': 'AVAX/USDT', 'file': 'data/avax_hourly_data.csv', 'start': '2021-09-01T00:00:00Z'},
-    'DOT':   {'source': 'binance', 'ticker': 'DOT/USDT',  'file': 'data/dot_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
     'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
     'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
     'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
@@ -353,9 +352,16 @@ PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 # Create output folders
 for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
-TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
-TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY for LABEL generation (`2 * TRADING_FEE` break-even target)
+
+# Backtest simulations use a more realistic blend: live trader is maker-first
+# (~95% maker @ 0% fee, ~5% taker fallback @ 0.11%). Measured blend ≈ 1.6 bps/leg.
+# 5 bps/leg = 3× safety margin for periods when maker success degrades.
+# Applied uniformly across Mode D/V/R/S/T/G backtest sims so relative policy
+# comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
+BACKTEST_FEE_PER_LEG = 0.0005
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
@@ -1069,7 +1075,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     if macro_cols:
         df[macro_cols] = df[macro_cols].ffill()
 
-    # Load funding rate for regime gate (not a feature — underscore prefix)
+    # Load funding rate — as BOTH regime gate (_funding_rate) AND feature (deriv_funding_rate)
     funding_series = load_funding_rate(asset_name)
     if funding_series is not None:
         fr_df = funding_series.to_frame('_funding_rate')
@@ -1080,12 +1086,147 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         df['_funding_rate'] = df['_funding_rate'].ffill()
         n_funding = df['_funding_rate'].notna().sum()
         if verbose and n_funding > 0:
-            print(f"    Funding rate: {n_funding} rows loaded (regime gate)")
+            print(f"    Funding rate: {n_funding} rows loaded (regime gate + feature)")
+        # Create feature versions (no underscore = enters feature matrix)
+        df['deriv_funding_rate'] = df['_funding_rate']
+        df['deriv_funding_chg1d'] = df['deriv_funding_rate'].diff(24) * 100  # 24h change
+        df['deriv_funding_zscore'] = (df['deriv_funding_rate'] - df['deriv_funding_rate'].rolling(168, min_periods=24).mean()) / \
+                                     (df['deriv_funding_rate'].rolling(168, min_periods=24).std() + 1e-10)
+        for col in ['deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_zscore']:
+            if col not in all_cols:
+                all_cols.append(col)
     else:
         df['_funding_rate'] = np.nan
 
+    # Load open interest from derivatives CSV
+    deriv_file = os.path.join(MACRO_DIR, f'derivatives_{asset_name.lower()}.csv')
+    if os.path.exists(deriv_file):
+        try:
+            deriv_df = pd.read_csv(deriv_file, parse_dates=['datetime'] if 'datetime' in pd.read_csv(deriv_file, nrows=0).columns else [0])
+            if deriv_df.columns[0] != 'datetime':
+                deriv_df = deriv_df.rename(columns={deriv_df.columns[0]: 'datetime'})
+            deriv_df['datetime'] = pd.to_datetime(deriv_df['datetime'])
+            if deriv_df['datetime'].dt.tz is not None:
+                deriv_df['datetime'] = deriv_df['datetime'].dt.tz_localize(None)
+            deriv_df['_merge_dt'] = deriv_df['datetime'].dt.floor('h')
+            df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+
+            oi_cols_added = 0
+            if 'open_interest_usd' in deriv_df.columns:
+                oi_merge = deriv_df[['_merge_dt', 'open_interest_usd']].drop_duplicates(subset='_merge_dt', keep='last')
+                df = df.merge(oi_merge, on='_merge_dt', how='left')
+                df['open_interest_usd'] = df['open_interest_usd'].ffill()
+                # Create feature derivatives
+                df['deriv_oi_chg1d'] = df['open_interest_usd'].pct_change(24) * 100
+                df['deriv_oi_chg3d'] = df['open_interest_usd'].pct_change(72) * 100
+                df['deriv_oi_zscore'] = (df['open_interest_usd'] - df['open_interest_usd'].rolling(168, min_periods=24).mean()) / \
+                                        (df['open_interest_usd'].rolling(168, min_periods=24).std() + 1e-10)
+                for col in ['deriv_oi_chg1d', 'deriv_oi_chg3d', 'deriv_oi_zscore']:
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        oi_cols_added += 1
+                df = df.drop(columns=['open_interest_usd'], errors='ignore')
+            df = df.drop(columns=['_merge_dt'], errors='ignore')
+            if verbose and oi_cols_added > 0:
+                print(f"    Open interest: {oi_cols_added} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Open interest: failed to load ({e})")
+
+    # Load stablecoin flows
+    stable_file = os.path.join(MACRO_DIR, 'stablecoin_flows.csv')
+    if os.path.exists(stable_file):
+        try:
+            stable_df = pd.read_csv(stable_file, parse_dates=[0], index_col=0)
+            if stable_df.index.tz is not None:
+                stable_df.index = stable_df.index.tz_localize(None)
+            stable_df['_merge_date'] = stable_df.index.normalize()
+            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+
+            stable_cols_added = 0
+            if 'total_stable_mcap' in stable_df.columns:
+                s = stable_df['total_stable_mcap']
+                stable_feats = pd.DataFrame(index=stable_df.index)
+                stable_feats['stable_mcap_chg1d'] = s.pct_change(1) * 100
+                stable_feats['stable_mcap_chg7d'] = s.pct_change(7) * 100
+                stable_feats['stable_mcap_zscore'] = (s - s.rolling(30, min_periods=7).mean()) / (s.rolling(30, min_periods=7).std() + 1e-10)
+                stable_feats['_merge_date'] = stable_feats.index.normalize()
+
+                for col in ['stable_mcap_chg1d', 'stable_mcap_chg7d', 'stable_mcap_zscore']:
+                    merge_df = stable_feats[['_merge_date', col]].dropna()
+                    df = df.merge(merge_df, on='_merge_date', how='left')
+                    df[col] = df[col].ffill()
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        stable_cols_added += 1
+
+            df = df.drop(columns=['_merge_date'], errors='ignore')
+            if verbose and stable_cols_added > 0:
+                print(f"    Stablecoin flows: {stable_cols_added} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Stablecoin flows: failed to load ({e})")
+
+    # Load orderbook imbalance snapshots
+    ob_file = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
+    if os.path.exists(ob_file):
+        try:
+            ob_df = pd.read_csv(ob_file, parse_dates=['datetime'])
+            ob_asset = ob_df[ob_df['asset'] == asset_name].copy()
+            if len(ob_asset) > 10:
+                ob_asset['_merge_dt'] = pd.to_datetime(ob_asset['datetime']).dt.floor('h')
+                df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+                ob_cols_added = 0
+                for col in ['ob_imbalance', 'spread_bps']:
+                    if col in ob_asset.columns:
+                        merge_df = ob_asset[['_merge_dt', col]].drop_duplicates(subset='_merge_dt', keep='last')
+                        df = df.merge(merge_df, on='_merge_dt', how='left')
+                        df[col] = df[col].ffill()
+                        if col not in all_cols:
+                            all_cols.append(col)
+                            ob_cols_added += 1
+                df = df.drop(columns=['_merge_dt'], errors='ignore')
+                if verbose and ob_cols_added > 0:
+                    print(f"    Orderbook: {ob_cols_added} features added ({len(ob_asset)} snapshots)")
+        except Exception as e:
+            if verbose:
+                print(f"    Orderbook: failed to load ({e})")
+
+    # Load options IV skew snapshots
+    iv_file = os.path.join(MACRO_DIR, 'options_iv_snapshot.csv')
+    if os.path.exists(iv_file):
+        try:
+            iv_df = pd.read_csv(iv_file, parse_dates=['datetime'])
+            iv_asset = iv_df[iv_df['asset'] == asset_name].copy()
+            if len(iv_asset) > 10:
+                iv_asset['_merge_dt'] = pd.to_datetime(iv_asset['datetime']).dt.floor('h')
+                df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+                iv_cols_added = 0
+                for col in ['avg_iv', 'iv_skew']:
+                    if col in iv_asset.columns:
+                        merge_df = iv_asset[['_merge_dt', col]].drop_duplicates(subset='_merge_dt', keep='last')
+                        df = df.merge(merge_df, on='_merge_dt', how='left')
+                        df[col] = df[col].ffill()
+                        if col not in all_cols:
+                            all_cols.append(col)
+                            iv_cols_added += 1
+                df = df.drop(columns=['_merge_dt'], errors='ignore')
+                if verbose and iv_cols_added > 0:
+                    print(f"    Options IV: {iv_cols_added} features added ({len(iv_asset)} snapshots)")
+        except Exception as e:
+            if verbose:
+                print(f"    Options IV: failed to load ({e})")
+
+    # Exchange netflow shorter windows (1d, 3d) — from on-chain data
+    if 'oc_exchange_netflow' in df.columns:
+        df['oc_exchange_netflow_chg1d'] = df['oc_exchange_netflow'].pct_change(24) * 100
+        df['oc_exchange_netflow_chg3d'] = df['oc_exchange_netflow'].pct_change(72) * 100
+        for col in ['oc_exchange_netflow_chg1d', 'oc_exchange_netflow_chg3d']:
+            if col not in all_cols:
+                all_cols.append(col)
+
     if verbose:
-        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+        print(f"    All features: {len(base_cols)} base + {len(all_cols) - len(base_cols)} macro/deriv/sentiment/cross-asset = {len(all_cols)} total")
     return df, all_cols
 
 
@@ -1330,7 +1471,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
             in_pos   = True
             entry_px = price * (1 + TRADING_FEE)
         elif pred == 0 and in_pos:
-            sell_px = price * (1 - TRADING_FEE)
+            sell_px = price * (1 - BACKTEST_FEE_PER_LEG)
             trade_ret = (sell_px - entry_px) / entry_px
             cash *= (1 + trade_ret)
             trades += 1
@@ -1343,7 +1484,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     # Close open position at end
     if in_pos and total > 0:
         last_px = float(df_features.iloc[-1]['close'])
-        sell_px = last_px * (1 - TRADING_FEE)
+        sell_px = last_px * (1 - BACKTEST_FEE_PER_LEG)
         trade_ret = (sell_px - entry_px) / entry_px
         cash *= (1 + trade_ret)
         trades += 1
@@ -1883,12 +2024,12 @@ def simulate_portfolio(signals, initial=1000):
 
         if sig['signal'] == 'BUY' and position == 'cash':
             # BUY: spend cash, pay fee, get BTC
-            btc_held = cash * (1 - TRADING_FEE) / price
+            btc_held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
             cash = 0
             position = 'invested'
         elif sig['signal'] == 'SELL' and position == 'invested':
             # SELL: sell BTC, pay fee, get cash
-            cash = btc_held * price * (1 - TRADING_FEE)
+            cash = btc_held * price * (1 - BACKTEST_FEE_PER_LEG)
             btc_held = 0
             position = 'cash'
 
@@ -2152,7 +2293,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
             entry_price = price * (1 + TRADING_FEE)  # effective entry = price + fee
         elif ensemble_pred == 0 and in_position:
             # SELL -- pay fee
-            sell_price = price * (1 - TRADING_FEE)  # effective exit = price - fee
+            sell_price = price * (1 - BACKTEST_FEE_PER_LEG)  # effective exit = price - fee
             trade_return = (sell_price - entry_price) / entry_price
             portfolio *= (1 + trade_return)
             trades += 1
@@ -2175,7 +2316,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     # Close open position at end (with fee)
     if in_position and total > 0:
         last_price = closes_np[n - 1]
-        sell_price = last_price * (1 - TRADING_FEE)
+        sell_price = last_price * (1 - BACKTEST_FEE_PER_LEG)
         trade_return = (sell_price - entry_price) / entry_price
         portfolio *= (1 + trade_return)
         trade_returns.append(trade_return)
@@ -2480,15 +2621,15 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
     for m in merged:
         price = m['close']
         if m['combined'] == 'BUY' and not o_in:
-            o_held = o_cash * (1 - TRADING_FEE) / price; o_cash = 0; o_in = True; o_entry = price; o_trades += 1
+            o_held = o_cash * (1 - BACKTEST_FEE_PER_LEG) / price; o_cash = 0; o_in = True; o_entry = price; o_trades += 1
         elif m['combined'] == 'SELL' and o_in:
-            o_cash = o_held * price * (1 - TRADING_FEE)
+            o_cash = o_held * price * (1 - BACKTEST_FEE_PER_LEG)
             if price > o_entry: o_wins += 1
             o_held = 0; o_in = False
     # Close open position at last price for overall stats
     if o_in and merged:
         last_px = merged[-1]['close']
-        o_cash = o_held * last_px * (1 - TRADING_FEE)
+        o_cash = o_held * last_px * (1 - BACKTEST_FEE_PER_LEG)
     o_strat_ret = (o_cash / 1000.0 - 1) * 100
     o_bh_ret = (merged[-1]['close'] / o_start_px - 1) * 100 if merged else 0
     o_alpha = o_strat_ret - o_bh_ret
@@ -2506,9 +2647,9 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
             price = d['close']
             d['buy_hold'] = 1000 * (price / p_start)
             if d['combined'] == 'BUY' and not p_in:
-                p_held = p_cash * (1 - TRADING_FEE) / price; p_cash = 0; p_in = True; p_entry = price; p_trades += 1
+                p_held = p_cash * (1 - BACKTEST_FEE_PER_LEG) / price; p_cash = 0; p_in = True; p_entry = price; p_trades += 1
             elif d['combined'] == 'SELL' and p_in:
-                p_cash = p_held * price * (1 - TRADING_FEE)
+                p_cash = p_held * price * (1 - BACKTEST_FEE_PER_LEG)
                 if price > p_entry: p_wins += 1
                 p_held = 0; p_in = False
             d['portfolio'] = p_cash + p_held * price if p_in else p_cash
@@ -3131,7 +3272,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
             in_position = True
             entry_price = price * (1 + TRADING_FEE)
         elif ensemble_pred == 0 and in_position:
-            sell_price = price * (1 - TRADING_FEE)
+            sell_price = price * (1 - BACKTEST_FEE_PER_LEG)
             trade_return = (sell_price - entry_price) / entry_price
             portfolio *= (1 + trade_return)
             trades += 1
@@ -3163,7 +3304,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
     # Close open position at end
     if in_position and total > 0:
         last_price = closes_np[n - 1]
-        sell_price = last_price * (1 - TRADING_FEE)
+        sell_price = last_price * (1 - BACKTEST_FEE_PER_LEG)
         trade_return = (sell_price - entry_price) / entry_price
         portfolio *= (1 + trade_return)
         trades += 1
@@ -3684,13 +3825,13 @@ def _simulate_with_threshold(signals, conf_threshold):
             continue
 
         if sig['signal'] == 'BUY' and position == 'cash':
-            qty = cash * (1 - TRADING_FEE) / price
+            qty = cash * (1 - BACKTEST_FEE_PER_LEG) / price
             entry_price = price
             cash = 0
             position = 'invested'
             trades += 1
         elif sig['signal'] == 'SELL' and position == 'invested':
-            cash = qty * price * (1 - TRADING_FEE)
+            cash = qty * price * (1 - BACKTEST_FEE_PER_LEG)
             pnl_pct = (price / entry_price - 1) * 100
             trade_log.append(pnl_pct)
             qty = 0
@@ -4355,7 +4496,7 @@ def run_mode_s(assets_list, horizons, args=None):
                     first_price = price
 
                 if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
-                    held = cash * (1 - TRADING_FEE) / price
+                    held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
                     cash = 0
                     in_pos = True
                     entry_px = price
@@ -4365,14 +4506,14 @@ def run_mode_s(assets_list, horizons, args=None):
                     else:
                         bear_trades += 1
                 elif s['signal'] == 'SELL' and in_pos:
-                    cash = held * price * (1 - TRADING_FEE)
+                    cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
                     if price > entry_px:
                         wins += 1
                     held = 0
                     in_pos = False
 
             if in_pos and last_price:
-                cash = held * last_price * (1 - TRADING_FEE)
+                cash = held * last_price * (1 - BACKTEST_FEE_PER_LEG)
                 if last_price > entry_px:
                     wins += 1
 
@@ -4453,13 +4594,18 @@ def run_mode_s(assets_list, horizons, args=None):
 # ============================================================
 def run_mode_t(assets_list, args=None):
     """
-    Mode T — Sweep min_sell_pnl_pct × max_hold_hours to find the optimal
-    hold-until-profitable threshold.
+    Mode T — Sweep min_sell_pnl_pct × max_hold_hours × shield on/off per regime.
 
-    Uses 0% trading fee (maker-first strategy) and reads the current regime
-    config for production horizons + confidences.
+    For each (threshold, failsafe) pair, tests all 4 shield on/off combos
+    (bull ON/OFF × bear ON/OFF) and picks the combo that maximises total
+    return across the bull and bear horizons.
 
-    Saves winner to regime_config_ed.json (min_sell_pnl_pct, max_hold_hours).
+    Uses `BACKTEST_FEE_PER_LEG` (5 bps/leg realistic maker blend) and reads the
+    current regime config for production horizons + confidences.
+
+    Saves winner to regime_config_ed.json:
+      - min_sell_pnl_pct, max_hold_hours at asset level (shared thresholds)
+      - bull.hold_shield, bear.hold_shield per regime
     """
     replay = int(getattr(args, 'replay', 0)) or 1440
 
@@ -4494,7 +4640,7 @@ def run_mode_t(assets_list, args=None):
         print(f"  Asset: {asset} | Replay: {replay}h ({replay/720:.1f} months)")
         print(f"  Production: bull={bull_h}h@{bull_conf}% | bear={bear_h}h@{bear_conf}%")
         print(f"  Thresholds: {THRESHOLDS} | Failsafe: {FAILSAFE_HOURS}h")
-        print(f"  Fee: 0% (maker-first strategy)")
+        print(f"  Fee: {BACKTEST_FEE_PER_LEG*1e4:.1f} bps/leg (realistic maker blend)")
         print(f"{'='*80}")
 
         # Generate signals for production horizons only
@@ -4520,35 +4666,79 @@ def run_mode_t(assets_list, args=None):
             print(f"  Skipping {asset} — missing signals")
             continue
 
-        # Simulate for each horizon at its production confidence
-        def _sim_horizon(sigs, conf, min_pnl, max_hold_h):
-            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
-            trades, trade_log, blocked = 0, [], 0
-            hold_since_entry = 0
+        # Quick-release config for the shield (per-asset, optional). Defaults match
+        # the trader's defaults so the sim mirrors live behavior.
+        # Quick-release default OFF — opt-in only (see 2026-04-19 evaluation)
+        qr_cfg = asset_cfg.get('shield_quick_release', {})
+        QR_ENABLED = bool(qr_cfg.get('enabled', False))
+        QR_MIN_CONF = float(qr_cfg.get('min_sell_conf', 95))
+        QR_MAX_HOURS = float(qr_cfg.get('max_hours', 3))
 
-            for s in sigs:
+        # Simulate for each horizon at its production confidence.
+        # Optionally applies a rally-cooldown gate (rally_cfg), so the shield
+        # sweep can be conditioned on the gate from a prior iteration — closes
+        # the T↔G coupling for iterative convergence.
+        def _sim_horizon(sigs, conf, min_pnl, max_hold_h, rally_cfg=None):
+            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+            trades, trade_log, blocked, quick_rel = 0, [], 0, 0
+            hold_since_entry = 0
+            cd = 0
+            rs_arr = rl_arr = None
+            t_s = t_l = 0.0
+            cd_h = 0
+            if rally_cfg is not None:
+                h_s, h_l, t_s, t_l, cd_h = rally_cfg
+                closes = np.array([float(s['close']) for s in sigs])
+                def _rr(h):
+                    out = np.full(len(closes), np.nan)
+                    if h < len(closes):
+                        out[h:] = (closes[h:] / closes[:-h] - 1.0) * 100.0
+                    return out
+                rs_arr = _rr(h_s); rl_arr = _rr(h_l)
+
+            for i, s in enumerate(sigs):
                 price = s['close']
                 if in_pos:
                     hold_since_entry += 1
+                # Rally-cooldown trigger check
+                if rally_cfg is not None and cd_h > 0:
+                    rs = rs_arr[i] if not np.isnan(rs_arr[i]) else 0
+                    rl = rl_arr[i] if not np.isnan(rl_arr[i]) else 0
+                    if rs >= t_s or rl >= t_l:
+                        cd = max(cd, cd_h)
+
                 if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
-                    held = cash / price  # 0% fee
-                    cash = 0
-                    in_pos = True
-                    entry_px = price
-                    trades += 1
-                    hold_since_entry = 0
+                    if cd > 0:
+                        pass  # gate blocks BUY
+                    else:
+                        held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
+                        cash = 0
+                        in_pos = True
+                        entry_px = price
+                        trades += 1
+                        hold_since_entry = 0
                 elif s['signal'] == 'SELL' and in_pos:
                     cur_pnl = (price / entry_px - 1) * 100
                     override_expired = hold_since_entry >= max_hold_h
-                    if min_pnl <= 0 or cur_pnl >= min_pnl or override_expired:
-                        cash = held * price  # 0% fee
+                    # Quick-release: strong SELL within N cycles of entry bypasses shield
+                    quick_release = (QR_ENABLED and min_pnl > 0
+                                     and hold_since_entry <= QR_MAX_HOURS
+                                     and float(s.get('confidence', 0)) >= QR_MIN_CONF)
+                    if (min_pnl <= 0 or cur_pnl >= min_pnl or override_expired
+                            or quick_release):
+                        cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
                         trade_log.append(cur_pnl)
                         held = 0
                         in_pos = False
                         trades += 1
                         hold_since_entry = 0
+                        if quick_release:
+                            quick_rel += 1
                     else:
                         blocked += 1
+
+                if cd > 0:
+                    cd -= 1
 
             final = cash if not in_pos else held * sigs[-1]['close']
             if in_pos:
@@ -4590,51 +4780,154 @@ def run_mode_t(assets_list, args=None):
             else:
                 print(f"\n  No improvement over baseline for {h}h")
 
-        # Pick overall winner: average score across horizons
-        if not horizon_results:
-            print(f"\n  No improvement found for {asset} — config unchanged")
-            continue
+        # ---- Iterative joint sweep: (threshold, failsafe, bull_on, bear_on) x G ----
+        # Bull and bear share (t, fh); shield on/off is chosen independently per regime.
+        # Iterates T <-> G until config is stable (closes the coupling where T's
+        # shield sweep previously ignored the gate that G subsequently adds).
+        if bull_h == bear_h:
+            print(f"\n  NOTE: bull_h == bear_h == {bull_h}h — per-regime shield split has no effect.")
 
-        # Find combo that's best on average across production horizons
-        best_avg = None
-        best_combo = None
-        for t in THRESHOLDS:
-            for fh in FAILSAFE_HOURS:
-                total = 0
-                for h in test_horizons:
-                    conf = bull_conf if h == bull_h else bear_conf
-                    ret, _, _, _ = _sim_horizon(signals_cache[h], conf, t, fh)
-                    total += ret
-                avg = total / len(test_horizons)
-                if best_avg is None or avg > best_avg:
-                    best_avg = avg
-                    best_combo = (t, fh)
+        bull_sigs = signals_cache[bull_h]
+        bear_sigs = signals_cache[bear_h]
 
-        # Compare with baseline average
-        base_avg = 0
-        for h in test_horizons:
-            conf = bull_conf if h == bull_h else bear_conf
-            ret, _, _, _ = _sim_horizon(signals_cache[h], conf, 0, 999)
-            base_avg += ret
-        base_avg /= len(test_horizons)
+        max_iter = int(getattr(args, 'max_iter', 0)) or 4
 
-        if best_avg > base_avg:
-            t_win, fh_win = best_combo
-            print(f"\n  {'='*80}")
-            print(f"  WINNER: min_sell_pnl={t_win:.2f}% | max_hold={fh_win}h")
-            print(f"  Avg return: {best_avg:+.2f}% (vs baseline {base_avg:+.2f}%, delta {best_avg - base_avg:+.2f}%)")
-            print(f"  {'='*80}")
+        def _get_rally_tuple(cfg, regime=None):
+            """Rally-cooldown tuple for a specific regime, with asset-level fallback."""
+            def _tuple(rc):
+                if not rc or not rc.get('enabled'):
+                    return None
+                try:
+                    return (int(rc['h_short']), int(rc['h_long']),
+                            float(rc['t_short_pct']), float(rc['t_long_pct']),
+                            int(rc['cd_hours']))
+                except (KeyError, TypeError, ValueError):
+                    return None
+            if regime is not None:
+                block = cfg.get(regime)
+                if isinstance(block, dict):
+                    t = _tuple(block.get('rally_cooldown'))
+                    if t is not None:
+                        return t
+            return _tuple(cfg.get('rally_cooldown'))
 
-            regime_config[asset]['min_sell_pnl_pct'] = t_win
-            regime_config[asset]['max_hold_hours'] = fh_win
+        def _config_fingerprint(cfg):
+            # Per-regime gate lives in bull.rally_cooldown / bear.rally_cooldown
+            # Legacy asset-level rally_cooldown kept as fallback in the fingerprint.
+            asset_rc = cfg.get('rally_cooldown') or {}
+            bull_rc = cfg.get('bull', {}).get('rally_cooldown') or {}
+            bear_rc = cfg.get('bear', {}).get('rally_cooldown') or {}
+            def _rc_tuple(rc):
+                return (rc.get('h_short'), rc.get('h_long'),
+                        rc.get('t_short_pct'), rc.get('t_long_pct'),
+                        rc.get('cd_hours'))
+            return (
+                cfg.get('min_sell_pnl_pct'),
+                cfg.get('max_hold_hours'),
+                cfg.get('bull', {}).get('hold_shield'),
+                cfg.get('bear', {}).get('hold_shield'),
+                _rc_tuple(asset_rc),
+                _rc_tuple(bull_rc),
+                _rc_tuple(bear_rc),
+            )
 
+        prev_fp = None
+        converged = False
+        for iteration in range(1, max_iter + 1):
+            print(f"\n{'#'*80}")
+            print(f"  T<->G ITERATION {iteration}/{max_iter} | {asset}")
+            print(f"{'#'*80}")
+
+            bull_rally_cfg = _get_rally_tuple(regime_config[asset], regime='bull')
+            bear_rally_cfg = _get_rally_tuple(regime_config[asset], regime='bear')
+            def _desc(cfg):
+                return (f"rr{cfg[0]}h>={cfg[2]}% OR rr{cfg[1]}h>={cfg[3]}%, cd={cfg[4]}h"
+                        if cfg else "none")
+            print(f"  Using per-regime gates: bull={_desc(bull_rally_cfg)} | "
+                  f"bear={_desc(bear_rally_cfg)}")
+
+            # All-OFF baseline (with current gate applied per regime)
+            base_bull, _, _, _ = _sim_horizon(bull_sigs, bull_conf, 0, 999, bull_rally_cfg)
+            base_bear, _, _, _ = _sim_horizon(bear_sigs, bear_conf, 0, 999, bear_rally_cfg)
+            base_total = base_bull + base_bear
+
+            best_total = None
+            best_quad = None
+            rows_print = []
+            for t in THRESHOLDS:
+                for fh in FAILSAFE_HOURS:
+                    for bull_on in (False, True):
+                        for bear_on in (False, True):
+                            bull_t = t if bull_on else 0
+                            bear_t = t if bear_on else 0
+                            b_ret, _, _, _ = _sim_horizon(bull_sigs, bull_conf, bull_t, fh, bull_rally_cfg)
+                            r_ret, _, _, _ = _sim_horizon(bear_sigs, bear_conf, bear_t, fh, bear_rally_cfg)
+                            total = b_ret + r_ret
+                            rows_print.append((t, fh, bull_on, bear_on, b_ret, r_ret, total))
+                            if best_total is None or total > best_total:
+                                best_total = total
+                                best_quad = (t, fh, bull_on, bear_on)
+
+            rows_print.sort(key=lambda r: -r[6])
+            print(f"  Top 3 shield combos: "
+                  f"{' / '.join(f'thr={r[0]:.2f} fh={r[1]}h bull={r[2]} bear={r[3]} tot={r[6]:+.2f}%' for r in rows_print[:3])}")
+            print(f"  Baseline (all-OFF, gate applied): "
+                  f"bull={base_bull:+.2f}% bear={base_bear:+.2f}% total={base_total:+.2f}%")
+
+            t_win, fh_win, bull_on, bear_on = best_quad
+            if best_total > base_total:
+                regime_config[asset]['min_sell_pnl_pct'] = t_win
+                regime_config[asset]['max_hold_hours'] = fh_win
+                regime_config[asset].setdefault('bull', {})['hold_shield'] = bool(bull_on)
+                regime_config[asset].setdefault('bear', {})['hold_shield'] = bool(bear_on)
+                regime_config[asset].pop('hold_shield', None)
+                print(f"  T winner: min_sell_pnl={t_win:.2f}% max_hold={fh_win}h "
+                      f"bull_shield={'ON' if bull_on else 'OFF'} bear_shield={'ON' if bear_on else 'OFF'} "
+                      f"(total {best_total:+.2f}% vs {base_total:+.2f}%, delta {best_total-base_total:+.2f}%)")
+            else:
+                regime_config[asset]['min_sell_pnl_pct'] = 0
+                regime_config[asset]['max_hold_hours'] = 10
+                regime_config[asset].setdefault('bull', {})['hold_shield'] = False
+                regime_config[asset].setdefault('bear', {})['hold_shield'] = False
+                regime_config[asset].pop('hold_shield', None)
+                print(f"  T: no shield improvement — disabling for this iteration")
             _atomic_write_json(tcfg_path, regime_config)
-            print(f"\n  Config updated: {asset} min_sell_pnl={t_win:.2f}% max_hold={fh_win}h")
-        else:
-            print(f"\n  No overall improvement — disabling hold override for {asset}")
-            regime_config[asset]['min_sell_pnl_pct'] = 0
-            regime_config[asset]['max_hold_hours'] = 10
+
+            # Chain G with the new shield — per-regime: sweep bull and bear gates
+            # independently. Each sweep fires the gate only on its regime's bars,
+            # simulating the other regime as gate-less. Winners written to
+            # cfg[asset].bull.rally_cooldown and cfg[asset].bear.rally_cooldown.
+            tagged = _merge_tagged_signals(asset, bull_sigs, bear_sigs, regime_config[asset])
+            print(f"  Per-regime G sweep on {len(tagged)} tagged bars "
+                  f"(bull={sum(1 for s in tagged if s['regime']=='bull')} "
+                  f"bear={sum(1 for s in tagged if s['regime']=='bear')})...")
+            # Clear any legacy asset-level rally_cooldown — regime blocks are now authoritative
+            regime_config[asset].pop('rally_cooldown', None)
             _atomic_write_json(tcfg_path, regime_config)
+            for r_filter in ('bull', 'bear'):
+                print(f"  --- {r_filter.upper()} gate sweep ---")
+                _sweep_rally_cooldown(asset, tagged, regime_config[asset],
+                                      replay_h=replay, rank='recent',
+                                      write_config=True, regime_filter=r_filter)
+                with open(tcfg_path) as f:
+                    regime_config = json.load(f)
+
+            # Reload config after G's write (G uses atomic write and we've kept
+            # regime_config as the in-memory mirror via setdefault — re-read to be safe)
+            with open(tcfg_path) as f:
+                regime_config = json.load(f)
+
+            # Convergence check
+            fp = _config_fingerprint(regime_config[asset])
+            if prev_fp is not None and fp == prev_fp:
+                converged = True
+                print(f"\n  >>> Converged at iteration {iteration} (config unchanged).")
+                break
+            prev_fp = fp
+
+        if not converged:
+            print(f"\n  >>> Reached max_iter={max_iter} without convergence. "
+                  f"Final config written.")
 
     print(f"\n{'='*80}")
     print(f"  MODE T COMPLETE")
@@ -4938,19 +5231,19 @@ def _run_mode_r(assets, horizons, args):
             if first_price is None:
                 first_price = price
             if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
-                held = cash * (1 - TRADING_FEE) / price
+                held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
                 cash = 0
                 in_pos = True
                 entry_px = price
                 trades += 1
             elif s['signal'] == 'SELL' and in_pos:
-                cash = held * price * (1 - TRADING_FEE)
+                cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
                 if price > entry_px:
                     wins += 1
                 held = 0
                 in_pos = False
         if in_pos and last_price:
-            cash = held * last_price * (1 - TRADING_FEE)
+            cash = held * last_price * (1 - BACKTEST_FEE_PER_LEG)
             if last_price > entry_px:
                 wins += 1
         ret = (cash / 1000.0 - 1) * 100
@@ -5069,20 +5362,98 @@ def _apply_mode_r_to_config(r_results):
 # ============================================================
 
 # ============================================================
-# MODE G — RALLY-COOLDOWN OR-GATE SWEEP (V7-style)
+# RALLY-COOLDOWN SWEEP — shared helper used by Mode G and Mode T
 # ============================================================
-def run_mode_g(assets_list, args):
-    """Sweeps (h_short, h_long, t_short, t_long, cd_hours) for the OR-gate that blocks
-    BUYs after a hot rally. STRICT pick: beats_3of3 windows AND plateau_score >= 0.7,
-    tiebreak by score_dd_aware. Writes winner to regime_config_ed.json under
-    [asset]['rally_cooldown']. If no STRICT winner: warn + leave config alone.
-    Per-asset signal cache: data/{asset}_sl_signals_*.pkl (90/60/30d preferred)."""
-    replay_h = int(getattr(args, 'replay', 0)) or 1440
+
+def _build_detector_from_cfg(asset, asset_cfg):
+    """Return a detector callable(dt) → bool from asset_cfg. bull=True.
+    Also returns the shared indicator dict for convenience."""
+    ind, detectors = _build_regime_indicators_and_detectors(asset)
+    det_cfg = asset_cfg.get('regime_detector', {})
+    det_type = det_cfg.get('type', 'named')
+    params = det_cfg.get('params', {})
+    if det_type == 'named':
+        name = params.get('name', 'tsmom_672h')
+        det = detectors.get(name)
+        if det is None:
+            raise ValueError(f"Unknown named detector: {name}")
+        return det
+    elif det_type == 'sma_cross':
+        fast = int(params.get('fast', 24))
+        slow = int(params.get('slow', 100))
+        def _sma_det(dt, _ind=ind, _f=fast, _s=slow):
+            if dt not in _ind:
+                return True
+            try:
+                return _ind[dt][f'sma{_f}'] > _ind[dt][f'sma{_s}']
+            except (KeyError, TypeError):
+                return True
+        return _sma_det
+    raise ValueError(f"Unknown detector type: {det_type}")
+
+
+def _merge_tagged_signals(asset, bull_sig_list, bear_sig_list, asset_cfg):
+    """Merge bull+bear signal streams into one tagged list.
+    Each bar tagged with regime ('bull'|'bear') via the configured detector.
+
+    Important: detector lookup keys are NAIVE pandas Timestamps (matching how
+    _build_regime_indicators_and_detectors keys its `ind` dict). If we used
+    tz-aware keys every lookup would miss and default to bull.
+    """
+    detector = _build_detector_from_cfg(asset, asset_cfg)
+
+    def _to_naive(s_dt):
+        if isinstance(s_dt, str):
+            s_dt = datetime.strptime(s_dt, '%Y-%m-%d %H:%M')
+        ts = pd.Timestamp(s_dt)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert('UTC').tz_localize(None)
+        return ts
+
+    bull_map = {_to_naive(s['datetime']): s for s in bull_sig_list}
+    bear_map = {_to_naive(s['datetime']): s for s in bear_sig_list}
+    all_dts = sorted(set(bull_map.keys()) | set(bear_map.keys()))
+
+    bull_h = int(asset_cfg.get('bull', {}).get('horizon', 6))
+    bear_h = int(asset_cfg.get('bear', {}).get('horizon', 8))
+    bull_conf = float(asset_cfg.get('bull', {}).get('min_confidence', 85))
+    bear_conf = float(asset_cfg.get('bear', {}).get('min_confidence', 65))
+
+    merged = []
+    for dt in all_dts:
+        is_bull = bool(detector(dt))
+        regime = 'bull' if is_bull else 'bear'
+        src = bull_map.get(dt) if is_bull else bear_map.get(dt)
+        fallback = bear_map.get(dt) if is_bull else bull_map.get(dt)
+        chosen = src if src is not None else fallback
+        if chosen is None:
+            continue
+        merged.append({
+            'datetime': dt, 'close': float(chosen['close']),
+            'signal': chosen['signal'] if src is not None else 'HOLD',
+            'confidence': float(chosen['confidence']) if src is not None else 0.0,
+            'conf_threshold': bull_conf if is_bull else bear_conf,
+            'regime': regime, 'horizon': bull_h if is_bull else bear_h,
+        })
+    return merged
+
+
+def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
+                          write_config=True, regime_filter='all'):
+    """Core rally-cooldown gate sweep. Returns winner dict (or None if no STRICT).
+
+    Shared by Mode G (standalone, cache-fed) and Mode T (chain, fresh-signal-fed).
+    Writes winner to regime_config_ed.json if write_config=True:
+      - regime_filter='all': writes to asset_cfg['rally_cooldown'] (legacy, single gate)
+      - regime_filter='bull' or 'bear': writes to asset_cfg[regime_filter]['rally_cooldown']
+        AND the gate only fires on that regime's bars during the sim.
+    """
     if replay_h < 720:
-        print(f"  Mode G: --replay must be >= 720h (30d) for stable halves. Got {replay_h}")
-        return
+        print(f"  Rally-cooldown sweep: --replay must be >= 720h (30d). Got {replay_h}")
+        return None
     days = replay_h / 24.0
     half_days = days / 2.0
+    rank_col = 'score_recent' if rank == 'recent' else 'score_dd_aware'
 
     HORIZONS = [8, 10, 12, 14, 16, 18, 20, 24, 30, 36]
     def thr_for(h):
@@ -5091,15 +5462,53 @@ def run_mode_g(assets_list, args):
         if h in (24, 30, 36):      return [round(4.0 + 0.5*i, 2) for i in range(11)]
         raise ValueError(f"no thr grid for {h}")
     CD_GRID = [6, 8, 10, 12, 14, 16, 18, 20, 24, 30, 36, 48]
-    FEE = 0.0011; MIN_SELL_PNL_PCT = 0.005; MAX_HOLD_HOURS = 10
+    FEE = BACKTEST_FEE_PER_LEG
     PLATEAU_THR = 0.7
 
     print("=" * 80)
-    print(f"  MODE G — Rally-cooldown sweep | window={days:.0f}d "
-          f"(halves {half_days:.0f}+{half_days:.0f}d, ref {days:.0f}d)")
+    print(f"  RALLY-COOLDOWN SWEEP | {asset} | window={days:.0f}d "
+          f"(halves {half_days:.0f}+{half_days:.0f}d) | rank={rank}")
     print("=" * 80)
 
-    def simulate(sigs, rr_dict, h_s, h_l, t_s, t_l, cd_h):
+    # Log policy
+    _bull_sh = bool(asset_cfg.get('bull', {}).get('hold_shield', True))
+    _bear_sh = bool(asset_cfg.get('bear', {}).get('hold_shield', True))
+    _bull_c = asset_cfg.get('bull', {}).get('min_confidence', '?')
+    _bear_c = asset_cfg.get('bear', {}).get('min_confidence', '?')
+    _msp = asset_cfg.get('min_sell_pnl_pct', '?')
+    _mh = asset_cfg.get('max_hold_hours', '?')
+    print(f"  {asset} | policy: bull@{_bull_c}% shield={_bull_sh} | "
+          f"bear@{_bear_c}% shield={_bear_sh} | shield_thr={_msp}% / {_mh}h")
+    _tagged = sum(1 for s in signals if 'regime' in s)
+    if _tagged < len(signals):
+        print(f"  {asset} | WARNING: {len(signals)-_tagged}/{len(signals)} signals "
+              f"missing 'regime' tag — will default to 'bull'.")
+
+    def simulate(sigs, rr_dict, h_s, h_l, t_s, t_l, cd_h, asset_cfg):
+        """Simulate rally-cooldown gate against a signal stream.
+
+        Reads per-regime policy from asset_cfg (set by Mode T):
+          - bull/bear.hold_shield: whether to defer SELL on unrealized loss
+          - bull/bear.min_confidence: BUY confidence threshold for that regime
+          - min_sell_pnl_pct: shared shield profit threshold (percent)
+          - max_hold_hours: shared shield failsafe
+          - shield_quick_release: {enabled, min_sell_conf, max_hours}
+            Bypass shield on strong SELL signals shortly after entry.
+
+        Each signal bar carries s['regime'] = 'bull' | 'bear' (tagged at cache
+        build time). Policy is looked up at the current bar's regime."""
+        bull_shield = bool(asset_cfg.get('bull', {}).get('hold_shield', True))
+        bear_shield = bool(asset_cfg.get('bear', {}).get('hold_shield', True))
+        bull_conf = float(asset_cfg.get('bull', {}).get('min_confidence', 75.0))
+        bear_conf = float(asset_cfg.get('bear', {}).get('min_confidence', 65.0))
+        min_sell_pnl = float(asset_cfg.get('min_sell_pnl_pct', 0.5))  # already percent
+        max_hold = int(asset_cfg.get('max_hold_hours', 10))
+        # Quick-release default OFF — opt-in only (see 2026-04-19 evaluation)
+        qr_cfg = asset_cfg.get('shield_quick_release', {})
+        qr_enabled = bool(qr_cfg.get('enabled', False))
+        qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
+        qr_max_hours = float(qr_cfg.get('max_hours', 3))
+
         cash = 1000.0; qty = 0.0; in_pos = False; entry = 0.0
         hold = 0; trades = 0; skipped = 0; cd = 0
         ec = [1000.0]
@@ -5107,12 +5516,17 @@ def run_mode_g(assets_list, args):
         rs_arr = rr_dict.get(h_s); rl_arr = rr_dict.get(h_l)
         for i in range(n):
             s = sigs[i]; price = s['close']
+            regime = s.get('regime', 'bull')
+            conf_thr = bull_conf if regime == 'bull' else bear_conf
+            # Trigger check: only when this bar's regime matches the filter
+            # (or filter='all' = every bar). Enables per-regime gate sweeps.
             if cd_h > 0 and rs_arr is not None and rl_arr is not None:
-                rs = rs_arr[i]; rl = rl_arr[i]
-                if (rs == rs and rs >= t_s) or (rl == rl and rl >= t_l):
-                    cd = max(cd, cd_h)
+                if regime_filter == 'all' or regime_filter == regime:
+                    rs = rs_arr[i]; rl = rl_arr[i]
+                    if (rs == rs and rs >= t_s) or (rl == rl and rl >= t_l):
+                        cd = max(cd, cd_h)
             ec.append(cash + qty * price if in_pos else cash)
-            if s['signal'] == 'BUY' and s['confidence'] >= s['conf_threshold'] and not in_pos:
+            if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
                 if cd > 0:
                     skipped += 1
                 else:
@@ -5122,7 +5536,15 @@ def run_mode_g(assets_list, args):
             elif s['signal'] == 'SELL' and in_pos:
                 fp = sigs[i+1]['close'] if i+1 < n else price
                 cur = (fp / entry - 1.0) * 100.0
-                if cur >= MIN_SELL_PNL_PCT * 100.0 or hold >= MAX_HOLD_HOURS:
+                # Shield uses the CURRENT bar's regime — matches live trader,
+                # which re-evaluates regime on every tick.
+                shield_on = bull_shield if regime == 'bull' else bear_shield
+                shield_min = min_sell_pnl if shield_on else 0.0
+                # Quick-release: strong SELL within N cycles of entry bypasses shield
+                quick_release = (qr_enabled and shield_on
+                                 and hold <= qr_max_hours
+                                 and float(s.get('confidence', 0)) >= qr_min_conf)
+                if cur >= shield_min or hold >= max_hold or quick_release:
                     cash = qty * fp * (1 - FEE)
                     trades += 1; in_pos = False; qty = 0.0; entry = 0.0; hold = 0
             if in_pos: hold += 1
@@ -5134,6 +5556,182 @@ def run_mode_g(assets_list, args):
         mdd = float(dd.min()) * 100.0 if len(dd) else 0.0
         return dict(pnl_pct=pnl, dd_pct=mdd, trades=trades, skipped=skipped)
 
+    # Normalize signal datetimes to UTC
+    for s in signals:
+        t = pd.Timestamp(s['datetime'])
+        s['datetime'] = t.tz_localize('UTC') if t.tzinfo is None else t.tz_convert('UTC')
+
+    end_t = signals[-1]['datetime']
+    t_h1_lo = end_t - pd.Timedelta(days=half_days)
+    t_h2_lo = end_t - pd.Timedelta(days=days)
+    sigs_h1 = [s for s in signals if s['datetime'] >= t_h1_lo]
+    sigs_h2 = [s for s in signals if t_h2_lo <= s['datetime'] < t_h1_lo]
+    sigs_ref = [s for s in signals if s['datetime'] >= t_h2_lo]
+
+    if len(sigs_h2) < 100:
+        print(f"  {asset}: signal stream too short — H2 has only {len(sigs_h2)} signals. SKIPPING.")
+        return None
+
+    def build_rr(ws):
+        df = pd.DataFrame([{'datetime': s['datetime'], 'close': s['close']} for s in ws])
+        df = df.sort_values('datetime').reset_index(drop=True)
+        return {h: ((df['close'] / df['close'].shift(h) - 1.0) * 100.0).values for h in HORIZONS}
+    rr_h1 = build_rr(sigs_h1); rr_h2 = build_rr(sigs_h2); rr_ref = build_rr(sigs_ref)
+
+    b_h1 = simulate(sigs_h1, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    b_h2 = simulate(sigs_h2, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    b_ref = simulate(sigs_ref, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    print(f"  {asset} | sigs h1={len(sigs_h1)} h2={len(sigs_h2)} ref={len(sigs_ref)}")
+    print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
+          f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
+
+    pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
+    total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
+    print(f"  {asset} | sweeping {total:,} configs ...")
+
+    rows = []
+    t0 = time.time()
+    for h_s, h_l in pairs:
+        for t_s in thr_for(h_s):
+            for t_l in thr_for(h_l):
+                for cd in CD_GRID:
+                    r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    rows.append(dict(
+                        h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
+                        pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
+                        dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
+                        tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
+                        sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
+                    ))
+    print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
+
+    df = pd.DataFrame(rows)
+    df['beats_H1']  = df['pnl_H1']  > b_h1['pnl_pct']
+    df['beats_H2']  = df['pnl_H2']  > b_h2['pnl_pct']
+    df['beats_REF'] = df['pnl_REF'] > b_ref['pnl_pct']
+    df['beats_3of3'] = df['beats_H1'] & df['beats_H2'] & df['beats_REF']
+    df['avg_pnl_halves'] = (df['pnl_H1'] + df['pnl_H2']) / 2.0
+    df['worst_dd'] = np.maximum(df['dd_H1'].abs(), df['dd_H2'].abs())
+    df['score_dd_aware'] = df['avg_pnl_halves'] - 0.5 * df['worst_dd']
+    df['score_recent'] = df['pnl_H1'] - 0.5 * df['dd_H1'].abs()
+
+    h_idx = {h: i for i, h in enumerate(HORIZONS)}
+    cd_idx = {c: i for i, c in enumerate(CD_GRID)}
+    key_to_idx = {(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                   float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
+    beats3 = df['beats_3of3'].values
+
+    def nb_idx(hs, hl, ts, tl, cd, dim, step):
+        if dim == 'hs':
+            i = h_idx[hs] + step
+            if not (0 <= i < len(HORIZONS)): return None
+            new = HORIZONS[i]
+            if new >= hl: return None
+            key = (new, hl, ts, tl, cd)
+        elif dim == 'hl':
+            i = h_idx[hl] + step
+            if not (0 <= i < len(HORIZONS)): return None
+            new = HORIZONS[i]
+            if new <= hs or tl not in thr_for(new): return None
+            key = (hs, new, ts, tl, cd)
+        elif dim == 'ts':
+            new = round(ts + 0.5 * step, 2)
+            if new not in thr_for(hs): return None
+            key = (hs, hl, new, tl, cd)
+        elif dim == 'tl':
+            new = round(tl + 0.5 * step, 2)
+            if new not in thr_for(hl): return None
+            key = (hs, hl, ts, new, cd)
+        elif dim == 'cd':
+            i = cd_idx[cd] + step
+            if not (0 <= i < len(CD_GRID)): return None
+            key = (hs, hl, ts, tl, CD_GRID[i])
+        return key_to_idx.get(key)
+
+    plateau = np.zeros(len(df))
+    for i, r in df.iterrows():
+        nbrs = []
+        for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
+            for step in (-1, 1):
+                j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                           float(r['t_long']), int(r['cd']), dim, step)
+                if j is not None: nbrs.append(j)
+        plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
+    df['plateau_score'] = plateau
+
+    os.makedirs('output', exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = f'output/rally_cd_{asset}_{ts}.csv'
+    df.to_csv(out_path, index=False)
+    print(f"  {asset} | wrote {out_path}")
+
+    strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
+    strict = strict.sort_values(rank_col, ascending=False)
+    print(f"  {asset} | beats_3of3={int(df['beats_3of3'].sum())}  "
+          f"STRICT (3of3 + plateau>={PLATEAU_THR})={len(strict)}")
+    if len(strict) == 0:
+        print(f"  {asset} | NO STRICT WINNER — config not modified.")
+        return None
+
+    cols = ['h_short','h_long','t_short','t_long','cd',
+            'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_recent','score_dd_aware','plateau_score']
+    print(f"  {asset} | top 5 STRICT:")
+    print(strict[cols].head(5).to_string(index=False,
+          formatters={c: '{:+.2f}'.format for c in cols
+                      if c.startswith(('pnl_','score_','plateau','worst'))}))
+
+    win = strict.iloc[0]
+    print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
+          f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
+
+    winner_dict = {
+        'enabled': True,
+        'h_short': int(win['h_short']),
+        'h_long': int(win['h_long']),
+        't_short_pct': float(win['t_short']),
+        't_long_pct': float(win['t_long']),
+        'cd_hours': int(win['cd']),
+    }
+
+    if write_config:
+        cfg = {}
+        if os.path.exists(REGIME_CONFIG_PATH):
+            with open(REGIME_CONFIG_PATH) as f:
+                cfg = json.load(f)
+        if asset not in cfg:
+            cfg[asset] = {'enabled': False, 'symbol': f'{asset}-USD'}
+        # Route the winner to the right spot based on regime_filter
+        if regime_filter in ('bull', 'bear'):
+            cfg[asset].setdefault(regime_filter, {})['rally_cooldown'] = winner_dict
+            write_loc = f"{asset}.{regime_filter}.rally_cooldown"
+        else:
+            cfg[asset]['rally_cooldown'] = winner_dict
+            write_loc = f"{asset}.rally_cooldown"
+        _atomic_write_json(REGIME_CONFIG_PATH, cfg)
+        print(f"  {asset} | wrote {write_loc} to {REGIME_CONFIG_PATH}")
+
+    return winner_dict
+
+
+# ============================================================
+# MODE G — RALLY-COOLDOWN OR-GATE SWEEP (cache-fed standalone)
+# ============================================================
+def run_mode_g(assets_list, args):
+    """Standalone Mode G: load cached tagged signals (pre-built by extend_caches_90d.py),
+    call _sweep_rally_cooldown. Useful when models haven't changed and you want fast iteration.
+    For fresh signals, prefer Mode T which auto-chains rally-cooldown after its own sweep."""
+    replay_h = int(getattr(args, 'replay', 0)) or 1440
+    rank = getattr(args, 'rank', 'recent')
+
+    try:
+        with open(REGIME_CONFIG_PATH) as f:
+            regime_cfg_all = json.load(f)
+    except Exception as e:
+        print(f"  Mode G: cannot read {REGIME_CONFIG_PATH}: {e}")
+        return
+
     for asset in assets_list:
         cache_path = None
         for n in (90, 60, 30):
@@ -5142,155 +5740,36 @@ def run_mode_g(assets_list, args):
                 cache_path = p; break
         if cache_path is None:
             print(f"  {asset}: no signal cache (data/{asset.lower()}_sl_signals_*.pkl). "
-                  f"Run extend_caches_90d.py for {asset}. SKIPPING.")
+                  f"Run extend_caches_90d.py for {asset}, or use Mode T for fresh signals. SKIPPING.")
             continue
+
+        # Cache-freshness guard: standalone G is useful only when models haven't changed.
+        # If the production CSV is newer than the cache, the signals are stale.
+        try:
+            cache_mtime = os.path.getmtime(cache_path)
+            prod_mtime = os.path.getmtime(PRODUCTION_CSV)
+            if prod_mtime > cache_mtime:
+                age_min = (prod_mtime - cache_mtime) / 60.0
+                print("=" * 80)
+                print(f"  {asset}: STALE CACHE WARNING")
+                print(f"  Signal cache: {cache_path} ({datetime.fromtimestamp(cache_mtime)})")
+                print(f"  Production CSV: {PRODUCTION_CSV} ({datetime.fromtimestamp(prod_mtime)})")
+                print(f"  Production is {age_min:.0f} minutes NEWER than the cache.")
+                print(f"  The signals in the cache were generated by older models.")
+                print("  Options:")
+                print("    - Prefer Mode T (regenerates signals fresh, chains G automatically)")
+                print("    - Or rebuild: python extend_caches_90d.py")
+                print(f"  SKIPPING {asset} to avoid writing bad config.")
+                print("=" * 80)
+                continue
+        except OSError:
+            pass
 
         with open(cache_path, 'rb') as f:
             signals = pickle.load(f)
-        for s in signals:
-            t = pd.Timestamp(s['datetime'])
-            s['datetime'] = t.tz_localize('UTC') if t.tzinfo is None else t.tz_convert('UTC')
 
-        end_t = signals[-1]['datetime']
-        t_h1_lo = end_t - pd.Timedelta(days=half_days)
-        t_h2_lo = end_t - pd.Timedelta(days=days)
-        sigs_h1 = [s for s in signals if s['datetime'] >= t_h1_lo]
-        sigs_h2 = [s for s in signals if t_h2_lo <= s['datetime'] < t_h1_lo]
-        sigs_ref = [s for s in signals if s['datetime'] >= t_h2_lo]
-
-        if len(sigs_h2) < 100:
-            print(f"  {asset}: cache too short — H2 has only {len(sigs_h2)} signals. SKIPPING.")
-            continue
-
-        def build_rr(ws):
-            df = pd.DataFrame([{'datetime': s['datetime'], 'close': s['close']} for s in ws])
-            df = df.sort_values('datetime').reset_index(drop=True)
-            return {h: ((df['close'] / df['close'].shift(h) - 1.0) * 100.0).values for h in HORIZONS}
-        rr_h1 = build_rr(sigs_h1); rr_h2 = build_rr(sigs_h2); rr_ref = build_rr(sigs_ref)
-
-        b_h1 = simulate(sigs_h1, {}, 8, 36, 9999, 9999, 0)
-        b_h2 = simulate(sigs_h2, {}, 8, 36, 9999, 9999, 0)
-        b_ref = simulate(sigs_ref, {}, 8, 36, 9999, 9999, 0)
-        print(f"  {asset} | sigs h1={len(sigs_h1)} h2={len(sigs_h2)} ref={len(sigs_ref)}")
-        print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
-              f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
-
-        pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
-        total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
-        print(f"  {asset} | sweeping {total:,} configs ...")
-
-        rows = []
-        t0 = time.time()
-        for h_s, h_l in pairs:
-            for t_s in thr_for(h_s):
-                for t_l in thr_for(h_l):
-                    for cd in CD_GRID:
-                        r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd)
-                        r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd)
-                        rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd)
-                        rows.append(dict(
-                            h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
-                            pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
-                            dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
-                            tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
-                            sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
-                        ))
-        print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
-
-        df = pd.DataFrame(rows)
-        df['beats_H1']  = df['pnl_H1']  > b_h1['pnl_pct']
-        df['beats_H2']  = df['pnl_H2']  > b_h2['pnl_pct']
-        df['beats_REF'] = df['pnl_REF'] > b_ref['pnl_pct']
-        df['beats_3of3'] = df['beats_H1'] & df['beats_H2'] & df['beats_REF']
-        df['avg_pnl_halves'] = (df['pnl_H1'] + df['pnl_H2']) / 2.0
-        df['worst_dd'] = np.maximum(df['dd_H1'].abs(), df['dd_H2'].abs())
-        df['score_dd_aware'] = df['avg_pnl_halves'] - 0.5 * df['worst_dd']
-
-        h_idx = {h: i for i, h in enumerate(HORIZONS)}
-        cd_idx = {c: i for i, c in enumerate(CD_GRID)}
-        key_to_idx = {(int(r['h_short']), int(r['h_long']), float(r['t_short']),
-                       float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
-        beats3 = df['beats_3of3'].values
-
-        def nb_idx(hs, hl, ts, tl, cd, dim, step):
-            if dim == 'hs':
-                i = h_idx[hs] + step
-                if not (0 <= i < len(HORIZONS)): return None
-                new = HORIZONS[i]
-                if new >= hl: return None
-                key = (new, hl, ts, tl, cd)
-            elif dim == 'hl':
-                i = h_idx[hl] + step
-                if not (0 <= i < len(HORIZONS)): return None
-                new = HORIZONS[i]
-                if new <= hs or tl not in thr_for(new): return None
-                key = (hs, new, ts, tl, cd)
-            elif dim == 'ts':
-                new = round(ts + 0.5 * step, 2)
-                if new not in thr_for(hs): return None
-                key = (hs, hl, new, tl, cd)
-            elif dim == 'tl':
-                new = round(tl + 0.5 * step, 2)
-                if new not in thr_for(hl): return None
-                key = (hs, hl, ts, new, cd)
-            elif dim == 'cd':
-                i = cd_idx[cd] + step
-                if not (0 <= i < len(CD_GRID)): return None
-                key = (hs, hl, ts, tl, CD_GRID[i])
-            return key_to_idx.get(key)
-
-        plateau = np.zeros(len(df))
-        for i, r in df.iterrows():
-            nbrs = []
-            for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
-                for step in (-1, 1):
-                    j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
-                               float(r['t_long']), int(r['cd']), dim, step)
-                    if j is not None: nbrs.append(j)
-            plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
-        df['plateau_score'] = plateau
-
-        os.makedirs('output', exist_ok=True)
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_path = f'output/mode_g_{asset}_{ts}.csv'
-        df.to_csv(out_path, index=False)
-        print(f"  {asset} | wrote {out_path}")
-
-        strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
-        strict = strict.sort_values('score_dd_aware', ascending=False)
-        print(f"  {asset} | beats_3of3={int(df['beats_3of3'].sum())}  "
-              f"STRICT (3of3 + plateau>={PLATEAU_THR})={len(strict)}")
-        if len(strict) == 0:
-            print(f"  {asset} | NO STRICT WINNER — config not modified.")
-            continue
-
-        cols = ['h_short','h_long','t_short','t_long','cd',
-                'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_dd_aware','plateau_score']
-        print(f"  {asset} | top 5 STRICT:")
-        print(strict[cols].head(5).to_string(index=False,
-              formatters={c: '{:+.2f}'.format for c in cols
-                          if c.startswith(('pnl_','score_','plateau','worst'))}))
-
-        win = strict.iloc[0]
-        print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
-              f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
-
-        cfg = {}
-        if os.path.exists(REGIME_CONFIG_PATH):
-            with open(REGIME_CONFIG_PATH) as f:
-                cfg = json.load(f)
-        if asset not in cfg:
-            cfg[asset] = {'enabled': False, 'symbol': f'{asset}-USD'}
-        cfg[asset]['rally_cooldown'] = {
-            'enabled': True,
-            'h_short': int(win['h_short']),
-            'h_long': int(win['h_long']),
-            't_short_pct': float(win['t_short']),
-            't_long_pct': float(win['t_long']),
-            'cd_hours': int(win['cd']),
-        }
-        _atomic_write_json(REGIME_CONFIG_PATH, cfg)
-        print(f"  {asset} | wrote rally_cooldown to {REGIME_CONFIG_PATH}")
+        asset_cfg = regime_cfg_all.get(asset, {})
+        _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank=rank, write_config=True)
 
 
 def main():
@@ -5308,8 +5787,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T',
-                   'G', 'RSG', 'HRSG', 'DVRSG', 'HRSTG'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T', 'G'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -5351,6 +5829,26 @@ def main():
             except ValueError:
                 pass
 
+    # Parse --rank recent|balanced (Mode G tiebreak), default 'recent'
+    flag_rank = 'recent'
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--rank' and i < len(sys.argv) - 1:
+            v = sys.argv[i + 1].lower()
+            if v in ('recent', 'balanced'):
+                flag_rank = v
+            else:
+                print(f"  Unknown --rank value '{v}'. Valid: recent, balanced")
+                return
+
+    # Parse --max-iter N (Mode T: T<->G convergence iterations, default 4)
+    flag_max_iter = 0
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--max-iter' and i < len(sys.argv) - 1:
+            try:
+                flag_max_iter = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
     # --help
     if '--help' in sys.argv or '-h' in sys.argv:
         print("""
@@ -5371,11 +5869,10 @@ Modes:
   HRST    Full Ed pipeline + threshold: H → R → S → T
   DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
-  G       Rally-cooldown gate sweep (writes rally_cooldown to regime_config_ed.json)
-  RSG     RS then G
-  HRSG    HRS then G
-  DVRSG   DVRS then G
-  HRSTG   HRST then G
+  G       Rally-cooldown gate sweep — cache-fed standalone (fast iteration)
+          NOTE: Mode T chains this sweep automatically against fresh signals, so
+          HRST is the canonical way to get shield + gate together. G standalone
+          is kept for fast re-runs when models haven't changed.
 
 Assets:
   BTC,ETH,LINK,...   Comma-separated asset names (default: all)
@@ -5391,6 +5888,8 @@ Options:
   --replay N          Mode D/V/R/S/T: data window in hours (default: 1440=2mo)
   --conf N            Mode R only: confidence threshold (default: 90)
   --top N             Mode R only: show top N results (default: 15)
+  --rank MODE         Mode G tiebreak: recent (H1-focused, default) | balanced (H1+H2 avg)
+  --max-iter N        Mode T: T<->G convergence iterations (default 4; 1=single-pass legacy)
   --help, -h          Show this help
 
 Examples:
@@ -5429,7 +5928,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 
@@ -5491,9 +5990,8 @@ Examples:
         print("  HRS. Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)")
         print("  R.  REGIME BACKTEST (bull/bear horizon switching with regime detectors)")
         print("  DVRS. Same as HRS for specified horizons")
-        print("  G.  RALLY-COOLDOWN gate sweep (writes rally_cooldown to regime_config)")
-        print("  RSG / HRSG / DVRSG / HRSTG. Chains G after RS / HRS / DVRS / HRST")
-        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS/G/RSG/HRSG/DVRSG/HRSTG: ").strip().upper()
+        print("  G.  RALLY-COOLDOWN gate sweep — cache-fed standalone (T chains G automatically)")
+        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/HRST/R/DVRS/G/T: ").strip().upper()
 
 
         if mode not in VALID_MODES:
@@ -5656,43 +6154,23 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
+        _r_args.max_iter = flag_max_iter
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
         if mode == 'HRST':
             run_mode_t(assets_list, _r_args)
-    elif mode in ('HRSG', 'DVRSG', 'HRSTG'):
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
-        class _Args: pass
-        _r_args = _Args()
-        _r_args.replay = flag_replay
-        _r_args.conf = flag_conf
-        _r_args.top = flag_top
-        r_results = _run_mode_r(assets_list, horizons, _r_args)
-        _apply_mode_r_to_config(r_results)
-        run_mode_s(assets_list, horizons, _r_args)
-        if mode == 'HRSTG':
-            run_mode_t(assets_list, _r_args)
-        run_mode_g(assets_list, _r_args)
-    elif mode == 'RSG':
-        class _Args: pass
-        _r_args = _Args()
-        _r_args.replay = flag_replay
-        _r_args.conf = flag_conf
-        _r_args.top = flag_top
-        r_results = _run_mode_r(assets_list, horizons, _r_args)
-        _apply_mode_r_to_config(r_results)
-        run_mode_s(assets_list, horizons, _r_args)
-        run_mode_g(assets_list, _r_args)
     elif mode == 'G':
         class _Args: pass
         _r_args = _Args()
         _r_args.replay = flag_replay
+        _r_args.rank = flag_rank
         run_mode_g(assets_list, _r_args)
     elif mode == 'T':
         class _Args: pass
         _r_args = _Args()
         _r_args.replay = flag_replay
+        _r_args.max_iter = flag_max_iter
         run_mode_t(assets_list, _r_args)
     elif mode == 'P':
         run_mode_p(assets_list, horizons)

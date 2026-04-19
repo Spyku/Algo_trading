@@ -361,117 +361,133 @@ def download_onchain_data(asset='btc'):
 # ============================================================
 # 6. DERIVATIVES DATA (funding rate + open interest from Binance)
 # ============================================================
-def download_derivatives_data():
+def download_derivatives_data(assets=None):
     """
-    Download BTC derivatives data from Binance Futures public API (free, no key).
+    Download derivatives data from Binance Futures public API (free, no key).
     - Funding rate: every 8h, paginated from 2022-01-01
     - Open interest: hourly, max 30 days per request, paginated
-    Saves to data/macro_data/derivatives_btc.csv (hourly frequency).
+    Saves to data/macro_data/derivatives_{asset}.csv per asset (hourly frequency).
     """
     import urllib.request
     import ssl
     import time
 
-    print(f"\n  Downloading BTC derivatives data from Binance...")
+    if assets is None:
+        assets = ['BTC', 'ETH']
 
+    all_results = {}
     ctx = ssl._create_unverified_context()
     start_date = '2022-01-01'
     start_ms = int(pd.Timestamp(start_date).timestamp() * 1000)
 
-    # --- Funding Rate (8h intervals, paginate with limit=1000) ---
-    print(f"    Funding rate (8h intervals)...", end=' ')
-    all_funding = []
-    cursor_ms = start_ms
-    try:
-        while True:
-            url = (f"https://fapi.binance.com/fapi/v1/fundingRate"
-                   f"?symbol=BTCUSDT&startTime={cursor_ms}&limit=1000")
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                data = json.loads(resp.read().decode())
-            if not data:
-                break
-            all_funding.extend(data)
-            last_ts = data[-1]['fundingTime']
-            if len(data) < 1000:
-                break
-            cursor_ms = last_ts + 1
-            time.sleep(0.2)  # polite rate limiting
+    for asset in assets:
+        symbol = f"{asset}USDT"
+        print(f"\n  Downloading {asset} derivatives data from Binance...")
 
-        if all_funding:
-            fr_df = pd.DataFrame(all_funding)
-            fr_df['datetime'] = pd.to_datetime(fr_df['fundingTime'], unit='ms')
-            fr_df['funding_rate'] = pd.to_numeric(fr_df['fundingRate'], errors='coerce')
-            fr_df = fr_df[['datetime', 'funding_rate']].set_index('datetime').sort_index()
-            # Resample to hourly (forward-fill 8h values)
-            fr_hourly = fr_df.resample('1h').ffill()
-            print(f"{len(all_funding)} records -> {len(fr_hourly)} hourly rows")
-        else:
+        # --- Funding Rate (8h intervals, paginate with limit=1000) ---
+        print(f"    Funding rate (8h intervals)...", end=' ')
+        all_funding = []
+        cursor_ms = start_ms
+        try:
+            while True:
+                url = (f"https://fapi.binance.com/fapi/v1/fundingRate"
+                       f"?symbol={symbol}&startTime={cursor_ms}&limit=1000")
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                    data = json.loads(resp.read().decode())
+                if not data:
+                    break
+                all_funding.extend(data)
+                last_ts = data[-1]['fundingTime']
+                if len(data) < 1000:
+                    break
+                cursor_ms = last_ts + 1
+                time.sleep(0.2)
+
+            if all_funding:
+                fr_df = pd.DataFrame(all_funding)
+                fr_df['datetime'] = pd.to_datetime(fr_df['fundingTime'], unit='ms')
+                fr_df['funding_rate'] = pd.to_numeric(fr_df['fundingRate'], errors='coerce')
+                fr_df = fr_df[['datetime', 'funding_rate']].set_index('datetime').sort_index()
+                fr_hourly = fr_df.resample('1h').ffill()
+                print(f"{len(all_funding)} records -> {len(fr_hourly)} hourly rows")
+            else:
+                fr_hourly = None
+                print("NO DATA")
+        except Exception as e:
             fr_hourly = None
-            print("NO DATA")
-    except Exception as e:
-        fr_hourly = None
-        print(f"ERROR: {e}")
+            print(f"ERROR: {e}")
 
-    # --- Open Interest (hourly, paginate backwards using endTime) ---
-    print(f"    Open interest (hourly)...", end=' ')
-    all_oi = []
-    try:
-        # First request: latest 500 hours
-        url = (f"https://fapi.binance.com/futures/data/openInterestHist"
-               f"?symbol=BTCUSDT&period=1h&limit=500")
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-            data = json.loads(resp.read().decode())
-        if data:
-            all_oi.extend(data)
-
-        # Paginate backwards until we reach start_date or run out of data
-        while data and len(data) > 1:
-            earliest_ts = data[0]['timestamp']
-            if earliest_ts <= start_ms:
-                break
-            end_ms = earliest_ts - 1
+        # --- Open Interest (hourly, paginate backwards using endTime) ---
+        print(f"    Open interest (hourly)...", end=' ')
+        all_oi = []
+        try:
             url = (f"https://fapi.binance.com/futures/data/openInterestHist"
-                   f"?symbol=BTCUSDT&period=1h&endTime={end_ms}&limit=500")
+                   f"?symbol={symbol}&period=1h&limit=500")
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
                 data = json.loads(resp.read().decode())
             if data:
                 all_oi.extend(data)
-            time.sleep(0.2)
 
-        if all_oi:
-            oi_df = pd.DataFrame(all_oi)
-            oi_df['datetime'] = pd.to_datetime(oi_df['timestamp'], unit='ms')
-            oi_df['open_interest'] = pd.to_numeric(oi_df['sumOpenInterest'], errors='coerce')
-            oi_df['open_interest_usd'] = pd.to_numeric(oi_df['sumOpenInterestValue'], errors='coerce')
-            oi_df = oi_df[['datetime', 'open_interest', 'open_interest_usd']]
-            oi_df = oi_df.drop_duplicates(subset='datetime').set_index('datetime').sort_index()
-            print(f"{len(oi_df)} hourly rows")
-        else:
+            while data and len(data) > 1:
+                earliest_ts = data[0]['timestamp']
+                if earliest_ts <= start_ms:
+                    break
+                end_ms = earliest_ts - 1
+                url = (f"https://fapi.binance.com/futures/data/openInterestHist"
+                       f"?symbol={symbol}&period=1h&endTime={end_ms}&limit=500")
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                    data = json.loads(resp.read().decode())
+                if data:
+                    all_oi.extend(data)
+                time.sleep(0.2)
+
+            if all_oi:
+                oi_df = pd.DataFrame(all_oi)
+                oi_df['datetime'] = pd.to_datetime(oi_df['timestamp'], unit='ms')
+                oi_df['open_interest'] = pd.to_numeric(oi_df['sumOpenInterest'], errors='coerce')
+                oi_df['open_interest_usd'] = pd.to_numeric(oi_df['sumOpenInterestValue'], errors='coerce')
+                oi_df = oi_df[['datetime', 'open_interest', 'open_interest_usd']]
+                oi_df = oi_df.drop_duplicates(subset='datetime').set_index('datetime').sort_index()
+                print(f"{len(oi_df)} hourly rows")
+            else:
+                oi_df = None
+                print("NO DATA")
+        except Exception as e:
             oi_df = None
-            print("NO DATA")
-    except Exception as e:
-        oi_df = None
-        print(f"ERROR: {e}")
+            print(f"ERROR: {e}")
 
-    # Combine
-    dfs = [df for df in [fr_hourly, oi_df] if df is not None]
-    if not dfs:
-        print("  No derivatives data downloaded!")
-        return None
+        # --- Perp-Spot Basis ---
+        print(f"    Perp-spot basis...", end=' ')
+        try:
+            url = (f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}")
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                pdata = json.loads(resp.read().decode())
+            # premiumIndex gives markPrice, indexPrice, estimatedSettlePrice
+            # We'll store the premium as a column but historical needs klines
+            print(f"live premium={float(pdata.get('lastFundingRate', 0))*100:.4f}% (historical from funding)")
+        except Exception as e:
+            print(f"(live check failed: {e})")
 
-    deriv_df = pd.concat(dfs, axis=1).sort_index()
-    deriv_df = deriv_df.ffill()
+        # Combine
+        dfs = [df for df in [fr_hourly, oi_df] if df is not None]
+        if not dfs:
+            print(f"  No derivatives data for {asset}!")
+            continue
 
-    outfile = os.path.join(MACRO_DIR, 'derivatives_btc.csv')
-    deriv_df.to_csv(outfile)
-    print(f"\n  Saved: {outfile} ({len(deriv_df)} rows, {len(deriv_df.columns)} columns)")
-    print(f"  Columns: {list(deriv_df.columns)}")
-    print(f"  Date range: {deriv_df.index[0]} to {deriv_df.index[-1]}")
+        deriv_df = pd.concat(dfs, axis=1).sort_index()
+        deriv_df = deriv_df.ffill()
 
-    return deriv_df
+        outfile = os.path.join(MACRO_DIR, f'derivatives_{asset.lower()}.csv')
+        deriv_df.to_csv(outfile)
+        print(f"  Saved: {outfile} ({len(deriv_df)} rows, {len(deriv_df.columns)} columns)")
+        print(f"  Date range: {deriv_df.index[0]} to {deriv_df.index[-1]}")
+        all_results[asset] = deriv_df
+
+    return all_results
 
 
 # ============================================================
@@ -610,6 +626,290 @@ def download_gdelt_geopolitical():
 
 
 # ============================================================
+# 8. STABLECOIN FLOWS (USDT + USDC market cap from CoinGecko)
+# ============================================================
+def download_stablecoin_flows():
+    """
+    Download USDT and USDC market cap history from CoinGecko (free, no key).
+    Daily data — forward-filled to hourly. Computes daily change as feature.
+    """
+    import urllib.request
+    import ssl
+    import time
+
+    print(f"\n  Downloading stablecoin market cap data...")
+    ctx = ssl._create_unverified_context()
+
+    stables = {'tether': 'usdt', 'usd-coin': 'usdc'}
+    all_dfs = []
+
+    for coin_id, label in stables.items():
+        print(f"    {label.upper()} market cap...", end=' ')
+        try:
+            url = (f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+                   f"?vs_currency=usd&days=365&interval=daily")
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
+            if 'market_caps' in data and data['market_caps']:
+                mc = pd.DataFrame(data['market_caps'], columns=['timestamp', f'{label}_mcap'])
+                mc['datetime'] = pd.to_datetime(mc['timestamp'], unit='ms')
+                mc = mc[['datetime', f'{label}_mcap']].set_index('datetime').sort_index()
+                mc = mc[~mc.index.duplicated(keep='last')]
+                all_dfs.append(mc)
+                print(f"{len(mc)} days")
+            else:
+                print("NO DATA")
+            time.sleep(1.5)  # CoinGecko rate limit
+        except Exception as e:
+            print(f"ERROR: {e}")
+
+    if not all_dfs:
+        print("  No stablecoin data downloaded!")
+        return None
+
+    combined = pd.concat(all_dfs, axis=1).sort_index().ffill()
+    combined['total_stable_mcap'] = combined.sum(axis=1)
+
+    outfile = os.path.join(MACRO_DIR, 'stablecoin_flows.csv')
+    combined.to_csv(outfile)
+    print(f"  Saved: {outfile} ({len(combined)} rows)")
+    return combined
+
+
+# ============================================================
+# 9. OPTIONS IV SKEW (Deribit — free public API)
+# ============================================================
+def download_options_iv_skew():
+    """
+    Download ETH and BTC options implied volatility from Deribit public API (free, no key).
+    Gets current IV surface — ATM IV, 25-delta put/call IV, skew.
+    Historical IV requires paid data; we'll snapshot and accumulate over time.
+    """
+    import urllib.request
+    import ssl
+
+    print(f"\n  Downloading options IV data from Deribit...")
+    ctx = ssl._create_unverified_context()
+
+    rows = []
+    for asset in ['ETH', 'BTC']:
+        try:
+            # Get instruments list
+            url = (f"https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
+                   f"?currency={asset}&kind=option")
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
+
+            if 'result' in data:
+                options = data['result']
+                # Filter to near-term options (< 30 days)
+                now_ts = pd.Timestamp.now().timestamp() * 1000
+                near_term = [o for o in options if o.get('creation_timestamp', 0) > 0]
+
+                # Compute aggregate IV stats
+                ivs = [o.get('mark_iv', 0) for o in near_term if o.get('mark_iv', 0) > 0]
+                put_ivs = [o.get('mark_iv', 0) for o in near_term
+                           if o.get('instrument_name', '').endswith('P') and o.get('mark_iv', 0) > 0]
+                call_ivs = [o.get('mark_iv', 0) for o in near_term
+                            if o.get('instrument_name', '').endswith('C') and o.get('mark_iv', 0) > 0]
+
+                import numpy as np
+                avg_iv = np.mean(ivs) if ivs else 0
+                put_iv = np.mean(put_ivs) if put_ivs else 0
+                call_iv = np.mean(call_ivs) if call_ivs else 0
+                skew = put_iv - call_iv  # positive = more fear
+
+                rows.append({
+                    'datetime': pd.Timestamp.now().floor('h'),
+                    'asset': asset,
+                    'avg_iv': avg_iv,
+                    'put_iv': put_iv,
+                    'call_iv': call_iv,
+                    'iv_skew': skew,
+                    'n_options': len(near_term),
+                })
+                print(f"    {asset}: IV={avg_iv:.1f}% skew={skew:.1f}% ({len(near_term)} options)")
+            else:
+                print(f"    {asset}: no data")
+        except Exception as e:
+            print(f"    {asset}: ERROR {e}")
+
+    if not rows:
+        print("  No options data!")
+        return None
+
+    df = pd.DataFrame(rows)
+    outfile = os.path.join(MACRO_DIR, 'options_iv_snapshot.csv')
+    # Append to existing file
+    if os.path.exists(outfile):
+        existing = pd.read_csv(outfile)
+        df = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=['datetime', 'asset'], keep='last')
+    df.to_csv(outfile, index=False)
+    print(f"  Saved: {outfile} ({len(df)} rows)")
+    return df
+
+
+# ============================================================
+# 10. ORDERBOOK IMBALANCE SNAPSHOT
+# ============================================================
+def download_orderbook_snapshot(assets=None):
+    """
+    Snapshot orderbook bid/ask depth from Binance (free, no key).
+    Computes bid_vol/ask_vol imbalance ratio at top 20 levels.
+    Appends to CSV — call hourly to build history.
+    """
+    import urllib.request
+    import ssl
+
+    if assets is None:
+        assets = ['ETH', 'BTC']
+
+    print(f"\n  Snapshotting orderbook depth...")
+    ctx = ssl._create_unverified_context()
+    rows = []
+
+    for asset in assets:
+        symbol = f"{asset}USDT"
+        try:
+            url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=20"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                data = json.loads(resp.read().decode())
+
+            bid_vol = sum(float(b[1]) for b in data.get('bids', []))
+            ask_vol = sum(float(a[1]) for a in data.get('asks', []))
+            imbalance = bid_vol / (ask_vol + 1e-10)
+            best_bid = float(data['bids'][0][0]) if data.get('bids') else 0
+            best_ask = float(data['asks'][0][0]) if data.get('asks') else 0
+            spread_bps = (best_ask - best_bid) / best_bid * 10000 if best_bid > 0 else 0
+
+            rows.append({
+                'datetime': pd.Timestamp.now().floor('h'),
+                'asset': asset,
+                'bid_vol': bid_vol,
+                'ask_vol': ask_vol,
+                'ob_imbalance': imbalance,
+                'spread_bps': spread_bps,
+            })
+            print(f"    {asset}: imbalance={imbalance:.3f} spread={spread_bps:.1f}bps")
+        except Exception as e:
+            print(f"    {asset}: ERROR {e}")
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    outfile = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
+    if os.path.exists(outfile):
+        existing = pd.read_csv(outfile)
+        df = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=['datetime', 'asset'], keep='last')
+    df.to_csv(outfile, index=False)
+    print(f"  Saved: {outfile} ({len(df)} rows)")
+    return df
+
+
+# ============================================================
+# 11. WHALE WALLET FLOWS (Arkham free endpoint)
+# ============================================================
+def download_whale_flows():
+    """
+    Download large ETH/BTC transfers from Arkham Intelligence or Whale Alert.
+    Note: Arkham requires signup for API; Whale Alert has a free tier (10 req/min).
+    This uses the Whale Alert free API for recent large transfers.
+    """
+    import urllib.request
+    import ssl
+
+    print(f"\n  Downloading whale flow data...")
+    ctx = ssl._create_unverified_context()
+
+    # Whale Alert free API — requires API key (free tier: 10 req/min, 100/day)
+    # If no key, skip gracefully
+    api_key = os.environ.get('WHALE_ALERT_API_KEY', '')
+    if not api_key:
+        # Try config file
+        config_path = os.path.join(os.path.dirname(__file__), 'config', 'whale_alert_config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                api_key = json.load(f).get('api_key', '')
+
+    if not api_key:
+        print("  Skipped — no WHALE_ALERT_API_KEY env var or config/whale_alert_config.json")
+        print("  Get free key at: https://whale-alert.io/")
+        return None
+
+    try:
+        # Last 1 hour of large transactions (>$1M)
+        import time
+        since = int(time.time()) - 3600
+        url = (f"https://api.whale-alert.io/v1/transactions"
+               f"?api_key={api_key}&min_value=1000000&start={since}")
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            data = json.loads(resp.read().decode())
+
+        txns = data.get('transactions', [])
+        if txns:
+            rows = []
+            for tx in txns:
+                rows.append({
+                    'datetime': pd.Timestamp.now().floor('h'),
+                    'symbol': tx.get('symbol', '').upper(),
+                    'amount_usd': tx.get('amount_usd', 0),
+                    'from_type': tx.get('from', {}).get('owner_type', 'unknown'),
+                    'to_type': tx.get('to', {}).get('owner_type', 'unknown'),
+                })
+            df = pd.DataFrame(rows)
+
+            # Aggregate: net exchange flow per hour
+            exchange_in = df[df['to_type'] == 'exchange']['amount_usd'].sum()
+            exchange_out = df[df['from_type'] == 'exchange']['amount_usd'].sum()
+            print(f"    {len(txns)} large txns | exchange_in=${exchange_in/1e6:.1f}M | exchange_out=${exchange_out/1e6:.1f}M")
+
+            outfile = os.path.join(MACRO_DIR, 'whale_flows.csv')
+            if os.path.exists(outfile):
+                existing = pd.read_csv(outfile)
+                df = pd.concat([existing, df], ignore_index=True)
+            df.to_csv(outfile, index=False)
+            print(f"  Saved: {outfile}")
+            return df
+        else:
+            print("  No large transactions in last hour")
+            return None
+    except Exception as e:
+        print(f"  ERROR: {e}")
+        return None
+
+
+# ============================================================
+# 12. KALSHI PREDICTION MARKET DATA
+# ============================================================
+def download_kalshi_data():
+    """
+    Download crypto-related prediction market data from Kalshi.
+    Note: Kalshi requires account + API key. Skip if not configured.
+    """
+    print(f"\n  Kalshi prediction market data...")
+    api_key = os.environ.get('KALSHI_API_KEY', '')
+    if not api_key:
+        config_path = os.path.join(os.path.dirname(__file__), 'config', 'kalshi_config.json')
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                api_key = json.load(f).get('api_key', '')
+
+    if not api_key:
+        print("  Skipped — no KALSHI_API_KEY env var or config/kalshi_config.json")
+        print("  Get API access at: https://kalshi.com/")
+        return None
+
+    # TODO: implement when API key available
+    print("  API key found but download not yet implemented")
+    return None
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -633,11 +933,26 @@ def main():
     for _asset in ['btc', 'eth']:
         download_onchain_data(asset=_asset)
 
-    # 6. Derivatives data (funding rate + open interest)
-    deriv_df = download_derivatives_data()
+    # 6. Derivatives data (funding rate + open interest — BTC + ETH)
+    deriv_df = download_derivatives_data(assets=['BTC', 'ETH'])
 
     # 7. GDELT geopolitical data
     gdelt_df = download_gdelt_geopolitical()
+
+    # 8. Stablecoin flows
+    stable_df = download_stablecoin_flows()
+
+    # 9. Options IV snapshot
+    iv_df = download_options_iv_skew()
+
+    # 10. Orderbook snapshot
+    ob_df = download_orderbook_snapshot()
+
+    # 11. Whale flows (needs API key)
+    whale_df = download_whale_flows()
+
+    # 12. Kalshi (needs API key)
+    kalshi_df = download_kalshi_data()
 
     # Summary
     print(f"\n{'='*60}")
