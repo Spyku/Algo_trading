@@ -80,7 +80,7 @@ Sources: VIX, DXY, SP500, NASDAQ, GOLD, US10Y, EURUSD, USDJPY, OIL → each with
 
 **2.6 Fully dead feature groups (code exists, never wired)**
 
-- **On-chain BTC** — CoinMetrics (`active_addresses`, `MVRV`, `SOPR`, `hashrate`, `tx_count`, exchange flows) downloaded by `download_macro_data.py` but never fed into `build_all_features()`. Completely orphaned. Biggest untapped feature source.
+- **On-chain** — CoinMetrics (`active_addresses`, `MVRV`, `SOPR` BTC-only, `hashrate`, `tx_count`, exchange flows) downloaded by `download_macro_data.py`. **Wired into `build_all_features()` 2026-04-17.** First post-wiring HRS audit (2026-04-18): `oc_mvrv_chg1d` earned Grade 4 (4/6 ETH horizons), `oc_exchange_netflow_chg5d` Grade 3. Other 38 derivatives below selection — open question whether weak or correlation-crowded-out. SOPR pending BTC HRST.
 - **Derivatives / funding rate** — loaded as `_funding_rate` (underscore = non-feature), used only as a regime gate candidate, never in training.
 - **Feature Set B** — defined but `ACTIVE_FEATURE_SET='A'`; production actually uses Set D (dynamic, per-horizon selection).
 
@@ -168,7 +168,7 @@ Grading basis: frequency across the 48 production models (from `crypto_ed_produc
 
 *On-chain (MVRV, SOPR, hashrate, active addresses, netflow…):*
 
-All Grade 1 (DEAD). `download_macro_data.py` has the download skeleton but no loader in `build_all_features()`. CSVs get written and never read. This is a real opportunity — these are the most-cited on-chain signals in crypto academic literature.
+**Update 2026-04-19:** Loader landed 2026-04-17, first HRS post-wiring 2026-04-18. `oc_mvrv_chg1d` immediately promoted to **Grade 4 (66.7%, 4/6 ETH horizons)** — near the top of the feature table, just behind `hour_cos` (G5) and tied with `pysr_1/2` (G4). `oc_exchange_netflow_chg5d` Grade 3. Other 38 derivatives (hashrate, active_addresses, tx_count, fees) below selection threshold this run — open question whether genuinely weak or correlation-crowded-out (audit pending next Mode D run). BTC SOPR untested until BTC HRST runs.
 
 *Derivatives:*
 
@@ -265,11 +265,11 @@ Per-horizon verdict:
 | Mechanism | State | Evidence | Verdict |
 |---|---|---|---|
 | Stop-Loss / Take-Profit | OFF | 8 variants tested 2026-04-14 (`backtest_sl_variants.py`). Baseline (no SL) won: +1.11% PnL / −8.71% DD. Profit-lock and trailing all −11% to −20%. Disaster −7%/−10% never fired. | Keep OFF. Signal edge > risk mitigation. |
-| V7 Rally-Cooldown BUY Gate | ON | 49,716-config grid. H1 +10.42% / H2 +18.01% / 60d +31.84% / worst DD −3.63%. STRICT plateau-ridge winner. | Keep ON. |
+| V7 Rally-Cooldown BUY Gate | ON | 2026-04-18 HRSTG rerun (integrated T→G): winner `rr10h ≥ 2.5% OR rr30h ≥ 6.0%, cd=20h`. H1 +31.01% / H2 +22.22% / 60d +60.12% / worst DD +4.55% / plateau 1.00. Ranked by `--rank recent` (H1-focused, default). | Keep ON. |
 | Adaptive cooldown lift | Rejected | 0 triggers on 30d, −8.8% to −23.7% on 90d vs fixed 30h | Dropped. |
-| Hold-shield (`min_sell_pnl` + `max_hold`) | ON | ETH: 0.5% / 10h. Failsafe force-sell at 10h. | Keep. |
-| Regime filter (bull/bear) | ON | Mode R/S validated `tsmom_672h` for ETH | Keep, regime-conditional params. |
-| Min-confidence thresholds | ON | Per-regime: bull 85% / bear 65%. Global fallback 75. | Keep, per regime. |
+| Hold-shield (`min_sell_pnl` + `max_hold`) | **ON bull / OFF bear** (2026-04-18) | ETH: 0.6% / 12h shared, bull_shield=ON, bear_shield=OFF. Per-regime Mode T sweep (4 on/off combos) picked this config with +23.45pp over single-flag both-ON baseline. | Keep. Shield on bull rides dips; off in bear cuts fast. |
+| Regime filter (bull/bear) | ON | Mode R/S validated `tsmom_672h` for ETH (2026-04-18 HRSTG confirmed) | Keep, regime-conditional params. |
+| Min-confidence thresholds | ON | Per-regime: bull 95% / bear 80% (updated 2026-04-18 HRSTG). Global fallback 75. | Keep, per regime. |
 | Dynamic confidence raises in bear | Rejected (2026-03-29) | All variants lost money — blocked winning contrarian trades | Dropped. |
 | Maker orders (`bid+0.01`, `post_only`) | ON | 4 bugs fixed. 180s/10s window tuned 2026-04-15. | Keep. |
 | NTP clock sync | ON | Fixed 2026-04-13 after echo-back bug. Startup + every 5min + on 409. | Keep. |
@@ -279,19 +279,22 @@ Per-horizon verdict:
 
 ### 6. REGIME-CONDITIONAL ASYMMETRY (critical for future work)
 
-Current ETH asymmetry:
+Current ETH asymmetry (2026-04-18 HRSTG):
 
 | | Bull | Bear |
 |---|---|---|
 | Horizon | 6h (short) | 8h (longer) |
-| Min confidence | 85% | 65% |
+| Min confidence | 95% | 80% |
 | Max position | $12k | $12k |
+| Hold-shield | **ON** | **OFF** |
 
-Pattern observed across backtests: bull reliably 6h; bear drifts 7h–8h. Bull wins high (85–90% WR); bear is lower-conviction filler. Rationale: bear needs longer horizon to capture reversals + lower confidence threshold because signals are noisier.
+Pattern observed across backtests: bull reliably 6h; bear drifts 7h–8h. Rationale: bear needs longer horizon to capture reversals. Confidence thresholds tightened 2026-04-18 (was 85/65 → 95/80) by the current HRSTG Mode S joint sweep.
 
-**Confidence threshold per regime — DO NOT unify.** 2026-03-29 test: raising bear confidence across board blocked winning contrarian trades. Per-regime thresholds are load-bearing.
+**Confidence threshold per regime — DO NOT unify.** 2026-03-29 test: raising bear confidence across board blocked winning contrarian trades. Per-regime thresholds are load-bearing — today's S picked *higher* bear confidence (80 vs 65) but it's still below bull, so the principle holds. If live performance degrades, revert bear to 65%.
 
-**Rally-cooldown regime-conditionality: UNTESTED.** V7 params swept globally; no bull/bear split tried. Open hypothesis worth Mode G re-sweep with regime split.
+**Hold-shield regime split (2026-04-18):** Per-regime Mode T sweep found bull=ON / bear=OFF beats single-flag both-ON by +23.45pp (+115.50% vs +92.05% over 60d). Mechanism: bull regime rewards riding through dips (shield defers SELL on small losses); bear regime punishes holding losers (bear rallies are mean-reversion setups, cut fast).
+
+**Rally-cooldown regime-conditionality: partial.** Gate still operates globally on BUYs (one set of params), but Mode T→G integration now evaluates the gate against a per-regime-tagged signal stream, so the chosen gate reflects the combined bull+bear behavior under the active shield policy. Regime-split gate (separate params per regime) remains untested.
 
 **6.1 What doesn't work — deeper (from Topic 6)**
 
@@ -334,7 +337,7 @@ Going beyond the "dropped" one-liners in Agent 4's output to surface the lessons
 
 | Item | State | Opportunity |
 |---|---|---|
-| On-chain features (MVRV, SOPR, hashrate, tx_count, exchange flows) | Code exists, never wired | Biggest untapped source. 1–2 weeks to wire into `build_all_features()`. |
+| On-chain features (MVRV, SOPR, hashrate, tx_count, exchange flows) | **Wired 2026-04-17.** MVRV Grade 4 (66.7%), netflow_5d Grade 3. Others below threshold. | Audit whether unselected ones are weak or crowded out (TODO 1a). SOPR untested until BTC HRST. |
 | GDELT sentiment | Code exists, loader missing | Sourcing GDELT cleanly (rate limits, cache) is the work. |
 | Funding rate as feature | Loaded, never trained | Experimental feature in next Mode D sweep. |
 | Feature Set B (macro-heavy) | Defined, unused | Could outperform Set A in macro-driven regimes. |
@@ -797,26 +800,44 @@ The overwhelming majority of peer-reviewed work on crypto regime detection uses 
 
 ## Pending Work
 
-### TODO
+### PRIORITY 1 — Strategy Tests (2026-04-20)
 
-**HIGHEST PRIORITY:**
+1. **Vol-scaled horizons deeper validation** — `vol_2band (low→8h, high→6h)` beat tsmom regime by +5.02pp on 2-month ETH replay (+33.82% vs +28.80%, 65% WR). Picks horizon by 24h realized vol percentile rank: >70th pctile = high vol = use faster 6h, otherwise use 8h for more confirmation. Next steps: (a) validate on 4-month window, (b) test combining with tsmom detector, (c) decide whether to replace tsmom_672h. Script: `tools/test_vol_scaled_horizon.py`.
 
-0a. **Rally-cooldown BUY gate — fine-tune V6 + pick winner + wire to prod** — Core hypothesis already validated: after a large ETH rally, price tends to revert within 24h; blocking BUY for a cooldown window improves PnL. V6 (rr10≥5 OR rr24≥7, cd=24h) beat V0 on all 3 windows (+3.58 / +13.55 / −11.48 vs +1.11 / +2.24 / −16.70); 77–79% of skips were followed by a 24h price drop.
-   - **Scope:** fine-tune V6's OR-of-two-rolling-returns structure inside current crisis regime (not re-open mode choice). Workflow: (1) test if sweep finds anything beating V6, (2) promote only relevant horizons, (3) wire to prod, (4) demote if decays.
-   - **Sweep design (`audit_v6_v2.py`):** structure FIXED to `block BUYs for C hours when rr(Hshort)≥Tshort OR rr(Hlong)≥Tlong`. Horizon pairs = all 15 (Hshort<Hlong) from {10,12,14,16,18,24}h. Horizon-scaled thresholds: 10/12h→{3,4,5,6}; 14/16h→{4,5,6,7}; 18h→{5,6,7,8}; 24h→{5,6,7,8,9}. Cooldowns={10,12,18,24}h.
-   - **Windows:** two non-overlapping 30d halves (H1=days 0–30 back, H2=days 30–60 back) + 60d reference. No 90d (straddles regime change the detector should handle).
-   - **Scoring:** PnL%. Winner must beat V0 on BOTH halves. Trades + skipped-BUYs reported for eyeball churn-check only, no hard filter.
-   - **Next step:** run sweep → review winner + churn → wire into [crypto_revolut_ed_v2.py process_asset](G:/Autres ordinateurs/My laptop/engine/crypto_revolut_ed_v2.py) BUY path (compute rr(Hshort) and rr(Hlong) at top-of-hour; if either ≥ threshold, set cooldown; block BUY while cd>0, SELL unaffected; persist cd state to disk).
-   - **Artifacts (prior):** `backtest_rally_cooldown_multi.py`, `audit_v6.py`, `rally_cooldown_summary_{30d,60d,90d}.csv`, `rally_cooldown_stability.csv`. **Caches:** `data/eth_5m_backtest_90d.csv` (26,497 rows), `data/eth_sl_signals_90d.pkl` (2,186 hourly signals).
+2. **Triple barrier label test** — Replace fee-aware labels (`future_return > 2×fee`) with volatility-adaptive triple barrier. The label duration adapts to volatility: calm market waits longer for a meaningful move, volatile market resolves faster. Tested in 2025 pre-embargo on BTC with old combos (RF+GB+LR, +29%) — never tested with Ed's current pipeline (RF+LGBM, embargo, PySR, on-chain). Effort: medium (change label creation, run Mode D ETH 6,8h).
 
-0b. **Remove `/optimize` + `/optstatus` from trader bot** — Trader should not launch optimizations; that belongs to the optimizer bot. Already hidden from `/help`; next step is to delete `_handle_optimize_command`, `_handle_optstatus_command`, dispatcher branches, and related globals in `crypto_revolut_ed_v2.py`.
-1. **Restart optimizer bot** to load SV3 + Help buttons (commits a900d98, c0e674d).
-2. **Run SV3 ETH `--replay 2880`** — Ed V3 joint H-sweep test. If results beat current Mode S winner, push to prod.
-3. **RS ETH `--replay 2880` OOS** — running on Yoga since 06:57, report results when complete.
+3. **Meta-labeling test** — Train a secondary model that predicts whether the primary model's BUY/SELL will be correct. Primary says BUY → meta-model says "this BUY has 80% chance of winning" → skip low-quality signals. Separates direction from quality. Lopez de Prado Ch. 3. Effort: medium-high (new training pipeline). Never tested.
 
-**Other:**
-4. **Eli HRS BTC** — `python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10` — 30-minute candle test
-5. **Ein results review** — Check Ein (15min) BTC results from laptop run
+4. **Re-run Mode D ETH 6,8h with new derivative features** — Funding rate + OI ranked #2-5 in LGBM importance but Mode D grid failed initially (OI NaN caused dropna row loss: 1440→898 rows). Fixed: sparse features excluded from dropna (LGBM handles NaN natively). Need a clean re-run to produce actual production model candidates that include funding rate features.
+
+### PRIORITY 2 — Running Jobs
+
+5. **SOL HRST** — Launched 2026-04-19 evening on Desktop. Review criteria: pipeline health (4/4 horizons?), 60d alpha (need ≥20pp), ETH correlation, on-chain feature usage.
+
+6. **LINK P+HRST** — Running on Laptop. PySR regen (March expressions don't include on-chain) then full pipeline.
+
+### PRIORITY 3 — Research
+
+7. **Feature trimming** — 127/206 features (62%) never selected across 33 production models. Only 24 are Grade 4+ (selected ≥30% of the time). GDELT already disabled (21 dead features + slow download). Remaining trim targets: 37 dead macro variants (keep only `_chg1d` for VIX/SP500/NASDAQ/DXY/Gold), 38 dead on-chain derivatives (keep MVRV + netflow only), 11 dead sentiment, 4 dead cross-asset corr30d. Saves ~10-15% compute per Mode D.
+
+8. **Orderbook + IV accumulation** — Hourly snapshots now wired into Ed trader. Need ~2 weeks of data to evaluate as features. Binance doesn't provide historical orderbook depth; Deribit free API is snapshot-only. CryptoDataDownload has free DVOL history (ATM IV) as a stopgap.
+
+9. **Eli HRS BTC** — 30-minute candle system test. 10. **Ein results review** — 15-minute candle system.
+
+### Completed (2026-04-19)
+
+- **11 new feature sources added** — ETH derivatives (funding rate + open interest from Binance, previously BTC-only), stablecoin market cap flows (CoinGecko USDT+USDC), orderbook imbalance snapshots (Binance depth), options IV skew snapshots (Deribit), exchange netflow 1d/3d windows, perp-spot basis check. Whale Alert + Kalshi stubs built (need API keys). Total features: 152 → 185 (after GDELT removal). Derivative features ranked #2-5 in LGBM importance on ETH; stablecoin features ranked below 1% (dead).
+- **GDELT disabled** — 21 features, 0% selection rate across 33 models, 5-10 min rate-limited download per Mode D. Removed from both download pipeline and feature engineering. Code kept commented.
+- **Freshness check for macro downloads** — `_is_fresh()` helper skips re-downloading if CSV modified within 1 hour. Saves 5-10 min per Mode D run. IV and orderbook snapshots always append (accumulate over time).
+- **Sparse NaN handling fixed** — `dropna()` now only drops on core features, not sparse ones (OI, orderbook, IV, stablecoins). LGBM handles NaN natively via missing-value splits. Previously OI's 30-day-only history caused 1440→898 usable rows.
+- **Hourly snapshot accumulation** — Ed trader (`crypto_revolut_ed_v2.py`) now calls `download_orderbook_snapshot()` and `download_options_iv_skew()` at the end of each hourly cycle. Silent on failure. Data accumulates in `orderbook_snapshots.csv` and `options_iv_snapshot.csv`.
+- **Full feature audit** — 206 features counted and ranked across all 33 production models (ETH/BTC/SOL/LINK/XRP). 82 ever selected (40%), 127 never selected (62%). Grade 5 (≥50%): `price_to_sma100h` (70%), `hour_cos` (67%), `logret_120h` (64%), `m_sp500_chg1d` (52%). Per-asset top-10 documented. Full ranking available in conversation history.
+- **5 strategy improvement ideas tested:**
+  - **#3 Asymmetric loss** — DEAD. `scale_pos_weight` [0.3-1.5] made zero difference at 95%/85% confidence. High confidence threshold already filters false BUYs.
+  - **#4 Signal staleness** — DEAD. Consecutive BUY filter (skip after 1-8 consecutive hours). Best: +1.14pp on 6h (skip-after-3). Not actionable; rally-cooldown serves the same anti-churn function better.
+  - **#5 Vol-scaled horizons** — **PROMISING.** `vol_2band (low→8h, high→6h) @90%` = +33.82%, 46 trades, 65% WR. Beats tsmom_672h regime (+28.80%) by +5.02pp. Beats every single-horizon baseline. Needs validation on longer windows.
+  - **Kelly criterion** — Not tested (architectural mismatch with binary all-in/all-out positions).
+  - **#1 Triple barrier + #2 Meta-labeling** — Queued for 2026-04-20.
 
 ### Completed (2026-04-16)
 - **V7 rally-cooldown gate in production** (ETH) + Mode G optimizer + `/gate` Telegram command. Block BUYs for 30h after `rr_8h ≥ 3%` OR `rr_36h ≥ 5.5%`. State persists in position file.
