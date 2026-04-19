@@ -859,6 +859,17 @@ def _check_take_profit(asset, trading_cfg, dry_run=False):
 # ============================================================
 # RALLY-COOLDOWN GATE (V7: rr8>=3% OR rr36>=5.5% -> 30h block on BUYs)
 # ============================================================
+def _rally_cfg_for_regime(trading_cfg, regime_label):
+    """Return the rally-cooldown config dict for the active regime, with fallback.
+    Priority: trading_cfg[regime_label]['rally_cooldown'] → trading_cfg['rally_cooldown'] → None."""
+    block = trading_cfg.get(regime_label) if isinstance(trading_cfg.get(regime_label), dict) else None
+    if block:
+        rc = block.get('rally_cooldown')
+        if rc is not None:
+            return rc
+    return trading_cfg.get('rally_cooldown')
+
+
 def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     """Trigger detection — must run EVERY tick, regardless of position state.
     Scans the last cd_hours bars so rallies that fired while the engine was
@@ -920,6 +931,15 @@ def _is_rally_cooldown_active(position):
     if now >= until:
         return False, 0.0, until_str
     return True, (until - now).total_seconds() / 3600.0, until_str
+
+
+def _shield_on_for_regime(trading_cfg, regime_label):
+    """Return bool: hold-shield ON for the active regime.
+    Priority: regime block's hold_shield → asset-level hold_shield → default True."""
+    block = trading_cfg.get(regime_label, {}) if isinstance(trading_cfg.get(regime_label), dict) else {}
+    if 'hold_shield' in block:
+        return bool(block['hold_shield'])
+    return bool(trading_cfg.get('hold_shield', True))
 
 
 # ============================================================
@@ -988,13 +1008,14 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
     # Rally-cooldown trigger detection — runs EVERY tick (regardless of position state),
     # so a rally that fires while invested still extends the cooldown for the next BUY.
-    rc_cfg = trading_cfg.get('rally_cooldown')
+    # Per-regime: use the current regime's gate params (falls back to asset-level for legacy).
+    rc_cfg = _rally_cfg_for_regime(trading_cfg, regime_label)
     rc_update = _update_rally_cooldown(asset, df_raw, position, rc_cfg)
     if rc_update is not None:
         rs_pct, rl_pct, rc_fresh = rc_update
         rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
         h_s = int(rc_cfg['h_short']); h_l = int(rc_cfg['h_long'])
-        rc_tag = f"rr{h_s}={rs_pct:+.2f}% rr{h_l}={rl_pct:+.2f}%"
+        rc_tag = f"[{regime_label}] rr{h_s}={rs_pct:+.2f}% rr{h_l}={rl_pct:+.2f}%"
         if rc_fresh:
             rc_tag += f" | TRIGGER -> cd active {rc_hours_left:.1f}h"
             send_telegram(f"⏸ {asset} rally trigger fired: {rc_tag}")
@@ -1021,6 +1042,20 @@ def process_asset(asset, trading_cfg, dry_run=False):
     executed = False
     pnl_msg = ""
     hold_override_active = False
+    disaster_brake = False
+
+    # Disaster brake: force SELL on severe unrealized loss, bypassing shield.
+    # Acts as free downside insurance — only fires in rare catastrophic moves.
+    # Configured per-asset via `disaster_brake_pct` (default 0 = OFF).
+    if position['state'] == 'invested' and position.get('entry_price', 0) > 0:
+        brake_pct = float(trading_cfg.get('disaster_brake_pct', 0))
+        if brake_pct > 0:
+            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
+            if cur_pnl <= -brake_pct:
+                print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% — forcing SELL")
+                send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}%")
+                action = 'SELL'
+                disaster_brake = True
 
     if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
         rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
@@ -1101,7 +1136,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
 
     elif action == 'SELL' and position['state'] == 'invested':
         # Hold-until-profitable: block sell if unrealized P&L below threshold
-        shield_on = trading_cfg.get('hold_shield', True)
+        # Shield is per-regime; falls back to asset-level hold_shield for legacy config
+        # Disaster brake (if triggered above) bypasses shield entirely.
+        shield_on = (not disaster_brake) and _shield_on_for_regime(trading_cfg, regime_label)
         min_sell_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
         max_hold_h = trading_cfg.get('max_hold_hours', 10)
         if shield_on and min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
@@ -1110,7 +1147,25 @@ def process_asset(asset, trading_cfg, dry_run=False):
             entry_dt_utc = _parse_entry_time_utc(position.get('entry_time'))
             if entry_dt_utc is not None:
                 hours_held = (datetime.now(timezone.utc) - entry_dt_utc).total_seconds() / 3600
-            if cur_pnl < min_sell_pnl and hours_held < max_hold_h:
+            # Quick-release: if the model flips SELL with very high confidence shortly
+            # after entry, the BUY was likely a false positive — trust the signal.
+            # Guards the 2026-04-19 failure mode where shield held through a 12h trend
+            # reversal while the model screamed SELL @ 97-99% for 9 consecutive cycles.
+            # Shield quick-release: default OFF (empirically neutral in backtests —
+            # see 2026-04-19 test_qr_windows.py). Opt-in by setting
+            # shield_quick_release.enabled=true in regime_config_ed.json.
+            qr_cfg = trading_cfg.get('shield_quick_release', {})
+            qr_enabled = bool(qr_cfg.get('enabled', False))
+            qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
+            qr_max_hours = float(qr_cfg.get('max_hours', 3))
+            quick_release = (qr_enabled and hours_held <= qr_max_hours
+                             and confidence >= qr_min_conf)
+            if quick_release:
+                print(f"    🛡→ QUICK-RELEASE: SELL @ {confidence:.0f}% confidence within "
+                      f"{hours_held:.1f}h of entry (thr {qr_min_conf}%/{qr_max_hours}h) — trusting model")
+                send_telegram(f"🛡→ {asset} shield released: strong SELL ({confidence:.0f}%) "
+                              f"at {hours_held:.1f}h / PnL {cur_pnl:+.2f}%")
+            elif cur_pnl < min_sell_pnl and hours_held < max_hold_h:
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
                 send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)")
                 action = 'HOLD'
@@ -1781,40 +1836,89 @@ def _manual_sell_impl(msg, trading_cfg):
 
 
 def _handle_hold_shield_command(msg, trading_cfg):
-    """Toggle Hold Shield (10h hold-until-profitable) for the specified asset.
-    /hold        → toggle for first enabled asset
-    /hold ETH    → toggle for ETH
+    """Toggle Hold Shield per regime (bull/bear).
+    /hold                 → show current state (both regimes)
+    /hold on | off        → set both regimes
+    /hold bull on|off     → set bull only
+    /hold bear on|off     → set bear only
+    /hold ETH ...         → target specific asset (else first enabled)
+    /hold ETH bull on     → asset + regime + state
     """
     print(f"\n  [/hold] command received: {msg!r}", flush=True)
     try:
-        parts = msg.split()
+        parts = msg.split()[1:]  # drop '/hold'
         enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
         if not enabled:
             send_telegram("❌ No enabled asset")
             return
-        asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+
+        # Parse asset (optional first token if it's a known asset)
+        asset = None
+        if parts and parts[0].upper() in trading_cfg:
+            asset = parts.pop(0).upper()
+        if asset is None:
+            asset = enabled[0]
         if asset not in trading_cfg:
             send_telegram(f"❌ {asset} not configured")
             return
+
+        # Parse regime + state
+        regime = None
+        state_tok = None
+        for tok in parts:
+            low = tok.lower()
+            if low in ('bull', 'bear'):
+                regime = low
+            elif low in ('on', 'off'):
+                state_tok = low
+
         cfg = trading_cfg[asset]
-        current = cfg.get('hold_shield', True)
-        new_state = not current
-        cfg['hold_shield'] = new_state
+        for r in ('bull', 'bear'):
+            if r not in cfg or not isinstance(cfg[r], dict):
+                cfg[r] = {} if not isinstance(cfg.get(r), dict) else cfg[r]
+
+        def _current_state():
+            return (_shield_on_for_regime(cfg, 'bull'), _shield_on_for_regime(cfg, 'bear'))
+
+        # No state specified → show current (tap the Bull/Bear buttons to toggle)
+        if state_tok is None and regime is None and not parts:
+            b_on, r_on = _current_state()
+            min_pnl = cfg.get('min_sell_pnl_pct', 0)
+            max_h = cfg.get('max_hold_hours', 0)
+            send_telegram_with_buttons(
+                f"🛡 <b>{asset} Hold Shield</b>\n"
+                f"Bull: {'ON' if b_on else 'OFF'} | Bear: {'ON' if r_on else 'OFF'}\n"
+                f"Threshold: PnL ≥ {min_pnl}% or held ≥ {max_h}h\n\n"
+                f"Tap the Bull/Bear button below to toggle that regime.",
+                _main_buttons(trading_cfg)
+            )
+            return
+
+        # No state → toggle target(s)
+        if state_tok is None:
+            targets = [regime] if regime else ['bull', 'bear']
+            for r in targets:
+                cfg[r]['hold_shield'] = not _shield_on_for_regime(cfg, r)
+        else:
+            new_val = (state_tok == 'on')
+            targets = [regime] if regime else ['bull', 'bear']
+            for r in targets:
+                cfg[r]['hold_shield'] = new_val
+
+        # Remove stale asset-level hold_shield so regime values are authoritative
+        if 'hold_shield' in cfg:
+            del cfg['hold_shield']
+
         save_trading_config(trading_cfg)
+        b_on, r_on = _current_state()
         min_pnl = cfg.get('min_sell_pnl_pct', 0)
         max_h = cfg.get('max_hold_hours', 0)
-        if new_state:
-            send_telegram_with_buttons(
-                f"🛡 <b>{asset} Hold Shield: ON</b>\n"
-                f"Blocks SELL until PnL ≥ {min_pnl}% or {max_h}h held",
-                _main_buttons(trading_cfg)
-            )
-        else:
-            send_telegram_with_buttons(
-                f"🛡 <b>{asset} Hold Shield: OFF</b>\n"
-                f"SELL signals execute immediately",
-                _main_buttons(trading_cfg)
-            )
+        send_telegram_with_buttons(
+            f"🛡 <b>{asset} Hold Shield updated</b>\n"
+            f"Bull: {'ON' if b_on else 'OFF'} | Bear: {'ON' if r_on else 'OFF'}\n"
+            f"Thresholds: ≥{min_pnl}% or {max_h}h",
+            _main_buttons(trading_cfg)
+        )
     except Exception as e:
         import traceback
         print(f"  [/hold] ERROR: {e}", flush=True)
@@ -1938,21 +2042,26 @@ def send_telegram_with_buttons(message, buttons, parse_mode='HTML'):
 
 # Standard button layouts
 def _main_buttons(trading_cfg=None):
-    """Build main keyboard with dynamic Hold Shield state."""
-    shield_on = False
+    """Build main keyboard. Shield shown as two independent per-regime toggles.
+    Tapping "🛡 Bull: ON" sends "/hold bull" which toggles bull only."""
+    bull_on = bear_on = False
     try:
         cfg = trading_cfg if trading_cfg is not None else load_trading_config()
         for a, c in cfg.items():
             if c.get('enabled'):
-                shield_on = c.get('hold_shield', True) and c.get('min_sell_pnl_pct', 0) > 0
+                has_threshold = c.get('min_sell_pnl_pct', 0) > 0
+                bull_on = _shield_on_for_regime(c, 'bull') and has_threshold
+                bear_on = _shield_on_for_regime(c, 'bear') and has_threshold
                 break
     except Exception:
         pass
-    shield_label = '🛡 Shield: ON' if shield_on else '🛡 Shield: OFF'
+    bull_label = f"🛡 Bull: {'ON' if bull_on else 'OFF'}"
+    bear_label = f"🛡 Bear: {'ON' if bear_on else 'OFF'}"
     return [
         [('📊 Status', '/status'), ('📈 Charts', '/chart')],
         [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
-        [(shield_label, '/hold'), ('⚙️ Setup', '/setup')],
+        [(bull_label, '/hold bull'), (bear_label, '/hold bear')],
+        [('⚙️ Setup', '/setup')],
     ]
 
 
@@ -2752,6 +2861,15 @@ def run_all_once(trading_cfg, dry_run=False):
     if valid:
         msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances, trading_cfg=trading_cfg)
         send_telegram_with_buttons(msg, _main_buttons(trading_cfg))
+
+    # Accumulate hourly snapshots for future features (silent, non-blocking)
+    try:
+        from download_macro_data import download_orderbook_snapshot, download_options_iv_skew
+        enabled_assets = [a for a, c in trading_cfg.items() if c.get('enabled')]
+        download_orderbook_snapshot(assets=enabled_assets)
+        download_options_iv_skew()
+    except Exception:
+        pass  # never block trading on snapshot failure
 
     return results
 
