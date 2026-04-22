@@ -1,0 +1,278 @@
+{
+  "BTC": {
+    "enabled": false,
+    "symbol": "BTC-USD",
+    "regime_detector": {
+      "type": "named",
+      "params": {
+        "name": "sma24>sma100"
+      }
+    },
+    "bull": {
+      "horizon": 8,
+      "min_confidence": 85,
+      "max_position_usd": 6000,
+      "hold_shield": true
+    },
+    "bear": {
+      "horizon": 7,
+      "min_confidence": 65,
+      "max_position_usd": 6000,
+      "hold_shield": true
+    },
+    "take_profit_pct": 0,
+    "use_maker_orders": true,
+    "horizon": 8,
+    "min_confidence": 75,
+    "min_sell_pnl_pct": 0.35,
+    "max_hold_hours": 12,
+    "rally_cooldown": {
+      "enabled": true,
+      "h_short": 20,
+      "h_long": 24,
+      "t_short_pct": 3.0,
+      "t_long_pct": 4.5,
+      "cd_hours": 48
+    }
+  },
+  "ETH": {
+    "enabled": true,
+    "symbol": "ETH-USD",
+    "regime_detector": {
+      "type": "named",
+      "params": {
+        "name": "price>sma72"
+      }
+    },
+    "bull": {
+      "horizon": 6,
+      "min_confidence": 75,
+      "max_position_usd": 12000,
+      "hold_shield": false,
+      "rally_cooldown": {
+        "enabled": true,
+        "h_short": 14,
+        "h_long": 20,
+        "t_short_pct": 6.0,
+        "t_long_pct": 5.5,
+        "cd_hours": 10
+      }
+    },
+    "bear": {
+      "horizon": 5,
+      "min_confidence": 75,
+      "max_position_usd": 12000,
+      "hold_shield": true,
+      "rally_cooldown": {
+        "enabled": true,
+        "h_short": 8,
+        "h_long": 12,
+        "t_short_pct": 3.0,
+        "t_long_pct": 2.0,
+        "cd_hours": 16
+      }
+    },
+    "take_profit_pct": 0,
+    "use_maker_orders": true,
+    "min_sell_pnl_pct": 0.5,
+    "max_hold_hours": 10,
+    "horizon": 8,
+    "min_confidence": 90
+  },
+  "SOL": {
+    "enabled": false,
+    "symbol": "SOL-USD",
+    "regime_detector": {
+      "type": "named",
+      "params": {
+        "name": "sma168>sma480"
+      }
+    },
+    "bull": {
+      "horizon": 8,
+      "min_confidence": 90,
+      "max_position_usd": 2000,
+      "hold_shield": true
+    },
+    "bear": {
+      "horizon": 8,
+      "min_confidence": 65,
+      "max_position_usd": 1000,
+      "hold_shield": false
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "horizon": 7,
+    "min_confidence": 90,
+    "take_profit_pct": 0,
+    "min_sell_pnl_pct": 0.55,
+    "max_hold_hours": 12
+  },
+  "LINK": {
+    "enabled": false,
+    "symbol": "LINK-USD",
+    "regime_detector": {
+      "type": "named",
+      "params": {
+        "name": "vol_calm"
+      }
+    },
+    "bull": {
+      "horizon": 7,
+      "min_confidence": 95,
+      "max_position_usd": 0,
+      "hold_shield": false
+    },
+    "bear": {
+      "horizon": 6,
+      "min_confidence": 95,
+      "max_position_usd": 0,
+      "hold_shield": true
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "horizon": 7,
+    "min_confidence": 65,
+    "take_profit_pct": 0,
+    "min_sell_pnl_pct": 0.6,
+    "max_hold_hours": 12
+  },
+  "XRP": {
+    "enabled": false,
+    "symbol": "XRP-USD",
+    "regime_detector": {
+      "type": "named",
+      "params": {
+        "name": "sma168>sma480"
+      }
+    },
+    "bull": {
+      "horizon": 5,
+      "min_confidence": 85,
+      "max_position_usd": 0,
+      "hold_shield": true,
+      "rally_cooldown": {
+        "enabled": true,
+        "h_short": 12,
+        "h_long": 18,
+        "t_short_pct": 5.5,
+        "t_long_pct": 3.0,
+        "cd_hours": 48
+      }
+    },
+    "bear": {
+      "horizon": 7,
+      "min_confidence": 90,
+      "max_position_usd": 0,
+      "hold_shield": false,
+      "rally_cooldown": {
+        "enabled": true,
+        "h_short": 10,
+        "h_long": 16,
+        "t_short_pct": 4.5,
+        "t_long_pct": 4.5,
+        "cd_hours": 24
+      }
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "take_profit_pct": 0,
+    "min_sell_pnl_pct": 0.6,
+    "max_hold_hours": 12
+  },
+  "DOGE": {
+    "enabled": false,
+    "symbol": "DOGE-USD",
+    "regime_detector": {
+      "type": "sma_cross",
+      "params": {
+        "fast": 24,
+        "slow": 100
+      }
+    },
+    "bull": {
+      "horizon": 5,
+      "min_confidence": 90,
+      "max_position_usd": 0
+    },
+    "bear": {
+      "horizon": 8,
+      "min_confidence": 95,
+      "max_position_usd": 0
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "take_profit_pct": 0
+  },
+  "ADA": {
+    "enabled": false,
+    "symbol": "ADA-USD",
+    "regime_detector": {
+      "type": "sma_cross",
+      "params": {
+        "fast": 24,
+        "slow": 100
+      }
+    },
+    "bull": {
+      "horizon": 7,
+      "min_confidence": 90,
+      "max_position_usd": 0
+    },
+    "bear": {
+      "horizon": 8,
+      "min_confidence": 95,
+      "max_position_usd": 0
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "take_profit_pct": 0
+  },
+  "AVAX": {
+    "enabled": false,
+    "symbol": "AVAX-USD",
+    "regime_detector": {
+      "type": "sma_cross",
+      "params": {
+        "fast": 24,
+        "slow": 100
+      }
+    },
+    "bull": {
+      "horizon": 7,
+      "min_confidence": 90,
+      "max_position_usd": 0
+    },
+    "bear": {
+      "horizon": 8,
+      "min_confidence": 95,
+      "max_position_usd": 0
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0
+  },
+  "DOT": {
+    "enabled": false,
+    "symbol": "DOT-USD",
+    "regime_detector": {
+      "type": "sma_cross",
+      "params": {
+        "fast": 24,
+        "slow": 100
+      }
+    },
+    "bull": {
+      "horizon": 7,
+      "min_confidence": 90,
+      "max_position_usd": 0
+    },
+    "bear": {
+      "horizon": 8,
+      "min_confidence": 95,
+      "max_position_usd": 0
+    },
+    "strategy": "both_agree",
+    "max_position_usd": 0,
+    "take_profit_pct": 0
+  }
+}
