@@ -870,6 +870,33 @@ def _rally_cfg_for_regime(trading_cfg, regime_label):
     return trading_cfg.get('rally_cooldown')
 
 
+def _gate_on_for_regime(cfg_asset, regime_label):
+    """True if the rally-cooldown gate is enabled for the given regime.
+    Checks per-regime block first, falls back to asset-level."""
+    block = cfg_asset.get(regime_label) if isinstance(cfg_asset.get(regime_label), dict) else None
+    if block and isinstance(block.get('rally_cooldown'), dict):
+        return bool(block['rally_cooldown'].get('enabled'))
+    return bool((cfg_asset.get('rally_cooldown') or {}).get('enabled'))
+
+
+def _set_gate_enabled(cfg_asset, regime_label, enabled):
+    """Set enabled flag for the gate at a given regime.
+    regime_label = 'bull' | 'bear' | None (None = asset-level + all regimes)."""
+    default_rc = {'h_short': 8, 'h_long': 36, 't_short_pct': 3.0, 't_long_pct': 5.5, 'cd_hours': 30}
+    if regime_label in ('bull', 'bear'):
+        block = cfg_asset.setdefault(regime_label, {})
+        rc = block.setdefault('rally_cooldown', dict(default_rc))
+        rc['enabled'] = enabled
+    else:
+        # Asset-level + propagate to per-regime if those blocks exist
+        rc = cfg_asset.setdefault('rally_cooldown', dict(default_rc))
+        rc['enabled'] = enabled
+        for r in ('bull', 'bear'):
+            block = cfg_asset.get(r)
+            if isinstance(block, dict) and isinstance(block.get('rally_cooldown'), dict):
+                block['rally_cooldown']['enabled'] = enabled
+
+
 def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     """Trigger detection — must run EVERY tick, regardless of position state.
     Scans the last cd_hours bars so rallies that fired while the engine was
@@ -2042,25 +2069,35 @@ def send_telegram_with_buttons(message, buttons, parse_mode='HTML'):
 
 # Standard button layouts
 def _main_buttons(trading_cfg=None):
-    """Build main keyboard. Shield shown as two independent per-regime toggles.
-    Tapping "🛡 Bull: ON" sends "/hold bull" which toggles bull only."""
-    bull_on = bear_on = False
+    """Build main keyboard. Shield + rally-cooldown gate each have two per-regime toggles.
+    Tapping "🛡 Bull: ON" sends "/hold bull"; "🚦 Gate Bull: ON" sends "/gate <ASSET> bull off" etc."""
+    shield_bull = shield_bear = gate_bull = gate_bear = False
+    active_asset = None
     try:
         cfg = trading_cfg if trading_cfg is not None else load_trading_config()
         for a, c in cfg.items():
             if c.get('enabled'):
                 has_threshold = c.get('min_sell_pnl_pct', 0) > 0
-                bull_on = _shield_on_for_regime(c, 'bull') and has_threshold
-                bear_on = _shield_on_for_regime(c, 'bear') and has_threshold
+                shield_bull = _shield_on_for_regime(c, 'bull') and has_threshold
+                shield_bear = _shield_on_for_regime(c, 'bear') and has_threshold
+                gate_bull = _gate_on_for_regime(c, 'bull')
+                gate_bear = _gate_on_for_regime(c, 'bear')
+                active_asset = a
                 break
     except Exception:
         pass
-    bull_label = f"🛡 Bull: {'ON' if bull_on else 'OFF'}"
-    bear_label = f"🛡 Bear: {'ON' if bear_on else 'OFF'}"
+    shield_bull_label = f"🛡 Bull: {'ON' if shield_bull else 'OFF'}"
+    shield_bear_label = f"🛡 Bear: {'ON' if shield_bear else 'OFF'}"
+    gate_bull_label = f"🚦 Gate Bull: {'ON' if gate_bull else 'OFF'}"
+    gate_bear_label = f"🚦 Gate Bear: {'ON' if gate_bear else 'OFF'}"
+    # When we know the active asset, direct the button to it; else /gate shows status menu
+    gate_bull_cmd = f"/gate {active_asset} bull {'off' if gate_bull else 'on'}" if active_asset else "/gate"
+    gate_bear_cmd = f"/gate {active_asset} bear {'off' if gate_bear else 'on'}" if active_asset else "/gate"
     return [
         [('📊 Status', '/status'), ('📈 Charts', '/chart')],
         [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
-        [(bull_label, '/hold bull'), (bear_label, '/hold bear')],
+        [(shield_bull_label, '/hold bull'), (shield_bear_label, '/hold bear')],
+        [(gate_bull_label, gate_bull_cmd), (gate_bear_label, gate_bear_cmd)],
         [('⚙️ Setup', '/setup')],
     ]
 
@@ -2623,21 +2660,25 @@ def _setup_handle(text, trading_cfg):
 # ---- Rally-cooldown gate (V7) command ----
 
 def _handle_gate_command(msg, trading_cfg):
-    """Toggle V7 rally-cooldown gate per asset, or clear an active cooldown window.
+    """Toggle V7 rally-cooldown gate per asset (and optionally per regime), or clear an active window.
     Forms:
-      /gate                        -> status + buttons
-      /gate on | off               -> toggle on all enabled assets
-      /gate ETH on | off | clear   -> per-asset
+      /gate                              -> status + buttons
+      /gate on | off                     -> toggle on all enabled assets (all regimes)
+      /gate ETH on | off                 -> per-asset (all regimes)
+      /gate ETH bull on | off            -> per-asset, bull regime only
+      /gate ETH bear on | off            -> per-asset, bear regime only
+      /gate ETH clear                    -> wipe active cooldown timer only
     """
     parts = msg.split()
     enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
 
     def _show_status():
-        lines = ["🛡 <b>Rally-Cooldown Gate (V7)</b>", ""]
+        lines = ["🚦 <b>Rally-Cooldown Gate (V7)</b>", ""]
         rows = []
         for a in enabled:
-            rc = trading_cfg[a].get('rally_cooldown') or {}
-            on = bool(rc.get('enabled'))
+            cfg_a = trading_cfg[a]
+            bull_on = _gate_on_for_regime(cfg_a, 'bull')
+            bear_on = _gate_on_for_regime(cfg_a, 'bear')
             pos = load_position(a)
             until_str = pos.get('rally_cooldown_until', '')
             cd_left = ''
@@ -2651,45 +2692,55 @@ def _handle_gate_command(msg, trading_cfg):
                         cd_left = f" | cd {(until - now).total_seconds()/3600:.1f}h left"
                 except Exception:
                     pass
-            state = "🔵 ON" if on else "🔴 OFF"
-            lines.append(f"<b>{a}</b>: {state}{cd_left}")
-            if rc:
-                lines.append(f"   trig: rr{rc.get('h_short')}h≥{rc.get('t_short_pct')}% OR "
-                             f"rr{rc.get('h_long')}h≥{rc.get('t_long_pct')}% → {rc.get('cd_hours')}h")
-            row = [(f"{a} {'OFF' if on else 'ON'}", f"/gate {a} {'off' if on else 'on'}")]
+            lines.append(f"<b>{a}</b>: bull {'🔵 ON' if bull_on else '🔴 OFF'} / bear {'🔵 ON' if bear_on else '🔴 OFF'}{cd_left}")
+            bull_rc = (cfg_a.get('bull') or {}).get('rally_cooldown') or cfg_a.get('rally_cooldown') or {}
+            bear_rc = (cfg_a.get('bear') or {}).get('rally_cooldown') or cfg_a.get('rally_cooldown') or {}
+            if bull_rc:
+                lines.append(f"   bull: rr{bull_rc.get('h_short')}h≥{bull_rc.get('t_short_pct')}% OR rr{bull_rc.get('h_long')}h≥{bull_rc.get('t_long_pct')}% → {bull_rc.get('cd_hours')}h")
+            if bear_rc:
+                lines.append(f"   bear: rr{bear_rc.get('h_short')}h≥{bear_rc.get('t_short_pct')}% OR rr{bear_rc.get('h_long')}h≥{bear_rc.get('t_long_pct')}% → {bear_rc.get('cd_hours')}h")
+            row = [
+                (f"{a} bull {'OFF' if bull_on else 'ON'}", f"/gate {a} bull {'off' if bull_on else 'on'}"),
+                (f"{a} bear {'OFF' if bear_on else 'ON'}", f"/gate {a} bear {'off' if bear_on else 'on'}"),
+            ]
             if cd_active:
-                row.append((f"Clear {a} cd", f"/gate {a} clear"))
+                row.append((f"Clear cd", f"/gate {a} clear"))
             rows.append(row)
         send_telegram_with_buttons("\n".join(lines), rows)
 
     if len(parts) == 1:
         _show_status(); return
 
-    # /gate on | off  → all enabled
+    # /gate on | off  → all enabled assets, all regimes
     if len(parts) == 2 and parts[1].lower() in ('on', 'off'):
         on = parts[1].lower() == 'on'
         for a in enabled:
-            trading_cfg[a].setdefault('rally_cooldown', {
-                'h_short': 8, 'h_long': 36, 't_short_pct': 3.0, 't_long_pct': 5.5, 'cd_hours': 30
-            })
-            trading_cfg[a]['rally_cooldown']['enabled'] = on
+            _set_gate_enabled(trading_cfg[a], None, on)
         save_trading_config(trading_cfg)
-        send_telegram(f"🛡 Gate {'ON' if on else 'OFF'} for: {', '.join(enabled)}")
+        send_telegram(f"🚦 Gate {'ON' if on else 'OFF'} for: {', '.join(enabled)}")
         _show_status(); return
 
-    # /gate ASSET on|off|clear
+    # /gate ASSET [regime] on|off|clear
     if len(parts) >= 3:
         asset = parts[1].upper()
-        action = parts[2].lower()
         if asset not in trading_cfg:
             send_telegram(f"❌ {asset} not configured"); return
-        if action in ('on', 'off'):
-            trading_cfg[asset].setdefault('rally_cooldown', {
-                'h_short': 8, 'h_long': 36, 't_short_pct': 3.0, 't_long_pct': 5.5, 'cd_hours': 30
-            })
-            trading_cfg[asset]['rally_cooldown']['enabled'] = (action == 'on')
+
+        # Form: /gate ASSET bull|bear on|off
+        if len(parts) == 4 and parts[2].lower() in ('bull', 'bear') and parts[3].lower() in ('on', 'off'):
+            regime = parts[2].lower()
+            on = parts[3].lower() == 'on'
+            _set_gate_enabled(trading_cfg[asset], regime, on)
             save_trading_config(trading_cfg)
-            send_telegram(f"🛡 {asset} gate {action.upper()}")
+            send_telegram(f"🚦 {asset} {regime} gate {'ON' if on else 'OFF'}")
+            _show_status(); return
+
+        # Form: /gate ASSET on|off|clear
+        action = parts[2].lower()
+        if action in ('on', 'off'):
+            _set_gate_enabled(trading_cfg[asset], None, action == 'on')
+            save_trading_config(trading_cfg)
+            send_telegram(f"🚦 {asset} gate {action.upper()} (both regimes)")
             _show_status(); return
         if action == 'clear':
             pos = load_position(asset)
@@ -2701,7 +2752,7 @@ def _handle_gate_command(msg, trading_cfg):
                 send_telegram(f"ℹ️ {asset} has no active cooldown")
             _show_status(); return
 
-    send_telegram("Usage: /gate | /gate on|off | /gate ETH on|off|clear")
+    send_telegram("Usage: /gate | /gate on|off | /gate ETH on|off|clear | /gate ETH bull|bear on|off")
 
 
 # ---- Command loop ----

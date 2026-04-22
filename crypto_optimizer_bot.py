@@ -55,7 +55,7 @@ PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
 TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
 
-ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP', 'DOGE', 'ADA', 'AVAX', 'DOT']
+ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP']  # dropped DOGE/ADA/AVAX/DOT 2026-04-19 — weak priors, no diversification
 HORIZONS = [5, 6, 7, 8, 10, 12, 14]
 MODES = {
     'P':    'PySR Discovery',
@@ -66,14 +66,16 @@ MODES = {
     'R':    'Regime Backtest',
     'S':    'Joint Sweep (V3)',
     'RS':   'Regime + Joint Sweep',
-    'T':    'Threshold Sweep',
+    'T':    'Threshold + chain G',
+    'G':    'Rally-Cooldown (cache)',
     'HRS':  'Full Ed Pipeline',
-    'HRST': 'Full + Threshold',
+    'HRST': 'Full + Threshold (incl. G)',
     'DVRS': 'DV + Regime + Conf',
+    'F':    'Feature Trim',
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'T': 10, 'RS': 90, 'HRS': 150, 'HRST': 160, 'DVRS': 150}
+MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'T': 10, 'G': 2, 'RS': 90, 'HRS': 150, 'HRST': 160, 'DVRS': 150, 'F': 1}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -235,6 +237,7 @@ class OptJob:
     assets: list
     horizons: list
     replay: int = 0              # --replay hours (0 = default)
+    no_persist: bool = False     # --no-persist: redirect writes to *_noprod.* (prod untouched)
     status: str = 'queued'       # queued, running, done, failed, cancelled
     created_at: str = ''
     started_at: str = ''
@@ -249,7 +252,8 @@ class OptJob:
         assets_str = ','.join(self.assets)
         h_str = ','.join(f'{h}h' for h in self.horizons)
         replay_str = f" {self.replay}h" if self.replay else ""
-        return f"{self.mode} {assets_str} {h_str}{replay_str}"
+        noprod_str = " [NO-PROD]" if self.no_persist else ""
+        return f"{self.mode} {assets_str} {h_str}{replay_str}{noprod_str}"
 
 
 _job_queue = []          # pending jobs
@@ -268,7 +272,7 @@ REPLAY_OPTIONS = {
     '4m': (2880, '4 months'),
     '6m': (4320, '6 months'),
 }
-REPLAY_MODES = {'D', 'V', 'DV', 'R', 'S', 'RS', 'T', 'HRS', 'HRST', 'DVRS'}  # modes that support --replay
+REPLAY_MODES = {'D', 'V', 'DV', 'R', 'S', 'RS', 'T', 'G', 'HRS', 'HRST', 'DVRS'}  # modes that support --replay
 
 _menu_state = {
     'step': None,              # None, 'mode', 'assets', 'horizons', 'replay', 'confirm'
@@ -276,6 +280,7 @@ _menu_state = {
     'selected_assets': set(),
     'selected_horizons': set(),
     'selected_replay': 2880,   # default 4 months
+    'selected_noprod': False,  # --no-persist: research run, production untouched
     'last_activity': 0,
 }
 MENU_TIMEOUT = 300  # 5 minutes
@@ -307,19 +312,21 @@ def _show_mode_menu():
     _menu_state['step'] = 'mode'
     _menu_touch()
     buttons = [
-        [('🔧 Full Re-tune (HRS)', 'opt_mode_HRS')],
+        [('🔧 Full Re-tune (HRST)', 'opt_mode_HRST')],
         [('🔄 Regime Refresh (RS)', 'opt_mode_RS')],
         [('⚡ Model Refresh (DV)', 'opt_mode_DV')],
         [('🔬 PySR Discovery', 'opt_mode_P')],
+        [('🧹 Feature Trim (F)', 'opt_mode_F')],
         [('Advanced ▸', 'opt_advanced')],
         [('Help', 'opt_help'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons(
         "<b>Pick what to optimize:</b>\n\n"
-        "🔧 <b>Full Re-tune</b> — find best horizon + regime + model\n"
+        "🔧 <b>Full Re-tune</b> — H→R→S→T (horizon + regime + model + shield/gate)\n"
         "🔄 <b>Regime Refresh</b> — keep model, re-find detector + conf\n"
         "⚡ <b>Model Refresh</b> — keep regime, re-fit model\n"
         "🔬 <b>PySR</b> — symbolic-regression feature discovery\n"
+        "🧹 <b>Feature Trim</b> — disable Grade-1 features (never selected)\n"
         "▸ <b>Advanced</b> — individual modes (D/V/H/R/S/T + chains)",
         buttons
     )
@@ -333,8 +340,9 @@ def _show_advanced_mode_menu():
         [('DV - Grid+Val', 'opt_mode_DV'), ('H - Horizon', 'opt_mode_H')],
         [('R - Regime', 'opt_mode_R'), ('S - Joint Sweep', 'opt_mode_S')],
         [('RS - Regime+Sweep', 'opt_mode_RS'), ('HRS - Full', 'opt_mode_HRS')],
-        [('T - Threshold', 'opt_mode_T'), ('HRST - Full+T', 'opt_mode_HRST')],
+        [('T - Threshold+G', 'opt_mode_T'), ('HRST - Full+T+G', 'opt_mode_HRST')],
         [('P - PySR', 'opt_mode_P'), ('DVRS - DV+R+S', 'opt_mode_DVRS')],
+        [('G - Rally-cd (cache)', 'opt_mode_G')],
         [('◂ Back', 'opt_back_main'), ('Cancel', 'opt_cancel')],
     ]
     send_telegram_with_buttons("<b>Advanced — pick mode:</b>", buttons)
@@ -427,15 +435,32 @@ def _show_confirm():
                 replay_str = f"\nReplay: {label} ({replay_hours}h)"
                 break
 
+    noprod = bool(_menu_state.get('selected_noprod'))
+    noprod_label = "🔒 PROD" if not noprod else "🧪 NO-PROD (research)"
+    noprod_warning = ""
+    if noprod:
+        noprod_warning = (
+            "\n\n<b>⚠ NO-PROD mode:</b> writes redirect to\n"
+            "  <code>models/crypto_ed_production_noprod.csv</code>\n"
+            "  <code>config/regime_config_ed_noprod.json</code>\n"
+            "Production files + live trader untouched."
+        )
+
     msg = (
         f"<b>Confirm optimization:</b>\n\n"
         f"Mode: {mode_name} ({mode})\n"
         f"Assets: {assets_str}\n"
         f"Horizons: {h_str}{replay_str}\n"
+        f"Writes to: {noprod_label}\n"
         f"Machine: {MACHINE}\n"
         f"Est. time: {time_est}"
+        f"{noprod_warning}"
     )
-    buttons = [[('Confirm', 'opt_confirm'), ('Cancel', 'opt_cancel')]]
+    toggle_label = ("🧪 Switch to NO-PROD" if not noprod else "🔒 Switch to PROD")
+    buttons = [
+        [(toggle_label, 'opt_toggle_noprod')],
+        [('Confirm', 'opt_confirm'), ('Cancel', 'opt_cancel')],
+    ]
     send_telegram_with_buttons(msg, buttons)
 
 
@@ -444,6 +469,11 @@ def _handle_menu_callback(data):
     if data == 'opt_cancel':
         _menu_reset()
         send_telegram("Cancelled.")
+        return
+
+    if data == 'opt_toggle_noprod':
+        _menu_state['selected_noprod'] = not bool(_menu_state.get('selected_noprod'))
+        _show_confirm()
         return
 
     if data == 'opt_help':
@@ -469,6 +499,13 @@ def _handle_menu_callback(data):
             _menu_state['selected_horizons'] = set(HORIZONS)
         else:
             _menu_state['selected_horizons'] = {6}
+        # Mode F is universal (scans all prod models, not asset-specific).
+        # Skip asset + horizon pickers, go straight to confirm.
+        if mode == 'F':
+            _menu_state['selected_assets'] = {'ETH'}  # used only for feature-universe sampling
+            _menu_state['selected_horizons'] = {5}    # placeholder, ignored by Mode F
+            _show_confirm()
+            return
         _show_asset_menu()
         return
 
@@ -543,12 +580,14 @@ def _enqueue_job():
     assets = sorted(_menu_state['selected_assets'])
     horizons = sorted(_menu_state['selected_horizons'])
     replay = _menu_state.get('selected_replay', 0) if mode in REPLAY_MODES else 0
+    no_persist = bool(_menu_state.get('selected_noprod', False))
     job = OptJob(
         id=uuid.uuid4().hex[:8],
         mode=mode,
         assets=assets,
         horizons=horizons,
         replay=replay,
+        no_persist=no_persist,
         created_at=datetime.now().strftime('%H:%M:%S'),
     )
     with _queue_lock:
@@ -635,6 +674,8 @@ def _run_job(job):
     cmd = [PYTHON_EXE, '-u', SCRIPT_PATH, job.mode, assets_arg, h_arg]
     if hasattr(job, 'replay') and job.replay:
         cmd.extend(['--replay', str(job.replay)])
+    if getattr(job, 'no_persist', False):
+        cmd.append('--no-persist')
 
     print(f"  CMD: {' '.join(cmd)}")
 

@@ -277,6 +277,12 @@ TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY 
 # Applied uniformly across Mode D/V/R/S/T/G backtest sims so relative policy
 # comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
 BACKTEST_FEE_PER_LEG = 0.0005
+# Auto-drop features with >SPARSE_NAN_THRESHOLD fraction NaN in the training window.
+# Newer feeds (orderbook/IV) that haven't accumulated data yet would otherwise
+# collapse the training set via dropna(). 70% keeps useful-but-partial features
+# (e.g., deriv_oi at ~40% NaN has 820 valid rows — plenty of signal) and only
+# drops truly empty feeds (orderbook/IV at ~88% NaN = 175 valid rows).
+SPARSE_NAN_THRESHOLD = 0.70
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
@@ -309,6 +315,9 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 
 # Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
 LABEL_MODE = 'fee_aware'
+# Label threshold override (research/one-off). None = use LABEL_MODE default (2×fee=0.22%).
+# When set (via --label-threshold X), label=1 iff future_return > X. E.g., 0.01 = target ≥1% moves.
+LABEL_THRESHOLD_PCT = None
 
 # Mode V: live backtest validation of top 6 candidates
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
@@ -708,7 +717,9 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
 
-    if LABEL_MODE == 'fee_aware':
+    if LABEL_THRESHOLD_PCT is not None:
+        df['label'] = (future_return > LABEL_THRESHOLD_PCT).astype(int)
+    elif LABEL_MODE == 'fee_aware':
         # Fee-aware: label=1 only when future return exceeds round-trip cost
         df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
     else:
@@ -959,7 +970,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             added += len(new_cols)
 
     # On-chain features (daily — merge on date with ffill)
-    onchain_asset_map = {'BTC': 'btc', 'ETH': 'eth'}
+    onchain_asset_map = {'BTC': 'btc', 'ETH': 'eth', 'XRP': 'xrp', 'SOL': 'sol', 'LINK': 'link'}
     oc_key = onchain_asset_map.get(asset_name)
     if oc_key is not None:
         oc_df = _load_macro_csv(f'onchain_{oc_key}.csv')
@@ -1037,12 +1048,32 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
                         all_cols.append(col)
                         oi_cols_added += 1
                 df = df.drop(columns=['open_interest_usd'], errors='ignore')
+
+            # Perp-spot basis (2024 lit: crowded-leverage regime classifier — Schmeling et al. 2023
+            # style basis mean-reversion signal). Computed as (perp - spot) / spot, then change + zscore.
+            basis_cols_added = 0
+            if 'perp_close' in deriv_df.columns:
+                perp_merge = deriv_df[['_merge_dt', 'perp_close']].drop_duplicates(subset='_merge_dt', keep='last')
+                df = df.merge(perp_merge, on='_merge_dt', how='left')
+                df['perp_close'] = df['perp_close'].ffill()
+                df['deriv_basis'] = (df['perp_close'] - df['close']) / df['close']  # contango if >0, backwardation if <0
+                df['deriv_basis_chg1d'] = df['deriv_basis'].diff(24)
+                df['deriv_basis_zscore'] = (df['deriv_basis'] - df['deriv_basis'].rolling(168, min_periods=24).mean()) / \
+                                           (df['deriv_basis'].rolling(168, min_periods=24).std() + 1e-10)
+                for col in ['deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore']:
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        basis_cols_added += 1
+                df = df.drop(columns=['perp_close'], errors='ignore')
+
             df = df.drop(columns=['_merge_dt'], errors='ignore')
             if verbose and oi_cols_added > 0:
                 print(f"    Open interest: {oi_cols_added} features added")
+            if verbose and basis_cols_added > 0:
+                print(f"    Perp-spot basis: {basis_cols_added} features added")
         except Exception as e:
             if verbose:
-                print(f"    Open interest: failed to load ({e})")
+                print(f"    Open interest / basis: failed to load ({e})")
 
     # Load stablecoin flows
     stable_file = os.path.join(MACRO_DIR, 'stablecoin_flows.csv')
@@ -1064,7 +1095,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
                 stable_feats['_merge_date'] = stable_feats.index.normalize()
 
                 for col in ['stable_mcap_chg1d', 'stable_mcap_chg7d', 'stable_mcap_zscore']:
-                    merge_df = stable_feats[['_merge_date', col]].dropna()
+                    merge_df = stable_feats[['_merge_date', col]].dropna().drop_duplicates(subset='_merge_date', keep='last')
                     df = df.merge(merge_df, on='_merge_date', how='left')
                     df[col] = df[col].ffill()
                     if col not in all_cols:
@@ -1136,9 +1167,272 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             if col not in all_cols:
                 all_cols.append(col)
 
+    # Intraday cross-asset lead-lag features (2024 lit: BTC leads ETH 5-30min; ETH leads alts).
+    # At 1h resolution we capture the 1-3h lags. Each feature is the leader's 1h logret
+    # shifted forward by k hours, so at time t the value is the leader's return in [t-k-1, t-k].
+    leaders_for = {
+        'ETH':  ['BTC'],
+        'XRP':  ['BTC', 'ETH'],
+        'SOL':  ['BTC', 'ETH'],
+        'LINK': ['BTC', 'ETH'],
+    }
+    for leader in leaders_for.get(asset_name, []):
+        leader_file = ASSETS.get(leader, {}).get('file')
+        if not leader_file or not os.path.exists(leader_file):
+            continue
+        try:
+            led_df = pd.read_csv(leader_file)
+            led_df['datetime'] = pd.to_datetime(led_df['datetime'])
+            led_df = led_df.sort_values('datetime').reset_index(drop=True)
+            led_df['_merge_dt'] = led_df['datetime'].dt.floor('h')
+            led_df['_led_logret_1h'] = np.log(led_df['close'] / led_df['close'].shift(1))
+            merge_src = led_df[['_merge_dt', '_led_logret_1h']].drop_duplicates(subset='_merge_dt', keep='last')
+            df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+            df = df.merge(merge_src, on='_merge_dt', how='left')
+            df = df.drop(columns=['_merge_dt'], errors='ignore')
+
+            prefix = f'xa_{leader.lower()}_lag'
+            added_lead = 0
+            for k in [1, 2, 3]:
+                col = f'{prefix}{k}h'
+                df[col] = df['_led_logret_1h'].shift(k)
+                if col not in all_cols:
+                    all_cols.append(col)
+                    added_lead += 1
+            df = df.drop(columns=['_led_logret_1h'], errors='ignore')
+            if verbose and added_lead > 0:
+                print(f"    Cross-asset lead-lag ({leader}): {added_lead} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Cross-asset lead-lag ({leader}): failed to load ({e})")
+
+    # Apply optional feature deactivation config — keeps download pipeline intact
+    # but strips named features from the model's input matrix for speed/noise reduction.
+    all_cols, n_disabled = _apply_feature_disable(all_cols, verbose=verbose)
+
     if verbose:
-        print(f"    All features: {len(base_cols)} base + {len(all_cols) - len(base_cols)} macro/deriv/sentiment/cross-asset = {len(all_cols)} total")
+        disabled_str = f" ({n_disabled} disabled)" if n_disabled else ""
+        print(f"    All features: {len(base_cols)} base + {len(all_cols) - len(base_cols)} macro/deriv/sentiment/cross-asset = {len(all_cols)} total{disabled_str}")
     return df, all_cols
+
+
+_DISABLED_FEATURES_CACHE = None
+_DISABLED_FEATURES_MTIME = 0
+
+# Newborn features — added recently, need a fair HRST before being flagged dead by Mode F.
+# Prune from this set after 2-3 HRST cycles confirm them as dead (Grade 1 reconfirmed).
+NEWBORN_FEATURES = {
+    # 2026-04-19: derivatives-as-feature + stablecoin + orderbook + IV
+    'deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_zscore',
+    'deriv_oi_chg1d', 'deriv_oi_chg3d', 'deriv_oi_zscore',
+    'stable_mcap_chg1d', 'stable_mcap_chg7d', 'stable_mcap_zscore',
+    'ob_imbalance', 'spread_bps',
+    'avg_iv', 'iv_skew',
+    # 2026-04-20: perp-spot basis + BTC/ETH intraday lead-lag
+    'deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore',
+    'xa_btc_lag1h', 'xa_btc_lag2h', 'xa_btc_lag3h',
+    'xa_eth_lag1h', 'xa_eth_lag2h', 'xa_eth_lag3h',
+}
+
+_PYSR_BUILTINS = {
+    'tanh', 'sqrt', 'abs', 'Abs', 'log', 'sin', 'cos', 'exp', 'pow',
+    'max', 'min', 'floor', 'ceil', 'round', 'sign',
+    'PySRFunction', 'X', 'e', 'pi',
+}
+
+
+def run_mode_f(restore=False, include_newborns=False, asset='ETH'):
+    """Mode F — Feature trim: audit features across production models + PySR formulas,
+    then populate config/disabled_features.json with Grade 1 (zero-selection + zero-PySR)
+    features. Newborn features (recently added, haven't had a fair HRST) are spared by
+    default.
+
+    Flags:
+      --restore           Empty the disabled list (re-enable all features)
+      --include-newborns  Include newborn features in the disable list (aggressive)
+    """
+    import re
+    import glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg_path = os.path.join(here, 'config', 'disabled_features.json')
+
+    # Load current config to preserve _note + enabled flag
+    existing_cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                existing_cfg = json.load(f)
+        except Exception:
+            existing_cfg = {}
+
+    if restore:
+        cfg = {
+            "_note": existing_cfg.get('_note', 'Features excluded from LGBM matrix + PySR inputs.'),
+            "enabled": True,
+            "disabled_prefixes": [],
+            "disabled_exact": [],
+        }
+        _atomic_write_json(cfg_path, cfg)
+        print("  ── MODE F: RESTORE ──")
+        print(f"  Emptied disabled list. All features re-enabled.")
+        print(f"  Wrote: {cfg_path}")
+        return
+
+    print("=" * 70)
+    print("  MODE F: FEATURE TRIM AUDIT")
+    print("=" * 70)
+
+    # 1) Production model selection frequency
+    if not os.path.exists(PRODUCTION_CSV):
+        print(f"  ERROR: {PRODUCTION_CSV} not found — cannot audit")
+        return
+    df_prod = pd.read_csv(PRODUCTION_CSV)
+    n_models = len(df_prod)
+    prod_features = set()
+    for _, r in df_prod.iterrows():
+        feats = [f.strip() for f in str(r.get('optimal_features', '')).split(',') if f.strip()]
+        prod_features.update(feats)
+
+    # 2) PySR formula references (union across all asset/horizon JSONs)
+    pysr_features = set()
+    pysr_count = 0
+    for pf in sorted(glob.glob(os.path.join(here, 'models', 'pysr_*.json'))):
+        try:
+            with open(pf) as f:
+                j = json.load(f)
+        except Exception:
+            continue
+        pysr_count += 1
+        for expr in j.get('expressions', []):
+            eq = expr.get('sympy_format') or expr.get('equation') or ''
+            for tok in re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', eq):
+                if tok not in _PYSR_BUILTINS:
+                    pysr_features.add(tok)
+
+    # 3) Current feature universe (audit against this asset's build)
+    print(f"  Building feature universe from asset: {asset}...")
+    raw = load_data(asset)
+    _, universe = build_all_features(raw, asset_name=asset, horizon=5, verbose=False)
+    universe_set = set(universe)
+
+    # 4) Grade 1 candidates: in universe + 0 prod + 0 pysr
+    grade1_raw = sorted(c for c in universe if c not in prod_features and c not in pysr_features)
+
+    if include_newborns:
+        grade1 = grade1_raw
+        newborns_in_grade1 = [c for c in grade1_raw if c in NEWBORN_FEATURES]
+    else:
+        grade1 = sorted(c for c in grade1_raw if c not in NEWBORN_FEATURES)
+        newborns_in_grade1 = [c for c in grade1_raw if c in NEWBORN_FEATURES]
+
+    # 5) Safety: no overlap with prod-selected features
+    conflict = set(grade1) & prod_features
+    if conflict:
+        print(f"  ERROR: grade-1 list overlaps selected features: {conflict}")
+        print(f"  Aborting — not writing config.")
+        return
+
+    # 6) Category breakdown of what we're disabling
+    def _cat(name):
+        if name.startswith('oc_'): return 'on-chain'
+        if name.startswith('m_'): return 'macro'
+        if name.startswith('xa_'): return 'cross-asset'
+        if name.startswith('deriv_'): return 'derivatives'
+        if name.startswith('fg_'): return 'sentiment'
+        if name.startswith('gp_'): return 'geopolitical'
+        if name.startswith('stable_'): return 'stablecoin'
+        if name.startswith('ob_') or name == 'spread_bps': return 'orderbook'
+        if name.startswith('avg_iv') or name.startswith('iv_skew'): return 'options'
+        if name.startswith('whale_'): return 'whale'
+        if name.startswith('pysr_'): return 'pysr'
+        return 'technical'
+    from collections import Counter
+    cats = Counter(_cat(f) for f in grade1)
+
+    print()
+    print(f"  Production models scanned: {n_models}")
+    print(f"  PySR JSONs scanned: {pysr_count}  (unique feature refs: {len(pysr_features)})")
+    print(f"  Universe ({asset}): {len(universe)} features")
+    print(f"  Grade 1 (0 prod + 0 pysr): {len(grade1_raw)}")
+    if newborns_in_grade1 and not include_newborns:
+        print(f"  Newborns spared (recent additions, need HRST first): {len(newborns_in_grade1)}")
+        for f in newborns_in_grade1:
+            print(f"    skip: {f}")
+    print(f"  → Disabling: {len(grade1)} features")
+    for cat, n in cats.most_common():
+        print(f"    {cat:<12}: {n}")
+
+    # 7) Write config (preserve note + enabled state)
+    cfg = {
+        "_note": existing_cfg.get('_note', 'Features excluded from LGBM matrix + PySR inputs. Download/data pipelines still run. Regenerate via Mode F or tools/audit_features.py.'),
+        "enabled": existing_cfg.get('enabled', True),
+        "disabled_prefixes": [],
+        "disabled_exact": grade1,
+    }
+    _atomic_write_json(cfg_path, cfg)
+    print()
+    print(f"  Wrote: {cfg_path}")
+    print(f"  Next build_all_features() call will use {len(universe) - len(grade1)} features (was {len(universe)}).")
+
+
+def _load_disabled_features():
+    """Read config/disabled_features.json. Returns (exact_set, prefix_list, enabled_bool).
+    Cached; re-reads when the config file's mtime changes."""
+    global _DISABLED_FEATURES_CACHE, _DISABLED_FEATURES_MTIME
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'disabled_features.json')
+    if not os.path.exists(path):
+        return set(), [], False
+    mtime = os.path.getmtime(path)
+    if _DISABLED_FEATURES_CACHE is not None and mtime == _DISABLED_FEATURES_MTIME:
+        return _DISABLED_FEATURES_CACHE
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+        enabled = bool(cfg.get('enabled', True))
+        exact = set(cfg.get('disabled_exact') or [])
+        prefixes = list(cfg.get('disabled_prefixes') or [])
+        result = (exact, prefixes, enabled)
+    except Exception as e:
+        print(f"  WARN: disabled_features.json unreadable ({e}) — ignoring")
+        result = (set(), [], False)
+    _DISABLED_FEATURES_CACHE = result
+    _DISABLED_FEATURES_MTIME = mtime
+    return result
+
+
+def _apply_feature_disable(all_cols, verbose=True):
+    """Filter all_cols against the disable config. Returns (filtered_cols, n_dropped)."""
+    exact, prefixes, enabled = _load_disabled_features()
+    if not enabled or (not exact and not prefixes):
+        return all_cols, 0
+    def is_disabled(c):
+        if c in exact: return True
+        return any(c.startswith(p) for p in prefixes)
+    kept = [c for c in all_cols if not is_disabled(c)]
+    n_dropped = len(all_cols) - len(kept)
+    if verbose and n_dropped > 0:
+        samples = [c for c in all_cols if is_disabled(c)][:5]
+        extra = f" ...+{n_dropped - len(samples)} more" if n_dropped > len(samples) else ""
+        print(f"    Disabled features: {n_dropped} dropped ({', '.join(samples)}{extra})")
+    return kept, n_dropped
+
+
+def _filter_sparse_features(df, all_cols, threshold=SPARSE_NAN_THRESHOLD, verbose=True):
+    """Drop feature columns whose NaN fraction in `df` exceeds `threshold`.
+    Newer feeds (orderbook/IV) start sparse; keeping them would gate dropna()
+    on a near-empty set. Returns (df_trimmed, all_cols_trimmed, dropped_list)."""
+    if not all_cols:
+        return df, all_cols, []
+    nan_pct = df[all_cols].isna().mean()
+    dropped = nan_pct[nan_pct > threshold].index.tolist()
+    if dropped:
+        if verbose:
+            preview = ', '.join(f'{c}({nan_pct[c]*100:.0f}%)' for c in dropped[:8])
+            more = f' +{len(dropped)-8}' if len(dropped) > 8 else ''
+            print(f"  Auto-dropped {len(dropped)} sparse cols (>{threshold*100:.0f}% NaN): {preview}{more}")
+        all_cols = [c for c in all_cols if c not in dropped]
+        df = df.drop(columns=dropped)
+    return df, all_cols, dropped
 
 
 def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
@@ -3338,9 +3632,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
             print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows ({period_label})")
 
-        sparse_prefixes = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
-        core_cols_d = [c for c in all_cols if not any(c.startswith(p) for p in sparse_prefixes)]
-        df_clean = df_full.dropna(subset=core_cols_d + ['label']).reset_index(drop=True)
+        df_full, all_cols, _ = _filter_sparse_features(df_full, all_cols)
+        df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
         print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
 
         if len(df_clean) < 500:
@@ -3355,9 +3648,9 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         ranked_features = importance_df['feature'].tolist()
         print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features ranked")
 
-        # Prepare data for Optuna — columns in rank order (keep sparse NaN for LGBM)
-        core_ranked = [c for c in ranked_features if not any(c.startswith(p) for p in sparse_prefixes)]
-        df_optuna = df_clean.dropna(subset=core_ranked + ['label']).reset_index(drop=True)
+        # Prepare data for Optuna — columns in rank order
+        # (high-NaN cols already removed by _filter_sparse_features above)
+        df_optuna = df_clean.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
         features_np_all = df_optuna[ranked_features].values.astype(np.float64)
         labels_np_all = df_optuna['label'].values.astype(np.int32)
         closes_np_all = df_optuna['close'].values.astype(np.float64)
@@ -3833,9 +4126,12 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                         all_cols.remove(pc)
                         if pc in df_full.columns:
                             df_full.drop(columns=[pc], inplace=True)
-            sparse_prefixes_v = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
-            core_cols_v = [c for c in all_cols if not any(c.startswith(p) for p in sparse_prefixes_v)]
-            df_clean = df_full.dropna(subset=core_cols_v + ['label']).reset_index(drop=True)
+            # Window to replay period before sparsity filter — matches the scoring
+            # window, so pre-2022 ETH bars (no macro) don't inflate NaN% on current features.
+            if len(df_full) > _replay:
+                df_full = df_full.tail(_replay).reset_index(drop=True)
+            df_full, all_cols, _ = _filter_sparse_features(df_full, all_cols)
+            df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
             importance_df = _test_lgbm_importance(df_clean, all_cols, gamma=1.0)
             ranked_features = importance_df['feature'].tolist()
             print(f"  [Ranking done: {time.time()-t0:.1f}s] — {len(ranked_features)} features ranked")
@@ -4162,9 +4458,9 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
     total_rows = len(df_full_r)
     if total_rows > MAX_DIAG_HOURS:
         df_full_r = df_full_r.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-    sparse_prefixes_r = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
-    core_ranked_r = [c for c in ranked_features if not any(c.startswith(p) for p in sparse_prefixes_r)]
-    df_clean_r = df_full_r.dropna(subset=core_ranked_r + ['label']).reset_index(drop=True)
+    df_full_r, all_cols_r, dropped_r = _filter_sparse_features(df_full_r, all_cols_r)
+    ranked_features = [c for c in ranked_features if c not in dropped_r]
+    df_clean_r = df_full_r.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
 
     # Prepare fold 1 data (same as Mode D)
     features_np_all = df_clean_r[ranked_features].values.astype(np.float64)
@@ -4708,7 +5004,7 @@ def run_mode_t(assets_list, args=None):
         bull_sigs = signals_cache[bull_h]
         bear_sigs = signals_cache[bear_h]
 
-        max_iter = int(getattr(args, 'max_iter', 0)) or 4
+        max_iter = int(getattr(args, 'max_iter', 0)) or 6
 
         def _get_rally_tuple(cfg, regime=None):
             """Rally-cooldown tuple for a specific regime, with asset-level fallback."""
@@ -4749,8 +5045,80 @@ def run_mode_t(assets_list, args=None):
                 _rc_tuple(bear_rc),
             )
 
-        prev_fp = None
+        # Tolerances for "close enough" convergence on plateau configs.
+        # Designed so Mode T can declare convergence when consecutive iterations
+        # only differ in noise-level parameter jitter (e.g. min_sell_pnl 0.30→0.40,
+        # max_hold 8→10, gate windows shifting by 1-2h). Shields must still match
+        # exactly — those are structural (ON/OFF), not numeric plateau points.
+        TOL_PNL = 0.10   # min_sell_pnl_pct within ±0.10 pp
+        TOL_HOLD = 2     # max_hold_hours within ±2 h
+        TOL_GATE_H = 4   # h_short / h_long windows within ±4 h
+        TOL_GATE_T = 0.5 # t_short / t_long thresholds within ±0.5 pp
+        TOL_GATE_CD = 6  # cd_hours within ±6 h
+
+        def _rc_close(rc_a, rc_b):
+            """True if two rally-cooldown tuples are within tolerance or both absent."""
+            if rc_a is None and rc_b is None:
+                return True
+            # If either side has None-filled tuple (gate absent), must match exactly.
+            def _is_null(rc):
+                return rc is None or all(v is None for v in rc)
+            if _is_null(rc_a) and _is_null(rc_b):
+                return True
+            if _is_null(rc_a) or _is_null(rc_b):
+                return False
+            try:
+                hs_a, hl_a, ts_a, tl_a, cd_a = rc_a
+                hs_b, hl_b, ts_b, tl_b, cd_b = rc_b
+                if abs(int(hs_a) - int(hs_b)) > TOL_GATE_H:  return False
+                if abs(int(hl_a) - int(hl_b)) > TOL_GATE_H:  return False
+                if abs(float(ts_a) - float(ts_b)) > TOL_GATE_T: return False
+                if abs(float(tl_a) - float(tl_b)) > TOL_GATE_T: return False
+                if abs(int(cd_a) - int(cd_b)) > TOL_GATE_CD: return False
+                return True
+            except (TypeError, ValueError):
+                return False
+
+        def _configs_close_enough(fp_now, fp_prev):
+            """Tolerant convergence: plateau-level noise doesn't count as divergence.
+            Shields must match exactly (structural). Everything else within tolerance."""
+            if fp_now is None or fp_prev is None:
+                return False
+            try:
+                pnl_n, hold_n, bs_n, bz_n, art_n, brt_n, zrt_n = fp_now
+                pnl_p, hold_p, bs_p, bz_p, art_p, brt_p, zrt_p = fp_prev
+            except (TypeError, ValueError):
+                return False
+            # Shield (bull + bear) must match exactly — structural toggle, not plateau point.
+            if bs_n != bs_p or bz_n != bz_p:
+                return False
+            # min_sell_pnl numeric within tol
+            try:
+                if (pnl_n is None) != (pnl_p is None):
+                    return False
+                if pnl_n is not None and abs(float(pnl_n) - float(pnl_p)) > TOL_PNL:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            # max_hold numeric within tol
+            try:
+                if (hold_n is None) != (hold_p is None):
+                    return False
+                if hold_n is not None and abs(int(hold_n) - int(hold_p)) > TOL_HOLD:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            # Rally cooldown tuples (asset-level + per-regime) within tolerance
+            if not _rc_close(art_n, art_p): return False
+            if not _rc_close(brt_n, brt_p): return False
+            if not _rc_close(zrt_n, zrt_p): return False
+            return True
+
+        # Track fingerprints for strict convergence, tolerant convergence, and 2-cycle detection.
+        # We only need the last 2 fingerprints to detect cycles of length ≤ 2.
+        fp_history = []
         converged = False
+        cycle_detected = False
         for iteration in range(1, max_iter + 1):
             print(f"\n{'#'*80}")
             print(f"  T<->G ITERATION {iteration}/{max_iter} | {asset}")
@@ -4835,17 +5203,41 @@ def run_mode_t(assets_list, args=None):
             with open(tcfg_path) as f:
                 regime_config = json.load(f)
 
-            # Convergence check
+            # Convergence check — strict match, tolerant-plateau, or 2-cycle detection.
             fp = _config_fingerprint(regime_config[asset])
-            if prev_fp is not None and fp == prev_fp:
+            # 1. Exact match with previous → clean convergence
+            if fp_history and fp == fp_history[-1]:
                 converged = True
                 print(f"\n  >>> Converged at iteration {iteration} (config unchanged).")
                 break
-            prev_fp = fp
+            # 2. Tolerant match with previous (plateau settled)
+            if fp_history and _configs_close_enough(fp, fp_history[-1]):
+                converged = True
+                print(f"\n  >>> Converged-in-tolerance at iteration {iteration} "
+                      f"(plateau: |min_sell_pnl|<={TOL_PNL}pp, |max_hold|<={TOL_HOLD}h, "
+                      f"gate h<={TOL_GATE_H}h, t<={TOL_GATE_T}pp, cd<={TOL_GATE_CD}h).")
+                break
+            # 3. 2-cycle: current fp close to fp from 2 iterations ago (and NOT close to
+            #    previous, or we'd have caught it above). Indicates A↔B oscillation —
+            #    NOT convergence. Flag it, stop early to save compute, but the result
+            #    is structurally unstable and should not pass the promotion gate.
+            if len(fp_history) >= 2 and _configs_close_enough(fp, fp_history[-2]):
+                cycle_detected = True
+                print(f"\n  >>> 2-CYCLE DETECTED at iteration {iteration}: "
+                      f"config oscillates between two states. This is NOT convergence.")
+                print(f"      Structural instability — shield+gate coupling bistable on this data.")
+                print(f"      Promotion gate #1 should REJECT this config. "
+                      f"Consider: (a) longer replay window, (b) fresh seed, (c) tie-breaker run.")
+                break
+            fp_history.append(fp)
+            # Keep only the last 2 fingerprints (all we need for 2-cycle detection).
+            if len(fp_history) > 2:
+                fp_history = fp_history[-2:]
 
-        if not converged:
+        if not converged and not cycle_detected:
             print(f"\n  >>> Reached max_iter={max_iter} without convergence. "
-                  f"Final config written.")
+                  f"Final config written. Structural instability likely — "
+                  f"promotion gate #1 should REJECT.")
 
     print(f"\n{'='*80}")
     print(f"  MODE T COMPLETE")
@@ -5705,7 +6097,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T', 'G'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T', 'G', 'F'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -5767,6 +6159,62 @@ def main():
             except ValueError:
                 pass
 
+    # Research flag globals (consolidated up front to satisfy Python's global-decl rules
+    # since both --no-persist and --label-threshold mutate module-level paths).
+    global PRODUCTION_CSV, REGIME_CONFIG_PATH, LABEL_THRESHOLD_PCT
+
+    # Parse Mode F flags
+    flag_restore = '--restore' in sys.argv
+    flag_include_newborns = '--include-newborns' in sys.argv
+
+    # Parse --no-persist (research: do NOT touch production CSV or regime_config_ed.json)
+    # Redirects both writes to *_noprod.* files seeded with current contents.
+    # Safe to run alongside live trader.
+    if '--no-persist' in sys.argv:
+        import shutil
+        np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
+        np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
+        if os.path.exists(PRODUCTION_CSV):
+            shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
+        if os.path.exists(REGIME_CONFIG_PATH):
+            shutil.copyfile(REGIME_CONFIG_PATH, np_config)
+        PRODUCTION_CSV = np_prod_csv
+        REGIME_CONFIG_PATH = np_config
+        print()
+        print("  " + "*" * 76)
+        print("  * --no-persist ACTIVE: production files are NOT modified")
+        print(f"  * All writes redirected to:")
+        print(f"  *    {PRODUCTION_CSV}")
+        print(f"  *    {REGIME_CONFIG_PATH}")
+        print("  * Safe to run alongside live trader.")
+        print("  " + "*" * 76)
+        print()
+
+    # Parse --label-threshold X.XX (research one-off: retrain with label=1 iff ret > X)
+    # When active: overrides the 2×fee default and redirects output to a tagged CSV so prod is untouched.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--label-threshold' and i < len(sys.argv) - 1:
+            try:
+                lt = float(sys.argv[i + 1])
+                if lt <= 0 or lt > 0.5:
+                    print(f"  --label-threshold value '{lt}' out of plausible range (0, 0.5]. Example: 0.01 = 1%.")
+                    return
+                LABEL_THRESHOLD_PCT = lt
+                pct = int(round(lt * 10000)) / 100  # e.g. 1.0 for 0.01
+                # Redirect output so prod stays untouched
+                PRODUCTION_CSV = f"models/crypto_ed_production_lt{pct:g}.csv"
+                print()
+                print("  " + "!" * 76)
+                print(f"  ! LABEL THRESHOLD OVERRIDE ACTIVE: label=1 iff future_return > {lt:.4f} ({pct:g}%)")
+                print(f"  ! Default 2×fee ({2*TRADING_FEE:.4f}) is BYPASSED.")
+                print(f"  ! Output redirected to: {PRODUCTION_CSV}")
+                print(f"  ! Production CSV is NOT modified.")
+                print("  " + "!" * 76)
+                print()
+            except ValueError:
+                print(f"  --label-threshold must be a float (e.g. 0.01 for 1%)")
+                return
+
     # --help
     if '--help' in sys.argv or '-h' in sys.argv:
         print("""
@@ -5791,6 +6239,10 @@ Modes:
           NOTE: Mode T chains this sweep automatically against fresh signals, so
           HRST is the canonical way to get shield + gate together. G standalone
           is kept for fast re-runs when models haven't changed.
+  F       Feature trim — audit production models + PySR formulas, populate
+          config/disabled_features.json with Grade 1 features (0 selection + 0
+          PySR). Download/data pipelines untouched. Use --restore to re-enable
+          all, --include-newborns to include recent additions.
 
 Assets:
   BTC,ETH,LINK,...   Comma-separated asset names (default: all)
@@ -5807,7 +6259,13 @@ Options:
   --conf N            Mode R only: confidence threshold (default: 90)
   --top N             Mode R only: show top N results (default: 15)
   --rank MODE         Mode G tiebreak: recent (H1-focused, default) | balanced (H1+H2 avg)
-  --max-iter N        Mode T: T<->G convergence iterations (default 4; 1=single-pass legacy)
+  --max-iter N        Mode T: T<->G convergence iterations (default 6; 1=single-pass legacy;
+                      tolerant-convergence active — accepts plateau-level noise)
+  --label-threshold X Research: retrain with label=1 iff future_return > X (e.g., 0.01 = 1%).
+                      Default = 2×fee (0.0022). Output redirected to models/crypto_ed_production_lt<pct>.csv.
+  --no-persist        Research: do NOT modify production files. Redirects writes to
+                      *_noprod.* files (seeded from current production state). Safe to run
+                      alongside live trader. Use for --replay 2880 validation, etc.
   --help, -h          Show this help
 
 Examples:
@@ -5846,7 +6304,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 
@@ -6090,6 +6548,12 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.max_iter = flag_max_iter
         run_mode_t(assets_list, _r_args)
+    elif mode == 'F':
+        run_mode_f(
+            restore=flag_restore,
+            include_newborns=flag_include_newborns,
+            asset=(assets_list[0] if assets_list else 'ETH'),
+        )
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
     elif mode in ('D', 'DV', 'DVS'):

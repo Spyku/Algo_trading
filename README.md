@@ -409,7 +409,35 @@ python crypto_trading_system_ed.py DV BTC 6h               # Mode DV — D then 
 python crypto_trading_system_ed.py H BTC 5,6,7,8h          # Mode H — horizon sweep
 python crypto_trading_system_ed.py R BTC 5,6,7,8h          # Mode R — regime backtest
 python crypto_trading_system_ed.py HRS BTC 5,6,7,8h        # Full pipeline: H → R → S
+python crypto_trading_system_ed.py HRST BTC 5,6,7,8h       # Full pipeline + T (shield + gate)
+python crypto_trading_system_ed.py F                       # Mode F — feature trim (audit + disable Grade-1)
+python crypto_trading_system_ed.py F --restore             # Empty the disabled list
 python crypto_trading_system_ed.py --help                  # Show all modes
+```
+
+**Research flags (preserve production):**
+```bash
+python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist
+# --no-persist: redirect ALL writes (production CSV + regime config) to *_noprod.*
+# Safe to run alongside live trader. Use for validation/sensitivity tests.
+
+python crypto_trading_system_ed.py DV ETH 5h --label-threshold 0.01
+# --label-threshold X: retrain with label=1 iff future_return > X (default 2×fee = 0.0022)
+# Output redirected to models/crypto_ed_production_lt<pct>.csv.
+```
+
+**Mode T convergence (upgraded 2026-04-22):**
+Mode T iterates shield↔gate optimization up to `--max-iter N` (default 6, was 4). Convergence semantics:
+- **Strict**: consecutive iterations produce identical config → `Converged`
+- **Tolerant**: numerics within plateau noise (min_sell_pnl ±0.10pp, max_hold ±2h, gate windows ±4h, thresholds ±0.5pp, cd ±6h) → `Converged-in-tolerance`
+- **2-cycle**: iter N close-in-tolerance to iter N−2 but not N−1 → `2-CYCLE DETECTED` (structural instability, **should not be promoted live**)
+- Otherwise → `Reached max_iter without convergence` (also unstable)
+
+Promotion gate: only "Converged" or "Converged-in-tolerance" should be promoted to production.
+
+**Verify Mode T logic:**
+```bash
+python tools/test_mode_t_convergence.py     # 8 unit tests + retrospective analysis
 ```
 
 ---
@@ -493,15 +521,27 @@ Tests whether dynamically switching between horizons based on market regime outp
 
 ---
 
-## Features (132)
+## Features (132 → 191 with 2026-04-19/20 additions)
 
 | Category | Count | Examples |
 |----------|-------|---------|
 | **Technical** | 51 | Log returns (1-240h), RSI, Bollinger Bands, ATR, ADX/DI, Garman-Klass vol, volatility ratios, Stochastic, spread ratios, SMA ratios, hour sin/cos |
 | **Macro** | 40 | VIX (level, zscore, regime), DXY, S&P500/Nasdaq changes (1/5/10d), US10Y, EUR/USD, USD/JPY, Oil, Gold volatility |
 | **Sentiment** | 25 | Fear & Greed Index (value, zscore, changes, MA, extreme flags) |
-| **Cross-asset** | 16 | BTC/ETH/DAX/Nasdaq/S&P500 rolling correlation (10/30d), relative strength (5d) |
-| **PySR symbolic** | variable | Auto-loaded from `models/pysr_{ASSET}_{H}h.json` if available; safe fallback if not |
+| **Cross-asset (daily)** | 16 | BTC/ETH/DAX/Nasdaq/S&P500 rolling correlation (10/30d), relative strength (5d) |
+| **Cross-asset (intraday)** ⏱ | 3-6 | BTC 1/2/3h lagged returns (all assets); ETH 1/2/3h lags (alts only). Added 2026-04-20. |
+| **On-chain** | ~40 per asset | CoinMetrics: MVRV, active addresses, fees, tx count, hashrate, exchange flows. BTC+ETH+XRP+LINK; SOL blocked (CoinMetrics 403). |
+| **Derivatives** | 9 | Funding rate + chg1d + zscore; OI chg1d/3d/zscore; perp-spot basis + chg1d + zscore. From Binance. |
+| **Stablecoin** | 3 | USDT+USDC market cap chg1d/chg7d/zscore (CoinGecko). Mostly Grade 1 dead. |
+| **Options IV** | 2 | ATM IV + 25-delta skew (Deribit). Grade 1 so far (recent addition). |
+| **Orderbook** | 2 | Hourly snapshot: imbalance + spread_bps. ETH-only accumulation. |
+| **PySR symbolic** | 5 per (asset, horizon) | Auto-loaded from `models/pysr_{ASSET}_{H}h.json`. Grade 4-5 when selected. |
+
+**Feature trimming (`config/disabled_features.json`)** — added 2026-04-21. Any feature listed in `disabled_exact` or matching `disabled_prefixes` is stripped from the LGBM input matrix at the end of `build_all_features()`. Data download + column computation still run — only the model's input set is trimmed. Default list is populated via `python crypto_trading_system_ed.py F` (Mode F), which audits 33 production models + 49 PySR JSONs and disables features with 0 selections AND 0 PySR references (Grade 1). 22 "newborn" features (added 2026-04-19/20) are spared by default; drop them from `NEWBORN_FEATURES` in code after a fair HRST cycle. Revert via `F --restore`.
+
+**Audit helpers:**
+- `python tools/audit_features.py --export models/feature_audit.csv` — grade every feature 1-5 by selection rate + PySR references
+- `python tools/check_pysr_consistency.py` — 5 checks verifying Mode P JSONs + HRST config + production CSV are consistent (no silent drift)
 
 ---
 
@@ -563,6 +603,16 @@ Inline keyboard menus to select mode/assets/horizons. Sequential job queue with 
 | `/results` | Show last results for an asset |
 | `/help` | List commands |
 | `/stop` | Stop the bot |
+
+**Main `/optimize` menu** (since 2026-04-21):
+- 🔧 Full Re-tune (HRST) — chains H → R → S → T
+- 🔄 Regime Refresh (RS)
+- ⚡ Model Refresh (DV)
+- 🔬 PySR Discovery
+- 🧹 Feature Trim (F) — audit + populate `disabled_features.json`; short-circuits past asset/horizon pickers
+- Advanced ▸ — full mode grid (D, V, H, R, S, T, G, HRS, RS, DVRS, etc.)
+
+**🧪 Switch to NO-PROD toggle** on the confirm screen: redirects the job's writes to `*_noprod.*` files so production stays untouched. Job labels show `[NO-PROD]` tag. Use for validation runs (e.g., `HRST ETH 5,6,7,8h --replay 1440 --no-persist`).
 
 ---
 

@@ -471,21 +471,45 @@ def download_derivatives_data(assets=None):
             oi_df = None
             print(f"ERROR: {e}")
 
-        # --- Perp-Spot Basis ---
-        print(f"    Perp-spot basis...", end=' ')
+        # --- Perp hourly klines (for perp-spot basis) ---
+        print(f"    Perp hourly klines...", end=' ')
+        all_klines = []
         try:
-            url = (f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}")
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                pdata = json.loads(resp.read().decode())
-            # premiumIndex gives markPrice, indexPrice, estimatedSettlePrice
-            # We'll store the premium as a column but historical needs klines
-            print(f"live premium={float(pdata.get('lastFundingRate', 0))*100:.4f}% (historical from funding)")
+            cursor_ms = start_ms
+            while True:
+                url = (f"https://fapi.binance.com/fapi/v1/klines"
+                       f"?symbol={symbol}&interval=1h&startTime={cursor_ms}&limit=1000")
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                    data = json.loads(resp.read().decode())
+                if not data:
+                    break
+                all_klines.extend(data)
+                last_ts = data[-1][0]
+                if len(data) < 1000:
+                    break
+                cursor_ms = last_ts + 1
+                time.sleep(0.2)
+
+            if all_klines:
+                perp_df = pd.DataFrame(all_klines, columns=[
+                    'open_time', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+                ])
+                perp_df['datetime'] = pd.to_datetime(perp_df['open_time'], unit='ms')
+                perp_df['perp_close'] = pd.to_numeric(perp_df['close'], errors='coerce')
+                perp_df = perp_df[['datetime', 'perp_close']]
+                perp_df = perp_df.drop_duplicates(subset='datetime').set_index('datetime').sort_index()
+                print(f"{len(perp_df)} hourly rows")
+            else:
+                perp_df = None
+                print("NO DATA")
         except Exception as e:
-            print(f"(live check failed: {e})")
+            perp_df = None
+            print(f"ERROR: {e}")
 
         # Combine
-        dfs = [df for df in [fr_hourly, oi_df] if df is not None]
+        dfs = [df for df in [fr_hourly, oi_df, perp_df] if df is not None]
         if not dfs:
             print(f"  No derivatives data for {asset}!")
             continue
@@ -952,15 +976,15 @@ def main():
     else:
         cross_df = download_cross_asset()
 
-    # 5. On-chain data (BTC + ETH)
-    for _asset in ['btc', 'eth']:
+    # 5. On-chain data (BTC + ETH + XRP + SOL + LINK)
+    for _asset in ['btc', 'eth', 'xrp', 'sol', 'link']:
         if _is_fresh(os.path.join(MACRO_DIR, f'onchain_{_asset}.csv')):
             print(f"  On-chain {_asset.upper()}: fresh — skipping")
         else:
             download_onchain_data(asset=_asset)
 
-    # 6. Derivatives data (funding rate + open interest — BTC + ETH)
-    stale_assets = [a for a in ['BTC', 'ETH'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
+    # 6. Derivatives data (funding rate + open interest — BTC + ETH + XRP + SOL + LINK)
+    stale_assets = [a for a in ['BTC', 'ETH', 'XRP', 'SOL', 'LINK'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
     if stale_assets:
         deriv_df = download_derivatives_data(assets=stale_assets)
     else:

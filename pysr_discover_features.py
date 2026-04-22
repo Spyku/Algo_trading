@@ -62,14 +62,29 @@ def _prepare_data(asset, horizon):
         all_cols = [c for c in all_cols if not c.startswith('pysr_')]
         print(f"  Excluded {len(pysr_cols)} existing PySR columns from inputs")
 
-    # Short-history features (GDELT: only ~3 months of data) would kill the historical
-    # window via dropna. Fill NaN with 0 for these columns so PySR can still use the
-    # full 12-month window — PySR will simply see 0 for periods before GDELT coverage.
-    gdelt_cols = [c for c in all_cols if c.startswith('gp_')]
-    if gdelt_cols:
-        for gc in gdelt_cols:
-            df_full[gc] = df_full[gc].fillna(0.0)
-        print(f"  GDELT: {len(gdelt_cols)} columns filled NaN→0 (short history, ~3 months)")
+    # Short-history features (GDELT: ~3 months; OI: ~30 days; orderbook/IV: accumulating;
+    # stablecoins: 1 year) would kill the historical window via dropna. Fill NaN with 0
+    # so PySR can still use the full 12-month window — PySR will see 0 for periods before
+    # coverage starts. Matches the sparse-feature exemption in crypto_trading_system_ed.py.
+    sparse_prefixes = ('gp_', 'deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+    sparse_cols = [c for c in all_cols if c.startswith(sparse_prefixes)]
+
+    # Trim to ~13 months before NaN detection: pre-2022 bars have no macro, which
+    # would mark m_*/xa_* cols as wrongly sparse.
+    from crypto_trading_system_ed import SPARSE_NAN_THRESHOLD
+    if len(df_full) > MAX_DIAG_HOURS * 2 + 1000:
+        df_full = df_full.tail(MAX_DIAG_HOURS * 2 + 1000).reset_index(drop=True)
+
+    # Auto-detect any additional sparse cols (e.g. spread_bps, xa_btc_lag*) that
+    # aren't in the prefix list but are still too NaN-heavy to safely dropna on.
+    nan_pct = df_full[all_cols].isna().mean()
+    auto_sparse = [c for c in all_cols if nan_pct[c] > SPARSE_NAN_THRESHOLD and c not in sparse_cols]
+    all_sparse = list(set(sparse_cols + auto_sparse))
+    if all_sparse:
+        for sc in all_sparse:
+            df_full[sc] = df_full[sc].fillna(0.0)
+        auto_tag = f" ({len(auto_sparse)} auto-detected)" if auto_sparse else ""
+        print(f"  Sparse features: {len(all_sparse)} columns filled NaN->0 (short history){auto_tag}")
 
     df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
 
