@@ -76,28 +76,31 @@ def load_primary_config(asset: str, horizon: int) -> dict:
 
 # -------- Meta dataset builder --------
 
-def build_meta_dataset(asset: str, horizon: int, replay_hours: int, primary_cfg: dict):
+def build_meta_dataset(asset: str, horizon: int, replay_hours: int, primary_cfg: dict,
+                       signals: list = None):
     """For each primary BUY signal in the replay window, build a meta-training row:
        X = features at signal time + primary_conf
        y = 1 if forward_return(horizon) > 2×fee else 0.
 
+    signals: optional pre-computed signal list. If None, calls generate_signals() (slow).
     Returns (meta_df, feature_cols) where meta_df has columns:
       ['datetime', 'close', 'primary_conf', 'label'] + feature_cols
     """
     print(f"  Building meta dataset for {asset} {horizon}h (replay={replay_hours}h)...")
 
     # 1) Primary signals (reuse Ed's walk-forward generator — no leak)
-    models = primary_cfg['combo'].split('+')
-    warnings.filterwarnings('ignore')
-    signals = generate_signals(
-        asset_name=asset,
-        model_names=models,
-        window_size=primary_cfg['window'],
-        replay_hours=replay_hours,
-        feature_override=primary_cfg['features'],
-        horizon=horizon,
-        gamma=primary_cfg['gamma'],
-    )
+    if signals is None:
+        models = primary_cfg['combo'].split('+')
+        warnings.filterwarnings('ignore')
+        signals = generate_signals(
+            asset_name=asset,
+            model_names=models,
+            window_size=primary_cfg['window'],
+            replay_hours=replay_hours,
+            feature_override=primary_cfg['features'],
+            horizon=horizon,
+            gamma=primary_cfg['gamma'],
+        )
     buy_signals = [s for s in signals if s['signal'] == 'BUY']
     print(f"  Primary produced {len(signals)} signals total, {len(buy_signals)} BUYs")
 

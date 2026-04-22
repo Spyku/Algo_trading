@@ -277,12 +277,23 @@ TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY 
 # Applied uniformly across Mode D/V/R/S/T/G backtest sims so relative policy
 # comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
 BACKTEST_FEE_PER_LEG = 0.0005
+# Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
+# Used for A/B testing so all matrix variants see the same data snapshot.
+NO_DATA_UPDATE = False
 # Auto-drop features with >SPARSE_NAN_THRESHOLD fraction NaN in the training window.
 # Newer feeds (orderbook/IV) that haven't accumulated data yet would otherwise
 # collapse the training set via dropna(). 70% keeps useful-but-partial features
 # (e.g., deriv_oi at ~40% NaN has 820 valid rows — plenty of signal) and only
 # drops truly empty feeds (orderbook/IV at ~88% NaN = 175 valid rows).
 SPARSE_NAN_THRESHOLD = 0.70
+# Feature-family floor: force Mode D's selected feature subset to include
+# at least N logret_* features and M pysr_* features. Prevents Optuna from
+# picking trend-blind volatility-only subsets on short horizons (observed
+# 2026-04-22: ETH 5h/6h ending up with 0 logrets + 0 pysr across both prod
+# and laptop trim configs). Applied in grid + refine feature selection.
+FEATURE_FLOOR_ENABLED = True
+FEATURE_FLOOR_MIN_LOGRET = 2
+FEATURE_FLOOR_MIN_PYSR = 1
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
@@ -318,6 +329,11 @@ LABEL_MODE = 'fee_aware'
 # Label threshold override (research/one-off). None = use LABEL_MODE default (2×fee=0.22%).
 # When set (via --label-threshold X), label=1 iff future_return > X. E.g., 0.01 = target ≥1% moves.
 LABEL_THRESHOLD_PCT = None
+# Meta-label filter threshold (research/A-B). None = no meta filter.
+# When set (via --meta-filter P), every BUY signal produced by generate_signals() is
+# audited by a walk-forward LGBM secondary; BUYs with meta_prob < P are downgraded to HOLD.
+# Enforces --no-persist so production never sees a meta-filtered result by accident.
+META_FILTER_THRESHOLD = None
 
 # Mode V: live backtest validation of top 6 candidates
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
@@ -1417,6 +1433,64 @@ def _apply_feature_disable(all_cols, verbose=True):
     return kept, n_dropped
 
 
+def _feature_floor_indices(ranked_features, n_feat,
+                           min_logret=FEATURE_FLOOR_MIN_LOGRET,
+                           min_pysr=FEATURE_FLOOR_MIN_PYSR,
+                           enabled=None):
+    """Return column indices (into ranked_features order) of the n_feat features
+    to use for training, guaranteeing at least `min_logret` logret_* and
+    `min_pysr` pysr_* features are included.
+
+    If the top-n_feat of ranked_features already satisfies the floors, returns
+    [0, 1, ..., n_feat-1] (default behavior).
+
+    Otherwise:
+    - Pulls the highest-ranked missing logret/pysr features from beyond position n_feat
+    - Evicts the lowest-ranked NON-essential features in the top-n_feat slice to make room
+    - Result is exactly n_feat features, still mostly in importance order, with
+      the promoted essentials appended.
+
+    If the overall ranked_features list has fewer essentials than min_logret/min_pysr,
+    uses whatever is available (does not overflow n_feat)."""
+    if enabled is None:
+        enabled = FEATURE_FLOOR_ENABLED
+    if n_feat >= len(ranked_features):
+        return list(range(len(ranked_features)))
+    if not enabled:
+        return list(range(n_feat))
+
+    is_lr = lambda f: f.startswith('logret_')
+    is_ps = lambda f: f.startswith('pysr_')
+
+    base_idx = list(range(n_feat))
+    lr_in = sum(1 for i in base_idx if is_lr(ranked_features[i]))
+    ps_in = sum(1 for i in base_idx if is_ps(ranked_features[i]))
+    need_lr = max(0, min_logret - lr_in)
+    need_ps = max(0, min_pysr - ps_in)
+    if need_lr == 0 and need_ps == 0:
+        return base_idx
+
+    # Find extra essentials from beyond n_feat (highest-ranked first)
+    extra_lr = [i for i in range(n_feat, len(ranked_features)) if is_lr(ranked_features[i])][:need_lr]
+    extra_ps = [i for i in range(n_feat, len(ranked_features)) if is_ps(ranked_features[i])][:need_ps]
+    extras = extra_lr + extra_ps
+    if not extras:
+        return base_idx  # nothing to promote — return what we had
+
+    # Evict lowest-ranked non-essentials from base to make room
+    n_to_remove = len(extras)
+    removable = [i for i in reversed(base_idx)
+                 if not is_lr(ranked_features[i]) and not is_ps(ranked_features[i])]
+    if len(removable) < n_to_remove:
+        n_to_remove = len(removable)
+        extras = extras[:n_to_remove]
+    to_remove = set(removable[:n_to_remove])
+
+    kept = [i for i in base_idx if i not in to_remove]
+    result = kept + extras
+    return result[:n_feat]
+
+
 def _filter_sparse_features(df, all_cols, threshold=SPARSE_NAN_THRESHOLD, verbose=True):
     """Drop feature columns whose NaN fraction in `df` exceeds `threshold`.
     Newer feeds (orderbook/IV) start sparse; keeping them would gate dropna()
@@ -2209,6 +2283,77 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
                   f"| price=${row['close']:,.2f}")
 
     print(f"  Generated {len(signals)} hourly signals for {asset_name}")
+
+    # Optional meta-label filter (research A/B). Train walk-forward secondary,
+    # downgrade BUYs with meta_prob < threshold to HOLD. Enforces --no-persist.
+    if META_FILTER_THRESHOLD is not None:
+        signals = _apply_meta_filter_to_signals(
+            asset_name=asset_name,
+            signals=signals,
+            horizon=horizon,
+            primary_cfg={
+                'combo': '+'.join(model_names),
+                'window': window_size,
+                'gamma': gamma,
+                'features': feature_override if feature_override is not None else [],
+            },
+            threshold=META_FILTER_THRESHOLD,
+        )
+    return signals
+
+
+def _apply_meta_filter_to_signals(asset_name, signals, horizon, primary_cfg, threshold):
+    """Train walk-forward secondary LGBM on primary BUYs; downgrade BUYs with
+    meta_prob < threshold to HOLD. Returns modified signals list."""
+    try:
+        from crypto_trading_system_meta import build_meta_dataset, walk_forward_meta_train
+    except Exception as e:
+        print(f"  [meta-filter] import failed: {e} — skipping filter, signals unchanged")
+        return signals
+
+    meta_df, feat_cols = build_meta_dataset(
+        asset_name, horizon, replay_hours=0, primary_cfg=primary_cfg, signals=signals,
+    )
+    if len(meta_df) == 0:
+        print(f"  [meta-filter] empty meta dataset — no BUYs to filter")
+        return signals
+
+    preds = walk_forward_meta_train(
+        meta_df, feat_cols, horizon=horizon, min_train=40, step=10,
+    )
+    if len(preds) == 0:
+        print(f"  [meta-filter] no walk-forward predictions — no filter applied")
+        return signals
+
+    # Build datetime -> meta_prob lookup (naive UTC)
+    lookup = {}
+    for _, row in preds.iterrows():
+        dt = pd.Timestamp(row['datetime'])
+        if dt.tzinfo is not None:
+            dt = dt.tz_convert('UTC').tz_localize(None)
+        lookup[dt] = float(row['meta_prob'])
+
+    # Apply filter
+    kept = dropped = no_pred = 0
+    for s in signals:
+        if s.get('signal') != 'BUY':
+            continue
+        dt = pd.Timestamp(s['datetime'])
+        if dt.tzinfo is not None:
+            dt = dt.tz_convert('UTC').tz_localize(None)
+        p = lookup.get(dt, None)
+        if p is None:
+            no_pred += 1  # keep BUY when no meta prediction (pre-walkforward warmup)
+        elif p < threshold:
+            s['signal'] = 'HOLD'
+            s['meta_filtered'] = True
+            s['meta_prob'] = p
+            dropped += 1
+        else:
+            s['meta_prob'] = p
+            kept += 1
+    print(f"  [meta-filter p>={threshold:.2f}] kept={kept} dropped={dropped} "
+          f"no_pred={no_pred} (of {kept+dropped+no_pred} BUYs)")
     return signals
 
 
@@ -3577,21 +3722,24 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
     print("=" * 70)
 
-    # Download fresh data
-    print("\n  Updating macro & sentiment data...")
-    t0 = time.time()
-    try:
-        import download_macro_data
-        download_macro_data.main()
-    except ImportError:
-        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
-    except Exception as e:
-        print(f"  WARNING: Macro data update failed: {e}")
-    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+    # Download fresh data (skippable via --no-data-update for A/B matrix testing)
+    if NO_DATA_UPDATE:
+        print("\n  [--no-data-update] Skipping macro + OHLCV downloads (using on-disk snapshot).")
+    else:
+        print("\n  Updating macro & sentiment data...")
+        t0 = time.time()
+        try:
+            import download_macro_data
+            download_macro_data.main()
+        except ImportError:
+            print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+        except Exception as e:
+            print(f"  WARNING: Macro data update failed: {e}")
+        print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
 
-    t0 = time.time()
-    update_all_data(assets_list)
-    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+        t0 = time.time()
+        update_all_data(assets_list)
+        print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
 
     best_models = []
 
@@ -3726,7 +3874,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 for n_feat in GRID_FEATURES:
                     if n_feat > len(ranked_features):
                         continue
-                    feat_np = features_np[:, :n_feat]
+                    sel_idx = _feature_floor_indices(ranked_features, n_feat)
+                    feat_np = features_np[:, sel_idx]
 
                     for gamma in GRID_GAMMAS:
                         eval_count += 1
@@ -3948,7 +4097,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             c_window = trial.params['window']
             c_gamma = trial.params['gamma']
             c_n_feat = trial.params['n_features']
-            c_features = ranked_features[:c_n_feat]
+            c_sel_idx = _feature_floor_indices(ranked_features, c_n_feat)
+            c_features = [ranked_features[i] for i in c_sel_idx]
 
             c_sampler = trial.user_attrs.get('sampler', '?')
             gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
@@ -4524,7 +4674,8 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
             t_gamma = trial.suggest_float('gamma', _gamma_lo, _gamma_hi)
             t_feats = trial.suggest_int('n_features', _feat_lo, _feat_hi)
 
-            feat_np = features_np[:, :t_feats]
+            sel_idx = _feature_floor_indices(ranked_features, t_feats)
+            feat_np = features_np[:, sel_idx]
             result = _deku_eval_with_pruning(
                 feat_np, labels_np, closes_np, _combo, t_window, n,
                 DIAG_STEP, model_factories, gamma=t_gamma, trial=None,
@@ -4555,13 +4706,14 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
             best = max(completed, key=lambda t: t.value)
             print(f"    → Best: w={best.params['window']}h g={best.params['gamma']:.4f} "
                   f"f={best.params['n_features']} apf={best.value:.3f}")
+            best_sel_idx = _feature_floor_indices(ranked_features, best.params['n_features'])
             all_refined.append({
                 'combo': combo_name,
                 'window': best.params['window'],
                 'gamma': best.params['gamma'],
                 'n_features': best.params['n_features'],
                 'apf': best.value,
-                'features': ranked_features[:best.params['n_features']],
+                'features': [ranked_features[i] for i in best_sel_idx],
             })
 
     refine_elapsed = (time.time() - t_refine) / 60
@@ -6150,6 +6302,26 @@ def main():
                 print(f"  Unknown --rank value '{v}'. Valid: recent, balanced")
                 return
 
+    # Parse --no-feature-floor (disable Mode D's feature-family floor for A/B testing).
+    # Default: floor ON (>=2 logret + >=1 pysr). Flag turns it OFF to compare.
+    if '--no-feature-floor' in sys.argv:
+        global FEATURE_FLOOR_ENABLED
+        FEATURE_FLOOR_ENABLED = False
+        print()
+        print(f"  [--no-feature-floor] Mode D feature-family floor DISABLED "
+              f"(old behavior: Optuna picks top-N from ranking with no family constraints).")
+        print()
+
+    # Parse --no-data-update (skip macro + asset downloads at HRST start).
+    # Used by the A/B matrix runner so all variants see the same data snapshot.
+    global NO_DATA_UPDATE
+    NO_DATA_UPDATE = '--no-data-update' in sys.argv
+    if NO_DATA_UPDATE:
+        print()
+        print(f"  [--no-data-update] Skipping macro + OHLCV downloads. "
+              f"Using whatever is currently on disk.")
+        print()
+
     # Parse --max-iter N (Mode T: T<->G convergence iterations, default 4)
     flag_max_iter = 0
     for i, a in enumerate(sys.argv[1:], 1):
@@ -6189,6 +6361,42 @@ def main():
         print("  * Safe to run alongside live trader.")
         print("  " + "*" * 76)
         print()
+
+    # Parse --meta-filter P (research A/B: train secondary LGBM, filter BUYs).
+    # Enforces --no-persist: never writes meta-filtered results to real production.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--meta-filter' and i < len(sys.argv) - 1:
+            try:
+                mp = float(sys.argv[i + 1])
+                if mp < 0.0 or mp > 1.0:
+                    print(f"  --meta-filter value '{mp}' out of [0, 1]. Example: 0.45.")
+                    return
+                global META_FILTER_THRESHOLD
+                META_FILTER_THRESHOLD = mp
+                # Enforce --no-persist: redirect PRODUCTION_CSV and REGIME_CONFIG_PATH
+                # to _noprod variants if not already redirected.
+                if not PRODUCTION_CSV.endswith('_noprod.csv'):
+                    np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
+                    np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
+                    if os.path.exists(PRODUCTION_CSV) and not os.path.exists(np_prod_csv):
+                        shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
+                    if os.path.exists(REGIME_CONFIG_PATH) and not os.path.exists(np_config):
+                        shutil.copyfile(REGIME_CONFIG_PATH, np_config)
+                    PRODUCTION_CSV = np_prod_csv
+                    REGIME_CONFIG_PATH = np_config
+                print()
+                print("  " + "#" * 76)
+                print(f"  # META-FILTER ACTIVE: p >= {mp:.2f}")
+                print(f"  # Every BUY signal audited by walk-forward secondary LGBM.")
+                print(f"  # BUYs with meta_prob < {mp:.2f} downgraded to HOLD.")
+                print(f"  # --no-persist enforced — writes go to:")
+                print(f"  #    {PRODUCTION_CSV}")
+                print(f"  #    {REGIME_CONFIG_PATH}")
+                print("  " + "#" * 76)
+                print()
+            except ValueError:
+                print(f"  --meta-filter must be a float in [0, 1] (e.g. 0.45)")
+                return
 
     # Parse --label-threshold X.XX (research one-off: retrain with label=1 iff ret > X)
     # When active: overrides the 2×fee default and redirects output to a tagged CSV so prod is untouched.
@@ -6263,6 +6471,14 @@ Options:
                       tolerant-convergence active — accepts plateau-level noise)
   --label-threshold X Research: retrain with label=1 iff future_return > X (e.g., 0.01 = 1%).
                       Default = 2×fee (0.0022). Output redirected to models/crypto_ed_production_lt<pct>.csv.
+  --meta-filter P     Research A/B: train walk-forward secondary LGBM per horizon; BUY
+                      signals with meta_prob < P are downgraded to HOLD. Enforces --no-persist.
+                      Example: --meta-filter 0.45. Compare _noprod.* outputs vs a baseline run.
+  --no-feature-floor  Research A/B: disable Mode D's feature-family floor (>=2 logret +
+                      >=1 pysr in every selected subset). Old behavior — use with --no-persist
+                      to A/B test floor ON vs OFF.
+  --no-data-update    Research A/B: skip macro + OHLCV downloads at HRST start. Used by
+                      tools/ab_matrix_runner.py so all variants see the same data snapshot.
   --no-persist        Research: do NOT modify production files. Redirects writes to
                       *_noprod.* files (seeded from current production state). Safe to run
                       alongside live trader. Use for --replay 2880 validation, etc.
@@ -6304,7 +6520,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 

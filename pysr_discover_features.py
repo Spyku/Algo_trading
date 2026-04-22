@@ -44,17 +44,22 @@ from crypto_trading_system_ed import (
 MAX_DIAG_HOURS = 6 * 30 * 24  # 4320 hours = 6 months (same cap as Mode D)
 
 
-def _prepare_data(asset, horizon):
+def _prepare_data(asset, horizon, load_data_fn=None, build_features_fn=None):
     """Load data and prepare X, y, all_cols for PySR discovery.
+    Optional load_data_fn / build_features_fn let callers (ed15) inject their own
+    pipelines — defaults to ed.py's hourly ones for backward compat.
     Returns (X, y, all_cols, pysr_rows) or (None, None, None, 0) on error."""
 
+    _load = load_data_fn if load_data_fn is not None else load_data
+    _build = build_features_fn if build_features_fn is not None else build_all_features
+
     print(f"\n  Loading data for {asset}...")
-    df_raw = load_data(asset)
+    df_raw = _load(asset)
     if df_raw is None:
         print(f"  ERROR: No data for {asset}")
         return None, None, None, 0
 
-    df_full, all_cols = build_all_features(df_raw, asset_name=asset, horizon=horizon)
+    df_full, all_cols = _build(df_raw, asset_name=asset, horizon=horizon)
 
     # Exclude any existing pysr_* columns — discovery must use only base features
     pysr_cols = [c for c in all_cols if c.startswith('pysr_')]
@@ -271,7 +276,9 @@ FEATURE_GROUPS = {
 
 
 def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
-                      max_corr=0.7, n_runs=4):
+                      max_corr=0.7, n_runs=4,
+                      load_data_fn=None, build_features_fn=None,
+                      horizon_suffix='h'):
     """Run PySR symbolic regression with multiple diverse runs.
 
     Each run uses a different feature subset to force structurally different
@@ -279,22 +286,27 @@ def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
 
     Args:
         asset: Asset name (e.g., 'BTC')
-        horizon: Prediction horizon in hours
+        horizon: Prediction horizon (in 'h' units for ed, 'p' units for ed15)
         n_top: Number of top expressions to save
         iterations: PySR iterations per run
         populations: Number of populations (ignored, uses 40 internally)
         max_corr: Maximum pairwise correlation between kept expressions
         n_runs: Number of independent PySR runs with different feature subsets
+        load_data_fn: Override data loader (default = ed.py's hourly load_data)
+        build_features_fn: Override feature builder (default = ed.py's hourly build_all_features)
+        horizon_suffix: Display suffix for horizon ('h' or 'p'), cosmetic only
 
     Returns:
         Tuple of (results_list, pysr_rows)
     """
     print(f"\n{'='*70}")
-    print(f"  PySR FEATURE DISCOVERY: {asset} {horizon}h")
+    print(f"  PySR FEATURE DISCOVERY: {asset} {horizon}{horizon_suffix}")
     print(f"  {n_runs} diverse runs × {iterations} iterations | Top: {n_top} | max_corr: {max_corr}")
     print(f"{'='*70}")
 
-    X, y, all_cols, pysr_rows = _prepare_data(asset, horizon)
+    X, y, all_cols, pysr_rows = _prepare_data(asset, horizon,
+                                              load_data_fn=load_data_fn,
+                                              build_features_fn=build_features_fn)
     if X is None:
         return [], 0
 
@@ -383,13 +395,19 @@ def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
     return results, pysr_rows
 
 
-def save_results(asset, horizon, results, all_cols, pysr_rows=0):
-    """Save discovered expressions to JSON and human-readable report."""
+def save_results(asset, horizon, results, all_cols, pysr_rows=0,
+                 name_prefix='', horizon_suffix='h'):
+    """Save discovered expressions to JSON and human-readable report.
+
+    Args:
+        name_prefix: Optional prefix for output filenames (e.g., 'ed15_' → pysr_ed15_BTC_5p.json)
+        horizon_suffix: 'h' (default, ed hourly) or 'p' (ed15 periods)
+    """
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
     os.makedirs(models_dir, exist_ok=True)
 
-    json_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}h.json')
-    report_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}h_report.txt')
+    json_path = os.path.join(models_dir, f'pysr_{name_prefix}{asset}_{horizon}{horizon_suffix}.json')
+    report_path = os.path.join(models_dir, f'pysr_{name_prefix}{asset}_{horizon}{horizon_suffix}_report.txt')
 
     output = {
         'asset': asset,

@@ -910,6 +910,14 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     if df_raw is None or len(df_raw) < h_l + 1:
         return None
     closes = df_raw['close'].values
+    # Bar timestamps for anchoring cooldown to actual candle time (not wall-clock)
+    # Each row's datetime is the bar's OPEN time; trigger is observable once the bar closes.
+    dt_series = pd.to_datetime(df_raw['datetime'])
+    if dt_series.dt.tz is None:
+        dt_series = dt_series.dt.tz_localize('UTC')
+    else:
+        dt_series = dt_series.dt.tz_convert('UTC')
+    bar_times = dt_series.values  # numpy array of tz-aware Timestamps
     now = datetime.now(timezone.utc)
 
     # Current-window values (returned for logging)
@@ -917,8 +925,9 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     rl = (closes[-1] / closes[-1 - h_l] - 1.0) * 100.0
 
     # Catch-up scan: check each of the last cd_h bars. If a past bar would have
-    # triggered, compute the implied cooldown-until (trigger_time + cd_h) and
-    # keep the latest still-active one.
+    # triggered, compute the implied cooldown-until from the BAR'S OWN timestamp
+    # (trigger_time + cd_h) so we don't over-extend cooldown when `now` drifts
+    # past the last closed candle. Keep the latest still-active one.
     max_lookback = min(cd_h, len(closes) - h_l - 1)
     best_until = None
     for bars_ago in range(max_lookback + 1):
@@ -926,7 +935,13 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
         rs_k = (closes[end_idx] / closes[end_idx - h_s] - 1.0) * 100.0
         rl_k = (closes[end_idx] / closes[end_idx - h_l] - 1.0) * 100.0
         if rs_k >= t_s or rl_k >= t_l:
-            implied_until = now - timedelta(hours=bars_ago) + timedelta(hours=cd_h)
+            # Use the bar's own open timestamp as the trigger anchor so cooldown is
+            # deterministic regardless of when `now` lands within the current hour.
+            # Matches the intuitive mental model: "rally at 14:00 + 16h cd = 06:00 next day".
+            trigger_time = pd.Timestamp(bar_times[end_idx]).to_pydatetime()
+            if trigger_time.tzinfo is None:
+                trigger_time = trigger_time.replace(tzinfo=timezone.utc)
+            implied_until = trigger_time + timedelta(hours=cd_h)
             if implied_until > now and (best_until is None or implied_until > best_until):
                 best_until = implied_until
 
