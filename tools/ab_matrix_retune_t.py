@@ -235,6 +235,7 @@ def run_variant(variant, replay_hours, max_iter, dry_run=False):
         PYTHON, MAIN_SCRIPT, 'T', 'ETH', horizons,
         '--replay', str(replay_hours),
         '--no-persist',
+        '--no-persist-keep',  # keep pre-staged variant files; do NOT reseed from live
         '--no-data-update',
         '--max-iter', str(max_iter),
     ]
@@ -315,7 +316,9 @@ def write_comparison_csv(results, out_path):
     with open(out_path, 'w', newline='', encoding='utf-8') as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        for v, r in results.items():
+        # results is a list of (variant_dict, result_dict) tuples
+        # (dicts can't be dict keys — early bug from this file)
+        for v, r in results:
             row = {
                 'variant': v['name'],
                 'label': v['label'],
@@ -366,7 +369,8 @@ def print_comparison_table(results):
           f"{'ORIG t_ref':<12} {'RETUNE total':<14} {'Δ (pp)':<10} "
           f"{'shield flip bull/bear':<22}")
     print('-' * 100)
-    for v, r in results.items():
+    # results is a list of (variant_dict, result_dict) tuples
+    for v, r in results:
         orig_conv = 'CONVERGED' if v['orig_converged'] else 'max_iter'
         retune_conv = 'CONVERGED' if r.get('t_converged') else f'iter {r.get("t_iterations","?")}'
         orig_tref = f'{v["orig_t_ref_pct"]:+.2f}%'
@@ -457,16 +461,14 @@ def main():
             os.remove(working_csv_bak)
         print(f'\n  Restored original _noprod files.')
 
-    # Rebuild dict using variants_to_run for write_comparison_csv
-    final = {v['name']: (v, results.get(v['name'], {})) for v in variants_to_run}
     if not args.dry_run:
-        # write_comparison_csv expects {variant_dict: result_dict}
-        pairs = {v: results.get(v['name'], {}) for v in variants_to_run}
+        # List of (variant_dict, result_dict) tuples — dicts aren't hashable so can't be dict keys
+        pairs = [(v, results.get(v['name'], {})) for v in variants_to_run]
         write_comparison_csv(pairs, out_csv)
         print(f'\n  Comparison CSV: {out_csv}')
 
         # Printable summary table
-        print_comparison_table({v: results.get(v['name'], {}) for v in variants_to_run})
+        print_comparison_table(pairs)
 
         print(f'\n  Live prod backup (safety): {live_cfg_bak}')
         print(f'  Data snapshot kept:        {snapshot_dir}  (delete after analysis)')

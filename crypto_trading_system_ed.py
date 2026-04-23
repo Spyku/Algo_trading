@@ -6350,19 +6350,29 @@ def main():
     # Parse --no-persist (research: do NOT touch production CSV or regime_config_ed.json)
     # Redirects both writes to *_noprod.* files seeded with current contents.
     # Safe to run alongside live trader.
+    #
+    # --no-persist-keep (companion flag): don't reseed _noprod.* from live prod.
+    # Use this when the caller has pre-staged _noprod.* with specific variant
+    # contents (e.g. tools/ab_matrix_retune_t.py swaps variant tagged files in).
+    # Without this, --no-persist would OVERWRITE the pre-staged variant data.
     if '--no-persist' in sys.argv:
         import shutil
+        keep_existing = '--no-persist-keep' in sys.argv
         np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
         np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
-        if os.path.exists(PRODUCTION_CSV):
-            shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
-        if os.path.exists(REGIME_CONFIG_PATH):
-            shutil.copyfile(REGIME_CONFIG_PATH, np_config)
+        if not keep_existing:
+            if os.path.exists(PRODUCTION_CSV):
+                shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
+            if os.path.exists(REGIME_CONFIG_PATH):
+                shutil.copyfile(REGIME_CONFIG_PATH, np_config)
         PRODUCTION_CSV = np_prod_csv
         REGIME_CONFIG_PATH = np_config
         print()
         print("  " + "*" * 76)
-        print("  * --no-persist ACTIVE: production files are NOT modified")
+        if keep_existing:
+            print("  * --no-persist-keep ACTIVE: using pre-staged _noprod files AS-IS")
+        else:
+            print("  * --no-persist ACTIVE: production files are NOT modified")
         print(f"  * All writes redirected to:")
         print(f"  *    {PRODUCTION_CSV}")
         print(f"  *    {REGIME_CONFIG_PATH}")
