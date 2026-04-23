@@ -120,9 +120,58 @@ def main():
     print(f'Loading current feature universe via build_all_features({args.asset!r})...')
     from crypto_trading_system_ed import load_data, build_all_features
     raw = load_data(args.asset)
-    _, universe_cols = build_all_features(raw, asset_name=args.asset, horizon=5, verbose=False)
+    df_full, universe_cols = build_all_features(raw, asset_name=args.asset, horizon=5, verbose=False)
+    # Also compute PySR features so they're in the NaN-in-tail scan
+    try:
+        from crypto_live_trader_ed import _compute_pysr_features
+        _compute_pysr_features(df_full, universe_cols, args.asset, 5, verbose=False)
+    except Exception:
+        pass
     universe = set(universe_cols)
     print(f'  {len(universe)} features in current build')
+    print()
+
+    # 3b) NaN-in-tail freshness risk — flags features where data pipeline lags.
+    # Any production feature with NaN in the most recent bars will cause the
+    # live trader's dropna + i=n-1 path to freeze on a stale row (this is the
+    # root cause of the 2026-04-23 86%-pinned / 2026-04-22 99%-pinned bugs).
+    print('=' * 90)
+    print('  NaN-IN-TAIL FRESHNESS RISK — features used by production models')
+    print('=' * 90)
+    nan_window = 48  # bars
+    all_prod_feats = set(prod_usage.keys())
+    risk_rows = []
+    for f in sorted(all_prod_feats):
+        if f not in df_full.columns:
+            continue  # orphan, covered separately
+        tail = df_full[f].tail(nan_window)
+        nan_count = int(tail.isna().sum())
+        if nan_count == 0:
+            continue
+        # Find how stale the feature is
+        last_valid_mask = df_full[f].notna()
+        if last_valid_mask.any():
+            last_valid_dt = df_full.loc[last_valid_mask, 'datetime'].iloc[-1]
+            last_raw_dt = df_full['datetime'].iloc[-1]
+            lag_h = (last_raw_dt - last_valid_dt).total_seconds() / 3600.0
+        else:
+            lag_h = float('inf')
+        models_using = prod_usage[f]
+        risk_rows.append((f, nan_count, lag_h, models_using))
+
+    if not risk_rows:
+        print(f'  OK — no production feature has NaN in the last {nan_window} bars.')
+    else:
+        print(f'  {len(risk_rows)} production feature(s) have NaN in the last {nan_window} bars:')
+        for f, n, lag, models in sorted(risk_rows, key=lambda r: -r[1]):
+            lag_str = 'all NaN' if lag == float('inf') else f'{lag:.1f}h stale'
+            model_str = ', '.join(f'{a}{h}h' for a, h in models)
+            print(f'    {f:<35} {n:>2}/{nan_window} NaN | last valid: {lag_str:<15} | used by: {model_str}')
+        print()
+        print('  IMPACT: with feature-NaN-dropping dropna at inference, these cause `i` to freeze')
+        print('  on an old row → identical prediction every cycle. Fix shipped 2026-04-23:')
+        print('  `generate_live_signal` now drops on label only + imputes feature NaN with 0.')
+        print('  Upstream fix: ensure the downloader covers every data source these features need.')
     print()
 
     # 4) Build unified feature list

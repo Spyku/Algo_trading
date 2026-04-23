@@ -2901,6 +2901,21 @@ def run_all_once(trading_cfg, dry_run=False):
         sync_positions(trading_cfg)
         balances = get_balances()
 
+    # Data-dependency downloads: keep ALL crypto OHLCV fresh regardless of
+    # trade status. Models reference cross-asset features (xa_btc_lag*,
+    # xa_eth_lag*, xa_*_relstr5d). If a referenced asset isn't traded AND not
+    # downloaded, its data goes stale, merges yield NaN on recent bars, and
+    # the trader silently freezes predictions (see 2026-04-23 86%-pinned bug).
+    # update_only=True fetches only new candles since last row (~1 API call
+    # per asset when already fresh, free data cost only in seconds).
+    from crypto_live_trader_ed import download_asset as _dl_asset
+    _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
+    for _dep_asset in _DATA_DEP_ASSETS:
+        try:
+            _dl_asset(_dep_asset, update_only=True)
+        except Exception as _e:
+            print(f"  [!] data-dep download {_dep_asset}: {_e}")
+
     results = []
     for asset, cfg in trading_cfg.items():
         if not cfg.get('enabled'):

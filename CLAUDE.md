@@ -416,6 +416,39 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
 ### TODO
 
+**🚨🚨🚨 UPMOST IMPORTANT — LIVE TRADER DATA-UPDATE SANITY CHECK (2026-04-23 morning, root cause of 86%-pinned bug):**
+
+**Root cause discovered this morning:** The 5h@86% stuck signal (7+ consecutive identical BUY signals) was caused by `xa_btc_lag2h` being NaN in all recent ETH rows because BTC OHLCV hadn't been downloaded in 49 hours (BTC is disabled/not traded → no downloader touches it → stale → merge yields NaN on recent rows). `generate_live_signal` at `crypto_live_trader_ed.py:379` does `df.dropna(subset=feature_cols + ['label'])` which kills every recent row, then `i = n - 1` points to a row from 49h ago. Model retrains each cycle but on the SAME frozen row → SAME 86% output every hour.
+
+Same class of bug almost certainly caused the prior **7h@99% pinned for 31+ hours** (likely `oc_mvrv_chg1d` on-chain data was stale).
+
+**Hard rules going forward — trader must enforce these at every cycle:**
+
+1. **Refuse to predict on stale data.** In `generate_live_signal`, after dropna, compute `lag_hours = (df_full.iloc[-1]['datetime'] - df.iloc[-1]['datetime']).total_seconds() / 3600`. If `lag_hours > horizon + 2`, print an error, send Telegram alert, and **return None** (do NOT emit a signal). Never silently predict on a row >horizon+2h old.
+
+2. **Don't drop whole rows on single-feature NaN.** Change `df = df_full.dropna(subset=feature_cols + ['label'])` → drop on `['label']` only. For feature NaN at inference, impute with 0 (matches PySR's NaN handling and LGBM's native NaN tolerance; RF needs the impute). This preserves all rows even when one data source is late.
+
+3. **Remove BTC entirely from ETH feature pipeline.** User doesn't trade BTC — `leaders_for['ETH']` in `crypto_trading_system_ed.py:1190` should be `[]` not `['BTC']`. Strips the `xa_btc_lag1h/2h/3h` features. Also remove BTC from the trader's download loop so stale BTC data isn't silently masking this class of bug.
+
+4. **Pre-inference data-freshness gate.** Before calling `build_all_features` in every cycle, the trader must verify each data source's mtime/last-row freshness:
+   - Primary OHLCV: last row ≤ 1.5h old
+   - Derivatives (`derivatives_eth.csv`): last row ≤ 2h old
+   - On-chain (`onchain_eth.csv`): last row ≤ 30h old (daily data)
+   - Stablecoin flows: last row ≤ 36h old
+   - Orderbook snapshots: ≥ 20 rows in last 24h
+   - Options IV: ≥ 20 rows in last 24h
+   - Macro (`macro_hourly.csv`, `macro_daily.csv`): last row ≤ 24h old
+   
+   If any check fails, log the failing sources, send Telegram alert, try to refresh via `download_macro_data.py` / `download_asset`, re-check. If still stale, refuse to emit a signal this cycle.
+
+5. **Audit every feature used by a prod model for sparse-tail risk.** Add to `tools/audit_features.py` a check that reports, per prod-CSV feature, the NaN count in the last 24 bars. Any feature with >0 NaN in tail is flagged for removal from new models (or requires a freshness guardian).
+
+**Current blast radius:** the 5h model just underwent this bug live. The 7h model probably did too. Any newborn/sparse feature in a future prod model (derivatives, on-chain, orderbook, IV, basis, lead-lag) is a ticking bomb until (1)-(4) ship.
+
+**Effort: ~2h to ship all four. Do this BEFORE any further trading.**
+
+---
+
 **🧪 CURRENTLY RUNNING — AB MATRIX ON DESKTOP (2026-04-22 17:32 CET → ETA ~14:00-15:00 2026-04-23):**
 
 Variant #1 finished 21:35 (4h 2min runtime, not the 2.5h I estimated). **Variant #1 already promoted live** — see "Closed 2026-04-22 late night" below. Variants #2-#5 + vol test still running; will compare against V1 tomorrow afternoon.

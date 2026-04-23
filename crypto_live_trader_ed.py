@@ -1,14 +1,10 @@
 """
-Crypto Live Trader (Doohan) — Signal Generation for Doohan Models
+Crypto Live Trader (Ed) — Signal Generation for Ed Models
 =============================================================
-Same as crypto_live_trader.py but imports from crypto_trading_system_doohan
-and reads models/crypto_doohan_v1_6_production.csv.
+Signal generation library for the Ed live trader (crypto_revolut_ed_v2.py).
+Imports from crypto_trading_system_ed and reads models/crypto_ed_production.csv.
 
-Usage:
-  python crypto_live_trader_doohan.py                  # Run once (BTC default)
-  python crypto_live_trader_doohan.py --loop           # Run every hour
-  python crypto_live_trader_doohan.py --loop --asset BTC
-  python crypto_live_trader_doohan.py --setup          # Setup Telegram
+Not run directly — used as a module by crypto_revolut_ed_v2.py.
 """
 
 import os
@@ -380,13 +376,37 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
         print(f"  [!] {asset_name} {horizon}h: no configured features matched -- falling back to FEATURE_SET_A")
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]
 
-    df = df_full.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
+    # Fix (2026-04-23): do NOT drop rows where a single sparse feature is NaN.
+    # That caused `i` to freeze on a row 49h stale when e.g. xa_btc_lag2h had a
+    # NaN tail, producing identical predictions every cycle (the 86%-pinned bug).
+    # Drop only on label NaN (needed for training); impute feature NaN with 0
+    # (matches PySR/LGBM NaN handling; RF requires non-NaN so zero-fill is safe).
+    df = df_full.dropna(subset=['label']).reset_index(drop=True)
+    feat_na_tail = df[feature_cols].iloc[-1].isna()
+    if feat_na_tail.any():
+        stale_feats = [f for f in feature_cols if pd.isna(df.iloc[-1][f])]
+        print(f"  [!] {asset_name} {horizon}h: {len(stale_feats)} feature(s) NaN in latest row: {stale_feats[:5]}{'...' if len(stale_feats)>5 else ''} -- imputing with 0")
+    df[feature_cols] = df[feature_cols].fillna(0.0)
     n = len(df)
     if n < window + 100:
         return None
 
     i = n - 1
     row = df.iloc[i]
+
+    # Staleness refusal: if the latest row used for inference is more than
+    # horizon+2h behind the freshest bar in df_full, abort with a loud warning.
+    # Prevents silent stale-signal bugs when upstream data sources are late.
+    try:
+        latest_raw_dt = pd.to_datetime(df_full.iloc[-1]['datetime'])
+        latest_used_dt = pd.to_datetime(row['datetime'])
+        lag_hours = (latest_raw_dt - latest_used_dt).total_seconds() / 3600.0
+        if lag_hours > horizon + 2:
+            print(f"  [!!] {asset_name} {horizon}h: inference row is {lag_hours:.1f}h stale (>horizon+2h) -- REFUSING to emit signal")
+            return None
+    except Exception:
+        pass
+
     train_start = max(0, i - window)
     train = df.iloc[train_start:i]
     X_train = train[feature_cols]
@@ -538,14 +558,14 @@ def compute_combined_signal(sig_short, sig_long, min_confidence=MIN_CONFIDENCE):
 
 def run_once(asset_name, _stale_warning=False):
     print(f"\n{'='*60}")
-    print(f"  LIVE SIGNAL [DOOHAN]: {asset_name}")
+    print(f"  LIVE SIGNAL [ED]: {asset_name}")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
     config_short = load_best_config(asset_name, horizon=HORIZON_SHORT)
     config_long = load_best_config(asset_name, horizon=HORIZON_LONG)
     if not config_short and not config_long:
-        print("  ERROR: No Doohan models found!")
+        print("  ERROR: No Ed models found!")
         return None
 
     print(f"\n  Downloading latest {asset_name} data...")
@@ -617,7 +637,7 @@ def _format_combined_message(asset_name, sig_short, sig_long, action, confidence
     }
 
     lines = [
-        f"<b>[DOOHAN] {asset_name}</b>  {_sig_str(sig_short, h_s)} | {_sig_str(sig_long, h_l)}",
+        f"<b>[ED] {asset_name}</b>  {_sig_str(sig_short, h_s)} | {_sig_str(sig_long, h_l)}",
         "", action_line, f"Reason: {reason_map.get(reason, reason)}",
         "", f"<b>Price: {price_str}</b>",
     ]
@@ -657,7 +677,7 @@ def wait_for_fresh_candle(asset_name, expected_hour_utc, max_retries=30, retry_i
 
 def run_loop(asset_name):
     print(f"\n{'='*60}")
-    print(f"  LIVE TRADER [DOOHAN]: {asset_name}")
+    print(f"  LIVE TRADER [ED]: {asset_name}")
     print(f"  Min confidence: {MIN_CONFIDENCE}%")
     print(f"{'='*60}")
 
@@ -666,10 +686,10 @@ def run_loop(asset_name):
     if c_s: print(f"  {HORIZON_SHORT}h: {c_s['best_combo']} | {c_s['accuracy']:.1f}%")
     if c_l: print(f"  {HORIZON_LONG}h: {c_l['best_combo']} | {c_l['accuracy']:.1f}%")
     if not c_s and not c_l:
-        print("  ERROR: No Doohan models!")
+        print("  ERROR: No Ed models!")
         return
 
-    send_telegram(f"<b>[DOOHAN] Live Trader Started</b>\n\nAsset: {asset_name}\nMin conf: {MIN_CONFIDENCE}%\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    send_telegram(f"<b>[ED] Live Trader Started</b>\n\nAsset: {asset_name}\nMin conf: {MIN_CONFIDENCE}%\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     cycle = 0
     while True:
@@ -691,11 +711,11 @@ def run_loop(asset_name):
 
         except KeyboardInterrupt:
             print("\n  Stopped.")
-            send_telegram(f"<b>[DOOHAN] Stopped</b>\nCycles: {cycle}")
+            send_telegram(f"<b>[ED] Stopped</b>\nCycles: {cycle}")
             break
         except Exception as e:
             print(f"\n  ERROR: {e}")
-            send_telegram(f"<b>[DOOHAN] Error</b>\n<code>{e}</code>")
+            send_telegram(f"<b>[ED] Error</b>\n<code>{e}</code>")
             time.sleep(120)
 
 # ============================================================
@@ -724,14 +744,14 @@ def setup_telegram():
     with open(TELEGRAM_CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=2)
     TELEGRAM_CONFIG.update(config)
-    send_telegram("<b>[DOOHAN] Telegram connected!</b>")
+    send_telegram("<b>[ED] Telegram connected!</b>")
 
 # ============================================================
 # MAIN
 # ============================================================
 def main():
     print("=" * 60)
-    print("  CRYPTO LIVE TRADER [DOOHAN]")
+    print("  CRYPTO LIVE TRADER [ED]")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
@@ -749,7 +769,7 @@ def main():
             return
 
     if not os.path.exists(MODELS_CSV):
-        print(f"\n  ERROR: No Doohan models found! Run crypto_trading_system_doohan.py Mode D first.")
+        print(f"\n  ERROR: No Ed models found! Run crypto_trading_system_ed.py Mode D first.")
         return
 
     if not TELEGRAM_CONFIG.get('token'):
