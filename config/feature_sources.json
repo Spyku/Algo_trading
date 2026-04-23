@@ -49,8 +49,8 @@
       "match_prefix": ["fg_"],
       "source_file": "data/macro_data/fear_greed.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 30,
-      "description": "Crypto Fear & Greed Index (Alternative.me daily)."
+      "max_age_hours": 36,
+      "description": "Crypto Fear & Greed Index (Alternative.me daily, updates ~midnight UTC). 24h cadence + API delay tolerance = 36h SLA."
     },
     {
       "match_prefix": ["xa_btc_lag"],
@@ -77,15 +77,15 @@
       "match_prefix": ["xa_sp500", "xa_nasdaq", "xa_dax", "xa_cac", "xa_smi"],
       "source_file": "data/macro_data/macro_daily.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 30,
-      "description": "Cross-asset relative-strength + correlation vs equity indices."
+      "max_age_hours": 72,
+      "description": "Cross-asset relative-strength + correlation vs equity indices. Daily bars = market close; weekend/holiday gaps can push last-bar age to 72h (Fri close → Mon morning check)."
     },
     {
       "match_prefix": ["m_vix", "m_dxy", "m_sp500", "m_nasdaq", "m_gold", "m_oil", "m_eurusd", "m_us10y", "m_usdjpy"],
       "source_file": "data/macro_data/macro_daily.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 30,
-      "description": "Macro daily — VIX, DXY, equity, commodities, rates, FX."
+      "max_age_hours": 72,
+      "description": "Macro daily — VIX, DXY, equity, commodities, rates, FX. yfinance daily bars = market close; weekend/holiday gaps can push last-bar age to 72h."
     },
     {
       "match_prefix": ["gdelt_", "gp_"],
