@@ -110,8 +110,50 @@ def _rows_last_24h(path):
     return None
 
 
-def preflight(asset=None, verbose=True):
-    report = {'ok': True, 'checks': [], 'failures': [], 'warnings': []}
+def _try_refresh_stale_source(source_file, verbose=True):
+    """Attempt to download a stale source file. Returns True if refreshed."""
+    rel = source_file
+    # Dispatch to the right download function based on path
+    try:
+        if rel.endswith('_hourly_data.csv') and rel.startswith('data/') and '/macro_data/' not in rel:
+            asset = rel.split('/')[-1].replace('_hourly_data.csv', '').upper()
+            from crypto_trading_system_ed import download_asset
+            download_asset(asset, update_only=True)
+            return True
+        if '/macro_data/derivatives_' in rel:
+            asset = rel.split('_')[-1].replace('.csv', '').upper()
+            from download_macro_data import download_derivatives_data
+            download_derivatives_data(assets=[asset])
+            return True
+        if rel.endswith('macro_daily.csv'):
+            from download_macro_data import download_yfinance_data
+            download_yfinance_data()
+            return True
+        if rel.endswith('fear_greed.csv'):
+            from download_macro_data import download_fear_greed
+            download_fear_greed()
+            return True
+        if rel.endswith('cross_asset.csv'):
+            from download_macro_data import download_cross_asset
+            download_cross_asset()
+            return True
+        if rel.endswith('stablecoin_flows.csv'):
+            from download_macro_data import download_stablecoin_flows
+            download_stablecoin_flows()
+            return True
+        if '/onchain_' in rel:
+            asset = rel.split('onchain_')[-1].replace('.csv', '')
+            from download_macro_data import download_onchain_data
+            download_onchain_data(asset=asset)
+            return True
+    except Exception as e:
+        if verbose:
+            print(f"    [auto-refresh] {rel}: {e}")
+    return False
+
+
+def preflight(asset=None, verbose=True, auto_refresh_once=True):
+    report = {'ok': True, 'checks': [], 'failures': [], 'warnings': [], 'refreshed': []}
 
     # Load configs
     if not os.path.exists(MANIFEST_PATH):
@@ -257,15 +299,29 @@ def preflight(asset=None, verbose=True):
                         print(f'    ✗ {msg}')
                 continue
             if max_age and age_h > max_age:
-                msg = f'{pair_label}: {src} {age_h:.1f}h stale (>{max_age}h SLA); features: {feats[:3]}{"..." if len(feats)>3 else ""}'
-                if optional:
-                    report['warnings'].append(msg)
+                # Auto-refresh: try to download the stale source once, re-check age.
+                # Survives transient staleness (e.g., AB matrix resetting data files).
+                refreshed = False
+                if auto_refresh_once and src not in report['refreshed']:
                     if verbose:
-                        print(f'    ⚠ {msg}')
-                else:
-                    report['failures'].append(msg)
-                    if verbose:
-                        print(f'    ✗ {msg}')
+                        print(f'    ⟳ {src} stale {age_h:.1f}h (>{max_age}h) — attempting auto-refresh...')
+                    if _try_refresh_stale_source(src, verbose=verbose):
+                        report['refreshed'].append(src)
+                        new_age, _ = _file_age_hours(src)
+                        if new_age is not None and new_age <= max_age:
+                            refreshed = True
+                            if verbose:
+                                print(f'    ✓ {src} refreshed to {new_age:.1f}h old — {len(feats)} feat(s)')
+                if not refreshed:
+                    msg = f'{pair_label}: {src} {age_h:.1f}h stale (>{max_age}h SLA); features: {feats[:3]}{"..." if len(feats)>3 else ""}'
+                    if optional:
+                        report['warnings'].append(msg)
+                        if verbose:
+                            print(f'    ⚠ {msg}')
+                    else:
+                        report['failures'].append(msg)
+                        if verbose:
+                            print(f'    ✗ {msg}')
             else:
                 age_str = f'{age_h:.1f}h old' if age_h is not None else '?'
                 max_str = f'≤{max_age}h' if max_age else 'no SLA'
