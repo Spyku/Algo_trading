@@ -2901,24 +2901,45 @@ def run_all_once(trading_cfg, dry_run=False):
         sync_positions(trading_cfg)
         balances = get_balances()
 
-    # Data-dependency downloads: keep ALL sources fresh regardless of trade
-    # status. Models reference cross-asset (xa_btc_lag*, xa_eth_lag*),
-    # derivatives (deriv_*), macro (m_*, xa_sp500/nasdaq/dax_*), sentiment
-    # (fg_*), on-chain (oc_*), stablecoin (stable_mcap_*). If any source goes
-    # stale, merge/compute yields NaN on recent rows — live inference freezes
-    # on an old row (see 2026-04-23 86%-pinned bug RCA in CLAUDE.md).
+    # Data-dependency downloads: keep sources fresh regardless of trade status.
+    # Models reference cross-asset (xa_btc_lag*, xa_eth_lag*), derivatives
+    # (deriv_*), macro (m_*), sentiment (fg_*), on-chain (oc_*), stablecoin
+    # (stable_mcap_*). Stale source -> NaN on recent rows -> silent freeze
+    # (2026-04-23 86%-pinned bug RCA).
     #
-    # Each download function has its own _is_fresh guard, so calling on every
-    # cycle is cheap (~1 API check per source when nothing new).
+    # Cycle-time optimization (2026-04-23): per-source freshness thresholds
+    # matched to the real publication cadence, so hourly cycles skip most
+    # downloads. Without these guards the extended block took ~3min; with
+    # them, subsequent cycles are ~20-40s.
     from crypto_live_trader_ed import download_asset as _dl_asset
+    import time as _time
+
     _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
+    # Only download derivatives for ENABLED assets + any referenced by a
+    # regime-gate _funding_rate (currently none). ETH's deriv_* features read
+    # derivatives_eth.csv only; BTC/XRP/SOL/LINK derivatives aren't referenced
+    # by any ETH model. If you enable BTC later, add it to _ENABLED below or
+    # pull it from trading_cfg.
+    _DERIV_ASSETS = [a for a, c in trading_cfg.items() if c.get('enabled')]
+    if not _DERIV_ASSETS:
+        _DERIV_ASSETS = ['ETH']  # safety default
+
+    def _file_is_fresh(relpath, max_age_sec):
+        """Check file mtime against a max age. Missing file = not fresh."""
+        fp = os.path.join(os.path.dirname(__file__), relpath)
+        if not os.path.exists(fp):
+            return False
+        return (_time.time() - os.path.getmtime(fp)) < max_age_sec
+
     print(f"\n  Refreshing data dependencies (hourly OHLCV + macro/deriv/onchain)...")
+    # OHLCV: hourly, update_only=True makes 1 cheap API check per asset.
+    # Needed for cross-asset lead-lag features (xa_btc_lag2h etc.).
     for _dep_asset in _DATA_DEP_ASSETS:
         try:
             _dl_asset(_dep_asset, update_only=True)
         except Exception as _e:
             print(f"  [!] data-dep download {_dep_asset}: {_e}")
-    # Macro / sentiment / derivatives / on-chain / stablecoin refresh
+
     try:
         from download_macro_data import (
             download_yfinance_data,
@@ -2928,24 +2949,47 @@ def run_all_once(trading_cfg, dry_run=False):
             download_onchain_data,
             download_stablecoin_flows,
         )
-        # Hourly-freshness sources
-        try:
-            download_derivatives_data(assets=list(_DATA_DEP_ASSETS))
-        except Exception as _e:
-            print(f"  [!] data-dep derivatives: {_e}")
-        # Daily-freshness sources — _is_fresh internal guards prevent re-download
-        for _fn, _label in [
-            (download_yfinance_data, 'macro_daily'),
-            (download_fear_greed, 'fear_greed'),
-            (download_cross_asset, 'cross_asset'),
-            (download_stablecoin_flows, 'stablecoin_flows'),
+
+        # Derivatives (Binance perp funding/OI/basis): hourly cadence. 2h
+        # freshness = skip if any enabled-asset derivatives file is <2h old.
+        # Only pulls for enabled assets (drops wasted BTC/XRP/SOL/LINK).
+        _DERIV_FRESHNESS_SEC = 2 * 3600
+        _deriv_stale = [
+            a for a in _DERIV_ASSETS
+            if not _file_is_fresh(f'data/macro_data/derivatives_{a.lower()}.csv', _DERIV_FRESHNESS_SEC)
+        ]
+        if _deriv_stale:
+            try:
+                download_derivatives_data(assets=_deriv_stale)
+            except Exception as _e:
+                print(f"  [!] data-dep derivatives: {_e}")
+        else:
+            print(f"  Derivatives fresh (<2h) for {_DERIV_ASSETS} — skip")
+
+        # Daily sources: publication lag is 6-36h (macro closes with markets,
+        # FG posts ~midnight UTC, stablecoin/cross-asset are daily).
+        # 6h freshness prevents waste when data hasn't updated.
+        for _fn, _relpath, _label, _thresh_sec in [
+            (download_yfinance_data,   'data/macro_data/macro_daily.csv',      'macro_daily',     6 * 3600),
+            (download_fear_greed,      'data/macro_data/fear_greed.csv',       'fear_greed',      6 * 3600),
+            (download_cross_asset,     'data/macro_data/cross_asset.csv',      'cross_asset',     6 * 3600),
+            (download_stablecoin_flows,'data/macro_data/stablecoin_flows.csv', 'stablecoin_flows',12 * 3600),
         ]:
+            if _file_is_fresh(_relpath, _thresh_sec):
+                continue  # silent skip
             try:
                 _fn()
             except Exception as _e:
                 print(f"  [!] data-dep {_label}: {_e}")
-        # Per-asset on-chain (CoinMetrics free tier: BTC, ETH, LINK; XRP partial; SOL 403)
+
+        # On-chain (CoinMetrics daily, 6-36h publication lag). 6h freshness
+        # guarantees we pick up new data within one cycle of publication
+        # while skipping most hourly cycles. Was the biggest culprit in the
+        # ~3min cycle time — four assets x CoinMetrics API = 30-60s.
+        _ONCHAIN_FRESHNESS_SEC = 6 * 3600
         for _oc_asset in ('btc', 'eth', 'xrp', 'link'):
+            if _file_is_fresh(f'data/macro_data/onchain_{_oc_asset}.csv', _ONCHAIN_FRESHNESS_SEC):
+                continue
             try:
                 download_onchain_data(asset=_oc_asset)
             except Exception as _e:
