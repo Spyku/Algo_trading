@@ -4983,8 +4983,16 @@ def run_mode_t(assets_list, args=None):
         print(f"  ERROR: Cannot read {tcfg_path}: {e}")
         return
 
-    THRESHOLDS = [round(0.30 + i * 0.05, 2) for i in range(7)]  # 0.30 to 0.60
-    FAILSAFE_HOURS = [8, 10, 12]
+    # Fixed defaults (2026-04-23): sweeping min_sell_pnl and max_hold every
+    # iteration was the main driver of Mode T non-convergence in the AB matrix
+    # (V2 oscillated between shield configs coupling through capital state;
+    # V3 stable config but max_hold jittered 8/10/12 → never hit convergence).
+    # Pinning both at empirical sweet spots (0.50%, 10h — winners in every
+    # converged prior HRST) collapses the per-iter search from 84 combos to
+    # just 4 (bull/bear shield on/off). Numeric jitter disappears;
+    # oscillation, if it happens, is now a REAL structural-instability signal.
+    THRESHOLDS = [0.5]
+    FAILSAFE_HOURS = [10]
 
     df_models = pd.read_csv(PRODUCTION_CSV)
 
