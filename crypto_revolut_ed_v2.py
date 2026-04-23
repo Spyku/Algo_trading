@@ -2901,101 +2901,139 @@ def run_all_once(trading_cfg, dry_run=False):
         sync_positions(trading_cfg)
         balances = get_balances()
 
-    # Data-dependency downloads: keep sources fresh regardless of trade status.
-    # Models reference cross-asset (xa_btc_lag*, xa_eth_lag*), derivatives
-    # (deriv_*), macro (m_*), sentiment (fg_*), on-chain (oc_*), stablecoin
-    # (stable_mcap_*). Stale source -> NaN on recent rows -> silent freeze
-    # (2026-04-23 86%-pinned bug RCA).
-    #
-    # Cycle-time optimization (2026-04-23): per-source freshness thresholds
-    # matched to the real publication cadence, so hourly cycles skip most
-    # downloads. Without these guards the extended block took ~3min; with
-    # them, subsequent cycles are ~20-40s.
+    # Two-priority data-dependency downloads (2026-04-23):
+    #   P1 (BLOCKING, runs before signal) — sources every enabled (asset, horizon)
+    #     model needs right now. Derived from feature_manifest.json +
+    #     feature_sources.json so it auto-adapts when config changes.
+    #   P2 (BACKGROUND, runs after Telegram is sent) — all remaining defensive
+    #     sources, so they're fresh when you enable a new asset/horizon.
+    # Per-source freshness thresholds prevent wasted downloads; a source is
+    # only actually pulled if it's stale.
     from crypto_live_trader_ed import download_asset as _dl_asset
     import time as _time
+    import json as _json
 
     _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
-    # Only download derivatives for ENABLED assets + any referenced by a
-    # regime-gate _funding_rate (currently none). ETH's deriv_* features read
-    # derivatives_eth.csv only; BTC/XRP/SOL/LINK derivatives aren't referenced
-    # by any ETH model. If you enable BTC later, add it to _ENABLED below or
-    # pull it from trading_cfg.
-    _DERIV_ASSETS = [a for a, c in trading_cfg.items() if c.get('enabled')]
-    if not _DERIV_ASSETS:
-        _DERIV_ASSETS = ['ETH']  # safety default
 
     def _file_is_fresh(relpath, max_age_sec):
-        """Check file mtime against a max age. Missing file = not fresh."""
         fp = os.path.join(os.path.dirname(__file__), relpath)
         if not os.path.exists(fp):
             return False
         return (_time.time() - os.path.getmtime(fp)) < max_age_sec
 
-    print(f"\n  Refreshing data dependencies (hourly OHLCV + macro/deriv/onchain)...")
-    # OHLCV: hourly, update_only=True makes 1 cheap API check per asset.
-    # Needed for cross-asset lead-lag features (xa_btc_lag2h etc.).
-    for _dep_asset in _DATA_DEP_ASSETS:
-        try:
-            _dl_asset(_dep_asset, update_only=True)
-        except Exception as _e:
-            print(f"  [!] data-dep download {_dep_asset}: {_e}")
-
+    # --- Source registry: every downloadable source, with freshness + download fn ---
     try:
         from download_macro_data import (
-            download_yfinance_data,
-            download_fear_greed,
-            download_cross_asset,
-            download_derivatives_data,
-            download_onchain_data,
-            download_stablecoin_flows,
+            download_yfinance_data, download_fear_greed, download_cross_asset,
+            download_derivatives_data, download_onchain_data, download_stablecoin_flows,
         )
-
-        # Derivatives (Binance perp funding/OI/basis): hourly cadence. 2h
-        # freshness = skip if any enabled-asset derivatives file is <2h old.
-        # Only pulls for enabled assets (drops wasted BTC/XRP/SOL/LINK).
-        _DERIV_FRESHNESS_SEC = 2 * 3600
-        _deriv_stale = [
-            a for a in _DERIV_ASSETS
-            if not _file_is_fresh(f'data/macro_data/derivatives_{a.lower()}.csv', _DERIV_FRESHNESS_SEC)
-        ]
-        if _deriv_stale:
-            try:
-                download_derivatives_data(assets=_deriv_stale)
-            except Exception as _e:
-                print(f"  [!] data-dep derivatives: {_e}")
-        else:
-            print(f"  Derivatives fresh (<2h) for {_DERIV_ASSETS} — skip")
-
-        # Daily sources: publication lag is 6-36h (macro closes with markets,
-        # FG posts ~midnight UTC, stablecoin/cross-asset are daily).
-        # 6h freshness prevents waste when data hasn't updated.
-        for _fn, _relpath, _label, _thresh_sec in [
-            (download_yfinance_data,   'data/macro_data/macro_daily.csv',      'macro_daily',     6 * 3600),
-            (download_fear_greed,      'data/macro_data/fear_greed.csv',       'fear_greed',      6 * 3600),
-            (download_cross_asset,     'data/macro_data/cross_asset.csv',      'cross_asset',     6 * 3600),
-            (download_stablecoin_flows,'data/macro_data/stablecoin_flows.csv', 'stablecoin_flows',12 * 3600),
-        ]:
-            if _file_is_fresh(_relpath, _thresh_sec):
-                continue  # silent skip
-            try:
-                _fn()
-            except Exception as _e:
-                print(f"  [!] data-dep {_label}: {_e}")
-
-        # On-chain (CoinMetrics daily, 6-36h publication lag). 6h freshness
-        # guarantees we pick up new data within one cycle of publication
-        # while skipping most hourly cycles. Was the biggest culprit in the
-        # ~3min cycle time — four assets x CoinMetrics API = 30-60s.
-        _ONCHAIN_FRESHNESS_SEC = 6 * 3600
-        for _oc_asset in ('btc', 'eth', 'xrp', 'link'):
-            if _file_is_fresh(f'data/macro_data/onchain_{_oc_asset}.csv', _ONCHAIN_FRESHNESS_SEC):
-                continue
-            try:
-                download_onchain_data(asset=_oc_asset)
-            except Exception as _e:
-                print(f"  [!] data-dep onchain_{_oc_asset}: {_e}")
+        _macro_ok = True
     except ImportError as _e:
         print(f"  [!] data-dep macro module import failed: {_e}")
+        _macro_ok = False
+
+    _SOURCE_REGISTRY = {
+        # OHLCV (hourly). update_only=True = 1 cheap API check; nearly free.
+        **{f'ohlcv_{a.lower()}': {
+               'file': f'data/{a.lower()}_hourly_data.csv',
+               'max_age_sec': 2 * 3600,
+               'fn': (lambda _a=a: _dl_asset(_a, update_only=True)),
+           } for a in _DATA_DEP_ASSETS},
+    }
+    if _macro_ok:
+        # Derivatives per-asset (Binance perp hourly)
+        for _a in _DATA_DEP_ASSETS:
+            _SOURCE_REGISTRY[f'derivatives_{_a.lower()}'] = {
+                'file': f'data/macro_data/derivatives_{_a.lower()}.csv',
+                'max_age_sec': 2 * 3600,
+                'fn': (lambda _aa=_a: download_derivatives_data(assets=[_aa])),
+            }
+        _SOURCE_REGISTRY.update({
+            'macro_daily':      {'file': 'data/macro_data/macro_daily.csv',      'max_age_sec':  6 * 3600, 'fn': download_yfinance_data},
+            'fear_greed':       {'file': 'data/macro_data/fear_greed.csv',       'max_age_sec':  6 * 3600, 'fn': download_fear_greed},
+            'cross_asset':      {'file': 'data/macro_data/cross_asset.csv',      'max_age_sec':  6 * 3600, 'fn': download_cross_asset},
+            'stablecoin_flows': {'file': 'data/macro_data/stablecoin_flows.csv', 'max_age_sec': 12 * 3600, 'fn': download_stablecoin_flows},
+        })
+        # On-chain per-asset (CoinMetrics daily; SOL skipped — 403 on free tier)
+        for _oc in ('btc', 'eth', 'xrp', 'link'):
+            _SOURCE_REGISTRY[f'onchain_{_oc}'] = {
+                'file': f'data/macro_data/onchain_{_oc}.csv',
+                'max_age_sec': 6 * 3600,
+                'fn': (lambda _o=_oc: download_onchain_data(asset=_o)),
+            }
+
+    # --- Map each prod-model feature name to its source key(s) ---
+    def _feature_to_source_keys(feat_name, primary_asset):
+        a = primary_asset.lower()
+        if feat_name.startswith('pysr_'):
+            return set()  # PySR itself = json file, handled separately; its inputs resolve via recursion in the manifest
+        if feat_name.startswith('xa_btc_lag'):   return {'ohlcv_btc'}
+        if feat_name.startswith('xa_eth_lag'):   return {'ohlcv_eth'}
+        if feat_name.startswith('xa_btc_usd') or feat_name.startswith('xa_eth_usd'):
+            return {'ohlcv_btc', 'ohlcv_eth'}
+        if any(feat_name.startswith(p) for p in ('xa_sp500', 'xa_nasdaq', 'xa_dax', 'xa_cac', 'xa_smi')):
+            return {'macro_daily', 'cross_asset'}
+        if any(feat_name.startswith(p) for p in ('m_vix', 'm_dxy', 'm_sp500', 'm_nasdaq', 'm_gold', 'm_oil', 'm_eurusd', 'm_us10y', 'm_usdjpy')):
+            return {'macro_daily'}
+        if feat_name.startswith('fg_'):          return {'fear_greed'}
+        if feat_name.startswith('deriv_'):       return {f'derivatives_{a}'}
+        if feat_name.startswith('oc_'):          return {f'onchain_{a}'}
+        if feat_name.startswith('stable_mcap_'): return {'stablecoin_flows'}
+        # Technical (logret, volatility, sma, adx, rsi, spread, hour_*, etc.)
+        return {f'ohlcv_{a}'}
+
+    # --- Compute P1 set: sources every enabled (asset, horizon) needs ---
+    def _compute_p1_sources():
+        p1 = set()
+        manifest_path = os.path.join(os.path.dirname(__file__), 'config', 'feature_manifest.json')
+        if not os.path.exists(manifest_path):
+            # No manifest -> be conservative: P1 = enabled asset OHLCV + their BTC lead-lag + their derivatives
+            for a, c in trading_cfg.items():
+                if not c.get('enabled'):
+                    continue
+                p1.add(f'ohlcv_{a.lower()}')
+                p1.add('ohlcv_btc')  # cross-asset lead-lag
+                p1.add(f'derivatives_{a.lower()}')
+                p1.add('macro_daily')
+                p1.add('fear_greed')
+            return p1
+        try:
+            manifest = _json.load(open(manifest_path))
+        except Exception:
+            return p1
+        for a, c in trading_cfg.items():
+            if not c.get('enabled'):
+                continue
+            p1.add(f'ohlcv_{a.lower()}')  # primary always required
+            for h_key in ('bull', 'bear'):
+                h = c.get(h_key, {}).get('horizon')
+                if h is None:
+                    continue
+                info = manifest.get('assets', {}).get(a, {}).get(str(h))
+                if not info:
+                    continue
+                for feat in info.get('union', []):
+                    p1 |= _feature_to_source_keys(feat, a)
+        return {k for k in p1 if k in _SOURCE_REGISTRY}
+
+    def _refresh_sources(keys, label):
+        """Iterate source keys; for each, skip if fresh else download. Never raises."""
+        stale = [k for k in keys if not _file_is_fresh(_SOURCE_REGISTRY[k]['file'], _SOURCE_REGISTRY[k]['max_age_sec'])]
+        if not stale:
+            print(f"  [{label}] all fresh ({len(keys)} sources) — skip")
+            return
+        print(f"  [{label}] refreshing {len(stale)}/{len(keys)} stale sources: {stale}")
+        for k in stale:
+            try:
+                _SOURCE_REGISTRY[k]['fn']()
+            except Exception as _e:
+                print(f"  [{label}] [!] {k}: {_e}")
+
+    # --- PHASE 1: P1 required sources (BLOCKING before signal) ---
+    p1_keys = _compute_p1_sources()
+    p2_keys = set(_SOURCE_REGISTRY.keys()) - p1_keys
+    print(f"\n  Data-dep priority split: P1={sorted(p1_keys)} | P2={sorted(p2_keys)}")
+    _refresh_sources(p1_keys, 'P1 REQUIRED')
 
     results = []
     for asset, cfg in trading_cfg.items():
@@ -3023,6 +3061,12 @@ def run_all_once(trading_cfg, dry_run=False):
     if valid:
         msg = format_multi_asset_telegram(valid, dry_run=dry_run, balances=balances, trading_cfg=trading_cfg)
         send_telegram_with_buttons(msg, _main_buttons(trading_cfg))
+
+    # --- PHASE 2: P2 deferred sources (AFTER signal is sent to Telegram) ---
+    # Keeps the defensive data (XRP/SOL/LINK OHLCV, their derivatives,
+    # on-chain for non-primary assets, etc.) fresh for the next config flip
+    # without delaying the current cycle's signal emission.
+    _refresh_sources(p2_keys, 'P2 DEFERRED')
 
     # Accumulate hourly snapshots for future features (silent, non-blocking)
     try:
