@@ -2901,20 +2901,57 @@ def run_all_once(trading_cfg, dry_run=False):
         sync_positions(trading_cfg)
         balances = get_balances()
 
-    # Data-dependency downloads: keep ALL crypto OHLCV fresh regardless of
-    # trade status. Models reference cross-asset features (xa_btc_lag*,
-    # xa_eth_lag*, xa_*_relstr5d). If a referenced asset isn't traded AND not
-    # downloaded, its data goes stale, merges yield NaN on recent bars, and
-    # the trader silently freezes predictions (see 2026-04-23 86%-pinned bug).
-    # update_only=True fetches only new candles since last row (~1 API call
-    # per asset when already fresh, free data cost only in seconds).
+    # Data-dependency downloads: keep ALL sources fresh regardless of trade
+    # status. Models reference cross-asset (xa_btc_lag*, xa_eth_lag*),
+    # derivatives (deriv_*), macro (m_*, xa_sp500/nasdaq/dax_*), sentiment
+    # (fg_*), on-chain (oc_*), stablecoin (stable_mcap_*). If any source goes
+    # stale, merge/compute yields NaN on recent rows — live inference freezes
+    # on an old row (see 2026-04-23 86%-pinned bug RCA in CLAUDE.md).
+    #
+    # Each download function has its own _is_fresh guard, so calling on every
+    # cycle is cheap (~1 API check per source when nothing new).
     from crypto_live_trader_ed import download_asset as _dl_asset
     _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
+    print(f"\n  Refreshing data dependencies (hourly OHLCV + macro/deriv/onchain)...")
     for _dep_asset in _DATA_DEP_ASSETS:
         try:
             _dl_asset(_dep_asset, update_only=True)
         except Exception as _e:
             print(f"  [!] data-dep download {_dep_asset}: {_e}")
+    # Macro / sentiment / derivatives / on-chain / stablecoin refresh
+    try:
+        from download_macro_data import (
+            download_yfinance_data,
+            download_fear_greed,
+            download_cross_asset,
+            download_derivatives_data,
+            download_onchain_data,
+            download_stablecoin_flows,
+        )
+        # Hourly-freshness sources
+        try:
+            download_derivatives_data(assets=list(_DATA_DEP_ASSETS))
+        except Exception as _e:
+            print(f"  [!] data-dep derivatives: {_e}")
+        # Daily-freshness sources — _is_fresh internal guards prevent re-download
+        for _fn, _label in [
+            (download_yfinance_data, 'macro_daily'),
+            (download_fear_greed, 'fear_greed'),
+            (download_cross_asset, 'cross_asset'),
+            (download_stablecoin_flows, 'stablecoin_flows'),
+        ]:
+            try:
+                _fn()
+            except Exception as _e:
+                print(f"  [!] data-dep {_label}: {_e}")
+        # Per-asset on-chain (CoinMetrics free tier: BTC, ETH, LINK; XRP partial; SOL 403)
+        for _oc_asset in ('btc', 'eth', 'xrp', 'link'):
+            try:
+                download_onchain_data(asset=_oc_asset)
+            except Exception as _e:
+                print(f"  [!] data-dep onchain_{_oc_asset}: {_e}")
+    except ImportError as _e:
+        print(f"  [!] data-dep macro module import failed: {_e}")
 
     results = []
     for asset, cfg in trading_cfg.items():
@@ -3347,6 +3384,46 @@ def main():
         if bull_max <= 0 and bear_max <= 0 and top_max <= 0:
             print(f"  ⚠️ {asset}: No max_position_usd set in bull/bear config. Trades will be skipped.")
             print(f"     Edit config/regime_config_ed.json to set max_position_usd.")
+
+    # Pre-flight integrity check: validate that every required feature for
+    # every enabled (asset, horizon) is present in the current build AND all
+    # upstream data sources meet their freshness SLAs. Refuse to start if not.
+    # Allow --skip-preflight for emergency overrides; warn in Telegram.
+    skip_preflight = '--skip-preflight' in sys.argv
+    if not skip_preflight and not dry_run:
+        # Refresh the manifest first (cheap: just rebuilds from prod CSV)
+        try:
+            import subprocess as _sp
+            _sp.check_call(
+                [sys.executable, os.path.join(os.path.dirname(__file__), 'tools', 'generate_feature_manifest.py')],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+        except Exception as _e:
+            print(f"  [preflight] manifest regen skipped: {_e}")
+        # Run preflight
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
+            from trader_preflight import preflight as _preflight
+            report = _preflight(verbose=True)
+            if not report['ok']:
+                print()
+                print("=" * 60)
+                print("  TRADER STARTUP BLOCKED — pre-flight failed")
+                print("=" * 60)
+                print("  Fix the source freshness issues above, OR run with")
+                print("  --skip-preflight to bypass (NOT recommended).")
+                try:
+                    failures = '\n'.join(f'  • {m}' for m in report['failures'][:5])
+                    send_telegram(f"🚨 Trader startup BLOCKED — pre-flight failed:\n{failures}")
+                except Exception:
+                    pass
+                sys.exit(2)
+        except SystemExit:
+            raise
+        except Exception as _e:
+            print(f"  [preflight] could not run (proceeding cautiously): {_e}")
+    elif skip_preflight:
+        print("  [preflight] --skip-preflight set: SKIPPING integrity check")
 
     if loop_mode:
         run_loop(trading_cfg, dry_run=dry_run)

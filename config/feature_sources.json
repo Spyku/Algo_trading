@@ -1,0 +1,105 @@
+{
+  "_note": "Maps feature-name patterns to their upstream data source files and freshness SLAs. Preflight uses this to verify the trader is being fed correctly. Patterns are matched in the order listed — first match wins. {asset} is substituted with the lowercase asset name (e.g. {asset}=eth).",
+  "_generated_by": "hand-crafted 2026-04-23 from crypto_trading_system_ed.py:build_all_features introspection",
+  "_max_age_units": "hours",
+  "rules": [
+    {
+      "match_prefix": ["pysr_"],
+      "source_file": "models/pysr_{ASSET}_{H}h.json",
+      "source_kind": "pysr_json",
+      "max_age_hours": null,
+      "description": "PySR formulas. Loaded lazily; age doesn't matter as long as inputs are fresh."
+    },
+    {
+      "match_prefix": ["ob_"],
+      "source_file": "data/macro_data/orderbook_snapshots.csv",
+      "source_kind": "snapshot_ring",
+      "min_rows_last_24h": 20,
+      "description": "Orderbook depth snapshots (hourly, ring buffer)."
+    },
+    {
+      "match_prefix": ["iv_", "avg_iv"],
+      "source_file": "data/macro_data/options_iv_snapshot.csv",
+      "source_kind": "snapshot_ring",
+      "min_rows_last_24h": 20,
+      "description": "Deribit options IV + skew (hourly, ring buffer)."
+    },
+    {
+      "match_prefix": ["deriv_funding", "deriv_oi", "deriv_basis"],
+      "source_file": "data/macro_data/derivatives_{asset}.csv",
+      "source_kind": "hourly_series",
+      "max_age_hours": 2,
+      "description": "Binance perp funding rate + open interest + perp-spot basis."
+    },
+    {
+      "match_prefix": ["oc_"],
+      "source_file": "data/macro_data/onchain_{asset}.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 36,
+      "description": "CoinMetrics on-chain data (MVRV, SOPR, netflow, hashrate, tx_count, etc.). Daily, delay ~24h typical."
+    },
+    {
+      "match_prefix": ["stable_mcap_"],
+      "source_file": "data/macro_data/stablecoin_flows.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 48,
+      "description": "USDT + USDC total market cap (CoinGecko daily)."
+    },
+    {
+      "match_prefix": ["fg_"],
+      "source_file": "data/macro_data/fear_greed.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 30,
+      "description": "Crypto Fear & Greed Index (Alternative.me daily)."
+    },
+    {
+      "match_prefix": ["xa_btc_lag"],
+      "source_file": "data/btc_hourly_data.csv",
+      "source_kind": "ohlcv_hourly",
+      "max_age_hours": 2,
+      "description": "BTC intraday lead-lag (ETH/XRP/SOL/LINK models). Needs BTC OHLCV fresh even if BTC is not traded."
+    },
+    {
+      "match_prefix": ["xa_eth_lag"],
+      "source_file": "data/eth_hourly_data.csv",
+      "source_kind": "ohlcv_hourly",
+      "max_age_hours": 2,
+      "description": "ETH intraday lead-lag (XRP/SOL/LINK models). Needs ETH OHLCV fresh even if ETH is not traded."
+    },
+    {
+      "match_prefix": ["xa_btc_usd", "xa_eth_usd"],
+      "source_file": "data/{asset}_hourly_data.csv",
+      "source_kind": "ohlcv_hourly",
+      "max_age_hours": 2,
+      "description": "Daily cross-asset relstr/corr vs BTC-USD or ETH-USD."
+    },
+    {
+      "match_prefix": ["xa_sp500", "xa_nasdaq", "xa_dax", "xa_cac", "xa_smi"],
+      "source_file": "data/macro_data/macro_daily.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 30,
+      "description": "Cross-asset relative-strength + correlation vs equity indices."
+    },
+    {
+      "match_prefix": ["m_vix", "m_dxy", "m_sp500", "m_nasdaq", "m_gold", "m_oil", "m_eurusd", "m_us10y", "m_usdjpy"],
+      "source_file": "data/macro_data/macro_daily.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 30,
+      "description": "Macro daily — VIX, DXY, equity, commodities, rates, FX."
+    },
+    {
+      "match_prefix": ["gdelt_", "gp_"],
+      "source_file": "data/macro_data/gdelt_daily.csv",
+      "source_kind": "daily_series",
+      "max_age_hours": 48,
+      "optional": true,
+      "description": "GDELT geopolitical features. DISABLED from pipeline 2026-04-19 but kept for reference."
+    }
+  ],
+  "default": {
+    "source_file": "data/{asset}_hourly_data.csv",
+    "source_kind": "ohlcv_hourly",
+    "max_age_hours": 2,
+    "description": "Technical features (logret_*, volatility_*, sma_*, adx_*, rsi_*, spread_*, vol_ratio_*, stoch_*, price_*, bb_*, gk_*, atr_*, hour_*, dow_*, intraday_*, volume_*, label) — derived from primary asset OHLCV."
+  }
+}
