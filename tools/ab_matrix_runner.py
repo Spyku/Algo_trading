@@ -414,11 +414,12 @@ def main():
         ('trimON_metaON',          True,  0.45, False),
         ('trimON_metaON_floorOFF', True,  0.45, True),
     ]
-    # Focused 3-variant validation for floor+trim+convergence replication
+    # Focused 4-variant validation for floor+trim+meta on clean data
     focus_variants = [
-        ('A_floorON_trimOFF',  False, None, False),
-        ('B_floorON_trimON',   True,  None, False),
-        ('C_floorOFF_trimOFF', False, None, True),
+        ('A_floorON_trimOFF',      False, None, False),
+        ('B_floorON_trimON',       True,  None, False),
+        ('C_floorOFF_trimOFF',     False, None, True),
+        ('D_floorON_trimON_metaON', True, 0.45, False),
     ]
     if args.variants == 'focus':
         variants = focus_variants
