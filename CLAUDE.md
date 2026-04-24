@@ -416,6 +416,29 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
 ### TODO
 
+**🛎️ FIRST: check `output/ERRORS_INBOX.md` for runtime errors**
+
+The live trader appends runtime warnings/errors to `output/ERRORS_INBOX.md`
+(rate-limited to 1 entry per unique key per hour). When the user asks
+"what's on my TODO" or similar status review, READ THIS FILE FIRST and
+summarize any recent entries inline with the TODO review. Each entry has
+severity (ℹ info / ⚠ warn / 🚨 critical). Critical entries should be
+surfaced prominently — they usually mean the trader is running degraded
+(FEATURE_SET_A fallback, regime detector errored, upstream data missing).
+
+After review, user will either:
+- Tell me to investigate/fix → find the root cause in code + logs
+- Tell me to clear/ignore → delete the relevant lines from the inbox file
+
+Inbox location: `output/ERRORS_INBOX.md`. Starts empty — only populates
+when the trader hits an alert path. Absence of file = clean slate.
+
+Stdout is also always mirrored to `logs/ed_runtime_*.log` per-launch
+(Fix #5D 2026-04-24), so console-only warnings survive restart. Grep
+there for post-incident forensics.
+
+---
+
 **🚨🚨🚨 UPMOST IMPORTANT — LIVE TRADER DATA-UPDATE SANITY CHECK (2026-04-23 morning, root cause of 86%-pinned bug):**
 
 **Root cause discovered this morning:** The 5h@86% stuck signal (7+ consecutive identical BUY signals) was caused by `xa_btc_lag2h` being NaN in all recent ETH rows because BTC OHLCV hadn't been downloaded in 49 hours (BTC is disabled/not traded → no downloader touches it → stale → merge yields NaN on recent rows). `generate_live_signal` at `crypto_live_trader_ed.py:379` does `df.dropna(subset=feature_cols + ['label'])` which kills every recent row, then `i = n - 1` points to a row from 49h ago. Model retrains each cycle but on the SAME frozen row → SAME 86% output every hour.

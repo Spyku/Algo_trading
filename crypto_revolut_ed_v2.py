@@ -3337,6 +3337,15 @@ def run_loop(trading_cfg, dry_run=False):
 # MAIN
 # ============================================================
 def main():
+    # Fix #5D (2026-04-24): install stdout tee BEFORE any other print so every
+    # print from startup onwards is captured to a log file. Works with or
+    # without external tee_launcher.bat.
+    try:
+        from crypto_live_trader_ed import init_runtime_log
+        init_runtime_log()
+    except Exception as _e:
+        print(f"[!] runtime log init failed: {_e}")
+
     print("=" * 60)
     print("  REVOLUT X MULTI-ASSET TRADER [ED V2]")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

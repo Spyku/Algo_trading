@@ -53,25 +53,100 @@ from crypto_trading_system_ed import (
 )
 from sklearn.preprocessing import StandardScaler
 
-# ── Rate-limited Telegram alerts (Fix #2 — 2026-04-24) ─────────────────
-# Library-level helper; crypto_revolut_ed_v2.py has its own copy for the
-# trader-orchestration layer. Kept separate to avoid circular imports.
+# ── Runtime error inbox + rate-limited alerts (Fix #5 — 2026-04-24) ────
+# Two-sink alert system:
+#   1. Telegram push (rate-limited so recurring failures don't spam)
+#   2. output/ERRORS_INBOX.md append (append-only, survives every restart)
+# CLAUDE.md instructs me to read the inbox when user asks about TODO, so
+# operational errors are surfaced during any status review. User can clear
+# the file manually after triage.
 _TG_RATE_LIMIT_LT = {}  # key -> last_sent_epoch
 
-def _rate_limited_telegram_lt(key, msg, cooldown_sec=3600):
-    """Send Telegram alert; skip if same `key` alerted within cooldown_sec.
-    Never raises — safe for use in except blocks."""
+ERRORS_INBOX_PATH = os.path.join(os.path.dirname(__file__), 'output', 'ERRORS_INBOX.md')
+
+def _append_error_inbox(key, msg, severity='warn'):
+    """Append a runtime error entry to ERRORS_INBOX.md. Never raises."""
+    try:
+        os.makedirs(os.path.dirname(ERRORS_INBOX_PATH), exist_ok=True)
+        if not os.path.exists(ERRORS_INBOX_PATH):
+            header = (
+                "# Runtime Errors Inbox (Ed V2 trader)\n\n"
+                "Appended automatically by the live trader and helpers. Rate-limited to\n"
+                "1 entry per unique key per hour. Severity: info / warn / critical.\n\n"
+                "**Triage:** review → fix upstream → clear file (or move old entries to archive).\n\n"
+                "---\n\n"
+            )
+            with open(ERRORS_INBOX_PATH, 'w', encoding='utf-8') as f:
+                f.write(header)
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        icon = {'info': 'ℹ', 'warn': '⚠', 'critical': '🚨'}.get(severity, '•')
+        line = f"- `{ts}` {icon} **{severity.upper()}** `{key}` — {msg}\n"
+        with open(ERRORS_INBOX_PATH, 'a', encoding='utf-8') as f:
+            f.write(line)
+    except Exception:
+        pass  # inbox is best-effort; never fail a caller because of logging
+
+def _rate_limited_telegram_lt(key, msg, cooldown_sec=3600, severity='warn'):
+    """Send Telegram alert AND append to ERRORS_INBOX.md; skip if same `key`
+    alerted within cooldown_sec. Never raises — safe in except blocks.
+
+    severity: 'info' | 'warn' | 'critical' — controls inbox icon.
+    """
     import time as _t
     now = _t.time()
     last = _TG_RATE_LIMIT_LT.get(key, 0)
     if now - last < cooldown_sec:
         return False
     _TG_RATE_LIMIT_LT[key] = now
+    _append_error_inbox(key, msg, severity)
     try:
         send_telegram(msg)
         return True
     except Exception:
         return False
+
+
+# ── Stdout tee: always write to logs/ed_runtime_*.log (Fix #5D — 2026-04-24) ──
+# Redirect stdout+stderr so every `print(...)` survives, even when the
+# trader is launched ad-hoc without tee_launcher.bat. Independent of
+# external tee — belt-and-suspenders logging.
+class _TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+_RUNTIME_LOG_FILE = None
+
+def init_runtime_log():
+    """Install a TeeStream so stdout/stderr also write to a dated log file.
+    Idempotent — safe to call multiple times. Returns the log path."""
+    global _RUNTIME_LOG_FILE
+    if _RUNTIME_LOG_FILE is not None:
+        return _RUNTIME_LOG_FILE.name
+    try:
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f'ed_runtime_{ts}.log')
+        _RUNTIME_LOG_FILE = open(log_path, 'a', encoding='utf-8', buffering=1)
+        sys.stdout = _TeeStream(sys.stdout, _RUNTIME_LOG_FILE)
+        sys.stderr = _TeeStream(sys.stderr, _RUNTIME_LOG_FILE)
+        print(f"[runtime-log] tee installed → {log_path}")
+        return log_path
+    except Exception as e:
+        print(f"[!] runtime-log init failed: {e}")
+        return None
 
 
 # ── Regime detection ──────────────────────────────────────────────────
@@ -464,8 +539,26 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     missing_feats = [f for f in feature_list if f not in all_cols]
     if missing_feats:
         print(f"  [!] {asset_name} {horizon}h: {len(missing_feats)} configured features unavailable: {missing_feats[:5]}{'...' if len(missing_feats) > 5 else ''}")
+        # Partial mismatch — warn but continue with the matching subset
+        _rate_limited_telegram_lt(
+            f'feat_partial_{asset_name}_{horizon}',
+            f"⚠ {asset_name} {horizon}h: {len(missing_feats)}/{len(feature_list)} configured features missing from current build "
+            f"({missing_feats[:3]}{'...' if len(missing_feats)>3 else ''}) — using remaining {len(feature_cols)} features.",
+            severity='warn',
+        )
     if not feature_cols:
-        print(f"  [!] {asset_name} {horizon}h: no configured features matched -- falling back to FEATURE_SET_A")
+        # Fix #5A (2026-04-24): FEATURE_SET_A fallback is CRITICAL.
+        # The model was trained on a specific feature set; falling back to
+        # FEATURE_SET_A means we're running a DIFFERENT model than the one
+        # in backtest. Has to reach Telegram.
+        print(f"  [!!] {asset_name} {horizon}h: NO configured features matched -- falling back to FEATURE_SET_A (DIFFERENT MODEL)")
+        _rate_limited_telegram_lt(
+            f'feat_fallback_{asset_name}_{horizon}',
+            f"🚨 {asset_name} {horizon}h: ZERO configured features match build — falling back to FEATURE_SET_A. "
+            f"The model is now running on features it was NOT trained with. Check crypto_ed_production.csv "
+            f"optimal_features vs current build_all_features output.",
+            severity='critical',
+        )
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]
 
     # Fix #4 (2026-04-24): forward-fill THEN zero-fill (not zero-only).
