@@ -509,7 +509,19 @@ def load_best_config(asset_name, horizon=None):
 # ============================================================
 # GENERATE SINGLE SIGNAL
 # ============================================================
-def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
+def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_out=None):
+    """Generate one signal for (asset_name, config.horizon).
+
+    Fix #9 (2026-04-24): optional `metrics_out` dict — if provided, health
+    metrics are written into it for per-cycle forensics. Keys:
+      n_features_expected / n_features_available / n_features_nan_inference
+      feature_set_a_fallback (bool) / inference_row_age_h
+      feature_build_sec / model_fit_sec
+    No behavior change when metrics_out is None.
+    """
+    import time as _tm
+    _fb_start = _tm.time()
+
     model_names = config['models'].split('+')
     window = config['best_window']
     fs = config.get('feature_set', 'A')
@@ -524,6 +536,9 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     else:
         feature_list = list(FEATURE_SET_A)
 
+    if metrics_out is not None:
+        metrics_out['n_features_expected'] = len(feature_list)
+
     if df_raw is None:
         try:
             download_asset(asset_name, update_only=True)
@@ -535,8 +550,14 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
 
     df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose)
     _compute_pysr_features(df_full, all_cols, asset_name, horizon, verbose=False)
+    if metrics_out is not None:
+        metrics_out['feature_build_sec'] = round(_tm.time() - _fb_start, 2)
+
     feature_cols = [f for f in feature_list if f in all_cols]
     missing_feats = [f for f in feature_list if f not in all_cols]
+    if metrics_out is not None:
+        metrics_out['n_features_available'] = len(feature_cols)
+        metrics_out['feature_set_a_fallback'] = False  # will flip to True if fallback hits
     if missing_feats:
         print(f"  [!] {asset_name} {horizon}h: {len(missing_feats)} configured features unavailable: {missing_feats[:5]}{'...' if len(missing_feats) > 5 else ''}")
         # Partial mismatch — warn but continue with the matching subset
@@ -547,6 +568,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             severity='warn',
         )
     if not feature_cols:
+        if metrics_out is not None:
+            metrics_out['feature_set_a_fallback'] = True
         # Fix #5A (2026-04-24): FEATURE_SET_A fallback is CRITICAL.
         # The model was trained on a specific feature set; falling back to
         # FEATURE_SET_A means we're running a DIFFERENT model than the one
@@ -575,6 +598,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     # NaN — that's what froze `i` on a 49h-stale row.
     df = df_full.dropna(subset=['label']).reset_index(drop=True)
     feat_na_tail = df[feature_cols].iloc[-1].isna()
+    if metrics_out is not None:
+        metrics_out['n_features_nan_inference'] = int(feat_na_tail.sum())
     if feat_na_tail.any():
         stale_feats = [f for f in feature_cols if pd.isna(df.iloc[-1][f])]
         print(f"  [!] {asset_name} {horizon}h: {len(stale_feats)} feature(s) NaN in latest row: {stale_feats[:5]}{'...' if len(stale_feats)>5 else ''} -- forward-fill + zero-fill")
@@ -602,6 +627,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
         latest_raw_dt = pd.to_datetime(df_full.iloc[-1]['datetime'])
         latest_used_dt = pd.to_datetime(row['datetime'])
         lag_hours = (latest_raw_dt - latest_used_dt).total_seconds() / 3600.0
+        if metrics_out is not None:
+            metrics_out['inference_row_age_h'] = round(lag_hours, 2)
         if lag_hours > horizon + 2:
             print(f"  [!!] {asset_name} {horizon}h: inference row is {lag_hours:.1f}h stale (>horizon+2h) -- REFUSING to emit signal")
             return None
@@ -622,6 +649,7 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
     X_test_s = pd.DataFrame(scaler.transform(X_test), columns=feature_cols)
 
     sw = get_decay_weights(len(y_train), gamma)
+    _fit_start = _tm.time()
     votes, probas = [], []
     for model_name in model_names:
         try:
@@ -631,6 +659,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             probas.append(model.predict_proba(X_test_s)[0][1])
         except Exception:
             continue
+    if metrics_out is not None:
+        metrics_out['model_fit_sec'] = round(_tm.time() - _fit_start, 2)
 
     if not votes:
         return None

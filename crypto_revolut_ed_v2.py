@@ -47,6 +47,55 @@ from crypto_live_trader_ed import (
 
 
 # ============================================================
+# PER-CYCLE METRICS (Fix #9 — 2026-04-24)
+# Append one row per (asset, cycle) to output/cycle_metrics.csv.
+# Provides forensics for "why was cycle X slow?" / "when did pinning start?" /
+# "which feature went NaN on 04-23?" — answerable with pd.read_csv now.
+# ============================================================
+CYCLE_METRICS_CSV = os.path.join(os.path.dirname(__file__), 'output', 'cycle_metrics.csv')
+
+CYCLE_METRICS_COLUMNS = [
+    'timestamp',           # cycle start ISO
+    'asset',
+    'regime',              # bull / bear / error
+    'signal',              # BUY / SELL / HOLD
+    'confidence',          # 0-100, 2 decimals
+    'horizon',             # active horizon (e.g. 5)
+    'position_state',      # cash / invested
+    'price',
+    # Feature health (from generate_live_signal)
+    'n_features_expected',       # len(optimal_features)
+    'n_features_available',      # intersect(optimal_features, build)
+    'n_features_nan_inference',  # NaN count on the inference row
+    'feature_set_a_fallback',    # bool — model fell back to FEATURE_SET_A
+    # Staleness
+    'inference_row_age_h',       # latest_raw_dt - inference_row_dt, in hours
+    # Timings
+    'p1_duration_sec',
+    'p2_duration_sec',
+    'feature_build_sec',
+    'model_fit_sec',
+    'total_cycle_sec',
+]
+
+
+def _append_cycle_metrics(row_dict):
+    """Append a per-cycle per-asset row to cycle_metrics.csv. Never raises.
+    Keys missing from row_dict become empty cells."""
+    import csv
+    try:
+        os.makedirs(os.path.dirname(CYCLE_METRICS_CSV), exist_ok=True)
+        file_exists = os.path.exists(CYCLE_METRICS_CSV)
+        with open(CYCLE_METRICS_CSV, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=CYCLE_METRICS_COLUMNS, extrasaction='ignore')
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({c: row_dict.get(c, '') for c in CYCLE_METRICS_COLUMNS})
+    except Exception as _e:
+        print(f"  [!] cycle_metrics write failed: {_e}")
+
+
+# ============================================================
 # RATE-LIMITED TELEGRAM ALERTS (Fix #1 — 2026-04-24)
 # Prevents per-cycle Telegram spam when a source is persistently failing.
 # Keyed so different (source, context) pairs alert independently.
@@ -1011,8 +1060,10 @@ def _shield_on_for_regime(trading_cfg, regime_label):
 # ============================================================
 # PROCESS ONE ASSET
 # ============================================================
-def process_asset(asset, trading_cfg, dry_run=False):
-    """Generate signals and execute for one asset. Returns result dict."""
+def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
+    """Generate signals and execute for one asset. Returns result dict.
+    Fix #9 (2026-04-24): cycle_metrics optional dict — if provided, we
+    populate one row per horizon with health/timing info."""
     position = load_position(asset)
     symbol = trading_cfg.get('symbol', f'{asset}-USD')
     max_usd = trading_cfg.get('max_position_usd', 0)
@@ -1058,11 +1109,15 @@ def process_asset(asset, trading_cfg, dry_run=False):
     if not sigs_by_horizon:
         return None
     # Generate live signals for each available horizon
+    # Fix #9: pass metrics_out dict to capture feature-health + timings
     first = True
+    per_horizon_metrics = {}  # {horizon: {health fields}}
     for h in list(sigs_by_horizon.keys()):
         cfg = sigs_by_horizon[h]
-        sig = generate_live_signal(asset, cfg, df_raw=df_raw, verbose=first)
-        sigs_by_horizon[h] = sig  # replace config with actual signal
+        m_out = {}
+        sig = generate_live_signal(asset, cfg, df_raw=df_raw, verbose=first, metrics_out=m_out)
+        sigs_by_horizon[h] = sig
+        per_horizon_metrics[h] = m_out
         first = False
 
     # Apply strategy — Ed regime always uses single horizon (Xh_only)
@@ -1348,6 +1403,29 @@ def process_asset(asset, trading_cfg, dry_run=False):
             if g and g < 1.0:
                 gamma_val = str(g)
             break
+
+    # Fix #9 (2026-04-24): emit one cycle_metrics row per active horizon
+    if cycle_metrics is not None:
+        for h, h_metrics in per_horizon_metrics.items():
+            row = {
+                'timestamp': cycle_metrics.get('timestamp', ''),
+                'asset': asset,
+                'regime': regime_label,
+                'signal': (sigs_by_horizon.get(h) or {}).get('signal', ''),
+                'confidence': (sigs_by_horizon.get(h) or {}).get('confidence', ''),
+                'horizon': h,
+                'position_state': position.get('state', ''),
+                'price': round(price, 2) if price else '',
+                'n_features_expected': h_metrics.get('n_features_expected', ''),
+                'n_features_available': h_metrics.get('n_features_available', ''),
+                'n_features_nan_inference': h_metrics.get('n_features_nan_inference', ''),
+                'feature_set_a_fallback': h_metrics.get('feature_set_a_fallback', ''),
+                'inference_row_age_h': h_metrics.get('inference_row_age_h', ''),
+                'feature_build_sec': h_metrics.get('feature_build_sec', ''),
+                'model_fit_sec': h_metrics.get('model_fit_sec', ''),
+                # P1/P2/total populated at cycle level, merged at flush time
+            }
+            cycle_metrics.setdefault('rows', []).append(row)
 
     return {
         'asset': asset, 'action': action, 'confidence': confidence,
@@ -2987,6 +3065,15 @@ def _get_models_fingerprint(trading_cfg):
 
 def run_all_once(trading_cfg, dry_run=False):
     """Sync positions, process all enabled assets."""
+    import time as _tm_cycle
+    _cycle_t0 = _tm_cycle.time()
+    cycle_metrics = {
+        'timestamp': datetime.now().isoformat(timespec='seconds'),
+        'rows': [],                      # per-asset-per-horizon rows populated by process_asset
+        'p1_duration_sec': None,
+        'p2_duration_sec': None,
+    }
+
     # Hot-reload trading config before each cycle
     _reload_trading_config(trading_cfg)
 
@@ -3164,7 +3251,9 @@ def run_all_once(trading_cfg, dry_run=False):
     p1_keys = _compute_p1_sources()
     p2_keys = set(_SOURCE_REGISTRY.keys()) - p1_keys
     print(f"\n  Data-dep priority split: P1={sorted(p1_keys)} | P2={sorted(p2_keys)}")
+    _p1_t0 = _tm_cycle.time()
     _refresh_sources(p1_keys, 'P1 REQUIRED')
+    cycle_metrics['p1_duration_sec'] = round(_tm_cycle.time() - _p1_t0, 2)
 
     results = []
     for asset, cfg in trading_cfg.items():
@@ -3180,7 +3269,8 @@ def run_all_once(trading_cfg, dry_run=False):
         bull_h = cfg.get('bull', {}).get('horizon', '?')
         bear_h = cfg.get('bear', {}).get('horizon', '?')
         print(f"\n  --- {asset} (bull={bull_h}h / bear={bear_h}h) ---")
-        r = process_asset(asset, cfg, dry_run=dry_run)
+        # Fix #9: thread cycle_metrics dict through; process_asset appends per-horizon rows
+        r = process_asset(asset, cfg, dry_run=dry_run, cycle_metrics=cycle_metrics)
         results.append(r)
 
     # Refresh balances AFTER trades so Telegram shows current exchange state
@@ -3197,7 +3287,9 @@ def run_all_once(trading_cfg, dry_run=False):
     # Keeps the defensive data (XRP/SOL/LINK OHLCV, their derivatives,
     # on-chain for non-primary assets, etc.) fresh for the next config flip
     # without delaying the current cycle's signal emission.
+    _p2_t0 = _tm_cycle.time()
     _refresh_sources(p2_keys, 'P2 DEFERRED')
+    cycle_metrics['p2_duration_sec'] = round(_tm_cycle.time() - _p2_t0, 2)
 
     # Accumulate hourly snapshots for future features (silent, non-blocking)
     try:
@@ -3207,6 +3299,14 @@ def run_all_once(trading_cfg, dry_run=False):
         download_options_iv_skew()
     except Exception:
         pass  # never block trading on snapshot failure
+
+    # Fix #9: flush cycle metrics to CSV
+    _total_sec = round(_tm_cycle.time() - _cycle_t0, 2)
+    for row in cycle_metrics.get('rows', []):
+        row['p1_duration_sec'] = cycle_metrics['p1_duration_sec']
+        row['p2_duration_sec'] = cycle_metrics['p2_duration_sec']
+        row['total_cycle_sec'] = _total_sec
+        _append_cycle_metrics(row)
 
     return results
 
