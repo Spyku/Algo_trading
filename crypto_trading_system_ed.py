@@ -377,8 +377,10 @@ REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
 
 
 def _atomic_write_json(path, data):
-    """Write JSON atomically: temp file + os.replace, so a crash mid-write can't corrupt the target."""
-    tmp = path + '.tmp'
+    """Write JSON atomically: temp file + os.replace, so a crash mid-write can't
+    corrupt the target. Tmp path includes PID so two concurrent HRST/trader
+    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit)."""
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, 'w') as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -387,9 +389,9 @@ def _atomic_write_json(path, data):
 def _atomic_write_csv(df, path, **to_csv_kwargs):
     """Write a DataFrame to CSV atomically: temp file + os.replace. Protects live
     trader / other readers from seeing partial writes if the process crashes
-    mid-write. Use this for any write to crypto_ed_production.csv or other
-    files that another process reads."""
-    tmp = path + '.tmp'
+    mid-write. Tmp path includes PID so two concurrent writers don't race on the
+    same tmp file."""
+    tmp = f"{path}.{os.getpid()}.tmp"
     df.to_csv(tmp, **to_csv_kwargs)
     os.replace(tmp, path)
 
@@ -3825,11 +3827,18 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     elif _DATA_DOWNLOADED_THIS_SESSION:
         print("\n  [session cache] Data already downloaded earlier this run — skipping redownload.")
     else:
+        # Track success of BOTH downloads — only cache the flag if both succeed,
+        # otherwise subsequent horizons retry. Previously the flag got set even
+        # when one download silently failed, causing stale-data cascades across
+        # horizons.
+        macro_ok = False
+        ohlcv_ok = False
         print("\n  Updating macro & sentiment data...")
         t0 = time.time()
         try:
             import download_macro_data
             download_macro_data.main()
+            macro_ok = True
         except ImportError:
             print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
         except Exception as e:
@@ -3837,9 +3846,18 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
 
         t0 = time.time()
-        update_all_data(assets_list)
+        try:
+            update_all_data(assets_list)
+            ohlcv_ok = True
+        except Exception as e:
+            print(f"  WARNING: OHLCV data update failed: {e}")
         print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
-        _DATA_DOWNLOADED_THIS_SESSION = True
+
+        if macro_ok and ohlcv_ok:
+            _DATA_DOWNLOADED_THIS_SESSION = True
+        else:
+            print(f"  [session cache] NOT setting download-cache flag (macro_ok={macro_ok}, ohlcv_ok={ohlcv_ok}) "
+                  f"— next horizon will retry. Current horizon proceeds on whatever is on disk.")
 
     best_models = []
 

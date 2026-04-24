@@ -911,6 +911,14 @@ Deep audit of live trader + backtest engine flagged 7 silent-failure / logical-b
 
 **Deployment safety:** all fixes tested with syntax parse + sample invocations. Live trader impact: zero functional change on healthy path. New behavior only kicks in when something is genuinely broken (refuse-to-trade + Telegram alert), which is what we want.
 
+**Re-audit (2026-04-24 late evening) — 2 follow-up bugs from the fixes themselves:**
+
+- **Atomic write tmp-path collision (CRITICAL)** — both `_atomic_write_json` and `_atomic_write_csv` used `path + '.tmp'`. Two concurrent writers (e.g., parallel HRST subprocesses) would collide on the same tmp file; one's content could overwrite the other's before `os.replace`. **Fix**: tmp path now includes PID (`path + f'.{os.getpid()}.tmp'`). Also applied to `crypto_revolut_ed_v2.py:save_trading_config`.
+
+- **Partial data download flag (HIGH)** — `_DATA_DOWNLOADED_THIS_SESSION = True` was set after the download block regardless of whether macro and OHLCV actually succeeded. If one failed silently, subsequent horizons would skip the retry and run on partial/stale data. **Fix**: track `macro_ok` + `ohlcv_ok` flags; only cache-flag when BOTH succeed. Partial success prints a diagnostic and next horizon retries.
+
+Re-audit also verified: all 7 original fixes clean, no regressions, label float/NaN cascade correct, Mode T max_iter still honored under tighter tolerance, feature-refuse paths cleanly return None, regime error propagation complete, staleness check handles all tz permutations, model-fit logging thread-safe under GIL.
+
 ### Closed 2026-04-24 (sparse-feature quarantine + dropna warning + AB matrix relaunched)
 
 **Discovery:** all prior HRST runs (V1, V4, first AB matrix) trained on only **672 clean rows** out of a 1440-row (60d) window because `deriv_oi_*` (3 cols, ~50% NaN) and `ob_imbalance, spread_bps, avg_iv, iv_skew` (4 cols, ~93% NaN) had short history — dropna cascaded and wiped half the window. Models were effectively trained on the most recent 28 days, not 60. V1 and V4 promotion decisions were made on biased data.
