@@ -1029,7 +1029,14 @@ def process_asset(asset, trading_cfg, dry_run=False):
         return None
 
     # Detect regime — determines horizon, confidence, and max_position
+    # Fix #2 (2026-04-24): detect_regime now returns 'error' sentinel when the
+    # detector fails structurally (unknown name, exception, PySR NaN inputs).
+    # Refuse to trade this cycle; Telegram alert already fired by detector.
+    # Cold-start insufficient-data still falls through to 'bull' (graceful).
     regime_label, regime_cfg = detect_regime(asset, df_raw)
+    if regime_label == 'error':
+        print(f"  [!!] {asset}: regime detector returned ERROR — skipping cycle")
+        return None
     regime_horizon = regime_cfg.get('horizon')
     regime_min_conf = regime_cfg.get('min_confidence')
     if regime_cfg.get('max_position_usd'):

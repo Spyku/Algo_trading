@@ -53,6 +53,27 @@ from crypto_trading_system_ed import (
 )
 from sklearn.preprocessing import StandardScaler
 
+# ── Rate-limited Telegram alerts (Fix #2 — 2026-04-24) ─────────────────
+# Library-level helper; crypto_revolut_ed_v2.py has its own copy for the
+# trader-orchestration layer. Kept separate to avoid circular imports.
+_TG_RATE_LIMIT_LT = {}  # key -> last_sent_epoch
+
+def _rate_limited_telegram_lt(key, msg, cooldown_sec=3600):
+    """Send Telegram alert; skip if same `key` alerted within cooldown_sec.
+    Never raises — safe for use in except blocks."""
+    import time as _t
+    now = _t.time()
+    last = _TG_RATE_LIMIT_LT.get(key, 0)
+    if now - last < cooldown_sec:
+        return False
+    _TG_RATE_LIMIT_LT[key] = now
+    try:
+        send_telegram(msg)
+        return True
+    except Exception:
+        return False
+
+
 # ── Regime detection ──────────────────────────────────────────────────
 REGIME_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config', 'regime_config_ed.json')
 _regime_config_cache = {}
@@ -81,8 +102,12 @@ def detect_regime(asset, df_prices):
         df_prices: DataFrame with at least 'close', 'high', 'low', 'datetime' columns
 
     Returns:
-        tuple: (regime_str, active_config) where regime_str is 'bull' or 'bear'
+        tuple: (regime_str, active_config) where regime_str is
+               'bull' | 'bear' | 'error'  (Fix #2 2026-04-24: 'error' added)
                and active_config is {'horizon': int, 'min_confidence': int, 'max_position_usd': float}
+
+        Callers MUST check regime_str=='error' and refuse to trade that cycle.
+        Telegram alert has already been sent by the detector on 'error' return.
     """
     cfg = load_regime_config()
     asset_cfg = cfg.get(asset, {})
@@ -96,8 +121,12 @@ def detect_regime(asset, df_prices):
     det_type = detector.get('type', 'fixed')
     params = detector.get('params', {})
 
-    # Evaluate detector
+    # Evaluate detector — may return None on unrecoverable error
     is_bull = _evaluate_detector(det_type, params, df_prices, asset)
+
+    if is_bull is None:
+        # Detector errored. Telegram already sent. Refuse to trade this cycle.
+        return 'error', {}
 
     regime = 'bull' if is_bull else 'bear'
     active = asset_cfg.get(regime, asset_cfg.get('bull', {}))
@@ -106,7 +135,17 @@ def detect_regime(asset, df_prices):
 
 
 def _evaluate_detector(det_type, params, df, asset):
-    """Evaluate a regime detector. Returns True for bull, False for bear."""
+    """Evaluate a regime detector.
+
+    Returns:
+        True  = bull
+        False = bear
+        None  = UNRECOVERABLE error (unknown detector type / unhandled exception).
+                Caller MUST refuse to trade. Rate-limited Telegram alert fired.
+
+    Per-branch: insufficient data → silent bull default (cold-start tolerance).
+    Unknown-name / exception / PySR-unevaluable → None + Telegram (Fix #2 2026-04-24).
+    """
     try:
         if det_type == 'fixed':
             return params.get('regime', 'bull') == 'bull'
@@ -115,7 +154,7 @@ def _evaluate_detector(det_type, params, df, asset):
             fast = int(params.get('fast', 24))
             slow = int(params.get('slow', 100))
             if len(df) < slow + 10:
-                return True  # not enough data, default bull
+                return True  # cold-start: not enough data, silent bull default
             sma_fast = df['close'].rolling(fast).mean().iloc[-1]
             sma_slow = df['close'].rolling(slow).mean().iloc[-1]
             return sma_fast > sma_slow
@@ -154,25 +193,46 @@ def _evaluate_detector(det_type, params, df, asset):
             return _evaluate_named_detector(params.get('name', ''), df)
 
         else:
-            print(f"  [!] Unknown regime detector type: {det_type}")
-            return True  # default bull
+            # Unknown detector type = config error, not graceful degradation.
+            print(f"  [!!] Unknown regime detector type: {det_type} — REFUSING to trade")
+            _rate_limited_telegram_lt(
+                f'regime_unknown_type_{det_type}',
+                f"🚨 {asset}: unknown regime detector type '{det_type}' — refusing to trade this cycle. Fix config/regime_config_ed.json.",
+            )
+            return None  # caller must refuse
 
     except Exception as e:
-        print(f"  [!] Regime detection error: {e}")
-        return True  # default bull
+        print(f"  [!!] Regime detection exception ({det_type}): {e} — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            f'regime_exception_{asset}_{det_type}',
+            f"🚨 {asset}: regime detector '{det_type}' raised exception: {e} — refusing to trade this cycle.",
+        )
+        return None  # caller must refuse
 
 
 def _evaluate_named_detector(name, df):
     """Evaluate a named detector. Must mirror the dict in
     crypto_trading_system_ed.py::_build_regime_indicators_and_detectors.
     Supported names: sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h.
+
+    Return convention (Fix #2 2026-04-24):
+        True  = bull
+        False = bear
+        None  = unknown name OR unhandled exception — caller MUST refuse to trade.
+    Insufficient-data returns True (cold-start default).
     """
     import numpy as _np
     if not name:
-        return True
+        # Empty name = unconfigured detector = real error
+        print(f"  [!!] Named detector called with empty name — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            'regime_named_empty',
+            "🚨 regime_detector.params.name is empty/unconfigured — refusing to trade. Check config/regime_config_ed.json.",
+        )
+        return None
     try:
         if name == 'sma24>sma100':
-            if len(df) < 110: return True
+            if len(df) < 110: return True  # cold-start
             return df['close'].rolling(24).mean().iloc[-1] > df['close'].rolling(100).mean().iloc[-1]
 
         if name == 'sma168>sma480':
@@ -205,23 +265,43 @@ def _evaluate_named_detector(name, df):
             if len(df) < 680: return True
             return _np.log(df['close'].iloc[-1] / df['close'].iloc[-672]) > 0
 
-        print(f"  [!] Unknown named detector: {name}")
-        return True
+        # Unknown name = typo in config = real error
+        print(f"  [!!] Unknown named detector: '{name}' — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            f'regime_named_unknown_{name}',
+            f"🚨 Unknown regime detector name '{name}' — refusing to trade. Valid: sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h.",
+        )
+        return None
     except Exception as e:
-        print(f"  [!] Named detector '{name}' error: {e}")
-        return True
+        print(f"  [!!] Named detector '{name}' exception: {e} — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            f'regime_named_exc_{name}',
+            f"🚨 Named detector '{name}' raised: {e} — refusing to trade this cycle.",
+        )
+        return None
 
 
 def _evaluate_pysr_detector(params, df, asset):
-    """Evaluate a PySR-discovered regime formula."""
+    """Evaluate a PySR-discovered regime formula.
+
+    Return convention (Fix #2 2026-04-24):
+        True  = bull
+        False = bear
+        None  = missing JSON, unevaluable formula, NaN inputs, or exception
+                → caller MUST refuse to trade. Rate-limited Telegram alert.
+    """
     model_file = params.get('model_file', '')
     expr_index = int(params.get('expression_index', 0))
     threshold = float(params.get('threshold', 0.5))
 
     model_path = os.path.join(os.path.dirname(__file__), model_file)
     if not os.path.exists(model_path):
-        print(f"  [!] PySR regime model not found: {model_path}")
-        return True
+        print(f"  [!!] PySR regime model not found: {model_path} — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            f'pysr_regime_missing_{model_file}',
+            f"🚨 PySR regime model missing: {model_file} — refusing to trade. Run Mode P or fix config.",
+        )
+        return None
 
     try:
         with open(model_path, 'r', encoding='utf-8') as f:
@@ -229,7 +309,12 @@ def _evaluate_pysr_detector(params, df, asset):
 
         expressions = pysr_data.get('expressions', [])
         if expr_index >= len(expressions):
-            return True
+            print(f"  [!!] PySR regime: expression_index {expr_index} out of range (have {len(expressions)}) — REFUSING")
+            _rate_limited_telegram_lt(
+                f'pysr_regime_idx_{model_file}',
+                f"🚨 PySR regime: expression_index {expr_index} out of range for {model_file} (have {len(expressions)}) — refusing to trade.",
+            )
+            return None
 
         expr = expressions[expr_index]
         equation = expr.get('sympy_format', expr.get('equation', ''))
@@ -250,20 +335,27 @@ def _evaluate_pysr_detector(params, df, asset):
                     local_dict[fname] = val
                 else:
                     bad_feats.append(f"{fname}(NaN)")
-                    local_dict[fname] = 0.0
             else:
                 bad_feats.append(f"{fname}(missing)")
-                local_dict[fname] = 0.0
         if bad_feats:
-            print(f"  [!] PySR regime model {model_file}: {len(bad_feats)} unusable features {bad_feats[:5]} -- defaulting to BULL")
-            return True
+            # Any missing/NaN feature = unreliable prediction = refuse
+            print(f"  [!!] PySR regime {model_file}: {len(bad_feats)} unusable features {bad_feats[:5]} — REFUSING to trade")
+            _rate_limited_telegram_lt(
+                f'pysr_regime_feats_{model_file}',
+                f"🚨 PySR regime {model_file}: {len(bad_feats)} NaN/missing features ({bad_feats[:3]}) — refusing to trade.",
+            )
+            return None
 
         result = float(sympy.sympify(equation).evalf(subs=local_dict))
         return result <= threshold  # <= threshold = bull, > threshold = bear
 
     except Exception as e:
-        print(f"  [!] PySR regime eval error: {e}")
-        return True
+        print(f"  [!!] PySR regime eval exception: {e} — REFUSING to trade")
+        _rate_limited_telegram_lt(
+            f'pysr_regime_exc_{model_file}',
+            f"🚨 PySR regime {model_file} raised: {e} — refusing to trade.",
+        )
+        return None
 
 # ============================================================
 # STRATEGY CONFIG
