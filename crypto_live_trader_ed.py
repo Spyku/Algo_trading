@@ -50,6 +50,7 @@ from crypto_trading_system_ed import (
     HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
     download_asset, load_data, build_all_features,
     get_decay_weights, _compute_pysr_features,
+    _log_fit_exception,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -569,20 +570,43 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         )
     if not feature_cols:
         if metrics_out is not None:
-            metrics_out['feature_set_a_fallback'] = True
-        # Fix #5A (2026-04-24): FEATURE_SET_A fallback is CRITICAL.
-        # The model was trained on a specific feature set; falling back to
-        # FEATURE_SET_A means we're running a DIFFERENT model than the one
-        # in backtest. Has to reach Telegram.
-        print(f"  [!!] {asset_name} {horizon}h: NO configured features matched -- falling back to FEATURE_SET_A (DIFFERENT MODEL)")
+            metrics_out['refused_zero_features'] = True
+        # Fix #3 (2026-04-24): REFUSE to trade instead of FEATURE_SET_A fallback.
+        # The old fallback silently ran a DIFFERENT model than the one in
+        # production.csv — user's backtest expectations no longer apply. If in
+        # cash, refusal = miss opportunity (safe). If invested, refusal = stay
+        # in position until features are restored or user intervenes (also safe
+        # — shield/max_hold/disaster-brake still gate SELL downstream once a
+        # real signal reappears). Either is preferable to silent model swap.
+        print(f"  [!!!] {asset_name} {horizon}h: ZERO configured features available — REFUSING TO TRADE.")
         _rate_limited_telegram_lt(
-            f'feat_fallback_{asset_name}_{horizon}',
-            f"🚨 {asset_name} {horizon}h: ZERO configured features match build — falling back to FEATURE_SET_A. "
-            f"The model is now running on features it was NOT trained with. Check crypto_ed_production.csv "
-            f"optimal_features vs current build_all_features output.",
+            f'feat_refuse_{asset_name}_{horizon}',
+            f"🛑 {asset_name} {horizon}h: REFUSING TO TRADE — zero configured features match current build. "
+            f"Prod model's optimal_features don't exist in build_all_features output. "
+            f"Check crypto_ed_production.csv vs current feature pipeline. "
+            f"Trader stays in current position until features are restored.",
             severity='critical',
         )
-        feature_cols = [f for f in FEATURE_SET_A if f in all_cols]
+        return None
+
+    # Severe partial mismatch: >50% of configured features missing also refuses.
+    # Re-training on <50% of the intended feature set is effectively a different
+    # model — worse than refusing. Threshold is intentionally loose: 50%+
+    # available still trades with degraded signal + warns; below that = refuse.
+    coverage = len(feature_cols) / max(len(feature_list), 1)
+    if coverage < 0.50:
+        if metrics_out is not None:
+            metrics_out['refused_low_coverage'] = True
+        print(f"  [!!!] {asset_name} {horizon}h: only {len(feature_cols)}/{len(feature_list)} features "
+              f"({coverage*100:.0f}%) — REFUSING TO TRADE (threshold 50%).")
+        _rate_limited_telegram_lt(
+            f'feat_low_cov_{asset_name}_{horizon}',
+            f"🛑 {asset_name} {horizon}h: REFUSING TO TRADE — feature coverage {coverage*100:.0f}% "
+            f"({len(feature_cols)}/{len(feature_list)}, min 50%). Missing: {missing_feats[:5]}"
+            f"{'...' if len(missing_feats)>5 else ''}. Model drift too large.",
+            severity='critical',
+        )
+        return None
 
     # Fix #4 (2026-04-24): forward-fill THEN zero-fill (not zero-only).
     # Old behavior: fillna(0.0) — numerically wrong for log-returns where 0 is
@@ -620,20 +644,52 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
     i = n - 1
     row = df.iloc[i]
 
-    # Staleness refusal: if the latest row used for inference is more than
-    # horizon+2h behind the freshest bar in df_full, abort with a loud warning.
-    # Prevents silent stale-signal bugs when upstream data sources are late.
+    # Staleness refusal — two checks, both refuse on fail:
+    # (1) Internal gap: `row` (used for inference) vs freshest bar in df_full.
+    #     Should be ~0. Non-zero means dropna ate recent rows (NaN in a required
+    #     feature). Threshold: 2h = missed at least one hourly candle.
+    # (2) Wall-clock staleness: freshest bar in df_full vs datetime.now().
+    #     Catches the case where df_full itself hasn't been updated recently
+    #     (data pipeline failure, network hiccup, stale dump). Threshold: 2h.
+    # Fix #5 (2026-04-24): tightened from `horizon+2` to fixed 2h. `horizon+2`
+    # was too loose (10h staleness acceptable at horizon=8h). Added wall-clock
+    # check which the old logic missed entirely.
+    from datetime import datetime, timezone
     try:
         latest_raw_dt = pd.to_datetime(df_full.iloc[-1]['datetime'])
         latest_used_dt = pd.to_datetime(row['datetime'])
+        if latest_raw_dt.tzinfo is None:
+            latest_raw_dt = latest_raw_dt.tz_localize('UTC')
+        if latest_used_dt.tzinfo is None:
+            latest_used_dt = latest_used_dt.tz_localize('UTC')
         lag_hours = (latest_raw_dt - latest_used_dt).total_seconds() / 3600.0
+        now = datetime.now(timezone.utc)
+        wall_lag_hours = (now - latest_raw_dt).total_seconds() / 3600.0
         if metrics_out is not None:
             metrics_out['inference_row_age_h'] = round(lag_hours, 2)
-        if lag_hours > horizon + 2:
-            print(f"  [!!] {asset_name} {horizon}h: inference row is {lag_hours:.1f}h stale (>horizon+2h) -- REFUSING to emit signal")
+            metrics_out['data_wall_age_h'] = round(wall_lag_hours, 2)
+        if lag_hours > 2:
+            print(f"  [!!] {asset_name} {horizon}h: inference row is {lag_hours:.1f}h behind latest bar (>2h) — REFUSING")
+            _rate_limited_telegram_lt(
+                f'stale_inference_{asset_name}_{horizon}',
+                f"🛑 {asset_name} {horizon}h: REFUSING — inference row is {lag_hours:.1f}h behind freshest bar "
+                f"(likely dropna ate recent rows due to missing/NaN feature). Check P1 data pipeline.",
+                severity='critical',
+            )
             return None
-    except Exception:
-        pass
+        if wall_lag_hours > 2:
+            print(f"  [!!] {asset_name} {horizon}h: freshest bar is {wall_lag_hours:.1f}h old (wall clock >2h) — REFUSING")
+            _rate_limited_telegram_lt(
+                f'stale_wall_{asset_name}_{horizon}',
+                f"🛑 {asset_name} {horizon}h: REFUSING — freshest bar in df_full is {wall_lag_hours:.1f}h old "
+                f"(wall clock). Data pipeline not updating. Check downloads.",
+                severity='critical',
+            )
+            return None
+    except Exception as e:
+        # Don't mask staleness check errors silently — log + refuse.
+        print(f"  [!!] {asset_name} {horizon}h: staleness check raised {e} — REFUSING")
+        return None
 
     train_start = max(0, i - window)
     train = df.iloc[train_start:i]
@@ -657,7 +713,8 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
             model.fit(X_train_s, y_train, sample_weight=sw)
             votes.append(model.predict(X_test_s)[0])
             probas.append(model.predict_proba(X_test_s)[0][1])
-        except Exception:
+        except Exception as e:
+            _log_fit_exception(f'generate_live_signal/{model_name}', e)
             continue
     if metrics_out is not None:
         metrics_out['model_fit_sec'] = round(_tm.time() - _fit_start, 2)
@@ -736,7 +793,14 @@ def generate_regime_signal(asset, df_raw=None):
             return None
 
     # Detect regime
+    # Fix #4 (2026-04-24): refuse to trade when detect_regime returns 'error'
+    # sentinel (structural detector failure: unknown name, exception, PySR NaN).
+    # Previously this function proceeded with `horizon=6` default + empty config,
+    # silently trading as if bull-at-6h regardless of detector state.
     regime, active_cfg = detect_regime(asset, df_raw)
+    if regime == 'error':
+        print(f"  [!!] {asset}: regime detector returned ERROR — refusing regime-based signal")
+        return None
     horizon = active_cfg.get('horizon', 6)
     min_conf = active_cfg.get('min_confidence', 85)
 

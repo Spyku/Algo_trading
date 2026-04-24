@@ -303,6 +303,10 @@ BACKTEST_FEE_PER_LEG = 0.0005
 # Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
 # Used for A/B testing so all matrix variants see the same data snapshot.
 NO_DATA_UPDATE = False
+# Session-scoped guard: Mode D sets this True after the first successful download,
+# so subsequent horizons in an HRST run reuse the same data snapshot instead of
+# redownloading 4× (which also drifts the tail timestamp across horizons).
+_DATA_DOWNLOADED_THIS_SESSION = False
 # Override for disabled_features.json's `enabled` flag. None = use file as-is.
 # True/False via --trim-override on|off so A/B matrix doesn't touch prod config.
 TRIM_ENABLED_OVERRIDE = None
@@ -378,6 +382,35 @@ def _atomic_write_json(path, data):
     with open(tmp, 'w') as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
+
+
+def _atomic_write_csv(df, path, **to_csv_kwargs):
+    """Write a DataFrame to CSV atomically: temp file + os.replace. Protects live
+    trader / other readers from seeing partial writes if the process crashes
+    mid-write. Use this for any write to crypto_ed_production.csv or other
+    files that another process reads."""
+    tmp = path + '.tmp'
+    df.to_csv(tmp, **to_csv_kwargs)
+    os.replace(tmp, path)
+
+
+# Session-scoped seen-exception cache — suppresses duplicate error logs from
+# per-iteration model-fit exception handlers (Fix #7 2026-04-24). Previously
+# those blocks did `except Exception: continue` with zero visibility; if all
+# iterations failed, the outer loop produced "no votes" with no explanation.
+# Now the first occurrence of each (context, ExceptionClass, short_message)
+# is printed, later ones are silent — so logs stay clean but failures surface.
+_EXCEPTION_SEEN = set()
+
+
+def _log_fit_exception(context, exc):
+    """One-line print the first time a (context, exception-class, short-msg) triple
+    is seen in the process. Subsequent identical failures stay quiet."""
+    key = (context, type(exc).__name__, str(exc)[:120])
+    if key in _EXCEPTION_SEEN:
+        return
+    _EXCEPTION_SEEN.add(key)
+    print(f"    [fit-exc][{context}] {type(exc).__name__}: {str(exc)[:120]}")
 
 
 def _compute_optuna_score(result):
@@ -762,16 +795,21 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
 
+    # Compute labels as float (0.0/1.0) so NaN stays NaN at the tail. Previous
+    # code cast directly to int which coerced `NaN > threshold` (=False) to 0 —
+    # silently mislabeling the last `horizon` rows as "negative class" instead
+    # of dropping them. Downstream dropna(subset=['label']) removes the NaN tail.
     if LABEL_THRESHOLD_PCT is not None:
-        df['label'] = (future_return > LABEL_THRESHOLD_PCT).astype(int)
+        label_raw = (future_return > LABEL_THRESHOLD_PCT).astype(float)
     elif LABEL_MODE == 'fee_aware':
         # Fee-aware: label=1 only when future return exceeds round-trip cost
-        df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
+        label_raw = (future_return > 2 * TRADING_FEE).astype(float)
     else:
         # Rolling median on PAST realized returns (no lookahead)
         past_return = df['close'] / df['close'].shift(horizon) - 1
         rolling_median = past_return.rolling(200, min_periods=50).median()
-        df['label'] = (future_return > rolling_median).astype(int)
+        label_raw = (future_return > rolling_median).astype(float)
+    df['label'] = label_raw.where(future_return.notna(), np.nan)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_5h',
@@ -2283,7 +2321,8 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
                     proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
                 probas.append(proba[1])
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'generate_signals/{model_name}', e)
                 continue
 
         if not votes:
@@ -2678,7 +2717,8 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
                 model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'_quick_score/{model_name}', e)
                 continue
         if not votes:
             continue
@@ -3656,7 +3696,8 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                 model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'_deku_eval_with_pruning/{model_name}', e)
                 continue
         if not votes:
             step_idx += 1
@@ -3773,9 +3814,16 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
     print("=" * 70)
 
-    # Download fresh data (skippable via --no-data-update for A/B matrix testing)
+    # Download fresh data (skippable via --no-data-update for A/B matrix testing).
+    # Also skipped if a prior Mode D in the same session already downloaded — so
+    # HRST's 4-horizon loop doesn't redownload 4× and drift the tail timestamp
+    # across horizons (which would make Mode S compare signals across different
+    # data snapshots).
+    global _DATA_DOWNLOADED_THIS_SESSION
     if NO_DATA_UPDATE:
         print("\n  [--no-data-update] Skipping macro + OHLCV downloads (using on-disk snapshot).")
+    elif _DATA_DOWNLOADED_THIS_SESSION:
+        print("\n  [session cache] Data already downloaded earlier this run — skipping redownload.")
     else:
         print("\n  Updating macro & sentiment data...")
         t0 = time.time()
@@ -3791,6 +3839,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         t0 = time.time()
         update_all_data(assets_list)
         print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+        _DATA_DOWNLOADED_THIS_SESSION = True
 
     best_models = []
 
@@ -4586,7 +4635,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                 df_existing = df_existing[~mask]
             df_prod = pd.concat([df_existing, df_prod], ignore_index=True)
 
-        df_prod.to_csv(PRODUCTION_CSV, index=False)
+        _atomic_write_csv(df_prod, PRODUCTION_CSV, index=False)
         print(f"\n  Production model saved: {PRODUCTION_CSV}")
         for prod_row, h, best_conf in production_models:
             print(f"    {prod_row['coin']} {h}h: {prod_row['best_combo']}  w={prod_row['best_window']}h  "
@@ -4611,8 +4660,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
             trading_config[asset]['horizon'] = h
             trading_config[asset]['min_confidence'] = best_conf
 
-        with open(tcfg_path, 'w') as f:
-            json.dump(trading_config, f, indent=2)
+        _atomic_write_json(tcfg_path, trading_config)
         print(f"  Trading config updated: {tcfg_path}")
         for prod_row, h, best_conf in production_models:
             print(f"    {prod_row['coin']}: horizon={h}h, min_confidence={best_conf}%")
@@ -5196,6 +5244,94 @@ def run_mode_t(assets_list, args=None):
             wr = (winners / len(trade_log) * 100) if trade_log else 0
             return ret, len(trade_log), wr, blocked
 
+        def _sim_regime_switched(tagged, bull_min_pnl, bear_min_pnl, max_hold_h,
+                                  bull_rally_cfg, bear_rally_cfg):
+            """Single-pool regime-switched simulator — mirrors live trader.
+            ONE $1000 cash pool; each bar reads the active regime's signal,
+            confidence threshold, shield min_pnl, and rally-cooldown gate.
+            Compounds through regime flips. Contrast _sim_horizon: that one
+            trades a SINGLE horizon over ALL bars with its own pool; summing
+            two _sim_horizon returns double-counts capital and trades each
+            horizon on bars it would never actually see in production.
+            """
+            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+            trade_log, blocked = [], 0
+            hold_since_entry = 0
+            bull_cd = bear_cd = 0
+
+            closes = np.array([float(s['close']) for s in tagged])
+            def _rr_arr(h):
+                out = np.full(len(closes), np.nan)
+                if h and h < len(closes):
+                    out[h:] = (closes[h:] / closes[:-h] - 1.0) * 100.0
+                return out
+            bh_s = bh_l = 0; bt_s = bt_l = 0.0; bcd_h = 0
+            bull_rs = bull_rl = None
+            if bull_rally_cfg is not None:
+                bh_s, bh_l, bt_s, bt_l, bcd_h = bull_rally_cfg
+                bull_rs = _rr_arr(bh_s); bull_rl = _rr_arr(bh_l)
+            rh_s = rh_l = 0; rt_s = rt_l = 0.0; rcd_h = 0
+            bear_rs = bear_rl = None
+            if bear_rally_cfg is not None:
+                rh_s, rh_l, rt_s, rt_l, rcd_h = bear_rally_cfg
+                bear_rs = _rr_arr(rh_s); bear_rl = _rr_arr(rh_l)
+
+            for i, s in enumerate(tagged):
+                price = s['close']
+                regime = s.get('regime', 'bull')
+                conf_thr = float(s.get('conf_threshold', 0))
+                min_pnl = bull_min_pnl if regime == 'bull' else bear_min_pnl
+                if in_pos:
+                    hold_since_entry += 1
+                # Both gates armed on every bar — trader does the same
+                if bcd_h > 0:
+                    rs = bull_rs[i] if not np.isnan(bull_rs[i]) else 0
+                    rl = bull_rl[i] if not np.isnan(bull_rl[i]) else 0
+                    if rs >= bt_s or rl >= bt_l:
+                        bull_cd = max(bull_cd, bcd_h)
+                if rcd_h > 0:
+                    rs = bear_rs[i] if not np.isnan(bear_rs[i]) else 0
+                    rl = bear_rl[i] if not np.isnan(bear_rl[i]) else 0
+                    if rs >= rt_s or rl >= rt_l:
+                        bear_cd = max(bear_cd, rcd_h)
+                active_cd = bull_cd if regime == 'bull' else bear_cd
+
+                if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
+                    if active_cd > 0:
+                        pass
+                    else:
+                        held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
+                        cash = 0
+                        in_pos = True
+                        entry_px = price
+                        hold_since_entry = 0
+                elif s['signal'] == 'SELL' and in_pos:
+                    cur_pnl = (price / entry_px - 1) * 100
+                    override_expired = hold_since_entry >= max_hold_h
+                    quick_release = (QR_ENABLED and min_pnl > 0
+                                     and hold_since_entry <= QR_MAX_HOURS
+                                     and float(s.get('confidence', 0)) >= QR_MIN_CONF)
+                    if (min_pnl <= 0 or cur_pnl >= min_pnl or override_expired
+                            or quick_release):
+                        cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
+                        trade_log.append(cur_pnl)
+                        held = 0
+                        in_pos = False
+                        hold_since_entry = 0
+                    else:
+                        blocked += 1
+
+                if bull_cd > 0: bull_cd -= 1
+                if bear_cd > 0: bear_cd -= 1
+
+            final = cash if not in_pos else held * tagged[-1]['close']
+            if in_pos:
+                trade_log.append((tagged[-1]['close'] / entry_px - 1) * 100)
+            ret = (final / 1000.0 - 1) * 100
+            winners = sum(1 for t in trade_log if t > 0)
+            wr = (winners / len(trade_log) * 100) if trade_log else 0
+            return ret, len(trade_log), wr, blocked
+
         # Run sweep per horizon
         horizon_results = {}
         for h in test_horizons:
@@ -5288,7 +5424,11 @@ def run_mode_t(assets_list, args=None):
         TOL_HOLD = 2     # max_hold_hours within ±2 h
         TOL_GATE_H = 4   # h_short / h_long windows within ±4 h
         TOL_GATE_T = 0.5 # t_short / t_long thresholds within ±0.5 pp
-        TOL_GATE_CD = 6  # cd_hours within ±6 h
+        # cd_hours within ±2 h — tightened 2026-04-24 from ±6h.
+        # ±6h was too loose for short cooldowns (cd=10h vs cd=16h flagged as
+        # converged when they're structurally different behavior). ±2h matches
+        # TOL_HOLD semantics: small numeric jitter allowed, big jumps flagged.
+        TOL_GATE_CD = 2  # cd_hours within ±2 h
 
         def _rc_close(rc_a, rc_b):
             """True if two rally-cooldown tuples are within tolerance or both absent."""
@@ -5366,10 +5506,24 @@ def run_mode_t(assets_list, args=None):
             print(f"  Using per-regime gates: bull={_desc(bull_rally_cfg)} | "
                   f"bear={_desc(bear_rally_cfg)}")
 
-            # All-OFF baseline (with current gate applied per regime)
-            base_bull, _, _, _ = _sim_horizon(bull_sigs, bull_conf, 0, 999, bull_rally_cfg)
-            base_bear, _, _, _ = _sim_horizon(bear_sigs, bear_conf, 0, 999, bear_rally_cfg)
-            base_total = base_bull + base_bear
+            # Build single regime-tagged signal stream (one per bar).
+            # Mode T uses a SINGLE $1000 pool switching horizons per regime —
+            # matching the live trader. Prior implementation summed two
+            # standalone per-horizon sims (each with its own $1000 pool),
+            # which double-counted capital and traded each horizon on bars
+            # it would never see in production.
+            tagged = _merge_tagged_signals(asset, bull_sigs, bear_sigs, regime_config[asset])
+            n_bull = sum(1 for s in tagged if s['regime'] == 'bull')
+            n_bear = len(tagged) - n_bull
+            print(f"  Tagged stream: {len(tagged)} bars (bull={n_bull} bear={n_bear})")
+
+            # Diagnostic — standalone per-horizon returns (NOT used for selection)
+            diag_bull, _, _, _ = _sim_horizon(bull_sigs, bull_conf, 0, 999, bull_rally_cfg)
+            diag_bear, _, _, _ = _sim_horizon(bear_sigs, bear_conf, 0, 999, bear_rally_cfg)
+
+            # All-OFF baseline — regime-switched, one pool
+            base_total, base_tr, base_wr, _ = _sim_regime_switched(
+                tagged, 0, 0, 999, bull_rally_cfg, bear_rally_cfg)
 
             best_total = None
             best_quad = None
@@ -5380,19 +5534,22 @@ def run_mode_t(assets_list, args=None):
                         for bear_on in (False, True):
                             bull_t = t if bull_on else 0
                             bear_t = t if bear_on else 0
-                            b_ret, _, _, _ = _sim_horizon(bull_sigs, bull_conf, bull_t, fh, bull_rally_cfg)
-                            r_ret, _, _, _ = _sim_horizon(bear_sigs, bear_conf, bear_t, fh, bear_rally_cfg)
-                            total = b_ret + r_ret
-                            rows_print.append((t, fh, bull_on, bear_on, b_ret, r_ret, total))
+                            total, tr, wr, bl = _sim_regime_switched(
+                                tagged, bull_t, bear_t, fh,
+                                bull_rally_cfg, bear_rally_cfg)
+                            rows_print.append((t, fh, bull_on, bear_on, total, tr, wr))
                             if best_total is None or total > best_total:
                                 best_total = total
                                 best_quad = (t, fh, bull_on, bear_on)
 
-            rows_print.sort(key=lambda r: -r[6])
+            rows_print.sort(key=lambda r: -r[4])
             print(f"  Top 3 shield combos: "
-                  f"{' / '.join(f'thr={r[0]:.2f} fh={r[1]}h bull={r[2]} bear={r[3]} tot={r[6]:+.2f}%' for r in rows_print[:3])}")
-            print(f"  Baseline (all-OFF, gate applied): "
-                  f"bull={base_bull:+.2f}% bear={base_bear:+.2f}% total={base_total:+.2f}%")
+                  f"{' / '.join(f'thr={r[0]:.2f} fh={r[1]}h bull={r[2]} bear={r[3]} tot={r[4]:+.2f}% n={r[5]} wr={r[6]:.0f}%' for r in rows_print[:3])}")
+            print(f"  Baseline (all-OFF, gate applied): regime-switched={base_total:+.2f}% "
+                  f"[{base_tr} trades, WR {base_wr:.0f}%]")
+            print(f"  Diagnostic per-horizon (NOT used for selection): "
+                  f"bull={diag_bull:+.2f}% bear={diag_bear:+.2f}% "
+                  f"(sum={diag_bull+diag_bear:+.2f}% ← old bug: 2× capital, wrong bars)")
 
             t_win, fh_win, bull_on, bear_on = best_quad
             if best_total > base_total:
@@ -6053,8 +6210,28 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
         qr_max_hours = float(qr_cfg.get('max_hours', 3))
 
+        # Other-regime existing gate (only used during per-regime sweeps so
+        # the sweep sees the currently-deployed gate on the bars it isn't
+        # directly sweeping — prevents the bear sweep from choosing a gate
+        # that assumes no bull gate exists, which was causing T<->G oscillation).
+        other_regime = 'bear' if regime_filter == 'bull' else ('bull' if regime_filter == 'bear' else None)
+        o_hs = o_hl = 0
+        o_ts = o_tl = 0.0
+        o_cd_h = 0
+        o_rs_arr = o_rl_arr = None
+        if other_regime is not None:
+            o_gate = asset_cfg.get(other_regime, {}).get('rally_cooldown') or {}
+            if o_gate.get('enabled'):
+                try:
+                    o_hs = int(o_gate['h_short']); o_hl = int(o_gate['h_long'])
+                    o_ts = float(o_gate['t_short_pct']); o_tl = float(o_gate['t_long_pct'])
+                    o_cd_h = int(o_gate['cd_hours'])
+                    o_rs_arr = rr_dict.get(o_hs); o_rl_arr = rr_dict.get(o_hl)
+                except (KeyError, TypeError, ValueError):
+                    o_cd_h = 0
+
         cash = 1000.0; qty = 0.0; in_pos = False; entry = 0.0
-        hold = 0; trades = 0; skipped = 0; cd = 0
+        hold = 0; trades = 0; skipped = 0; cd = 0; other_cd = 0
         ec = [1000.0]
         n = len(sigs)
         rs_arr = rr_dict.get(h_s); rl_arr = rr_dict.get(h_l)
@@ -6062,37 +6239,44 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
             s = sigs[i]; price = s['close']
             regime = s.get('regime', 'bull')
             conf_thr = bull_conf if regime == 'bull' else bear_conf
-            # Trigger check: only when this bar's regime matches the filter
-            # (or filter='all' = every bar). Enables per-regime gate sweeps.
+            # Sweep-candidate gate trigger: only on bars matching the filter
+            # (or every bar for filter='all').
             if cd_h > 0 and rs_arr is not None and rl_arr is not None:
                 if regime_filter == 'all' or regime_filter == regime:
                     rs = rs_arr[i]; rl = rl_arr[i]
                     if (rs == rs and rs >= t_s) or (rl == rl and rl >= t_l):
                         cd = max(cd, cd_h)
+            # Other-regime's existing gate: only on other regime's bars
+            if o_cd_h > 0 and o_rs_arr is not None and regime == other_regime:
+                rs = o_rs_arr[i]; rl = o_rl_arr[i]
+                if (rs == rs and rs >= o_ts) or (rl == rl and rl >= o_tl):
+                    other_cd = max(other_cd, o_cd_h)
             ec.append(cash + qty * price if in_pos else cash)
+            # Fill price at CURRENT bar close — matches _sim_horizon,
+            # _sim_regime_switched, and live maker-order semantics (fill within
+            # ~3 min at bid+0.01, i.e. ~current-bar close). Prior next-bar-close
+            # convention added an unmodeled hour of price drift per trade.
             if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
-                if cd > 0:
+                # BUY blocked by whichever cooldown is active on THIS bar's regime
+                active_cd = cd if (regime_filter == 'all' or regime == regime_filter) else other_cd
+                if active_cd > 0:
                     skipped += 1
                 else:
-                    fp = sigs[i+1]['close'] if i+1 < n else price
-                    qty = cash * (1 - FEE) / fp
-                    cash = 0.0; in_pos = True; entry = fp; hold = 0
+                    qty = cash * (1 - FEE) / price
+                    cash = 0.0; in_pos = True; entry = price; hold = 0
             elif s['signal'] == 'SELL' and in_pos:
-                fp = sigs[i+1]['close'] if i+1 < n else price
-                cur = (fp / entry - 1.0) * 100.0
-                # Shield uses the CURRENT bar's regime — matches live trader,
-                # which re-evaluates regime on every tick.
+                cur = (price / entry - 1.0) * 100.0
                 shield_on = bull_shield if regime == 'bull' else bear_shield
                 shield_min = min_sell_pnl if shield_on else 0.0
-                # Quick-release: strong SELL within N cycles of entry bypasses shield
                 quick_release = (qr_enabled and shield_on
                                  and hold <= qr_max_hours
                                  and float(s.get('confidence', 0)) >= qr_min_conf)
                 if cur >= shield_min or hold >= max_hold or quick_release:
-                    cash = qty * fp * (1 - FEE)
+                    cash = qty * price * (1 - FEE)
                     trades += 1; in_pos = False; qty = 0.0; entry = 0.0; hold = 0
             if in_pos: hold += 1
             if cd > 0: cd -= 1
+            if other_cd > 0: other_cd -= 1
         if in_pos:
             cash = qty * sigs[-1]['close'] * (1 - FEE); trades += 1
         pnl = (cash / 1000.0 - 1.0) * 100.0

@@ -854,6 +854,63 @@ Optional flags:
 
 10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
 
+### Closed 2026-04-24 evening (7-point safety audit — all critical paths hardened)
+
+Deep audit of live trader + backtest engine flagged 7 silent-failure / logical-bug classes. All fixed the same evening (2-3h of work). Each fix is minimal and tested.
+
+**Audit findings + fixes (severity order):**
+
+1. **Label mislabeling at tail** (CRITICAL) — [crypto_trading_system_ed.py:767-782](crypto_trading_system_ed.py#L767)
+   - `future_return.shift(-horizon)` is NaN for the last `horizon` rows. `(NaN > threshold).astype(int)` coerced to 0, silently marking those rows as negative class.
+   - Over 1440-row window with horizon=8 → 8 rows poisoned as false SELL examples. Gamma-weighting gives recent rows highest weight = disproportionate training bias toward SELL-at-peak.
+   - **Fix**: cast to `.astype(float)` then `.where(future_return.notna(), np.nan)`. Downstream dropna removes the NaN tail cleanly. Verified: built df ends exactly `horizon` hours before raw data end.
+
+2. **Mode T `cd_hours` convergence tolerance too loose** (HIGH) — [crypto_trading_system_ed.py:5396](crypto_trading_system_ed.py#L5396)
+   - `TOL_GATE_CD = 6` → cd=10h vs cd=16h considered "converged." But 60% longer cooldown is structurally different behavior.
+   - **Fix**: tightened to `TOL_GATE_CD = 2` (matches `TOL_HOLD` semantics). Convergence gate now catches oscillating cooldowns that previously shipped silently.
+
+3. **FEATURE_SET_A silent fallback when features missing** (HIGH) — [crypto_live_trader_ed.py:570](crypto_live_trader_ed.py#L570)
+   - If a prod model's `optimal_features` didn't match the current build, trader silently fell back to `FEATURE_SET_A` — a 30-feature default the model was NEVER trained with. Decision boundary broke silently.
+   - **Fix**: refuse to trade (`return None`) + critical Telegram alert when ZERO features match. Also added severe-partial threshold: coverage < 50% → refuse with Telegram alert. Verified current V4 prod models all at 100% coverage.
+
+4. **Regime detector 'error' sentinel silently defaulting to bull** (HIGH) — [crypto_live_trader_ed.py:762](crypto_live_trader_ed.py#L762), [crypto_revolut_ed_v2.py:1723](crypto_revolut_ed_v2.py#L1723)
+   - Main `process_asset` trader path already handled 'error' (from earlier Fix #2). But the legacy `generate_regime_signal` defaulted to `horizon=6` + empty cfg and traded anyway. The `/status` Telegram handler displayed 'error' as 🔴 bear.
+   - **Fix**: both legacy paths now refuse; `/status` displays `⚠️ DETECTOR ERROR (refusing trades)`.
+
+5. **Staleness threshold too loose** (MEDIUM) — [crypto_live_trader_ed.py:649](crypto_live_trader_ed.py#L649)
+   - Old check: `if lag_hours > horizon + 2: refuse`. At horizon=8h, allowed 10h of staleness. No wall-clock check at all — missed the case where `df_full` itself was stale.
+   - **Fix**: two checks, both with fixed 2h threshold:
+     - Internal gap (inference row vs freshest bar in `df_full`) > 2h → refuse + Telegram
+     - Wall-clock staleness (freshest bar vs `datetime.now(UTC)`) > 2h → refuse + Telegram
+   - Hardened tz-awareness guard so naive vs aware comparisons don't raise. Replaced the `except: pass` wrapper with `except: refuse`.
+
+6. **Non-atomic writes to live config/prod files** (MEDIUM) — multiple sites
+   - `with open(path, 'w'): json.dump(...)` creates a truncated file mid-write. Race window (~10-100ms) where live trader's hot-reload could read partial JSON → `JSONDecodeError`.
+   - **Fix**: added `_atomic_write_csv()` helper (mirrors existing `_atomic_write_json`). Patched 3 sites:
+     - `crypto_trading_system_ed.py:4616` — `crypto_ed_production.csv` write
+     - `crypto_trading_system_ed.py:4641` — `regime_config_ed.json` write
+     - `crypto_revolut_ed_v2.py:185` — `save_trading_config()` now tempfile + `os.replace`
+   - All writes atomic via `os.replace()` (atomic on modern NTFS/POSIX). Readers see OLD or NEW, never half-written.
+
+7. **Silent model-fit exception swallowing** (MEDIUM) — 4 sites
+   - `except Exception: continue` in signal-generation model.fit/predict loops hid GPU OOM, scaling errors, all-NaN features. Outer loop showed "no votes" with zero diagnostic.
+   - **Fix**: added `_log_fit_exception(context, exc)` helper with session-scoped dedup set — first occurrence of each `(context, ExceptionClass, short_msg)` triple prints once, subsequent repeats stay silent. No log spam, but failure modes surface.
+   - Patched: `generate_signals` (ed.py:2324), `_quick_score` (ed.py:2720), `_deku_eval_with_pruning` (ed.py:3699), `generate_live_signal` (live_trader.py:715). Live trader imports helper lazily from main module.
+
+**Audit false positives (flagged by auditor, verified not bugs):**
+
+- **`rs == rs` NaN guard at rally_cooldown simulator**: auditor claimed tautology, but `float('nan') == float('nan')` returns False in Python/NumPy, so `rs == rs` is the standard idiomatic NaN check. Behavior is correct.
+- **Signal cache reuse across T↔G iterations**: signals are shield/gate-independent (shield applied AFTER signal generation), so caching across iterations is actually correct.
+
+**Not fixed (intentional):**
+
+- **`except Exception: pass` in Windows priority / orphan worker cleanup**: non-critical setup steps, intentional tolerance.
+- **Config cold-start fallbacks to `{}`**: expected behavior when file doesn't exist yet.
+- **`os.startfile()` GUI open**: cosmetic, platform-specific.
+- **Funding rate load falling back to None**: documented semantic.
+
+**Deployment safety:** all fixes tested with syntax parse + sample invocations. Live trader impact: zero functional change on healthy path. New behavior only kicks in when something is genuinely broken (refuse-to-trade + Telegram alert), which is what we want.
+
 ### Closed 2026-04-24 (sparse-feature quarantine + dropna warning + AB matrix relaunched)
 
 **Discovery:** all prior HRST runs (V1, V4, first AB matrix) trained on only **672 clean rows** out of a 1440-row (60d) window because `deriv_oi_*` (3 cols, ~50% NaN) and `ob_imbalance, spread_bps, avg_iv, iv_skew` (4 cols, ~93% NaN) had short history — dropna cascaded and wiped half the window. Models were effectively trained on the most recent 28 days, not 60. V1 and V4 promotion decisions were made on biased data.

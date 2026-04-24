@@ -181,9 +181,15 @@ def load_trading_config():
     return defaults
 
 def save_trading_config(cfg):
+    """Atomic write — trader hot-reloads regime_config_ed.json on mtime change;
+    a direct `open('w') + json.dump` creates a race window where readers could
+    see an empty or partial file. tempfile + os.replace is atomic on modern
+    filesystems."""
     os.makedirs('config', exist_ok=True)
-    with open(REGIME_CONFIG_FILE, 'w') as f:
+    tmp = REGIME_CONFIG_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(cfg, f, indent=2)
+    os.replace(tmp, REGIME_CONFIG_FILE)
 
 
 # ============================================================
@@ -1721,8 +1727,13 @@ def _handle_status_command(with_charts=False):
             if df_raw is not None:
                 try:
                     regime, active_cfg = detect_regime(asset, df_raw)
-                    icon = '🔵' if regime == 'bull' else '🔴'
-                    regime_label = f"{icon} {regime.upper()} {active_cfg.get('horizon','?')}h@{active_cfg.get('min_confidence','?')}%"
+                    if regime == 'error':
+                        # Fix #4 (2026-04-24): 'error' sentinel should display as a
+                        # warning, not fall through to the bear icon.
+                        regime_label = f"⚠️ DETECTOR ERROR (refusing trades)"
+                    else:
+                        icon = '🔵' if regime == 'bull' else '🔴'
+                        regime_label = f"{icon} {regime.upper()} {active_cfg.get('horizon','?')}h@{active_cfg.get('min_confidence','?')}%"
                 except Exception:
                     pass
             if df_raw is not None and len(df_raw) >= 4:
