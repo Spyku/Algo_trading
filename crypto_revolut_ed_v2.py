@@ -3313,7 +3313,8 @@ def run_all_once(trading_cfg, dry_run=False):
                 p1.add('fear_greed')
             return p1
         try:
-            manifest = _json.load(open(manifest_path))
+            with open(manifest_path) as _mf:
+                manifest = _json.load(_mf)
         except Exception:
             return p1
         for a, c in trading_cfg.items():

@@ -709,17 +709,21 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     rs = gain / loss
     df['rsi_14h'] = 100 - (100 / (1 + rs))
 
+    # Flat-price guards: all divisors below can be 0 on stablecoin hours or
+    # illiquid windows. +1e-10 matches the ATR-ratio safeguards elsewhere in
+    # this function (line 772-ish). Previously produced inf/NaN that silently
+    # degraded LGBM feature quality.
     low14  = df['low'].rolling(14).min()
     high14 = df['high'].rolling(14).max()
-    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
+    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14 + 1e-10)
 
     bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
-    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std + 1e-10)
 
     roll_mean = df['close'].rolling(50).mean()
     roll_std  = df['close'].rolling(50).std()
-    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
+    df['zscore_50h'] = (df['close'] - roll_mean) / (roll_std + 1e-10)
 
     tr = pd.DataFrame({
         'hl': df['high'] - df['low'],
@@ -732,7 +736,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 
     df['volatility_12h'] = df['logret_1h'].rolling(12).std()
     df['volatility_48h'] = df['logret_1h'].rolling(48).std()
-    df['vol_ratio_12_48'] = df['volatility_12h'] / df['volatility_48h']
+    df['vol_ratio_12_48'] = df['volatility_12h'] / (df['volatility_48h'] + 1e-10)
 
     if df['volume'].sum() == 0 or df['volume'].isna().all():
         df['volume_ratio_h'] = 1.0
