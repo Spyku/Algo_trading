@@ -47,6 +47,30 @@ from crypto_live_trader_ed import (
 
 
 # ============================================================
+# RATE-LIMITED TELEGRAM ALERTS (Fix #1 — 2026-04-24)
+# Prevents per-cycle Telegram spam when a source is persistently failing.
+# Keyed so different (source, context) pairs alert independently.
+# ============================================================
+_TELEGRAM_RATE_LIMIT = {}  # key -> last_sent_epoch
+
+def _rate_limited_telegram(key, msg, cooldown_sec=3600):
+    """Send Telegram alert; skip if same `key` alerted within cooldown_sec.
+    Returns True if sent, False if suppressed by cooldown.
+    Never raises — safe for use in except blocks."""
+    import time as _t
+    now = _t.time()
+    last = _TELEGRAM_RATE_LIMIT.get(key, 0)
+    if now - last < cooldown_sec:
+        return False
+    _TELEGRAM_RATE_LIMIT[key] = now
+    try:
+        send_telegram(msg)
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================
 # TRADING CONFIG (per-asset strategies + max positions)
 # ============================================================
 REGIME_CONFIG_FILE = 'config/regime_config_ed.json'
@@ -993,14 +1017,15 @@ def process_asset(asset, trading_cfg, dry_run=False):
     symbol = trading_cfg.get('symbol', f'{asset}-USD')
     max_usd = trading_cfg.get('max_position_usd', 0)
 
-    # Download data first — needed for regime detection
-    try:
-        download_asset(asset, update_only=True)
-    except Exception:
-        pass
-
+    # Fix #1 (2026-04-24): removed redundant download_asset call. The P1 block
+    # in run_all_once already refreshed this asset's OHLCV at cycle start.
+    # The old silent `except Exception: pass` had hidden every failure here.
     df_raw = load_data(asset)
     if df_raw is None:
+        _rate_limited_telegram(
+            f'load_data_{asset}',
+            f'🚨 {asset}: load_data returned None — CSV missing or unreadable. Check P1 download logs.',
+        )
         return None
 
     # Detect regime — determines horizon, confidence, and max_position
@@ -3017,7 +3042,10 @@ def run_all_once(trading_cfg, dry_run=False):
         return {k for k in p1 if k in _SOURCE_REGISTRY}
 
     def _refresh_sources(keys, label):
-        """Iterate source keys; for each, skip if fresh else download. Never raises."""
+        """Iterate source keys; for each, skip if fresh else download. Never raises.
+        Fix #1 (2026-04-24): failures now emit rate-limited Telegram alerts
+        (once/hour per source+label) on top of the console log. Prevents silent
+        download outages from persisting unnoticed."""
         stale = [k for k in keys if not _file_is_fresh(_SOURCE_REGISTRY[k]['file'], _SOURCE_REGISTRY[k]['max_age_sec'])]
         if not stale:
             print(f"  [{label}] all fresh ({len(keys)} sources) — skip")
@@ -3028,6 +3056,10 @@ def run_all_once(trading_cfg, dry_run=False):
                 _SOURCE_REGISTRY[k]['fn']()
             except Exception as _e:
                 print(f"  [{label}] [!] {k}: {_e}")
+                _rate_limited_telegram(
+                    f'datadep_{label}_{k}',
+                    f"🚨 [{label}] {k} download failed: {_e}",
+                )
 
     # --- PHASE 1: P1 required sources (BLOCKING before signal) ---
     p1_keys = _compute_p1_sources()
