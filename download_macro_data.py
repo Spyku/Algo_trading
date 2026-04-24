@@ -32,11 +32,46 @@ FRESHNESS_SECONDS = 3600  # 1 hour
 
 
 def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
-    """Return True if file exists and was modified within max_age_seconds."""
+    """Return True if file's LAST-ROW datetime is within max_age_seconds.
+    Fix #7 (2026-04-24): content-aware, not mtime-aware. Catches partial
+    downloads that bumped mtime but didn't advance data, and write-on-empty-
+    response cases where the CSV was rewritten with the same last row.
+
+    Looks for a 'datetime' / 'date' / 'timestamp' column (any one suffices).
+    Falls back to mtime if no time column is recognizable, so edge-case
+    files (snapshot-ring files without a datetime column) still have some
+    staleness gate."""
     if not os.path.exists(filepath):
         return False
-    age = time.time() - os.path.getmtime(filepath)
-    return age < max_age_seconds
+    try:
+        # Efficient: only parse the column we care about
+        df = pd.read_csv(filepath, usecols=lambda c: c in ('datetime', 'date', 'timestamp'))
+        if len(df) == 0:
+            return False
+        if 'datetime' in df.columns:
+            last = pd.to_datetime(df['datetime'].iloc[-1])
+        elif 'date' in df.columns:
+            last = pd.to_datetime(df['date'].iloc[-1])
+        elif 'timestamp' in df.columns:
+            # Binance OHLCV uses ms-epoch timestamp
+            last = pd.to_datetime(df['timestamp'].iloc[-1], unit='ms')
+        else:
+            # No recognizable time column — fall back to mtime
+            age = time.time() - os.path.getmtime(filepath)
+            return age < max_age_seconds
+
+        # Make both sides tz-aware at UTC for a clean subtraction
+        if last.tzinfo is None:
+            last = last.tz_localize('UTC')
+        age_sec = (pd.Timestamp.now(tz='UTC') - last).total_seconds()
+        return age_sec < max_age_seconds
+    except Exception:
+        # CSV unreadable (corrupted, locked, etc.) — fall back to mtime
+        try:
+            age = time.time() - os.path.getmtime(filepath)
+            return age < max_age_seconds
+        except Exception:
+            return False
 
 
 # ============================================================

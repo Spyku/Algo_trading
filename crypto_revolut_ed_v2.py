@@ -3017,10 +3017,33 @@ def run_all_once(trading_cfg, dry_run=False):
     _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
 
     def _file_is_fresh(relpath, max_age_sec):
+        """Fix #7 (2026-04-24): content-aware freshness using last-row datetime.
+        Looks for a 'datetime' / 'date' / 'timestamp' column and checks its
+        most recent value against max_age. Falls back to mtime on any failure.
+        Catches partial downloads that bumped mtime but didn't advance data."""
         fp = os.path.join(os.path.dirname(__file__), relpath)
         if not os.path.exists(fp):
             return False
-        return (_time.time() - os.path.getmtime(fp)) < max_age_sec
+        try:
+            import pandas as _pd
+            df = _pd.read_csv(fp, usecols=lambda c: c in ('datetime', 'date', 'timestamp'))
+            if len(df) == 0:
+                return False
+            if 'datetime' in df.columns:
+                last = _pd.to_datetime(df['datetime'].iloc[-1])
+            elif 'date' in df.columns:
+                last = _pd.to_datetime(df['date'].iloc[-1])
+            elif 'timestamp' in df.columns:
+                last = _pd.to_datetime(df['timestamp'].iloc[-1], unit='ms')
+            else:
+                # Snapshot ring files with no time column — use mtime
+                return (_time.time() - os.path.getmtime(fp)) < max_age_sec
+            if last.tzinfo is None:
+                last = last.tz_localize('UTC')
+            age_sec = (_pd.Timestamp.now(tz='UTC') - last).total_seconds()
+            return age_sec < max_age_sec
+        except Exception:
+            return (_time.time() - os.path.getmtime(fp)) < max_age_sec
 
     # --- Source registry: every downloadable source, with freshness + download fn ---
     try:
