@@ -51,16 +51,22 @@ OUTPUT_DIR = os.path.join(ENGINE_DIR, 'output')
 DATA_DIR = os.path.join(ENGINE_DIR, 'data')
 MACRO_DIR = os.path.join(DATA_DIR, 'macro_data')
 
-# Files to snapshot/restore — anything HRST reads that could change across runs
+# Files to mirror into the isolated matrix data directory (Fix #10, 2026-04-24)
+# Anything HRST reads through load_data / build_all_features belongs here.
 SNAPSHOT_FILES = [
     'data/eth_hourly_data.csv',
     'data/btc_hourly_data.csv',
+    'data/xrp_hourly_data.csv',
+    'data/sol_hourly_data.csv',
+    'data/link_hourly_data.csv',
     'data/macro_data/macro_hourly.csv',
     'data/macro_data/macro_daily.csv',
     'data/macro_data/cross_asset.csv',
     'data/macro_data/fear_greed.csv',
     'data/macro_data/onchain_eth.csv',
     'data/macro_data/onchain_btc.csv',
+    'data/macro_data/onchain_xrp.csv',
+    'data/macro_data/onchain_link.csv',
     'data/macro_data/derivatives_eth.csv',
     'data/macro_data/derivatives_btc.csv',
     'data/macro_data/stablecoin_flows.csv',
@@ -69,32 +75,49 @@ SNAPSHOT_FILES = [
 ]
 
 
-def snapshot_data(snapshot_dir: str):
-    """Copy current state of all data files to snapshot_dir."""
-    os.makedirs(snapshot_dir, exist_ok=True)
+def build_isolated_data_dir(matrix_data_dir: str):
+    """Fix #10 (2026-04-24): mirror live data/ into an ISOLATED directory.
+    Each variant's HRST subprocess will be invoked with `--data-dir
+    matrix_data_dir` so it reads from here, never from live data/.
+    Live trader's data/ is completely untouched by the matrix.
+
+    Mirror preserves directory structure (data_matrix_<ts>/macro_data/*.csv)
+    so the override is a drop-in replacement of the root."""
+    os.makedirs(matrix_data_dir, exist_ok=True)
+    os.makedirs(os.path.join(matrix_data_dir, 'macro_data'), exist_ok=True)
     n_copied = 0
     for rel in SNAPSHOT_FILES:
         src = os.path.join(ENGINE_DIR, rel)
         if not os.path.exists(src):
             continue
-        dst = os.path.join(snapshot_dir, rel.replace('/', '__').replace('\\', '__'))
+        # Preserve path structure: data/foo.csv → matrix_data_dir/foo.csv
+        # data/macro_data/foo.csv → matrix_data_dir/macro_data/foo.csv
+        rel_no_prefix = rel[len('data/'):] if rel.startswith('data/') else rel
+        dst = os.path.join(matrix_data_dir, rel_no_prefix)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(src, dst)
         n_copied += 1
     return n_copied
 
 
+# Legacy aliases — keep callers happy during transition. Both map to new
+# isolated-dir behavior. restore_data is now a no-op (the mirror is read-only
+# across variants; HRST uses --no-data-update so nothing writes to it).
+def snapshot_data(snapshot_dir: str):
+    return build_isolated_data_dir(snapshot_dir)
+
 def restore_data(snapshot_dir: str):
-    """Restore all data files from snapshot_dir back to live paths."""
-    n_restored = 0
+    """No-op under Fix #10: matrix variants read from the isolated mirror via
+    --data-dir; they never touch live data/. Return count of mirror files for
+    logging compatibility."""
+    if not os.path.isdir(snapshot_dir):
+        return 0
+    n = 0
     for rel in SNAPSHOT_FILES:
-        dst = os.path.join(ENGINE_DIR, rel)
-        src = os.path.join(snapshot_dir, rel.replace('/', '__').replace('\\', '__'))
-        if not os.path.exists(src):
-            continue
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(src, dst)
-        n_restored += 1
-    return n_restored
+        rel_no_prefix = rel[len('data/'):] if rel.startswith('data/') else rel
+        if os.path.exists(os.path.join(snapshot_dir, rel_no_prefix)):
+            n += 1
+    return n
 
 
 def read_trim_enabled():
@@ -246,8 +269,13 @@ def run_hrst(label: str, trim_enabled: bool, meta_p, snapshot_dir: str, dry_run:
     print(f'  VARIANT: {label}  |  trim={trim_enabled}  |  meta={meta_p}  |  floor={"OFF" if no_feature_floor else "ON"}  |  seed={optuna_seed or "default(42)"}')
     print('=' * 80)
 
+    # Fix #10 (2026-04-24): pass --data-dir pointing at the isolated mirror.
+    # Mode T reads ONLY from there; live data/ is never touched. Previously
+    # the runner restored-in-place, which was the root cause of the trader's
+    # 2026-04-23 stale-data incident.
     cmd = [PY, 'crypto_trading_system_ed.py', 'HRST', 'ETH', '5,6,7,8h',
            '--replay', '1440', '--no-persist', '--no-data-update',
+           '--data-dir', snapshot_dir,
            '--trim-override', 'on' if trim_enabled else 'off']
     if meta_p is not None:
         cmd += ['--meta-filter', str(meta_p)]
@@ -257,16 +285,16 @@ def run_hrst(label: str, trim_enabled: bool, meta_p, snapshot_dir: str, dry_run:
         cmd += ['--optuna-seed', str(optuna_seed)]
 
     if dry_run:
-        print(f'  [DRY-RUN] restore snapshot; trim via --trim-override (no config file write)')
+        print(f'  [DRY-RUN] isolated data-dir: {snapshot_dir}')
         print(f'  [DRY-RUN] would run: {" ".join(cmd)}')
         return {'variant': label, 'status': 'dry_run',
                 'trim_enabled': trim_enabled, 'meta_threshold': meta_p,
                 'feature_floor': not no_feature_floor,
                 'optuna_seed': optuna_seed}
 
-    # Restore data snapshot so all variants see the same bars
-    n_restored = restore_data(snapshot_dir)
-    print(f'  restored {n_restored} files from snapshot')
+    # Mirror is already populated by build_isolated_data_dir at startup;
+    # variants share the same read-only mirror. No restore needed.
+    print(f'  data-dir: {snapshot_dir} (isolated — live data/ untouched)')
     print(f'  trim via CLI flag (--trim-override {"on" if trim_enabled else "off"}) — prod config untouched')
     print(f'  command: {" ".join(cmd)}')
     start = time.time()
@@ -317,8 +345,8 @@ def run_vol_test(snapshot_dir: str, dry_run: bool):
     if dry_run:
         print(f'  [DRY-RUN] would run: {" ".join(cmd)}')
         return {'variant': 'vol_scaled', 'status': 'dry_run'}
-    if not dry_run:
-        restore_data(snapshot_dir)
+    # Fix #10: no restore needed — vol test reads live data but is standalone
+    # and doesn't compete with HRST variants for feature consistency.
     start = time.time()
     try:
         result = subprocess.run(cmd, cwd=ENGINE_DIR, capture_output=False)
@@ -350,24 +378,29 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     tag = datetime.now().strftime('%Y%m%d_%H%M%S')
     results_csv = os.path.join(OUTPUT_DIR, f'ab_matrix_results_{tag}.csv')
-    snapshot_dir = os.path.join(DATA_DIR, f'_ab_snapshot_{tag}')
+    # Fix #10 (2026-04-24): isolated data mirror — NO LONGER a snapshot that
+    # restores onto live data/. Each variant reads from this dir via --data-dir.
+    # Live trader's data/ is completely untouched by the matrix.
+    snapshot_dir = os.path.join(ENGINE_DIR, f'data_matrix_{tag}')
 
     print(f'\n{"#"*80}')
     print(f'#  FACTORIAL A/B MATRIX — ETH HRST')
     print(f'#  replay: 1440h (2mo, matches current market regime)')
     print(f'#  --no-persist: all runs are research-only, production untouched')
-    print(f'#  --no-data-update + frozen snapshot: all variants on identical data')
+    print(f'#  --data-dir + isolated mirror: all variants on identical data, live data/ untouched')
     print(f'#  results CSV: {results_csv}')
-    print(f'#  snapshot dir: {snapshot_dir}')
+    print(f'#  isolated mirror: {snapshot_dir}')
     print(f'#  dry-run: {args.dry_run}  |  skip-vol: {args.skip_vol}')
     print(f'{"#"*80}\n')
 
-    # Freeze data at matrix start — all variants restore from here
+    # Build the isolated data mirror at matrix start. Variants pass
+    # --data-dir <mirror> to Mode T; no restore needed between variants.
     if not args.dry_run:
-        n = snapshot_data(snapshot_dir)
-        print(f'Snapshotted {n} data files to {snapshot_dir}\n')
+        n = build_isolated_data_dir(snapshot_dir)
+        print(f'Mirrored {n} data files into isolated dir: {snapshot_dir}')
+        print(f'Live data/ will NOT be touched by any variant.\n')
     else:
-        print(f'[DRY-RUN] would snapshot {len(SNAPSHOT_FILES)} data files\n')
+        print(f'[DRY-RUN] would mirror {len(SNAPSHOT_FILES)} data files\n')
 
     current_trim = read_trim_enabled()
     print(f'config/disabled_features.json state: enabled={current_trim} '

@@ -245,27 +245,50 @@ ACTIVE_FEATURE_SET = 'A'
 # ============================================================
 # ASSET CONFIGURATION
 # ============================================================
-ASSETS = {
-    # Crypto universe pruned 2026-04-19: dropped DOGE/ADA/AVAX/DOT (weak priors, no
-    # diversification edge vs ETH). Kept: ETH (prod), BTC (standby), SOL (testing),
-    # LINK (standby), XRP (decorrelation candidate).
-    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
-    'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_hourly_data.csv', 'start': '2019-01-01T00:00:00Z'},
-    'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
-    'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
-    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
-}
+# Fix #10 (2026-04-24): data-dir is overridable via --data-dir CLI flag OR
+# ED_DATA_DIR env var. Matrix/research runners write their own copy to
+# data_matrix_<ts>/ and point here, so live trader's data/ is untouched.
+DATA_DIR = os.environ.get('ED_DATA_DIR', 'data')
+MACRO_DIR = os.environ.get('ED_MACRO_DIR', os.path.join(DATA_DIR, 'macro_data'))
+
+_ASSET_DEFS = [
+    # Crypto universe pruned 2026-04-19: dropped DOGE/ADA/AVAX/DOT.
+    ('BTC',   'binance',  'BTC/USDT',  'btc_hourly_data.csv',  '2017-08-01T00:00:00Z'),
+    ('ETH',   'binance',  'ETH/USDT',  'eth_hourly_data.csv',  '2017-08-01T00:00:00Z'),
+    ('XRP',   'binance',  'XRP/USDT',  'xrp_hourly_data.csv',  '2018-05-01T00:00:00Z'),
+    ('SOL',   'binance',  'SOL/USDT',  'sol_hourly_data.csv',  '2020-08-01T00:00:00Z'),
+    ('LINK',  'binance',  'LINK/USDT', 'link_hourly_data.csv', '2019-01-01T00:00:00Z'),
+    ('SMI',   'yfinance', '^SSMI',     'smi_hourly_data.csv',  None),
+    ('DAX',   'yfinance', '^GDAXI',    'dax_hourly_data.csv',  None),
+    ('CAC40', 'yfinance', '^FCHI',     'cac40_hourly_data.csv', None),
+]
+
+def _build_assets_dict():
+    """Build ASSETS dict using current DATA_DIR. Call after DATA_DIR changes."""
+    return {
+        asset: {'source': src, 'ticker': tkr,
+                'file': os.path.join(DATA_DIR, fname),
+                'start': start}
+        for (asset, src, tkr, fname, start) in _ASSET_DEFS
+    }
+
+ASSETS = _build_assets_dict()
+
+def set_data_dir(new_dir):
+    """Override the data directory. Must be called BEFORE any load_data /
+    build_all_features. Rebuilds ASSETS dict to pick up new paths."""
+    global DATA_DIR, MACRO_DIR, ASSETS
+    DATA_DIR = new_dir
+    MACRO_DIR = os.path.join(new_dir, 'macro_data')
+    ASSETS = _build_assets_dict()
 
 HORIZON_SHORT = 4                 # short horizon (parametric — change here to switch)
 HORIZON_LONG = 8                  # long horizon (parametric — change here to switch)
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
 PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 
-# Create output folders
-for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
+# Create output folders (keeps default data/ dir alive even if --data-dir points elsewhere)
+for _d in [DATA_DIR, MACRO_DIR, 'data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
 TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
@@ -794,8 +817,9 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 # ============================================================
 # V2: MACRO & SENTIMENT FEATURES
 # ============================================================
-MACRO_DIR = 'data/macro_data'
-DATA_DIR = 'data'
+# Fix #10 (2026-04-24): DATA_DIR and MACRO_DIR are defined ABOVE (line ~248)
+# so that --data-dir override works. CHARTS/MODELS/CONFIG are never isolated
+# (matrix variants write to `_noprod_<label>.*` tagged names, not a separate dir).
 CHARTS_DIR = 'charts'
 MODELS_DIR = 'models'
 CONFIG_DIR = 'config'
@@ -6430,6 +6454,16 @@ def main():
     # Parse Mode F flags
     flag_restore = '--restore' in sys.argv
     flag_include_newborns = '--include-newborns' in sys.argv
+
+    # Fix #10 (2026-04-24): Parse --data-dir BEFORE anything reads files.
+    # Matrix / research runners pass their own isolated data directory so the
+    # live trader's data/ is never touched. Alternative: set ED_DATA_DIR env var.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--data-dir' and i < len(sys.argv) - 1:
+            new_dir = sys.argv[i + 1]
+            set_data_dir(new_dir)
+            print(f"  [data-dir] active: {DATA_DIR} (macro: {MACRO_DIR})")
+            break
 
     # Parse --no-persist (research: do NOT touch production CSV or regime_config_ed.json)
     # Redirects both writes to *_noprod.* files seeded with current contents.
