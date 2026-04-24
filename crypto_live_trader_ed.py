@@ -550,7 +550,9 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
             signal = 'HOLD'
 
     avg_proba = np.mean(probas)
-    confidence = round(avg_proba * 100) if signal != 'SELL' else round((1 - avg_proba) * 100)
+    # Fix #3 (2026-04-24): store 2 decimals so pinned vs noise-around-same-int
+    # is distinguishable. 85.3 >= 85 still holds so min_conf threshold unchanged.
+    confidence = round(avg_proba * 100, 2) if signal != 'SELL' else round((1 - avg_proba) * 100, 2)
 
     # Use raw data (df_raw) for last 4h — df drops last `horizon` rows due to label shift
     last_4h = []
@@ -676,20 +678,20 @@ def run_once(asset_name, _stale_warning=False):
         print(f"\n  --- {HORIZON_SHORT}h: {config_short['best_combo']} | w={config_short['best_window']}h ---")
         sig_short = generate_live_signal(asset_name, config_short, df_raw=df_raw)
         if sig_short:
-            print(f"  {sig_short['signal']} ({sig_short['confidence']:.0f}%)")
+            print(f"  {sig_short['signal']} ({sig_short['confidence']:.2f}%)")
 
     if config_long:
         print(f"\n  --- {HORIZON_LONG}h: {config_long['best_combo']} | w={config_long['best_window']}h ---")
         sig_long = generate_live_signal(asset_name, config_long, df_raw=df_raw)
         if sig_long:
-            print(f"  {sig_long['signal']} ({sig_long['confidence']:.0f}%)")
+            print(f"  {sig_long['signal']} ({sig_long['confidence']:.2f}%)")
 
     action, confidence, reason = compute_combined_signal(sig_short, sig_long)
     any_sig = sig_short or sig_long
     price = any_sig['close'] if any_sig else 0
 
     print(f"\n  {'='*50}")
-    print(f"  >>> {action} ({confidence:.0f}%) -- {reason}")
+    print(f"  >>> {action} ({confidence:.2f}%) -- {reason}")
     print(f"  {'='*50}")
 
     msg = _format_combined_message(asset_name, sig_short, sig_long, action, confidence, reason)
@@ -707,9 +709,9 @@ def _format_combined_message(asset_name, sig_short, sig_long, action, confidence
     price_str = f"${price:,.2f}" if price > 1000 else f"${price:.4f}"
 
     if action == 'BUY':
-        action_line = f"<b>ACTION: BUY</b> ({confidence:.0f}%)"
+        action_line = f"<b>ACTION: BUY</b> ({confidence:.2f}%)"
     elif action == 'SELL':
-        action_line = f"<b>ACTION: SELL</b> ({confidence:.0f}%)"
+        action_line = f"<b>ACTION: SELL</b> ({confidence:.2f}%)"
     else:
         action_line = f"<b>HOLD</b> -- no action"
 
@@ -718,7 +720,7 @@ def _format_combined_message(asset_name, sig_short, sig_long, action, confidence
     def _sig_str(sig, h):
         if not sig:
             return f"{h}h: N/A"
-        return f"{h}h: {sig['signal']} ({sig['confidence']:.0f}%)"
+        return f"{h}h: {sig['signal']} ({sig['confidence']:.2f}%)"
 
     reason_map = {
         'both_buy': f'{h_s}h + {h_l}h both BUY', 'both_sell': f'{h_s}h + {h_l}h both SELL',

@@ -1102,8 +1102,8 @@ def process_asset(asset, trading_cfg, dry_run=False):
     sig_strs = []
     for h in sorted(sigs_by_horizon.keys()):
         s = sigs_by_horizon[h]
-        sig_strs.append(f"{h}h={s['signal']}({s['confidence']:.0f}%)" if s else f"{h}h=N/A")
-    print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.0f}%) [{regime_label.upper()}] [{reason}] | pos={position['state']}")
+        sig_strs.append(f"{h}h={s['signal']}({s['confidence']:.2f}%)" if s else f"{h}h=N/A")
+    print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.2f}%) [{regime_label.upper()}] [{reason}] | pos={position['state']}")
 
     # Log signal for /chart command
     _log_signal(asset, price, sigs_by_horizon, action, confidence)
@@ -1235,9 +1235,9 @@ def process_asset(asset, trading_cfg, dry_run=False):
             quick_release = (qr_enabled and hours_held <= qr_max_hours
                              and confidence >= qr_min_conf)
             if quick_release:
-                print(f"    🛡→ QUICK-RELEASE: SELL @ {confidence:.0f}% confidence within "
+                print(f"    🛡→ QUICK-RELEASE: SELL @ {confidence:.2f}% confidence within "
                       f"{hours_held:.1f}h of entry (thr {qr_min_conf}%/{qr_max_hours}h) — trusting model")
-                send_telegram(f"🛡→ {asset} shield released: strong SELL ({confidence:.0f}%) "
+                send_telegram(f"🛡→ {asset} shield released: strong SELL ({confidence:.2f}%) "
                               f"at {hours_held:.1f}h / PnL {cur_pnl:+.2f}%")
             elif cur_pnl < min_sell_pnl and hours_held < max_hold_h:
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
@@ -1407,7 +1407,7 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None, trading_c
         def _se(sig, h):
             if not sig: return f"{h}h:N/A"
             e = '🔵' if sig['signal'] == 'BUY' else '🔴' if sig['signal'] == 'SELL' else '🟡'
-            return f"{e}{h}h:{sig['signal']}({sig['confidence']:.0f}%)"
+            return f"{e}{h}h:{sig['signal']}({sig['confidence']:.2f}%)"
 
         sigs_h = r.get('sigs_by_horizon', {})
         if sigs_h:
