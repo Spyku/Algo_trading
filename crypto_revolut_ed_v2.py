@@ -96,6 +96,26 @@ def _append_cycle_metrics(row_dict):
 
 
 # ============================================================
+# PER-ASSET TRADE MUTATION LOCK (Fix N1 — 2026-04-24)
+# Prevents the main-loop auto-cycle and the Telegram command thread from
+# BOTH initiating a trade on the same asset simultaneously. Each call site
+# try-acquires non-blocking; if busy, bails out with a user-facing message
+# rather than waiting 30-180s on a maker-order completion.
+# ============================================================
+_asset_trade_locks = {}                # {asset: threading.Lock}
+_asset_trade_locks_guard = threading.Lock()
+
+def _get_asset_trade_lock(asset):
+    """Return (creating if needed) a per-asset lock. Thread-safe lazy init."""
+    with _asset_trade_locks_guard:
+        lk = _asset_trade_locks.get(asset)
+        if lk is None:
+            lk = threading.Lock()
+            _asset_trade_locks[asset] = lk
+        return lk
+
+
+# ============================================================
 # RATE-LIMITED TELEGRAM ALERTS (Fix #1 — 2026-04-24)
 # Prevents per-cycle Telegram spam when a source is persistently failing.
 # Keyed so different (source, context) pairs alert independently.
@@ -1186,6 +1206,23 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 action = 'SELL'
                 disaster_brake = True
 
+    # Fix N1 (2026-04-24): acquire the per-asset trade lock BEFORE any auto
+    # trade execution. Non-blocking — if the Telegram thread is mid-manual-
+    # trade for this asset, skip this cycle's auto trade rather than double-
+    # trading. Released in finally after the trade blocks.
+    _asset_lock = _get_asset_trade_lock(asset)
+    _trade_lock_held = False
+    if action in ('BUY', 'SELL') and not dry_run and position.get('auto_trade'):
+        if _asset_lock.acquire(blocking=False):
+            _trade_lock_held = True
+        else:
+            print(f"    ⚠ {asset}: manual trade in progress — auto {action} SKIPPED this cycle")
+            _rate_limited_telegram(
+                f'auto_skip_manual_trade_{asset}',
+                f"⚠ {asset}: manual trade active via Telegram — auto-{action} skipped this cycle.",
+            )
+            action = 'HOLD'
+
     if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
         rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
         if rc_active:
@@ -1392,6 +1429,13 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             position['base_amount'] = 0
             position['usd_invested'] = 0
             save_position(asset, position)
+
+    # Fix N1: release per-asset trade lock now that trade execution is done
+    if _trade_lock_held:
+        try:
+            _asset_lock.release()
+        except Exception:
+            pass
 
     # Get gamma from the primary horizon model
     gamma_val = ''
@@ -1809,6 +1853,25 @@ def _manual_buy_impl(msg, trading_cfg):
         send_telegram(f"❌ {asset} not enabled")
         return
 
+    # Fix N1 (2026-04-24): acquire per-asset trade lock so auto-cycle can't
+    # start its own trade on this asset while we run. Non-blocking + fail-fast
+    # so user gets a 'busy' reply within seconds, not 180s.
+    _asset_lock = _get_asset_trade_lock(asset)
+    if not _asset_lock.acquire(blocking=False):
+        send_telegram(f"⏳ {asset}: auto-cycle trade in progress — retry in ~30s")
+        return
+
+    try:
+        _manual_buy_impl_locked(msg, trading_cfg, asset, amount_usd)
+    finally:
+        try:
+            _asset_lock.release()
+        except Exception:
+            pass
+
+
+def _manual_buy_impl_locked(msg, trading_cfg, asset, amount_usd):
+    """Trade execution body — runs inside the per-asset trade lock."""
     cfg = trading_cfg[asset]
     symbol = cfg.get('symbol', f'{asset}-USD')
     pos = load_position(asset)
@@ -1904,6 +1967,23 @@ def _manual_sell_impl(msg, trading_cfg):
         send_telegram(f"❌ {asset} not enabled")
         return
 
+    # Fix N1 (2026-04-24): per-asset trade lock (same pattern as /buy)
+    _asset_lock = _get_asset_trade_lock(asset)
+    if not _asset_lock.acquire(blocking=False):
+        send_telegram(f"⏳ {asset}: auto-cycle trade in progress — retry in ~30s")
+        return
+
+    try:
+        _manual_sell_impl_locked(msg, trading_cfg, asset)
+    finally:
+        try:
+            _asset_lock.release()
+        except Exception:
+            pass
+
+
+def _manual_sell_impl_locked(msg, trading_cfg, asset):
+    """Trade execution body — runs inside the per-asset trade lock."""
     cfg = trading_cfg[asset]
     symbol = cfg.get('symbol', f'{asset}-USD')
     pos = load_position(asset)
