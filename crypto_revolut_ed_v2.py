@@ -2883,8 +2883,73 @@ def _set_paused(val):
 # ============================================================
 # MAIN LOOP
 # ============================================================
+# Fix #6 (2026-04-24): track whether startup preflight has passed.
+# Hot-reload preflight only runs AFTER startup is complete so we don't
+# double-run at initialization. Set by main() after startup preflight.
+_TRADER_PREFLIGHT_PASSED = False
+
+
+def _validate_config_or_revert(trading_cfg, snapshot):
+    """Fix #6 (2026-04-24): re-run preflight after hot-reload. On failure,
+    revert trading_cfg in-place to the pre-reload snapshot + Telegram alert.
+    Returns True if config passed, False if reverted."""
+    if not _TRADER_PREFLIGHT_PASSED:
+        # Still in startup; let main()'s startup-preflight handle validation.
+        return True
+
+    # Regenerate manifest first (the active prod CSV may have changed too).
+    try:
+        import subprocess as _sp
+        _sp.check_call(
+            [sys.executable, os.path.join(os.path.dirname(__file__), 'tools', 'generate_feature_manifest.py')],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+    except Exception as _e:
+        print(f"  [preflight-hotreload] manifest regen failed: {_e}")
+
+    # Run preflight
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
+        from trader_preflight import preflight as _preflight
+        report = _preflight(verbose=False)
+    except Exception as _e:
+        print(f"  [preflight-hotreload] could not run ({_e}) — accepting hot-reload defensively.")
+        return True
+
+    if report.get('ok'):
+        print(f"  [preflight-hotreload] ✓ PASSED ({len(report.get('checks', []))} checks)")
+        return True
+
+    # FAIL — revert in-place so trading_cfg resumes pre-reload state.
+    failures = report.get('failures', [])
+    print(f"  [!!] [preflight-hotreload] FAILED — reverting config to pre-reload snapshot")
+    for msg in failures[:5]:
+        print(f"       ✗ {msg}")
+
+    # Revert: clear trading_cfg then repopulate from snapshot (preserve object identity
+    # because many callers hold a reference to the dict).
+    trading_cfg.clear()
+    for k, v in snapshot.items():
+        trading_cfg[k] = v
+
+    # Telegram alert
+    failures_short = '\n'.join(f'  • {m}' for m in failures[:3])
+    _rate_limited_telegram(
+        'hotreload_preflight_failed',
+        f"🚨 Hot-reload preflight FAILED — reverted to previous config.\n{failures_short}\n\n"
+        f"Fix regime_config_ed.json / crypto_ed_production.csv then re-save to trigger retry.",
+    )
+    return False
+
+
 def _reload_trading_config(trading_cfg):
-    """Hot-reload regime_config_ed.json into existing dict. Returns True if anything changed."""
+    """Hot-reload regime_config_ed.json into existing dict. Returns True if anything changed.
+    Fix #6 (2026-04-24): after applying changes, re-run preflight. On failure, revert
+    in-place to the pre-reload snapshot and send Telegram alert."""
+    import copy as _copy
+    # Snapshot BEFORE merge so we can revert if preflight fails
+    snapshot = _copy.deepcopy(trading_cfg)
+
     fresh = load_trading_config()
     changed = False
     for asset in list(fresh.keys()):
@@ -2898,6 +2963,10 @@ def _reload_trading_config(trading_cfg):
                     trading_cfg[asset][key] = fresh[asset][key]
                     print(f"  CONFIG RELOAD: {asset}.{key}: {old_val} -> {fresh[asset][key]}")
                     changed = True
+
+    if changed:
+        # Validate — revert on failure. No-op if trader hasn't finished startup.
+        _validate_config_or_revert(trading_cfg, snapshot)
     return changed
 
 
@@ -3554,12 +3623,17 @@ def main():
                 except Exception:
                     pass
                 sys.exit(2)
+            # Fix #6: mark startup complete so hot-reloads will re-run preflight.
+            global _TRADER_PREFLIGHT_PASSED
+            _TRADER_PREFLIGHT_PASSED = True
         except SystemExit:
             raise
         except Exception as _e:
             print(f"  [preflight] could not run (proceeding cautiously): {_e}")
     elif skip_preflight:
         print("  [preflight] --skip-preflight set: SKIPPING integrity check")
+        # Even when skipped, flag startup complete so hot-reloads validate.
+        _TRADER_PREFLIGHT_PASSED = True
 
     if loop_mode:
         run_loop(trading_cfg, dry_run=dry_run)
