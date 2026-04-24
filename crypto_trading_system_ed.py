@@ -280,6 +280,12 @@ BACKTEST_FEE_PER_LEG = 0.0005
 # Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
 # Used for A/B testing so all matrix variants see the same data snapshot.
 NO_DATA_UPDATE = False
+# Override for disabled_features.json's `enabled` flag. None = use file as-is.
+# True/False via --trim-override on|off so A/B matrix doesn't touch prod config.
+TRIM_ENABLED_OVERRIDE = None
+# Override for Optuna TPESampler seed. None = use default seed=42.
+# Set via --optuna-seed N for seed-robustness A/B testing.
+OPTUNA_SEED_OVERRIDE = None
 # Auto-drop features with >SPARSE_NAN_THRESHOLD fraction NaN in the training window.
 # Newer feeds (orderbook/IV) that haven't accumulated data yet would otherwise
 # collapse the training set via dropna(). 70% keeps useful-but-partial features
@@ -1392,12 +1398,18 @@ def run_mode_f(restore=False, include_newborns=False, asset='ETH'):
 
 
 def _load_disabled_features():
-    """Read config/disabled_features.json. Returns (exact_set, prefix_list, enabled_bool).
-    Cached; re-reads when the config file's mtime changes."""
+    """Read config/disabled_features.json. Returns (exact_set, prefix_list,
+    enabled_bool, always_exact_set). Cached; re-reads when file's mtime changes.
+
+    Two separate lists:
+    - disabled_exact / disabled_prefixes: Mode F Grade-1 list, toggled by
+      `enabled` flag (and --trim-override).
+    - always_disabled_exact: structurally-broken features (e.g. short history).
+      Applied REGARDLESS of enabled flag."""
     global _DISABLED_FEATURES_CACHE, _DISABLED_FEATURES_MTIME
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'disabled_features.json')
     if not os.path.exists(path):
-        return set(), [], False
+        return set(), [], False, set()
     mtime = os.path.getmtime(path)
     if _DISABLED_FEATURES_CACHE is not None and mtime == _DISABLED_FEATURES_MTIME:
         return _DISABLED_FEATURES_CACHE
@@ -1405,31 +1417,46 @@ def _load_disabled_features():
         with open(path) as f:
             cfg = json.load(f)
         enabled = bool(cfg.get('enabled', True))
+        # --trim-override takes precedence over the file's `enabled` flag so
+        # A/B matrix variants can flip trim on/off without modifying prod config.
+        if TRIM_ENABLED_OVERRIDE is not None:
+            enabled = bool(TRIM_ENABLED_OVERRIDE)
         exact = set(cfg.get('disabled_exact') or [])
         prefixes = list(cfg.get('disabled_prefixes') or [])
-        result = (exact, prefixes, enabled)
+        always = set(cfg.get('always_disabled_exact') or [])
+        result = (exact, prefixes, enabled, always)
     except Exception as e:
         print(f"  WARN: disabled_features.json unreadable ({e}) — ignoring")
-        result = (set(), [], False)
+        result = (set(), [], False, set())
     _DISABLED_FEATURES_CACHE = result
     _DISABLED_FEATURES_MTIME = mtime
     return result
 
 
 def _apply_feature_disable(all_cols, verbose=True):
-    """Filter all_cols against the disable config. Returns (filtered_cols, n_dropped)."""
-    exact, prefixes, enabled = _load_disabled_features()
-    if not enabled or (not exact and not prefixes):
+    """Filter all_cols against the disable config. Returns (filtered_cols, n_dropped).
+    Always applies `always_disabled_exact`; applies `disabled_exact/prefixes`
+    only when the `enabled` flag is True (honors --trim-override)."""
+    exact, prefixes, enabled, always = _load_disabled_features()
+    active_exact = set(always)
+    if enabled:
+        active_exact |= exact
+    if not active_exact and not (enabled and prefixes):
         return all_cols, 0
     def is_disabled(c):
-        if c in exact: return True
-        return any(c.startswith(p) for p in prefixes)
+        if c in active_exact: return True
+        if enabled:
+            return any(c.startswith(p) for p in prefixes)
+        return False
     kept = [c for c in all_cols if not is_disabled(c)]
     n_dropped = len(all_cols) - len(kept)
     if verbose and n_dropped > 0:
         samples = [c for c in all_cols if is_disabled(c)][:5]
         extra = f" ...+{n_dropped - len(samples)} more" if n_dropped > len(samples) else ""
-        print(f"    Disabled features: {n_dropped} dropped ({', '.join(samples)}{extra})")
+        always_n = sum(1 for c in all_cols if c in always)
+        trim_n = n_dropped - always_n
+        tag = f"{always_n} always-off + {trim_n} trim-off" if enabled else f"{always_n} always-off (trim off)"
+        print(f"    Disabled features: {n_dropped} dropped [{tag}] ({', '.join(samples)}{extra})")
     return kept, n_dropped
 
 
@@ -3782,7 +3809,30 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         df_full, all_cols, _ = _filter_sparse_features(df_full, all_cols)
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
-        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
+        window_rows = len(df_full)
+        clean_rows = len(df_clean)
+        retained = clean_rows / max(window_rows, 1)
+        print(f"  Clean data: {clean_rows:,} rows, {len(all_cols)} features "
+              f"({retained*100:.0f}% of {window_rows}-row window retained)")
+
+        if retained < 0.80:
+            print()
+            print("  " + "!" * 76)
+            print(f"  ! DATA LOSS WARNING: dropna removed {window_rows - clean_rows} rows "
+                  f"({100 - retained*100:.0f}% of the window)")
+            print(f"  ! Clean rows ({clean_rows}) < 80% of expected ({window_rows}).")
+            # Identify the worst offenders for the report
+            per_col_nan = df_full[all_cols].isna().sum()
+            worst = per_col_nan.sort_values(ascending=False).head(8)
+            print(f"  ! Worst NaN offenders (keeping these dropna()s is cutting rows):")
+            for col, n in worst.items():
+                if n > 0:
+                    print(f"  !   {col:30s}  {int(n):4d} NaN  ({n/window_rows*100:.0f}%)")
+            print(f"  ! Fix: add offenders to config/disabled_features.json (disabled_exact)")
+            print(f"  !      — model results here are BIASED toward whatever regime spans "
+                  f"the {clean_rows} clean rows.")
+            print("  " + "!" * 76)
+            print()
 
         if len(df_clean) < 500:
             print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
@@ -4657,7 +4707,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
         study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42),
+            sampler=optuna.samplers.TPESampler(seed=OPTUNA_SEED_OVERRIDE if OPTUNA_SEED_OVERRIDE is not None else 42),
             study_name=f'ed_v1_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
@@ -6330,6 +6380,40 @@ def main():
               f"Using whatever is currently on disk.")
         print()
 
+    # Parse --trim-override on|off — override disabled_features.json's `enabled`
+    # flag without writing to disk. Lets A/B matrix variants flip trim state
+    # without touching the prod config the live trader hot-reloads.
+    global TRIM_ENABLED_OVERRIDE
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--trim-override' and i < len(sys.argv) - 1:
+            v = sys.argv[i + 1].lower().strip()
+            if v in ('on', 'true', '1', 'yes'):
+                TRIM_ENABLED_OVERRIDE = True
+            elif v in ('off', 'false', '0', 'no'):
+                TRIM_ENABLED_OVERRIDE = False
+            else:
+                print(f"  --trim-override must be on|off (got {v!r}). Ignoring.")
+                return
+            print()
+            print(f"  [--trim-override {v}] Feature-trim enabled={TRIM_ENABLED_OVERRIDE} "
+                  f"(in-memory only — config/disabled_features.json NOT modified).")
+            print()
+
+    # Parse --optuna-seed N — override TPESampler seed (default 42).
+    # Tests whether matrix effects (floor/trim) replicate across noise realizations.
+    global OPTUNA_SEED_OVERRIDE
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--optuna-seed' and i < len(sys.argv) - 1:
+            try:
+                OPTUNA_SEED_OVERRIDE = int(sys.argv[i + 1])
+                print()
+                print(f"  [--optuna-seed {OPTUNA_SEED_OVERRIDE}] TPESampler seed override "
+                      f"(default 42). Different search path, different noise realization.")
+                print()
+            except ValueError:
+                print(f"  --optuna-seed must be an integer (got {sys.argv[i+1]!r}). Ignoring.")
+                return
+
     # Parse --max-iter N (Mode T: T<->G convergence iterations, default 4)
     flag_max_iter = 0
     for i, a in enumerate(sys.argv[1:], 1):
@@ -6497,6 +6581,10 @@ Options:
                       to A/B test floor ON vs OFF.
   --no-data-update    Research A/B: skip macro + OHLCV downloads at HRST start. Used by
                       tools/ab_matrix_runner.py so all variants see the same data snapshot.
+  --trim-override X   Research A/B: force disabled_features.json enabled flag (on|off)
+                      without modifying the file. Safe during live trading.
+  --optuna-seed N     Research A/B: override Optuna TPESampler seed (default 42). Tests
+                      whether findings replicate across noise realizations.
   --no-persist        Research: do NOT modify production files. Redirects writes to
                       *_noprod.* files (seeded from current production state). Safe to run
                       alongside live trader. Use for --replay 2880 validation, etc.
@@ -6538,7 +6626,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter', '--trim-override', '--optuna-seed') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 

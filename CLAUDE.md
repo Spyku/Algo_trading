@@ -449,9 +449,112 @@ Same class of bug almost certainly caused the prior **7h@99% pinned for 31+ hour
 
 ---
 
-**🧪 CURRENTLY RUNNING — AB MATRIX ON DESKTOP (2026-04-22 17:32 CET → ETA ~14:00-15:00 2026-04-23):**
+**🧪 CURRENTLY RUNNING — AB MATRIX RELAUNCH (2026-04-24 07:40 CEST → ETA ~17:00 2026-04-24):**
 
-Variant #1 finished 21:35 (4h 2min runtime, not the 2.5h I estimated). **Variant #1 already promoted live** — see "Closed 2026-04-22 late night" below. Variants #2-#5 + vol test still running; will compare against V1 tomorrow afternoon.
+Previous matrix (2026-04-22 17:32) was **biased** — dropna was eating ~half the window due to 7 sparse features with short history. All V1/V4 promotion decisions made on 672-row training set instead of 1432. Full explanation in "Closed 2026-04-24" section below.
+
+Relaunch: `python tools/ab_matrix_runner.py --variants focus --seed 2026`. Three variants (A_floorON_trimOFF, B_floorON_trimON, C_floorOFF_trimOFF), clean data (1432/1440 rows per variant), seed 2026 to cross-check effects aren't seed-specific.
+
+**Earlier (superseded) matrix results — kept for historical record only:**
+Variant #1 finished 2026-04-22 21:35 and was promoted live as V1 (then later replaced with V4 from that same matrix). Both V1 and V4 trained on the 672-row biased window — their Mode T totals (+122.59% and similar) are inflated by training narrowness. **Do not reference those numbers as baselines — they're not comparable to the clean relaunch.**
+
+---
+
+**🔄 RETEST PRIORITIES AFTER MATRIX FINISHES (ETH-first, clean data post-dropna-fix 2026-04-24):**
+
+All decisions from 2026-03-20 onwards were made on biased data (dropna eating ~half the window due to sparse-feature NaN). ETH-focused retests come first; secondary assets (SOL/LINK/BTC) lower priority — fix ETH robust FIRST.
+
+**R1. [HIGH — ETH core] Promote clean matrix winner.**
+When matrix finishes (~17:00 today), compare A/B/C variants' Mode T finals. Whichever converged + has top alpha + passes 4 promotion gates:
+```powershell
+# Backup current V4
+copy config\regime_config_ed.json config\regime_config_ed_v4_pre_clean.json
+copy models\crypto_ed_production.csv models\crypto_ed_production_v4_pre_clean.csv
+# Promote the matrix winner (replace {LABEL} with actual winner: A_floorON_trimOFF, B_floorON_trimON, or C_floorOFF_trimOFF)
+copy config\regime_config_ed_noprod_{LABEL}.json config\regime_config_ed.json
+copy models\crypto_ed_production_noprod_{LABEL}.csv models\crypto_ed_production.csv
+# Clear cooldown
+# Edit config/position_ed_v2_ETH.json, set "rally_cooldown_until": ""
+```
+**Decision tree:** best variant's alpha > V4's live performance-adjusted expectation → promote; within noise → keep V4, re-evaluate next week.
+
+**R2. [HIGH — ETH validation] 4-month HRST on clean winner.**
+Structural-consistency check — does the matrix winner hold on a longer window?
+```bash
+python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 2880 --no-persist
+```
+~6-8h desktop runtime. Tag outputs `_4mo_clean`. Compare Mode S winner to the 2mo clean winner:
+- Same detector + horizons → strong structural confirmation → ship with confidence
+- Different winner → window-sensitivity still present; use 2mo for current market regime (per standing rule R7)
+Prior biased 4mo run gave `tsmom_672h 6h/7h @ +155.91pp` — that number is inflated. Clean 4mo will be more honest.
+
+**R3. [HIGH — ETH, conditional] Meta-labeling retest on clean signals.**
+Only if matrix's variant C (floor OFF) or B (trim+meta) shows meta as a contender. Prior standalone meta harness showed +23.21pp on raw signals at p=0.60 and strategy-aware +15.76pp — **both biased**. Retest with the NEW clean primary model (from R1) as the base:
+```bash
+python crypto_trading_system_meta.py ETH 5 --replay 1440
+python crypto_trading_system_meta.py ETH 6 --replay 1440
+python crypto_trading_system_meta.py ETH 7 --replay 1440
+python crypto_trading_system_meta.py ETH 8 --replay 1440
+python tools/test_meta_strategy_impact.py ETH --replay 1440
+```
+~30-60min total. Decision: ≥+10pp on clean data at any threshold → ship behind trader flag; <+5pp → shelve meta permanently.
+
+**R4. [HIGH — ETH label] Label-threshold 1% retest on clean data.**
+Previous test (−47pp delta) was run on biased data. Direction was clear but absolute numbers untrustworthy. Quick confirm on clean data:
+```bash
+python crypto_trading_system_ed.py DV ETH 5h --replay 1440 --label-threshold 0.01
+```
+~45min. Expected: still negative delta (direction robust). If suddenly POSITIVE on clean data, reopen the label-threshold question.
+
+**R5. [HIGH — ETH gate] Bull rally-gate retest on clean data.**
+Prior evidence (bull gate hurts: live 30d −7.48pp, OOS 60d −1.31pp, FULL 90d −3.32pp) was on biased data. The consistency across 3 windows suggests the direction is real, but retest:
+- Check V4's current bull-gate (whichever the matrix winner picks) against a disabled-gate variant
+- Manual test: after promoting R1's winner, run 1 week with bull gate ON, compare to baseline simulation
+- Or: compare matrix A's bull gate output vs A with `/gate ETH bull off` post-promotion
+
+**R6. [MEDIUM — ETH gate] Drop-gate sweep retest.**
+Prior rejection (101/126 OOS rank = overfit). Direction robust to bias. Only retest if meta + 4mo + bull-gate all favor complex gate structure.
+```bash
+python tools/backtest_drop_gate.py  # already exists
+```
+Low priority — run only if time.
+
+---
+
+**🟡 LOW PRIORITY — SECONDARY ASSET RETESTS (only after ETH is robust):**
+
+Don't touch these until ETH promotion + 4mo validation + meta decision are done. Running ETH-first preserves compute for ETH-specific tuning.
+
+**R7. [LOW] SOL HRST retest.**
+Prior result (2026-04-21): `sma168>sma480 5h@65%/8h@70%` +42.30%/+40.37pp alpha (biased). Retest:
+```bash
+python crypto_trading_system_ed.py HRST SOL 5,6,7,8h --replay 1440 --no-persist
+```
+~3-4h desktop. Decision: if clean alpha ≥ 50% of ETH's clean alpha → commit $2-3k. Otherwise shelve.
+
+**R8. [LOW] LINK HRST retest.**
+Shelved 2026-04-20: "5/8 horizons NEGATIVE, beats_3of3=0". Could be entirely a dropna artifact. Same command pattern as R7, replace SOL with LINK. If LINK now converges with decent plateau → unshelve. If still weak → permanently shelve.
+
+**R9. [LOW] BTC HRST retest.**
+Last done 2026-04-20 with +36.15%/+23.89pp alpha. Biased. Retest for reliability check — BTC is the simplest diversification target but wasn't enabled. Same command with BTC.
+
+**R10. [LOW] XRP HRST (never tested on clean data).**
+Only remaining untested asset. Mode P first if JSONs are stale:
+```bash
+python crypto_trading_system_ed.py P XRP 5,6,7,8h
+python crypto_trading_system_ed.py HRST XRP 5,6,7,8h --replay 1440 --no-persist
+```
+
+---
+
+**🟢 STILL TRUSTED (no retest needed — pre-bug-era or bias-independent):**
+
+- Stop-loss / take-profit / trailing-stop variants (tested in earlier era, before sparse-feature pipeline)
+- LSTM ensemble (pre-bug era)
+- V1.7.2 regularization (pre-bug era)
+- 4h horizon rejection (structural embargo issue, not bias)
+- GDELT disable (feature selection evidence, not bias-dependent)
+- PySR discovery leakage check (uses dedicated historical window, excludes Mode D's replay period)
 
 `python tools/ab_matrix_runner.py` launched. 5 HRST variants + 1 vol test, all on a frozen data snapshot with `--no-persist` + `--no-data-update`. Safe to run alongside live trader; position stays open.
 
@@ -617,6 +720,32 @@ python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist;
 
 **F. Execution-gap investigation (no lit ref, but highest-EV lever).** The 30d gap: simulated baseline +27.11% vs live +2.54% = **~24.5pp unaccounted**. ~7.5pp was bull-gate harm (now disabled 2026-04-20). Remaining ~17pp: slippage, partial fills, manual interventions, timing, clock drift. Next: TCA logging (`implementation_shortfall = fill_price - arrival_mid` per trade), manual-vs-auto PnL decomposition, latency audit on order placement.
 
+**G. Scheduled sparse-feature re-enable tests (do NOT auto-enable — test first).**
+
+7 features disabled 2026-04-24 via `config/disabled_features.json` because short history was collapsing `dropna()` (only 101 clean rows out of 1440 before disable; 1432 after). Data pipelines untouched — features keep accumulating in the background. Tests scheduled for when each group has enough history for a clean 60-day replay.
+
+**G1. 2026-05-22 — `deriv_oi_*` re-enable test:**
+- Features: `deriv_oi_chg1d`, `deriv_oi_chg3d`, `deriv_oi_zscore`
+- History started 2026-03-20 (Binance public OI retention ~30d). By 2026-05-22 there will be ~63 days + 72h warmup buffer for `deriv_oi_chg3d`.
+- **Procedure**:
+  1. `copy config\disabled_features.json config\disabled_features_pre_deriv_oi_20260522.json` (backup)
+  2. Baseline: `python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist` (keep disabled list as-is). Tag outputs with `_deriv_oi_OFF`.
+  3. Temporarily remove 3 `deriv_oi_*` entries from `disabled_features.json`.
+  4. Test: `python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist`. Tag outputs with `_deriv_oi_ON`.
+  5. Restore original `disabled_features.json` from backup.
+  6. **Decision tree:** Mode T alpha ON ≥ OFF + 5pp → re-enable permanently. Within ±5pp → leave disabled. Worse → leave disabled.
+
+**G2. 2026-06-18 — Orderbook + IV re-enable test:**
+- Features: `ob_imbalance`, `spread_bps`, `avg_iv`, `iv_skew`
+- History started 2026-04-19 when live Ed trader began writing `orderbook_snapshots.csv` + `options_iv_snapshot.csv`. By 2026-06-18 there will be ~60 days of coverage.
+- **Procedure**: same as G1 — backup, baseline run `_ob_iv_OFF`, enable-test run `_ob_iv_ON`, restore backup, decide.
+
+**Why test-first (not auto-enable):**
+- Matrix already showed adding features can hurt (trim=ON was worse than OFF despite feature availability). Same discipline for these.
+- Re-enable should be event-driven (evidence of improvement), not calendar-driven.
+- These tests are cheap — ~6-8h per one-off run, no code changes needed.
+- **NO automatic trigger on the date** — user decides when to run the test based on priorities.
+
 **🧪 [UPMOST ACTION — overnight desktop] AB MATRIX: trim × meta × vol (2026-04-22 evening).**
 
 Orchestrator: `tools/ab_matrix_runner.py`. Runs the full factorial on a SINGLE MACHINE with a FROZEN DATA SNAPSHOT so every variant sees identical bars. All runs use `--no-persist` + new `--no-data-update` flag. Writes consolidated audit CSV `output/ab_matrix_results_<timestamp>.csv` with per-horizon feature lists, confidences, shields, gates, detector, meta stats — everything needed to audit each variant's strategy.
@@ -701,6 +830,39 @@ Optional flags:
 9. **Ein results review** — 15-minute candle BTC results from earlier laptop run. Separate research track.
 
 10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
+
+### Closed 2026-04-24 (sparse-feature quarantine + dropna warning + AB matrix relaunched)
+
+**Discovery:** all prior HRST runs (V1, V4, first AB matrix) trained on only **672 clean rows** out of a 1440-row (60d) window because `deriv_oi_*` (3 cols, ~50% NaN) and `ob_imbalance, spread_bps, avg_iv, iv_skew` (4 cols, ~93% NaN) had short history — dropna cascaded and wiped half the window. Models were effectively trained on the most recent 28 days, not 60. V1 and V4 promotion decisions were made on biased data.
+
+**Fix — two-section `config/disabled_features.json`:**
+- `disabled_exact` (65 entries): Mode F Grade-1 features — toggleable via `enabled` flag and `--trim-override`
+- `always_disabled_exact` (7 entries): structurally-broken features (short history) — **applied REGARDLESS of enabled flag**
+  - `deriv_oi_chg1d, deriv_oi_chg3d, deriv_oi_zscore` (Binance OI history started 2026-03-20)
+  - `ob_imbalance, spread_bps` (live trader started writing 2026-04-19)
+  - `avg_iv, iv_skew` (live trader Deribit feed started 2026-04-19)
+- `_load_disabled_features()` returns `(exact, prefixes, enabled, always)` — 4-tuple now
+- `_apply_feature_disable()` always strips `always_disabled_exact`; strips `disabled_exact+prefixes` only when `enabled=True`
+- Data pipelines untouched — these features keep being downloaded, just excluded from LGBM/PySR inputs
+- Result: clean rows went from 672 → **1432/1440 (99.4%)** in Mode D window
+
+**Fix — DATA LOSS WARNING in Mode D ([crypto_trading_system_ed.py:3793](crypto_trading_system_ed.py#L3793)):**
+When clean rows < 80% of window after dropna, prints bang-boxed warning with:
+- Row count + % of window retained
+- Top 8 NaN offenders by raw count
+- Suggestion to add them to `disabled_features.json`
+- Explicit note that model results are biased toward whatever regime spans the surviving rows
+- Fires per horizon (4× per HRST if the issue persists)
+
+**Live trader impact:** zero. `disabled_features.json` structure extended but backward-compatible. Live trader's hot-reload now sees 72 total disabled (65 Mode F + 7 always). Effective pool unchanged from yesterday. V4 prod models don't reference any of the 7 always-disabled features — verified via `optimal_features` scan.
+
+**Matrix relaunched 2026-04-24 07:40 CEST** — `python tools/ab_matrix_runner.py --variants focus --seed 2026`:
+- 3 variants: A (floorON_trimOFF), B (floorON_trimON), C (floorOFF_trimOFF)
+- Optuna seed 2026 (vs default 42) — tests whether effects are seed-robust
+- Now running on 1432/1440 clean rows per variant instead of 672
+- ETA ~14:00-17:00 2026-04-24
+
+**Known TODO scheduled re-enable tests:** 2026-05-22 for deriv_oi_*; 2026-06-18 for orderbook/IV. See TODO G1/G2. **NOT auto-enabled** — user runs A/B test first and decides.
 
 ### Closed 2026-04-22 late night (V1 promoted + rally-cd bug fix + matrix launched)
 

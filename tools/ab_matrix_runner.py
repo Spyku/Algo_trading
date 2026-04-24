@@ -97,15 +97,13 @@ def restore_data(snapshot_dir: str):
     return n_restored
 
 
-def set_trim_enabled(enabled: bool):
-    """Flip the enabled flag in disabled_features.json (Mode F master switch)."""
+def read_trim_enabled():
+    """Read current enabled flag from disabled_features.json (read-only).
+    Note: the matrix NEVER writes this file — trim state is passed to
+    HRST via --trim-override instead, so the live trader isn't affected."""
     with open(DISABLED_CFG, 'r', encoding='utf-8') as f:
         cfg = json.load(f)
-    old = cfg.get('enabled', True)
-    cfg['enabled'] = bool(enabled)
-    with open(DISABLED_CFG, 'w', encoding='utf-8') as f:
-        json.dump(cfg, f, indent=2)
-    return old
+    return bool(cfg.get('enabled', True))
 
 
 def tag_outputs(tag: str):
@@ -240,32 +238,36 @@ def parse_production_csv(csv_path: str):
 
 
 def run_hrst(label: str, trim_enabled: bool, meta_p, snapshot_dir: str, dry_run: bool,
-             no_feature_floor: bool = False):
-    """Run a single HRST variant against the frozen data snapshot."""
+             no_feature_floor: bool = False, optuna_seed=None):
+    """Run a single HRST variant against the frozen data snapshot.
+    Trim state is passed via --trim-override (in-memory only, the live
+    trader's disabled_features.json is NEVER modified)."""
     print('=' * 80)
-    print(f'  VARIANT: {label}  |  trim={trim_enabled}  |  meta={meta_p}  |  floor={"OFF" if no_feature_floor else "ON"}')
+    print(f'  VARIANT: {label}  |  trim={trim_enabled}  |  meta={meta_p}  |  floor={"OFF" if no_feature_floor else "ON"}  |  seed={optuna_seed or "default(42)"}')
     print('=' * 80)
 
     cmd = [PY, 'crypto_trading_system_ed.py', 'HRST', 'ETH', '5,6,7,8h',
-           '--replay', '1440', '--no-persist', '--no-data-update']
+           '--replay', '1440', '--no-persist', '--no-data-update',
+           '--trim-override', 'on' if trim_enabled else 'off']
     if meta_p is not None:
         cmd += ['--meta-filter', str(meta_p)]
     if no_feature_floor:
         cmd += ['--no-feature-floor']
+    if optuna_seed is not None:
+        cmd += ['--optuna-seed', str(optuna_seed)]
 
     if dry_run:
-        print(f'  [DRY-RUN] restore snapshot, trim={trim_enabled}, floor={"OFF" if no_feature_floor else "ON"}')
+        print(f'  [DRY-RUN] restore snapshot; trim via --trim-override (no config file write)')
         print(f'  [DRY-RUN] would run: {" ".join(cmd)}')
         return {'variant': label, 'status': 'dry_run',
                 'trim_enabled': trim_enabled, 'meta_threshold': meta_p,
-                'feature_floor': not no_feature_floor}
+                'feature_floor': not no_feature_floor,
+                'optuna_seed': optuna_seed}
 
     # Restore data snapshot so all variants see the same bars
     n_restored = restore_data(snapshot_dir)
     print(f'  restored {n_restored} files from snapshot')
-
-    prior_trim = set_trim_enabled(trim_enabled)
-    print(f'  trim: was {prior_trim}, now {trim_enabled}')
+    print(f'  trim via CLI flag (--trim-override {"on" if trim_enabled else "off"}) — prod config untouched')
     print(f'  command: {" ".join(cmd)}')
     start = time.time()
 
@@ -295,6 +297,7 @@ def run_hrst(label: str, trim_enabled: bool, meta_p, snapshot_dir: str, dry_run:
         'trim_enabled': trim_enabled,
         'meta_threshold': meta_p,
         'feature_floor': not no_feature_floor,
+        'optuna_seed': optuna_seed,
         'exit_code': exit_code,
         'runtime_min': round(runtime_min, 1),
         'log_path': log_path,
@@ -336,6 +339,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--skip-vol', action='store_true', help='Skip the vol-scaled horizon test')
     ap.add_argument('--dry-run', action='store_true', help='Print plan without executing')
+    ap.add_argument('--variants', default='all',
+                    help='Comma-separated variant labels to run, or "all" (default), '
+                         'or "focus" for the 3-variant floor/trim validation (A/B/C)')
+    ap.add_argument('--seed', type=int, default=None,
+                    help='Optuna TPESampler seed override (default 42). Set to e.g. 2026 '
+                         'to re-test whether floor/trim effects replicate on a different seed.')
     args = ap.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -360,25 +369,47 @@ def main():
     else:
         print(f'[DRY-RUN] would snapshot {len(SNAPSHOT_FILES)} data files\n')
 
-    with open(DISABLED_CFG, 'r', encoding='utf-8') as f:
-        original_trim = json.load(f).get('enabled', True)
-    print(f'Initial trim state: enabled={original_trim}\n')
+    current_trim = read_trim_enabled()
+    print(f'config/disabled_features.json state: enabled={current_trim} '
+          f'(WILL NOT BE MODIFIED — trim is passed to each variant via --trim-override)\n')
 
-    # 4 main factorial variants (floor=ON for all) + 1 floor tiebreaker
-    variants = [
-        # (label, trim, meta_p, no_feature_floor)
+    # (label, trim, meta_p, no_feature_floor)
+    all_variants = [
         ('trimOFF_metaOFF',        False, None, False),
         ('trimON_metaOFF',         True,  None, False),
         ('trimOFF_metaON',         False, 0.45, False),
         ('trimON_metaON',          True,  0.45, False),
-        ('trimON_metaON_floorOFF', True,  0.45, True),   # tiebreaker — isolates floor effect
+        ('trimON_metaON_floorOFF', True,  0.45, True),
     ]
+    # Focused 3-variant validation for floor+trim+convergence replication
+    focus_variants = [
+        ('A_floorON_trimOFF',  False, None, False),
+        ('B_floorON_trimON',   True,  None, False),
+        ('C_floorOFF_trimOFF', False, None, True),
+    ]
+    if args.variants == 'focus':
+        variants = focus_variants
+    elif args.variants == 'all':
+        variants = all_variants
+    else:
+        wanted = set(args.variants.split(','))
+        pool = {v[0]: v for v in all_variants + focus_variants}
+        variants = [pool[w] for w in wanted if w in pool]
+        if not variants:
+            print(f'ERROR: no variants matched {args.variants!r}')
+            print(f'Available: {list(pool.keys())}')
+            return
+
+    print(f'Running {len(variants)} variant(s): {[v[0] for v in variants]}')
+    if args.seed is not None:
+        print(f'Optuna seed override: {args.seed} (default would be 42)')
+    print()
 
     results = []
     try:
         for label, trim, meta, no_floor in variants:
             r = run_hrst(label, trim, meta, snapshot_dir, args.dry_run,
-                         no_feature_floor=no_floor)
+                         no_feature_floor=no_floor, optuna_seed=args.seed)
             results.append(r)
             _flush_csv(results_csv, results)
 
@@ -388,10 +419,15 @@ def main():
             _flush_csv(results_csv, results)
     finally:
         if not args.dry_run:
-            set_trim_enabled(original_trim)
-            print(f'\nRestored trim state to enabled={original_trim}')
-            # Live trader will re-download on next tick; leave snapshot files in place
-            # so user can verify if needed
+            # Verify disabled_features.json was NOT touched (sanity check)
+            final_trim = read_trim_enabled()
+            if final_trim != current_trim:
+                print(f'\n!! WARNING: disabled_features.json changed from {current_trim} → {final_trim} during run')
+                print(f'!! This should not happen with --trim-override. Check logs.')
+            else:
+                print(f'\nconfig/disabled_features.json integrity OK (enabled={final_trim})')
+            # Live trader's data files were restored from snapshot before each variant;
+            # live trader re-downloads on its own schedule (idempotent).
             print(f'Snapshot kept at: {snapshot_dir} (delete manually if not needed)')
 
     if not args.dry_run:
