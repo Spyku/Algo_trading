@@ -468,17 +468,33 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True):
         print(f"  [!] {asset_name} {horizon}h: no configured features matched -- falling back to FEATURE_SET_A")
         feature_cols = [f for f in FEATURE_SET_A if f in all_cols]
 
-    # Fix (2026-04-23): do NOT drop rows where a single sparse feature is NaN.
-    # That caused `i` to freeze on a row 49h stale when e.g. xa_btc_lag2h had a
-    # NaN tail, producing identical predictions every cycle (the 86%-pinned bug).
-    # Drop only on label NaN (needed for training); impute feature NaN with 0
-    # (matches PySR/LGBM NaN handling; RF requires non-NaN so zero-fill is safe).
+    # Fix #4 (2026-04-24): forward-fill THEN zero-fill (not zero-only).
+    # Old behavior: fillna(0.0) — numerically wrong for log-returns where 0 is
+    # a specific signal ("zero movement"), not "unknown." Forward-fill preserves
+    # the last known value (stale but plausible) and zero-fill catches features
+    # with no history at all.
+    #
+    # Additionally: rate-limited Telegram alert when any feature imputation
+    # fires at the inference row. Without this, the trader silently ran in
+    # "degraded features" mode — the exact pathology behind the 86%-pin bug.
+    #
+    # Drop only label-NaN (needed for training window). Don't drop on feature
+    # NaN — that's what froze `i` on a 49h-stale row.
     df = df_full.dropna(subset=['label']).reset_index(drop=True)
     feat_na_tail = df[feature_cols].iloc[-1].isna()
     if feat_na_tail.any():
         stale_feats = [f for f in feature_cols if pd.isna(df.iloc[-1][f])]
-        print(f"  [!] {asset_name} {horizon}h: {len(stale_feats)} feature(s) NaN in latest row: {stale_feats[:5]}{'...' if len(stale_feats)>5 else ''} -- imputing with 0")
-    df[feature_cols] = df[feature_cols].fillna(0.0)
+        print(f"  [!] {asset_name} {horizon}h: {len(stale_feats)} feature(s) NaN in latest row: {stale_feats[:5]}{'...' if len(stale_feats)>5 else ''} -- forward-fill + zero-fill")
+        _rate_limited_telegram_lt(
+            f'nan_impute_{asset_name}_{horizon}',
+            f"⚠ {asset_name} {horizon}h: {len(stale_feats)} feature(s) NaN at inference "
+            f"({stale_feats[:3]}{'...' if len(stale_feats)>3 else ''}) — using forward-fill + zero-fill. "
+            f"Upstream data likely stale; check P1 downloads.",
+        )
+    # Forward-fill carries last known value through NaN tails (correct for log-
+    # returns, ratios, indicators). fillna(0.0) is final safety for columns
+    # that have NEVER had data (cold start).
+    df[feature_cols] = df[feature_cols].ffill().fillna(0.0)
     n = len(df)
     if n < window + 100:
         return None
