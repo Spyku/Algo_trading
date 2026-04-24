@@ -472,14 +472,30 @@ Same class of bug almost certainly caused the prior **7h@99% pinned for 31+ hour
 
 ---
 
-**🧪 CURRENTLY RUNNING — AB MATRIX RELAUNCH (2026-04-24 07:40 CEST → ETA ~17:00 2026-04-24):**
+**🧪 CURRENTLY RUNNING — AB MATRIX 4-VARIANT FOCUS (2026-04-24 22:40 CEST → ETA ~14:00 2026-04-25):**
 
-Previous matrix (2026-04-22 17:32) was **biased** — dropna was eating ~half the window due to 7 sparse features with short history. All V1/V4 promotion decisions made on 672-row training set instead of 1432. Full explanation in "Closed 2026-04-24" section below.
+Launched AFTER the third-pass audit shipped (file-handle leak + div-by-zero guards, commit `eaf80e9`) and AFTER today's 22:07 HRST promoted a clean winner (`sma168>sma480 bull=7h@65% bear=6h@85%` — already live). This matrix runs on the first fully-clean data snapshot: 1432/1440 rows, label-tail fix, sparse-feature quarantine, div-by-zero guards, atomic writes — none of the prior 3 weeks' results were trained on this data quality.
 
-Relaunch: `python tools/ab_matrix_runner.py --variants focus --seed 2026`. Three variants (A_floorON_trimOFF, B_floorON_trimON, C_floorOFF_trimOFF), clean data (1432/1440 rows per variant), seed 2026 to cross-check effects aren't seed-specific.
+Command: `python tools/ab_matrix_runner.py --variants focus --skip-vol` (seed 42 default, matches today's live HRST for B-variant replication check).
+
+| Variant | Floor | Trim | Meta | Purpose |
+|---|---|---|---|---|
+| A_floorON_trimOFF | ON | OFF | — | Floor alone on full 184-feature universe — does floor still matter without trim? |
+| B_floorON_trimON | ON | ON | — | **Replicates today's 22:07 live HRST.** Sanity check that matrix subprocess = direct invocation (same seed + data). |
+| C_floorOFF_trimOFF | OFF | OFF | — | Raw universe, no guarantees. Tests whether floor's feature-family floor is doing real work. |
+| D_floorON_trimON_metaON | ON | ON | p≥0.45 | **R3 meta-labeling retest** — added 2026-04-24 22:40 (commit `23b73c1`). B↔D isolates meta contribution on clean primary. |
+
+Runtime: 4 × ~4h = ~16h laptop. Results in `output/ab_matrix_results_<timestamp>.csv` + tagged `_noprod_{A,B,C,D}.*` files.
+
+**Decision rules when matrix finishes (2026-04-25 afternoon):**
+- **B replicates today's HRST** (detector + horizons + confs match within seed noise): sanity check passes, matrix infrastructure trustworthy.
+- **Best (A/B/C)** alpha > today's live HRST by ≥5pp on Mode T REF: promote that variant instead.
+- **D > B by ≥5pp**: meta filter is shippable behind a config flag (resolves R3).
+- **D within ±5pp of B**: shelve meta permanently — was dead-end masquerading as signal on biased data.
+- All within noise: keep today's live HRST running, revisit after next week's live performance.
 
 **Earlier (superseded) matrix results — kept for historical record only:**
-Variant #1 finished 2026-04-22 21:35 and was promoted live as V1 (then later replaced with V4 from that same matrix). Both V1 and V4 trained on the 672-row biased window — their Mode T totals (+122.59% and similar) are inflated by training narrowness. **Do not reference those numbers as baselines — they're not comparable to the clean relaunch.**
+The 2026-04-22 17:32 matrix promoted V1 (`tsmom_672h 5h@85%/6h@80%` +122.59% Mode T). The 2026-04-24 07:40 seed-2026 relaunch promoted intermediate variants. Both were trained on poisoned data (672 rows + label-tail NaN + div-by-zero features). **Do not reference those numbers as baselines** — they're not comparable to this matrix's clean output.
 
 ---
 

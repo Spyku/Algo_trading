@@ -13,6 +13,27 @@ Automated ML trading system for **crypto** (BTC, ETH, XRP, DOGE, SOL, LINK, ADA,
 
 ---
 
+## 🧪 Currently Running
+
+**AB Matrix 4-variant focus (launched 2026-04-24 22:40 CEST → ETA ~14:00 2026-04-25, ~16h laptop):**
+
+First matrix on methodologically-clean data — ran after today's three-pass audit shipped (label-tail fix, div-by-zero guards, sparse-feature quarantine, atomic writes, file-handle leak fix). Today's 22:07 live HRST (`sma168>sma480 bull=7h@65% bear=6h@85%`) is already promoted and live; this matrix validates the decision and tests meta-labeling on a clean primary.
+
+```bash
+python tools/ab_matrix_runner.py --variants focus --skip-vol
+```
+
+| Variant | Floor | Trim | Meta | Purpose |
+|---|---|---|---|---|
+| A_floorON_trimOFF | ON | OFF | — | Floor alone on full universe |
+| B_floorON_trimON | ON | ON | — | Replicates today's live HRST (seed-robustness sanity check) |
+| C_floorOFF_trimOFF | OFF | OFF | — | Raw universe, no floor guarantees |
+| D_floorON_trimON_metaON | ON | ON | p≥0.45 | R3 meta-labeling retest — B↔D isolates meta contribution |
+
+All variants run with `--no-persist --no-data-update --data-dir data_matrix_<ts>/` — live production files + live `data/` never touched. Results land in `output/ab_matrix_results_<timestamp>.csv` + tagged `config/regime_config_ed_noprod_{A,B,C,D}.json` / `models/crypto_ed_production_noprod_{A,B,C,D}.csv`. See [CLAUDE.md](CLAUDE.md#) "CURRENTLY RUNNING" section for decision rules.
+
+---
+
 ## Engine Reference — Full Inventory (2026-04-17)
 
 Compiled from 4 parallel audits across `crypto_trading_system_ed.py`, `crypto_revolut_ed_v2.py`, `crypto_live_trader_ed.py`, CLAUDE.md, README.md, `config/regime_config_ed.json`, and all `models/*.csv`.
