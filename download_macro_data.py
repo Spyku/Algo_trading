@@ -31,6 +31,19 @@ os.makedirs(MACRO_DIR, exist_ok=True)
 FRESHNESS_SECONDS = 3600  # 1 hour
 
 
+def _alert_partial_download(key, msg, severity='warn'):
+    """Fix #8 (2026-04-24): lazy-imported Telegram alert for partial-download
+    scenarios. Kept as a separate helper to avoid a hard dependency on
+    crypto_live_trader_ed at module load (download_macro_data is also used
+    standalone as a CLI script)."""
+    try:
+        from crypto_live_trader_ed import _rate_limited_telegram_lt
+        _rate_limited_telegram_lt(key, msg, severity=severity)
+    except Exception:
+        # Standalone script use / import cycle fallback — at least print it.
+        print(f"  [{severity.upper()}] {key}: {msg}")
+
+
 def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
     """Return True if file's LAST-ROW datetime is within max_age_seconds.
     Fix #7 (2026-04-24): content-aware, not mtime-aware. Catches partial
@@ -126,8 +139,26 @@ def download_yfinance_data():
             print(f"ERROR: {e}")
 
     if not all_data:
-        print("  No macro data downloaded!")
+        print("  [!!] No macro data downloaded!")
+        _alert_partial_download(
+            'macro_total_fail',
+            "🚨 yfinance macro: ALL 9 tickers failed — macro_daily.csv NOT updated. Check yfinance / network.",
+            severity='critical',
+        )
         return None
+
+    # Fix #8 (2026-04-24): partial-success alerting
+    expected = set(tickers.keys())
+    got = set(all_data.keys())
+    missing = sorted(expected - got)
+    if missing:
+        print(f"  [!] Macro partial — missing {missing}. CSV will have fewer columns; m_{{ticker}}_* features absent.")
+        _alert_partial_download(
+            f'macro_partial_{"_".join(missing)}',
+            f"⚠ macro_daily partial download — missing tickers: {missing}. "
+            f"Features like m_{{{missing[0].lower()}}}_chg1d etc. will be absent. yfinance outage?",
+            severity='warn',
+        )
 
     # Combine into single DataFrame
     macro_df = pd.DataFrame(all_data)
@@ -263,6 +294,19 @@ def download_cross_asset():
             print(f"ERROR: {e}")
 
     if all_data:
+        # Fix #8 (2026-04-24): partial-success alerting
+        expected = set(pairs.keys())
+        got = set(all_data.keys())
+        missing = sorted(expected - got)
+        if missing:
+            print(f"  [!] Cross-asset partial — missing {missing}. xa_{{pair}}_* features will be absent.")
+            _alert_partial_download(
+                f'cross_asset_partial_{"_".join(missing)}',
+                f"⚠ cross_asset partial download — missing pairs: {missing}. "
+                f"Correlation/relstr features against those pairs will be absent.",
+                severity='warn',
+            )
+
         cross_df = pd.DataFrame(all_data)
         cross_df.index.name = 'date'
         cross_df.index = pd.to_datetime(cross_df.index).tz_localize(None)
@@ -273,6 +317,12 @@ def download_cross_asset():
         print(f"\n  Saved: {outfile} ({len(cross_df)} rows)")
         return cross_df
 
+    # Total failure
+    _alert_partial_download(
+        'cross_asset_total_fail',
+        "🚨 cross_asset: ALL pairs failed — file not updated. Check yfinance / network.",
+        severity='critical',
+    )
     return None
 
 
@@ -544,10 +594,31 @@ def download_derivatives_data(assets=None):
             print(f"ERROR: {e}")
 
         # Combine
+        # Fix #8 (2026-04-24): detect partial-success and alert loudly. File
+        # is still written with whatever we got (option B: visibility over
+        # safety), so the feature build continues — but a Telegram alert
+        # names the missing sub-source so the user knows features are degraded.
+        missing = []
+        if fr_hourly is None: missing.append('funding_rate')
+        if oi_df is None:     missing.append('open_interest')
+        if perp_df is None:   missing.append('perp_klines')
         dfs = [df for df in [fr_hourly, oi_df, perp_df] if df is not None]
         if not dfs:
-            print(f"  No derivatives data for {asset}!")
+            print(f"  [!!] No derivatives data for {asset}!")
+            _alert_partial_download(
+                f'deriv_total_fail_{asset}',
+                f"🚨 {asset} derivatives: ALL THREE sub-sources failed (funding, OI, perp_klines). No data written. Check Binance API status.",
+                severity='critical',
+            )
             continue
+        if missing:
+            print(f"  [!] {asset} derivatives: PARTIAL — missing {missing}. CSV will have fewer columns; downstream features degraded.")
+            _alert_partial_download(
+                f'deriv_partial_{asset}_{"_".join(missing)}',
+                f"⚠ {asset} derivatives partial download — missing: {missing}. "
+                f"CSV written with {len(dfs)}/3 sub-sources; deriv_* features that depend on missing sources will be absent.",
+                severity='warn',
+            )
 
         deriv_df = pd.concat(dfs, axis=1).sort_index()
         deriv_df = deriv_df.ffill()
