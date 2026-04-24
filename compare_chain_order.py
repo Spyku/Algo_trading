@@ -21,7 +21,7 @@ import pandas as pd
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIG_90D    = os.path.join(ENGINE_DIR, 'data', 'eth_sl_signals_90d.pkl')
 
-TRADING_FEE = 0.0011
+TRADING_FEE = 0.0005  # 5 bps/leg realistic maker blend (see ed.py BACKTEST_FEE_PER_LEG)
 V7 = dict(h_short=8, h_long=36, t_short=3.0, t_long=5.5, cd_hours=30)
 
 TRAIN_DAYS = 60

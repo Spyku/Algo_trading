@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 
 import numpy as np
 
-TRADING_FEE = 0.0011
+TRADING_FEE = 0.0005  # 5 bps/leg realistic maker blend (see ed.py BACKTEST_FEE_PER_LEG)
 REPLAY_HOURS = 720  # 1 month
 TP_PCT = 1.0
 

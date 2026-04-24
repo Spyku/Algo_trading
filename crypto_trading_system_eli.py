@@ -330,15 +330,12 @@ ACTIVE_FEATURE_SET = 'A'
 # ASSET CONFIGURATION
 # ============================================================
 ASSETS = {
+    # Pruned 2026-04-19 — see crypto_trading_system_ed.py ASSETS for rationale.
     'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_30m_data.csv',  'start': '2017-08-01T00:00:00Z'},
     'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_30m_data.csv',  'start': '2017-08-01T00:00:00Z'},
     'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_30m_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'DOGE':  {'source': 'binance', 'ticker': 'DOGE/USDT', 'file': 'data/doge_30m_data.csv', 'start': '2019-07-01T00:00:00Z'},
     'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_30m_data.csv',  'start': '2020-08-01T00:00:00Z'},
     'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_30m_data.csv', 'start': '2019-01-01T00:00:00Z'},
-    'ADA':   {'source': 'binance', 'ticker': 'ADA/USDT',  'file': 'data/ada_30m_data.csv',  'start': '2018-04-01T00:00:00Z'},
-    'AVAX':  {'source': 'binance', 'ticker': 'AVAX/USDT', 'file': 'data/avax_30m_data.csv', 'start': '2021-09-01T00:00:00Z'},
-    'DOT':   {'source': 'binance', 'ticker': 'DOT/USDT',  'file': 'data/dot_30m_data.csv',  'start': '2020-08-01T00:00:00Z'},
 }
 
 CANDLE_MINUTES = 30               # Eli = 30-minute candles
@@ -352,7 +349,8 @@ for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
 TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
-TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% total cost per trade
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used for `2*TRADING_FEE` label threshold only
+BACKTEST_FEE_PER_LEG = 0.0005  # 5 bps/leg — realistic maker-blend, used in all backtest sims
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 400          # ~200h at 30min candles
 REPLAY_HOURS_S = 800       # Mode S — longer window
@@ -1250,7 +1248,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
             in_pos   = True
             entry_px = price * (1 + TRADING_FEE)
         elif pred == 0 and in_pos:
-            sell_px = price * (1 - TRADING_FEE)
+            sell_px = price * (1 - BACKTEST_FEE_PER_LEG)
             trade_ret = (sell_px - entry_px) / entry_px
             cash *= (1 + trade_ret)
             trades += 1
@@ -1263,7 +1261,7 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
     # Close open position at end
     if in_pos and total > 0:
         last_px = float(df_features.iloc[-1]['close'])
-        sell_px = last_px * (1 - TRADING_FEE)
+        sell_px = last_px * (1 - BACKTEST_FEE_PER_LEG)
         trade_ret = (sell_px - entry_px) / entry_px
         cash *= (1 + trade_ret)
         trades += 1
@@ -1803,12 +1801,12 @@ def simulate_portfolio(signals, initial=1000):
 
         if sig['signal'] == 'BUY' and position == 'cash':
             # BUY: spend cash, pay fee, get BTC
-            btc_held = cash * (1 - TRADING_FEE) / price
+            btc_held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
             cash = 0
             position = 'invested'
         elif sig['signal'] == 'SELL' and position == 'invested':
             # SELL: sell BTC, pay fee, get cash
-            cash = btc_held * price * (1 - TRADING_FEE)
+            cash = btc_held * price * (1 - BACKTEST_FEE_PER_LEG)
             btc_held = 0
             position = 'cash'
 
@@ -2072,7 +2070,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
             entry_price = price * (1 + TRADING_FEE)  # effective entry = price + fee
         elif ensemble_pred == 0 and in_position:
             # SELL -- pay fee
-            sell_price = price * (1 - TRADING_FEE)  # effective exit = price - fee
+            sell_price = price * (1 - BACKTEST_FEE_PER_LEG)  # effective exit = price - fee
             trade_return = (sell_price - entry_price) / entry_price
             portfolio *= (1 + trade_return)
             trades += 1
@@ -2095,7 +2093,7 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
     # Close open position at end (with fee)
     if in_position and total > 0:
         last_price = closes_np[n - 1]
-        sell_price = last_price * (1 - TRADING_FEE)
+        sell_price = last_price * (1 - BACKTEST_FEE_PER_LEG)
         trade_return = (sell_price - entry_price) / entry_price
         portfolio *= (1 + trade_return)
         trade_returns.append(trade_return)
@@ -2324,7 +2322,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
     # ========================================================
     if sorted_results:
         import csv
-        csv_path = f'{MODELS_DIR}/diagnostic_results_doohan_{asset_name}.csv'
+        csv_path = f'{MODELS_DIR}/diagnostic_results_eli_{asset_name}.csv'
         sorted_for_csv = sorted(sorted_results, key=lambda x: (-x[10], -x[4]))  # APF desc, then return desc
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -2400,15 +2398,15 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
     for m in merged:
         price = m['close']
         if m['combined'] == 'BUY' and not o_in:
-            o_held = o_cash * (1 - TRADING_FEE) / price; o_cash = 0; o_in = True; o_entry = price; o_trades += 1
+            o_held = o_cash * (1 - BACKTEST_FEE_PER_LEG) / price; o_cash = 0; o_in = True; o_entry = price; o_trades += 1
         elif m['combined'] == 'SELL' and o_in:
-            o_cash = o_held * price * (1 - TRADING_FEE)
+            o_cash = o_held * price * (1 - BACKTEST_FEE_PER_LEG)
             if price > o_entry: o_wins += 1
             o_held = 0; o_in = False
     # Close open position at last price for overall stats
     if o_in and merged:
         last_px = merged[-1]['close']
-        o_cash = o_held * last_px * (1 - TRADING_FEE)
+        o_cash = o_held * last_px * (1 - BACKTEST_FEE_PER_LEG)
     o_strat_ret = (o_cash / 1000.0 - 1) * 100
     o_bh_ret = (merged[-1]['close'] / o_start_px - 1) * 100 if merged else 0
     o_alpha = o_strat_ret - o_bh_ret
@@ -2426,9 +2424,9 @@ def generate_strategy_html(asset_name, signals_short, signals_long, strategy='bo
             price = d['close']
             d['buy_hold'] = 1000 * (price / p_start)
             if d['combined'] == 'BUY' and not p_in:
-                p_held = p_cash * (1 - TRADING_FEE) / price; p_cash = 0; p_in = True; p_entry = price; p_trades += 1
+                p_held = p_cash * (1 - BACKTEST_FEE_PER_LEG) / price; p_cash = 0; p_in = True; p_entry = price; p_trades += 1
             elif d['combined'] == 'SELL' and p_in:
-                p_cash = p_held * price * (1 - TRADING_FEE)
+                p_cash = p_held * price * (1 - BACKTEST_FEE_PER_LEG)
                 if price > p_entry: p_wins += 1
                 p_held = 0; p_in = False
             d['portfolio'] = p_cash + p_held * price if p_in else p_cash
@@ -3051,7 +3049,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
             in_position = True
             entry_price = price * (1 + TRADING_FEE)
         elif ensemble_pred == 0 and in_position:
-            sell_price = price * (1 - TRADING_FEE)
+            sell_price = price * (1 - BACKTEST_FEE_PER_LEG)
             trade_return = (sell_price - entry_price) / entry_price
             portfolio *= (1 + trade_return)
             trades += 1
@@ -3083,7 +3081,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
     # Close open position at end
     if in_position and total > 0:
         last_price = closes_np[n - 1]
-        sell_price = last_price * (1 - TRADING_FEE)
+        sell_price = last_price * (1 - BACKTEST_FEE_PER_LEG)
         trade_return = (sell_price - entry_price) / entry_price
         portfolio *= (1 + trade_return)
         trades += 1
@@ -3603,13 +3601,13 @@ def _simulate_with_threshold(signals, conf_threshold):
             continue
 
         if sig['signal'] == 'BUY' and position == 'cash':
-            qty = cash * (1 - TRADING_FEE) / price
+            qty = cash * (1 - BACKTEST_FEE_PER_LEG) / price
             entry_price = price
             cash = 0
             position = 'invested'
             trades += 1
         elif sig['signal'] == 'SELL' and position == 'invested':
-            cash = qty * price * (1 - TRADING_FEE)
+            cash = qty * price * (1 - BACKTEST_FEE_PER_LEG)
             pnl_pct = (price / entry_price - 1) * 100
             trade_log.append(pnl_pct)
             qty = 0
@@ -4314,7 +4312,7 @@ def run_mode_s(assets_list, horizons, args=None):
                     first_price = price
 
                 if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
-                    held = cash * (1 - TRADING_FEE) / price
+                    held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
                     cash = 0
                     in_pos = True
                     entry_px = price
@@ -4324,14 +4322,14 @@ def run_mode_s(assets_list, horizons, args=None):
                     else:
                         bear_trades += 1
                 elif s['signal'] == 'SELL' and in_pos:
-                    cash = held * price * (1 - TRADING_FEE)
+                    cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
                     if price > entry_px:
                         wins += 1
                     held = 0
                     in_pos = False
 
             if in_pos and last_price:
-                cash = held * last_price * (1 - TRADING_FEE)
+                cash = held * last_price * (1 - BACKTEST_FEE_PER_LEG)
                 if last_price > entry_px:
                     wins += 1
 
@@ -4687,19 +4685,19 @@ def _run_mode_r(assets, horizons, args):
             if first_price is None:
                 first_price = price
             if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
-                held = cash * (1 - TRADING_FEE) / price
+                held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
                 cash = 0
                 in_pos = True
                 entry_px = price
                 trades += 1
             elif s['signal'] == 'SELL' and in_pos:
-                cash = held * price * (1 - TRADING_FEE)
+                cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
                 if price > entry_px:
                     wins += 1
                 held = 0
                 in_pos = False
         if in_pos and last_price:
-            cash = held * last_price * (1 - TRADING_FEE)
+            cash = held * last_price * (1 - BACKTEST_FEE_PER_LEG)
             if last_price > entry_px:
                 wins += 1
         ret = (cash / 1000.0 - 1) * 100

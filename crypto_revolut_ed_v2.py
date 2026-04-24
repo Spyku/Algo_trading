@@ -725,10 +725,16 @@ def sync_positions(trading_cfg, notify=True):
         updated = False
 
         if actual_usd > MIN_POSITION_USD and local_state == 'cash':
-            # Detected manual BUY — update local state
+            # Detected manual BUY — update local state.
+            # Fix N2 (2026-04-24): entry_price is current market mid, NOT the
+            # actual fill price. Sync runs every 5 min so the drift can be up
+            # to ±1% depending on volatility. Acceptable per user decision
+            # 2026-04-24 (option D — don't call Revolut X trades API).
+            # The (synced) tag on entry_time flags the trade as approximate;
+            # consumers of PnL history must tolerate ±0.5-1% error on these.
             pos['state'] = 'invested'
             pos['base_amount'] = actual_amount
-            pos['entry_price'] = price  # approximate
+            pos['entry_price'] = price  # approximate — see Fix N2 note above
             pos['entry_time'] = _now_utc_iso() + ' (synced)'
             pos['usd_invested'] = actual_usd
             pos['trades'].append({
@@ -741,7 +747,14 @@ def sync_positions(trading_cfg, notify=True):
             print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${price:,.2f}")
 
         elif actual_usd <= MIN_POSITION_USD and local_state == 'invested':
-            # Detected manual SELL — update local state
+            # Detected manual SELL — update local state.
+            # Fix N2 (2026-04-24): sell `price` is current mid at sync time,
+            # NOT the actual sell fill price. Both sides of this PnL calc
+            # carry ±1% noise: entry_price if the original BUY was also a
+            # sync, and `price` here for the SELL. So reported PnL on a
+            # synced-buy + synced-sell could be off by ±2% cumulatively.
+            # Acceptable per user 2026-04-24. The (synced) tag in the trade
+            # log flags the trade; treat its PnL numbers as approximate.
             pnl_pct = (price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
             pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
             pos['trades'].append({

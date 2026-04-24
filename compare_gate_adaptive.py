@@ -19,7 +19,7 @@ import pandas as pd
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIG_90D    = os.path.join(ENGINE_DIR, 'data', 'eth_sl_signals_90d.pkl')
 
-TRADING_FEE      = 0.0011
+TRADING_FEE      = 0.0005  # 5 bps/leg realistic maker blend (see ed.py BACKTEST_FEE_PER_LEG)
 MIN_SELL_PNL_PCT = 0.5   # matches production
 MAX_HOLD_HOURS   = 10
 

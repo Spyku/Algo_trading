@@ -125,6 +125,34 @@ VARIANTS = [
         'orig_converged': False,  # max_iter hit (max_hold jittered)
         'meta_filter': 0.45,       # V3 = trimOFF_metaON
     },
+    {
+        'name': 'V4',
+        'label': 'trimON_metaON',
+        'config_tag': 'regime_config_ed_noprod_trimON_metaON.json',
+        'csv_tag': 'crypto_ed_production_noprod_trimON_metaON.csv',
+        'orig_detector': 'sma24>sma100',
+        'orig_bull_h': 5, 'orig_bull_conf': 90,
+        'orig_bear_h': 5, 'orig_bear_conf': 65,
+        'orig_t_bull_shield': True, 'orig_t_bear_shield': True,
+        'orig_t_min_sell': 0.50, 'orig_t_max_hold': 10,
+        'orig_t_ref_pct': 52.00,
+        'orig_converged': True,   # iter 3
+        'meta_filter': 0.45,      # V4 = trimON_metaON
+    },
+    {
+        'name': 'V5',
+        'label': 'trimON_metaON_floorOFF',
+        'config_tag': 'regime_config_ed_noprod_trimON_metaON_floorOFF.json',
+        'csv_tag': 'crypto_ed_production_noprod_trimON_metaON_floorOFF.csv',
+        'orig_detector': 'price>sma72',
+        'orig_bull_h': 6, 'orig_bull_conf': 70,
+        'orig_bear_h': 5, 'orig_bear_conf': 70,
+        'orig_t_bull_shield': True, 'orig_t_bear_shield': True,
+        'orig_t_min_sell': 0.50, 'orig_t_max_hold': 10,
+        'orig_t_ref_pct': 17.15,
+        'orig_converged': False,  # max_iter hit
+        'meta_filter': 0.45,      # V5 = trimON_metaON_floorOFF
+    },
 ]
 
 

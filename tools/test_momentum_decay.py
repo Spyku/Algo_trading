@@ -41,7 +41,7 @@ from crypto_trading_system_ed import (  # noqa: E402
     _suppress_stderr,
     PRODUCTION_CSV,
     CONFIG_DIR,
-    TRADING_FEE,
+    BACKTEST_FEE_PER_LEG as TRADING_FEE,  # realistic 5 bps/leg blend, aliased for local sim
 )
 
 
