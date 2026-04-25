@@ -650,6 +650,13 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
     # Forward-fill carries last known value through NaN tails (correct for log-
     # returns, ratios, indicators). fillna(0.0) is final safety for columns
     # that have NEVER had data (cold start). Apply to BOTH views.
+    # N-08 note (2026-04-25): training-window features get ffill'd alongside
+    # the inference row. By design — Fix #4's intent was to NOT lose recent
+    # rows to dropna when a sparse feature has a NaN tail. RF/XGB partner
+    # models can't natively handle NaN; ffill produces stale-but-plausible
+    # values rather than dropping training rows. LGBM handles NaN natively
+    # but sees the imputed value as real data. Acceptable noise; revisit
+    # only if walk-forward backtest shows feature-impute-driven bias.
     df[feature_cols] = df[feature_cols].ffill().fillna(0.0)
     df_train[feature_cols] = df_train[feature_cols].ffill().fillna(0.0)
     n = len(df)
@@ -699,6 +706,46 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
                 f'stale_wall_{asset_name}_{horizon}',
                 f"🛑 {asset_name} {horizon}h: REFUSING — freshest bar in df_full is {wall_lag_hours:.1f}h old "
                 f"(wall clock). Data pipeline not updating. Check downloads.",
+                severity='critical',
+            )
+            return None
+
+        # N-07 fix (2026-04-25): per-feature staleness check. The wall-clock
+        # check above only validates the asset's OWN freshest bar. A model
+        # feature sourced from a different asset's CSV (e.g. xa_btc_lag* on
+        # ETH's model when BTC OHLCV is stale) would silently ffill at
+        # inference, producing degraded predictions on imputed leader data —
+        # the exact pathology behind the original 86%-pinned bug.
+        # For each feature_col, find the last non-NaN bar's age. Any feature
+        # whose last-valid bar is >2h behind df_full's tail = REFUSE.
+        # Sparse-by-design features (orderbook, IV, deriv_oi) skipped — they
+        # have intentional NaN gaps the design tolerates.
+        sparse_prefixes = ('ob_', 'avg_iv', 'iv_skew', 'deriv_oi_', 'stable_mcap_', 'whale_')
+        per_feat_max_lag = 0.0
+        per_feat_offender = None
+        for fc in feature_cols:
+            if fc.startswith(sparse_prefixes):
+                continue
+            col_data = df_full[fc] if fc in df_full.columns else None
+            if col_data is None:
+                continue
+            valid = col_data.dropna()
+            if len(valid) == 0:
+                continue
+            last_valid_idx = valid.index[-1]
+            last_valid_dt = pd.to_datetime(df_full.loc[last_valid_idx, 'datetime'])
+            if last_valid_dt.tzinfo is None:
+                last_valid_dt = last_valid_dt.tz_localize('UTC')
+            feat_lag_h = (latest_raw_dt - last_valid_dt).total_seconds() / 3600.0
+            if feat_lag_h > per_feat_max_lag:
+                per_feat_max_lag = feat_lag_h
+                per_feat_offender = fc
+        if per_feat_max_lag > 2:
+            print(f"  [!!] {asset_name} {horizon}h: feature '{per_feat_offender}' last-valid bar is {per_feat_max_lag:.1f}h behind df_full tail — REFUSING")
+            _rate_limited_telegram_lt(
+                f'stale_feat_{asset_name}_{horizon}',
+                f"🛑 {asset_name} {horizon}h: REFUSING — feature '{per_feat_offender}' is {per_feat_max_lag:.1f}h stale "
+                f"(non-sparse feature exceeded 2h staleness). Likely upstream source download failed.",
                 severity='critical',
             )
             return None

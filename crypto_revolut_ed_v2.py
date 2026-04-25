@@ -171,21 +171,19 @@ DEFAULT_TRADING_CONFIG = {
 }
 
 def load_trading_config():
-    defaults = json.loads(json.dumps(DEFAULT_TRADING_CONFIG))
+    """Read regime_config_ed.json and return its contents as the trading config.
+
+    N-04 fix (2026-04-25): JSON is the single source of truth. Earlier code
+    merged DEFAULT_TRADING_CONFIG underneath the file contents, which meant
+    deleting a key (or even an entire asset) from JSON had no effect at
+    runtime — defaults re-injected. Now the file IS the config; defaults
+    only seed a cold-start (no file present)."""
     if os.path.exists(REGIME_CONFIG_FILE):
         with open(REGIME_CONFIG_FILE) as f:
-            file_cfg = json.load(f)
-        # Merge file config over defaults
-        for asset in file_cfg:
-            if asset not in defaults:
-                defaults[asset] = {
-                    'enabled': True, 'symbol': f'{asset}-USD',
-                    'regime_detector': {'type': 'sma_cross', 'params': {'fast': 48, 'slow': 200}},
-                    'bull': {'horizon': 7, 'min_confidence': 95, 'max_position_usd': 12000},
-                    'bear': {'horizon': 8, 'min_confidence': 90, 'max_position_usd': 6000},
-                }
-            defaults[asset].update(file_cfg[asset])
-    return defaults
+            return json.load(f)
+    # Cold start only — write defaults to disk so subsequent loads are
+    # file-only and edits actually stick.
+    return json.loads(json.dumps(DEFAULT_TRADING_CONFIG))
 
 def save_trading_config(cfg):
     """Atomic write — trader hot-reloads regime_config_ed.json on mtime change;
