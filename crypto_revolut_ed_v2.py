@@ -764,81 +764,92 @@ def sync_positions(trading_cfg, notify=True):
         if not cfg.get('enabled'):
             continue
 
-        symbol = cfg.get('symbol', f'{asset}-USD')
-        pos = load_position(asset)
+        # M-06 fix (2026-04-25): try-acquire the per-asset trade lock so we
+        # don't race with main-loop or Telegram-thread trade execution. If
+        # busy, skip this asset for this sync cycle — the next 5-min sync
+        # will pick it up. Prevents duplicate (synced) trade records being
+        # appended on top of a fresh BUY/SELL the main loop just executed.
+        _sync_lock = _get_asset_trade_lock(asset)
+        if not _sync_lock.acquire(blocking=False):
+            print(f"  [sync] {asset} busy (trade in progress) — skipping this cycle")
+            continue
+        try:
+            symbol = cfg.get('symbol', f'{asset}-USD')
+            pos = load_position(asset)
 
-        # Get actual holdings from exchange
-        actual_amount = balances.get(asset, {}).get('total', 0)
-        price = get_asset_price(symbol)
-        actual_usd = actual_amount * price if price > 0 else 0
+            # Get actual holdings from exchange
+            actual_amount = balances.get(asset, {}).get('total', 0)
+            price = get_asset_price(symbol)
+            actual_usd = actual_amount * price if price > 0 else 0
 
-        local_state = pos['state']
-        updated = False
+            local_state = pos['state']
+            updated = False
 
-        if actual_usd > MIN_POSITION_USD and local_state == 'cash':
-            # Detected manual BUY — update local state.
-            # Fix N2 (2026-04-24): entry_price is current market mid, NOT the
-            # actual fill price. Sync runs every 5 min so the drift can be up
-            # to ±1% depending on volatility. Acceptable per user decision
-            # 2026-04-24 (option D — don't call Revolut X trades API).
-            # The (synced) tag on entry_time flags the trade as approximate;
-            # consumers of PnL history must tolerate ±0.5-1% error on these.
-            pos['state'] = 'invested'
-            pos['base_amount'] = actual_amount
-            pos['entry_price'] = price  # approximate — see Fix N2 note above
-            pos['entry_time'] = _now_utc_iso() + ' (synced)'
-            pos['usd_invested'] = actual_usd
-            pos['trades'].append({
-                'action': 'BUY', 'price': price,
-                'time': pos['entry_time'], 'usd': actual_usd,
-                'auto': False, 'synced': True,
-            })
-            updated = True
-            changes.append(f"🔄 {asset}: Detected MANUAL BUY — {actual_amount:.6f} {asset} (≈${actual_usd:,.2f})")
-            print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${price:,.2f}")
+            if actual_usd > MIN_POSITION_USD and local_state == 'cash':
+                # Detected manual BUY — update local state.
+                # Fix N2 (2026-04-24): entry_price is current market mid, NOT
+                # the actual fill price. Sync runs every 5 min so the drift
+                # can be up to ±1% depending on volatility. Acceptable per
+                # user decision 2026-04-24 (option D — don't call Revolut X
+                # trades API). The (synced) tag on entry_time flags the trade
+                # as approximate; PnL consumers must tolerate ±0.5-1% error.
+                pos['state'] = 'invested'
+                pos['base_amount'] = actual_amount
+                pos['entry_price'] = price  # approximate — see Fix N2 note above
+                pos['entry_time'] = _now_utc_iso() + ' (synced)'
+                pos['usd_invested'] = actual_usd
+                pos['trades'].append({
+                    'action': 'BUY', 'price': price,
+                    'time': pos['entry_time'], 'usd': actual_usd,
+                    'auto': False, 'synced': True,
+                })
+                updated = True
+                changes.append(f"🔄 {asset}: Detected MANUAL BUY — {actual_amount:.6f} {asset} (≈${actual_usd:,.2f})")
+                print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${price:,.2f}")
 
-        elif actual_usd <= MIN_POSITION_USD and local_state == 'invested':
-            # Detected manual SELL — update local state.
-            # Fix N2 (2026-04-24): sell `price` is current mid at sync time,
-            # NOT the actual sell fill price. Both sides of this PnL calc
-            # carry ±1% noise: entry_price if the original BUY was also a
-            # sync, and `price` here for the SELL. So reported PnL on a
-            # synced-buy + synced-sell could be off by ±2% cumulatively.
-            # Acceptable per user 2026-04-24. The (synced) tag in the trade
-            # log flags the trade; treat its PnL numbers as approximate.
-            pnl_pct = (price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
-            pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
-            pos['trades'].append({
-                'action': 'SELL', 'price': price,
-                'time': datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)',
-                'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-                'auto': False, 'synced': True,
-            })
-            pos['state'] = 'cash'
-            pos['entry_price'] = 0
-            pos['entry_time'] = ''
-            pos['base_amount'] = 0
-            pos['usd_invested'] = 0
-            updated = True
-            changes.append(f"🔄 {asset}: Detected MANUAL SELL (PnL: {pnl_pct:+.1f}%)")
-            print(f"  🔄 SYNC: {asset} manual SELL detected — PnL: {pnl_pct:+.1f}%")
+            elif actual_usd <= MIN_POSITION_USD and local_state == 'invested':
+                # Detected manual SELL — update local state.
+                # Fix N2 (2026-04-24): sell `price` is current mid at sync
+                # time, NOT the actual sell fill price. Both sides of this
+                # PnL calc carry ±1% noise: entry_price if the original BUY
+                # was also synced, and `price` here for the SELL. So reported
+                # PnL on a synced-buy + synced-sell could be off by ±2%
+                # cumulatively. The (synced) tag flags the approximation.
+                pnl_pct = (price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
+                pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
+                pos['trades'].append({
+                    'action': 'SELL', 'price': price,
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)',
+                    'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                    'auto': False, 'synced': True,
+                })
+                pos['state'] = 'cash'
+                pos['entry_price'] = 0
+                pos['entry_time'] = ''
+                pos['base_amount'] = 0
+                pos['usd_invested'] = 0
+                updated = True
+                changes.append(f"🔄 {asset}: Detected MANUAL SELL (PnL: {pnl_pct:+.1f}%)")
+                print(f"  🔄 SYNC: {asset} manual SELL detected — PnL: {pnl_pct:+.1f}%")
 
-        elif local_state == 'invested' and actual_amount > 0:
-            # Always refresh actual held amount from exchange (silent)
-            pos['base_amount'] = actual_amount
-            updated = True
+            elif local_state == 'invested' and actual_amount > 0:
+                # Always refresh actual held amount from exchange (silent)
+                pos['base_amount'] = actual_amount
+                updated = True
 
-            # Detect locked funds (stale open orders) and cancel them
-            available_amount = balances.get(asset, {}).get('available', 0)
-            if available_amount <= 0 < actual_amount:
-                print(f"  ⚠ SYNC: {asset} funds locked (available=0, total={actual_amount:.6f}) — cancelling stale orders")
-                cancelled = cancel_all_open_orders(cfg.get('symbol', f'{asset}-USD'))
-                if cancelled > 0:
-                    send_telegram(f"🧹 {asset}: cancelled {cancelled} stale order(s) — funds unlocked")
-                    changes.append(f"🧹 {asset}: cancelled {cancelled} stale order(s)")
+                # Detect locked funds (stale open orders) and cancel them
+                available_amount = balances.get(asset, {}).get('available', 0)
+                if available_amount <= 0 < actual_amount:
+                    print(f"  ⚠ SYNC: {asset} funds locked (available=0, total={actual_amount:.6f}) — cancelling stale orders")
+                    cancelled = cancel_all_open_orders(cfg.get('symbol', f'{asset}-USD'))
+                    if cancelled > 0:
+                        send_telegram(f"🧹 {asset}: cancelled {cancelled} stale order(s) — funds unlocked")
+                        changes.append(f"🧹 {asset}: cancelled {cancelled} stale order(s)")
 
-        if updated:
-            save_position(asset, pos)
+            if updated:
+                save_position(asset, pos)
+        finally:
+            _sync_lock.release()
 
     if changes and notify:
         msg = "🔄 <b>Position Sync</b>\n\n" + "\n".join(changes)
@@ -2932,9 +2943,15 @@ def _setup_handle(text, trading_cfg):
 
         # /cfg_{ASSET}_auto — toggle auto-trade
         if text_l == f'/cfg_{asset}_auto':
-            pos = load_position(asset)
-            pos['auto_trade'] = not pos.get('auto_trade', False)
-            save_position(asset, pos)
+            # M-07 fix (2026-04-25): hold the per-asset trade lock for the
+            # full load→modify→save sequence so a mid-flight main-loop trade
+            # doesn't lose this toggle (its save_position would clobber ours
+            # with stale auto_trade state).
+            _lk = _get_asset_trade_lock(asset)
+            with _lk:
+                pos = load_position(asset)
+                pos['auto_trade'] = not pos.get('auto_trade', False)
+                save_position(asset, pos)
             st = "🔵 ON" if pos['auto_trade'] else "🔴 OFF"
             send_telegram(f"✅ {asset} auto-trade → {st}")
             _setup_send_menu(asset, cfg[asset])
@@ -3099,10 +3116,17 @@ def _handle_gate_command(msg, trading_cfg):
             send_telegram(f"🚦 {asset} gate {action.upper()} (both regimes)")
             _show_status(); return
         if action == 'clear':
-            pos = load_position(asset)
-            if pos.get('rally_cooldown_until'):
-                pos['rally_cooldown_until'] = ''
-                save_position(asset, pos)
+            # M-07 fix (2026-04-25): hold the per-asset trade lock around
+            # load→modify→save so a mid-cycle main-loop save_position can't
+            # clobber our gate-clear (or vice versa).
+            _lk = _get_asset_trade_lock(asset)
+            with _lk:
+                pos = load_position(asset)
+                had_cooldown = bool(pos.get('rally_cooldown_until'))
+                if had_cooldown:
+                    pos['rally_cooldown_until'] = ''
+                    save_position(asset, pos)
+            if had_cooldown:
                 send_telegram(f"🧹 {asset} cooldown window cleared (one-time override)")
             else:
                 send_telegram(f"ℹ️ {asset} has no active cooldown")
