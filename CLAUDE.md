@@ -348,7 +348,7 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
     "bull": "6h@95%/$12k, shield=ON, gate=NONE (no STRICT winner on 60d)",
     "bear": "8h@80%/$12k, shield=OFF, gate=rr8h≥2.5% OR rr30h≥5.0%, cd=18h",
     "shared": "min_sell_pnl=0.6%, max_hold=12h",
-    "disaster_brake_pct": 5,
+    "disaster_brake_pct": 0,   // currently OFF (key absent from JSON; brake_pct=0 disables). M-04+N-03 fixes are in place — user opted to keep disabled 2026-04-25.
     "shield_quick_release": "95%/4h (armed; empirically inert on 60d)",
     "backtest_fee_per_leg": "0.0005 (5 bps, realistic maker blend)",
     "enabled": true
@@ -902,6 +902,33 @@ Optional flags:
 9. **Ein results review** — 15-minute candle BTC results from earlier laptop run. Separate research track.
 
 10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
+
+### Closed 2026-04-25 late-afternoon (post-bundle hotfixes + bundle 3)
+
+After bundle 1+2 shipped, user attempted to bring trader back online and surfaced **two more real-world bugs my earlier fixes had missed/introduced**. Re-audit then surfaced 3 more verified-real findings, all shipped same evening. Total of 6 additional commits on top of bundles 1+2.
+
+**Hotfixes (post-bundle 2):**
+
+- **`5ba0af7` HOTFIX M-01b** — `crypto_trading_system_ed.py` + `crypto_live_trader_ed.py`. The morning's M-01 fix was incomplete: `build_hourly_features` already did `dropna(subset=core_cols + ['label'])` BEFORE returning df_full. So even though I patched the live trader to keep the label-NaN tail, df_full's last row was already `freshest_raw_bar − horizon_hours` — wall-clock check saw 7h lag and refused every signal. Fix: added `keep_label_nan_tail=True` parameter to `build_all_features` / `build_hourly_features`, threaded through to live trader's call site. Engine training callers leave default False. Verified: ETH df_full last bar moved from 04:00 UTC (7.34h, REFUSE) to 11:00 UTC (0.34h, PASS). 7 rows recovered.
+
+- **`cbc4ad3` HOTFIX N-01 + N-03 + N-05** — `crypto_revolut_ed_v2.py`. (N-01 CRITICAL): `process_asset` leaked the per-asset trade lock on three balance-API-failure early-return paths (lines 1324, 1471, 1501). One API hiccup → ETH locked out forever, blocking Telegram handlers deadlock. Pre-existing from Fix N1 (commit `5a7c834`), surfaced by re-audit. Released lock at each early-return. (N-03 HIGH latent): if all signals refused, `price=0` + `get_best_bid_ask=(0,0)` → live_mid=0 → cur_pnl=−100% → brake force-sell on phantom data. Currently dormant since brake is disabled, but trap if re-enabled. Added `live_mid > 0` guard. (N-05 HIGH): M-07 Telegram handlers used blocking `with _lk:` — would freeze Telegram for 5min during a maker order, or forever after N-01 lock leak. Replaced with `acquire(timeout=2.0)`.
+
+- **`3b38190` N-02 MIN_TRADE_USD lowered to 299.9** — `crypto_revolut_ed_v2.py:746`. BUG 1's $0.01 safety margin shrunk `/buy ETH 300` to 299.99, which then failed `< 300` minimum check with a confusing "$299.99 below $300 min" message. Lowered threshold to 299.9 so exact-$300 inputs survive the safety margin. Anything below $299.99 still rejected.
+
+**Bundle 3 (re-audit follow-ups):**
+
+- **`d49cc22` N-04 + N-07 + N-08** — `crypto_revolut_ed_v2.py` + `crypto_live_trader_ed.py`. (N-04): `load_trading_config()` no longer merges DEFAULT_TRADING_CONFIG under file contents — earlier merge meant deleting a key from JSON had no runtime effect (defaults re-injected). Now JSON is single source of truth; defaults seed cold-start only. (N-07 Option A): per-feature staleness check in `generate_live_signal` — for each non-sparse feature_col, compute last-valid bar age vs latest_raw_dt; refuse if any >2h. Catches the M-01b-class case where an upstream-dependent feature source (e.g. `xa_btc_lag*` when BTC OHLCV is stale) silently ffill'd into the inference. Sparse-by-design features (orderbook, IV, deriv_oi, stablecoin, whale) are skipped. (N-08): added comment documenting why training-window features get ffill'd alongside the inference row — by design from Fix #4; LGBM handles native NaN but RF/XGB partner needs imputation; acceptable noise.
+
+- **`1124447` M-10 orphan-trade reconciliation** — `crypto_revolut_ed_v2.py`. New helpers `get_recent_private_trades` and `_reconcile_orphan_trade` query Revolut's `/trades/private/{symbol}` endpoint to recover actual fill price/timestamp when sync_positions detects a manual BUY/SELL. Match by side + quantity (within 0.1% relative). Falls back to mid-price (Fix N2 behavior) only when no recent trade matches. Trade records get `reconciled: True` marker (vs `synced: True`) so PnL consumers can distinguish exact-basis trades from approximate.
+
+**Disaster brake disabled (user decision, 2026-04-25):** doc previously claimed `disaster_brake_pct: 5` for ETH but the JSON had no such key, making the brake dormant. User confirmed to keep it disabled. The doc snippet now correctly shows `disaster_brake_pct: 0` with a note that M-04+N-03 fixes are in place if re-enabled later.
+
+**Bundle 3 deferred (verified clean or low-impact):**
+- **N-06** (LOW) — `_atomic_write_json` in engine has no in-process lock. Latent only; sequential code paths today.
+- **N-15** (LOW) — `cycle_metrics` not flushed on `process_asset` early-return paths. Observability gap, not correctness.
+- **M-20** (LOW) — Hot-reload regenerates feature manifest via subprocess every 5 min (3-10s blocking). User wants explanation before deciding.
+
+**Status by end of day:** 16 commits since `pre-trader-bundle-20260425` tag, 14 distinct bugs fixed, trader running cleanly with full instrumentation. Position file shows post-fix BUY at 22:01 last night; M-02/M-03 ledger-delta basis ready for next BUY. M-01 staleness chain working (lag_hours ~0). All maker order knobs configurable per asset.
 
 ### Closed 2026-04-25 midday (trader audit bundle 2 — 4 commits, ~50 lines)
 
