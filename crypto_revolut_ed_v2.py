@@ -126,13 +126,24 @@ def _get_asset_trade_lock(asset):
 # RATE-LIMITED TELEGRAM ALERTS (Fix #1 — 2026-04-24)
 # Prevents per-cycle Telegram spam when a source is persistently failing.
 # Keyed so different (source, context) pairs alert independently.
+#
+# F-04 caveat (2026-04-25): _TELEGRAM_RATE_LIMIT is module-level, so it
+# resets on every process start. If start_ed_v2.bat is in a restart loop
+# (trader exits → bat sleeps 30s → restarts), the cooldown only suppresses
+# WITHIN ONE process lifetime. Each new process gets a fresh dict and can
+# fire one alert per key on its first call. M-24 throttles the bat's
+# restart cadence to ~5min (sys.exit after _stop_event.wait(300)) to
+# bound the worst-case spam to ~12 alerts/hour during sustained outage,
+# vs the documented "1/hour" goal. To get true 1/hour across restarts,
+# the cooldown state would need persisting to disk (not done here).
 # ============================================================
 _TELEGRAM_RATE_LIMIT = {}  # key -> last_sent_epoch
 
 def _rate_limited_telegram(key, msg, cooldown_sec=3600):
     """Send Telegram alert; skip if same `key` alerted within cooldown_sec.
     Returns True if sent, False if suppressed by cooldown.
-    Never raises — safe for use in except blocks."""
+    Never raises — safe for use in except blocks.
+    See F-04 caveat above re: cross-process cooldown semantics."""
     import time as _t
     now = _t.time()
     last = _TELEGRAM_RATE_LIMIT.get(key, 0)
@@ -1016,6 +1027,12 @@ def _check_take_profit(asset, trading_cfg, dry_run=False):
     """Check if take-profit should trigger for an invested position.
     Called every 5 minutes from the sync loop.
     Returns True if TP was triggered and position was sold.
+
+    F-03 fix (2026-04-25): hardened with the same patches applied to
+    process_asset's auto-SELL — per-asset trade lock, ledger-delta basis
+    (M-02/M-03), and residual detection on partial sells (M-21). Was
+    dormant (TP=0 in ETH config) so the bugs were latent; if user ever
+    enables TP via /setup, they would have re-emerged.
     """
     cfg = trading_cfg.get(asset, {})
     if not cfg.get('enabled'):
@@ -1058,58 +1075,128 @@ def _check_take_profit(asset, trading_cfg, dry_run=False):
             )
             return False
 
-        # Execute sell
-        actual_held = position.get('base_amount', 0)
-        if actual_held <= 0:
+        # F-03 fix: acquire per-asset trade lock for the SELL. If the main
+        # loop or Telegram thread is mid-trade, skip TP this cycle and let
+        # the next 5-min sync retry. Prevents double-sell.
+        _tp_lock = _get_asset_trade_lock(asset)
+        if not _tp_lock.acquire(blocking=False):
+            print(f"  [TP] {asset}: trade lock busy — TP deferred to next cycle")
             return False
 
         try:
-            use_maker = cfg.get('use_maker_orders', False)
-            if use_maker:
-                status, order = execute_maker_sell(symbol, actual_held)
+            actual_held = position.get('base_amount', 0)
+            if actual_held <= 0:
+                return False
+
+            # F-03 fix: capture pre-trade balance for ledger-delta basis.
+            try:
+                pre_bal = get_balances() or {}
+                pre_usd = float(pre_bal.get('USD', {}).get('available', 0))
+                pre_crypto = float(pre_bal.get(asset, {}).get('total', actual_held))
+            except Exception:
+                pre_usd = 0.0
+                pre_crypto = actual_held
+
+            try:
+                use_maker = cfg.get('use_maker_orders', False)
+                if use_maker:
+                    status, order = execute_maker_sell(symbol, actual_held)
+                else:
+                    status, order = place_market_sell(symbol, actual_held)
+            except Exception as e:
+                print(f"  [!] TP sell failed: {e}")
+                send_telegram(f"<b>TP sell failed:</b> {asset}\n{e}")
+                return False
+
+            if status == 200 and order:
+                # F-03 fix: ledger-delta basis (M-02/M-03 pattern).
+                time.sleep(2)
+                post_bal = get_balances() or {}
+                usd_now = float(post_bal.get('USD', {}).get('available', pre_usd))
+                crypto_left = float(post_bal.get(asset, {}).get('total', 0))
+                delta_usd_recv = max(usd_now - pre_usd, 0.0)
+                delta_crypto_sold = max(pre_crypto - crypto_left, 0.0)
+                if delta_crypto_sold > 0 and delta_usd_recv > 0:
+                    sell_price = delta_usd_recv / delta_crypto_sold
+                else:
+                    sell_price = float(order.get('average_fill_price') or current_price)
+
+                entry_price_saved = position['entry_price']
+                pnl_pct_actual = (sell_price - entry_price_saved) / entry_price_saved * 100
+                # PnL: prefer ledger delta when available
+                if delta_usd_recv > 0 and position.get('usd_invested', 0) > 0:
+                    pnl_usd = delta_usd_recv - position['usd_invested']
+                else:
+                    pnl_usd = position.get('usd_invested', 0) * pnl_pct_actual / 100
+
+                # F-03 fix: residual detection (M-21 pattern). If TP sell
+                # partially completed, preserve the residual position
+                # instead of zeroing state. Without this, leftover ETH gets
+                # mis-recorded by sync_positions later.
+                residual_value_usd = crypto_left * sell_price
+                partial_sell = residual_value_usd > MIN_POSITION_USD
+                if partial_sell:
+                    pre_qty = position.get('base_amount', delta_crypto_sold + crypto_left)
+                    sold_fraction = (delta_crypto_sold / pre_qty) if pre_qty > 0 else 1.0
+                    realized_pnl_usd = delta_usd_recv - position.get('usd_invested', 0) * sold_fraction
+                    position['trades'].append({
+                        'action': 'SELL',
+                        'price': sell_price,
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        'pnl_pct': round(pnl_pct_actual, 2),
+                        'pnl_usd': round(realized_pnl_usd, 2),
+                        'auto': True,
+                        'reason': f'TP_{tp_pct}%',
+                        'partial': True,
+                        'sold_qty': round(delta_crypto_sold, 8),
+                        'residual_qty': round(crypto_left, 8),
+                    })
+                    position['base_amount'] = crypto_left
+                    position['usd_invested'] = position.get('usd_invested', 0) * (1 - sold_fraction)
+                    # state, entry_price, entry_time UNCHANGED
+                    save_position(asset, position)
+                    send_telegram(
+                        f"⚠️ <b>{asset} TP PARTIAL SELL</b>\n"
+                        f"Sold: {delta_crypto_sold:.6f} {asset} @ ${sell_price:,.2f} = ${delta_usd_recv:,.2f}\n"
+                        f"Residual: {crypto_left:.6f} {asset} (~${residual_value_usd:,.0f}) — position kept open\n"
+                        f"Realized PnL: {realized_pnl_usd:+,.2f} USD"
+                    )
+                    return False  # treat partial as not-yet-finalized
+
+                # Full sell — clear state.
+                position['trades'].append({
+                    'action': 'SELL',
+                    'price': sell_price,
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    'pnl_pct': round(pnl_pct_actual, 2),
+                    'pnl_usd': round(pnl_usd, 2),
+                    'auto': True,
+                    'reason': f'TP_{tp_pct}%',
+                })
+                position['state'] = 'cash'
+                position['entry_price'] = 0
+                position['entry_time'] = ''
+                position['base_amount'] = 0
+                position['usd_invested'] = 0
+                save_position(asset, position)
+
+                emoji = '+' if pnl_usd >= 0 else ''
+                send_telegram(
+                    f"<b>TAKE PROFIT {asset}</b>\n"
+                    f"Sold at ${sell_price:,.2f} (+{pnl_pct_actual:.2f}%)\n"
+                    f"PnL: ${emoji}{pnl_usd:.2f}\n"
+                    f"Entry: ${entry_price_saved:,.2f}\n"
+                    f"Target was: +{tp_pct}%"
+                )
+                print(f"  TP SOLD {asset} at ${sell_price:,.2f} | PnL: ${pnl_usd:+.2f} ({pnl_pct_actual:+.2f}%)")
+                return True
             else:
-                status, order = place_market_sell(symbol, actual_held)
-        except Exception as e:
-            print(f"  [!] TP sell failed: {e}")
-            send_telegram(f"<b>TP sell failed:</b> {asset}\n{e}")
-            return False
-
-        if status == 200 and order:
-            sell_price = float(order.get('average_fill_price', current_price))
-            entry_price_saved = position['entry_price']
-            pnl_pct_actual = (sell_price - entry_price_saved) / entry_price_saved * 100
-            pnl_usd = position.get('usd_invested', 0) * pnl_pct_actual / 100
-
-            # Record trade
-            position['trades'].append({
-                'action': 'SELL',
-                'price': sell_price,
-                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                'pnl_pct': round(pnl_pct_actual, 2),
-                'pnl_usd': round(pnl_usd, 2),
-                'auto': True,
-                'reason': f'TP_{tp_pct}%',
-            })
-            position['state'] = 'cash'
-            position['entry_price'] = 0
-            position['entry_time'] = ''
-            position['base_amount'] = 0
-            position['usd_invested'] = 0
-            save_position(asset, position)
-
-            emoji = '+' if pnl_usd >= 0 else ''
-            send_telegram(
-                f"<b>TAKE PROFIT {asset}</b>\n"
-                f"Sold at ${sell_price:,.2f} (+{pnl_pct_actual:.2f}%)\n"
-                f"PnL: ${emoji}{pnl_usd:.2f}\n"
-                f"Entry: ${entry_price_saved:,.2f}\n"
-                f"Target was: +{tp_pct}%"
-            )
-            print(f"  TP SOLD {asset} at ${sell_price:,.2f} | PnL: ${pnl_usd:+.2f} ({pnl_pct_actual:+.2f}%)")
-            return True
-        else:
-            print(f"  [!] TP sell order failed: status={status}")
-            return False
+                print(f"  [!] TP sell order failed: status={status}")
+                return False
+        finally:
+            # F-03 fix: guaranteed lock release even on exception path.
+            try: _tp_lock.release()
+            except Exception: pass
 
     return False
 
@@ -1403,7 +1490,13 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 cur_pnl = (live_mid - position['entry_price']) / position['entry_price'] * 100
                 if cur_pnl <= -brake_pct:
                     print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live mid ${live_mid:,.2f}) — forcing SELL")
-                    send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live ${live_mid:,.2f})")
+                    # F-05/F-12 fix (2026-04-25): rate-limit. If SELL fails
+                    # (status non-200), brake fires every cycle until the
+                    # SELL succeeds. 1h cooldown limits the spam.
+                    _rate_limited_telegram(
+                        f'disaster_brake_{asset}',
+                        f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live ${live_mid:,.2f})",
+                    )
                     action = 'SELL'
                     disaster_brake = True
             else:
@@ -1441,7 +1534,12 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             if rc_active:
                 msg = f'rally_cooldown {rc_hours_left:.1f}h left'
                 print(f"    ⏸ {asset} BUY skipped — {msg}")
-                send_telegram(f"⏸ {asset} BUY skipped — {msg}")
+                # F-05 fix (2026-04-25): rate-limit so a multi-hour cooldown
+                # doesn't spam one Telegram per cycle.
+                _rate_limited_telegram(
+                    f'rally_cd_skip_{asset}',
+                    f"⏸ {asset} BUY skipped — {msg}",
+                )
                 action = 'HOLD'
 
         if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
@@ -1477,7 +1575,12 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
 
                 # Minimum $300 to trade, target full max, or all available if < max
                 if usd_avail < MIN_TRADE_USD:
-                    send_telegram(f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum")
+                    # F-05 fix (2026-04-25): low-USD condition can persist
+                    # for hours/days while waiting for funds; rate-limit.
+                    _rate_limited_telegram(
+                        f'low_usd_buy_{asset}',
+                        f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum",
+                    )
                 else:
                     buy_amount = min(max_usd, usd_avail)
                     # BUG 1 fix: Revolut rejects maker orders where amount > balance even by $0.01
@@ -1508,6 +1611,7 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                             position['base_amount'] = delta_crypto
                             position['entry_price'] = delta_usd / delta_crypto
                             position['usd_invested'] = delta_usd
+                            executed = True
                         else:
                             # Balance API failed or returned zero delta — fall back to
                             # API order fields with the correct field names.
@@ -1517,12 +1621,31 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                                 position['base_amount'] = filled
                                 position['entry_price'] = avg_fill
                                 position['usd_invested'] = filled * avg_fill
+                                executed = True
                             else:
-                                # Last-resort fallback (preserves prior behavior).
-                                position['base_amount'] = buy_amount / price
-                                position['entry_price'] = price
-                                position['usd_invested'] = buy_amount
-                        executed = True
+                                # F-06 fix (2026-04-25): refuse to fabricate
+                                # position state when ALL three sources fail
+                                # (balance delta = 0, filled_quantity = 0,
+                                # average_fill_price = 0). The exchange may
+                                # have credited some ETH from a partial fill
+                                # we can't see, or none at all. Recording a
+                                # phantom buy_amount/price would lock in a
+                                # wrong basis; leave position in cash and
+                                # alert the user to /sync manually so the
+                                # next cycle reconciles via /trades/private
+                                # (M-10/M-22).
+                                _rate_limited_telegram(
+                                    f'buy_record_failed_{asset}',
+                                    f"🚨 {asset} BUY returned status=200 but balance-delta + "
+                                    f"filled_quantity + average_fill_price all returned 0. Cannot "
+                                    f"compute basis. Position left as cash; run /sync to "
+                                    f"reconcile via /trades/private.",
+                                )
+                                # Do NOT set executed=True; position stays cash.
+                                executed = False
+                        if executed:
+                            print(f"    Post-trade: {post_crypto:.6f} {asset} | ${post_usd:,.2f} USD "
+                                  f"(ledger basis ${position['usd_invested']:,.2f} @ ${position['entry_price']:,.2f})")
                         print(f"    Post-trade: {post_crypto:.6f} {asset} | ${post_usd:,.2f} USD "
                               f"(ledger basis ${position['usd_invested']:,.2f} @ ${position['entry_price']:,.2f})")
                     else:
@@ -1589,7 +1712,13 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     hold_override_active = True
                 elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
                     print(f"    ⚠ Failsafe: held {hours_held:.0f}h >= {max_hold_h}h, selling at {cur_pnl:+.2f}%")
-                    send_telegram(f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%")
+                    # F-05 fix (2026-04-25): rate-limit. If failsafe SELL
+                    # repeatedly fails (status non-200), this would otherwise
+                    # fire every cycle.
+                    _rate_limited_telegram(
+                        f'failsafe_sell_{asset}',
+                        f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%",
+                    )
 
         if action == 'SELL' and position['state'] == 'invested':
             if not dry_run and position.get('auto_trade'):
@@ -1597,7 +1726,12 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 balances = get_balances()
                 if balances is None:
                     print(f"    ❌ Cannot sell {asset} — balance API unreachable, keeping position")
-                    send_telegram(f"❌ {asset} SELL aborted: balance API failed (position kept as invested)")
+                    # F-05 fix (2026-04-25): rate-limit. A persistent balance-
+                    # API outage would otherwise fire every cycle.
+                    _rate_limited_telegram(
+                        f'sell_api_fail_{asset}',
+                        f"❌ {asset} SELL aborted: balance API failed (position kept as invested)",
+                    )
                     # N-01 fix (2026-04-25): release lock before early-return.
                     if _trade_lock_held:
                         try: _asset_lock.release()
@@ -1620,14 +1754,20 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 # If available=0 but total>0, funds are locked by an open order — cancel it first
                 if actual_held <= 0 < total_held:
                     print(f"    ⚠ {asset} balance locked (available=0, total={total_held:.6f}) — cancelling open orders...")
-                    send_telegram(f"⚠️ {asset} balance locked — cancelling open orders before sell")
+                    _rate_limited_telegram(
+                        f'balance_locked_{asset}',
+                        f"⚠️ {asset} balance locked — cancelling open orders before sell",
+                    )
                     cancelled = cancel_all_open_orders(symbol)
                     if cancelled > 0:
                         time.sleep(2)
                         balances = get_balances()
                         if balances is None:
                             print(f"    ❌ Cannot re-check balance after cancel — aborting sell")
-                            send_telegram(f"❌ {asset} SELL aborted: balance API failed after order cancel")
+                            _rate_limited_telegram(
+                                f'sell_api_fail_after_cancel_{asset}',
+                                f"❌ {asset} SELL aborted: balance API failed after order cancel",
+                            )
                             # N-01 fix (2026-04-25): release lock before early-return.
                             if _trade_lock_held:
                                 try: _asset_lock.release()
@@ -1676,7 +1816,10 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                         send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
                 else:
                     print(f"    ⚠ Nothing to sell (exchange balance = 0)")
-                    send_telegram(f"⚠️ {asset} SELL skipped: exchange balance = 0 (position kept as invested)")
+                    _rate_limited_telegram(
+                        f'sell_zero_balance_{asset}',
+                        f"⚠️ {asset} SELL skipped: exchange balance = 0 (position kept as invested)",
+                    )
 
             if not dry_run and position.get('auto_trade') and not executed:
                 # Auto-trade sell failed or nothing to sell — keep position as invested
