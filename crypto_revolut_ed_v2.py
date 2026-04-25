@@ -363,6 +363,60 @@ def get_asset_price(symbol):
 
     return 0
 
+def get_recent_private_trades(symbol, limit=50):
+    """Fetch recent private trades from Revolut X — used by orphan-trade
+    reconciliation in sync_positions (M-10 fix 2026-04-25).
+
+    Returns list of normalized dicts: [{'side','price','quantity','timestamp'},...]
+    in newest-first order. Empty list on API failure (caller falls back).
+    Defensive about field names since Revolut's response shape isn't
+    fully documented in this codebase: tries common variants.
+    """
+    try:
+        status, raw = revx_api('GET', f'/trades/private/{symbol}')
+        if status != 200 or not raw:
+            return []
+        trades = raw.get('data', raw) if isinstance(raw, dict) else raw
+        if not isinstance(trades, list):
+            return []
+        out = []
+        for t in trades[:limit]:
+            if not isinstance(t, dict):
+                continue
+            try:
+                price = float(t.get('p') or t.get('price') or t.get('average_fill_price') or 0)
+                qty   = float(t.get('q') or t.get('quantity') or t.get('size') or t.get('filled_quantity') or 0)
+                side  = (t.get('side') or t.get('s') or t.get('direction') or '').upper()
+                ts    =  t.get('t') or t.get('time') or t.get('timestamp') or t.get('created_at') or ''
+                if price > 0 and qty > 0 and side in ('BUY', 'SELL'):
+                    out.append({'side': side, 'price': price, 'quantity': qty, 'timestamp': ts})
+            except (ValueError, TypeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _reconcile_orphan_trade(symbol, side, target_qty, qty_tolerance=0.001):
+    """Search recent private trades for a match by side + quantity (within
+    `qty_tolerance` relative). Returns (price, timestamp) or (None, None).
+
+    Used during sync_positions when local state is 'cash' but exchange
+    holds the asset (manual BUY detected) — to recover the ACTUAL fill
+    price instead of using current mid (which drifts ±1%/5min).
+    """
+    if target_qty <= 0:
+        return None, None
+    side = side.upper()
+    for t in get_recent_private_trades(symbol):
+        if t['side'] != side:
+            continue
+        rel_diff = abs(t['quantity'] - target_qty) / target_qty
+        if rel_diff < qty_tolerance:
+            return t['price'], t['timestamp']
+    return None, None
+
+
 def place_market_buy(symbol, quote_size_usd):
     body = {
         'client_order_id': str(uuid.uuid4()),
@@ -787,41 +841,56 @@ def sync_positions(trading_cfg, notify=True):
 
             if actual_usd > MIN_POSITION_USD and local_state == 'cash':
                 # Detected manual BUY — update local state.
-                # Fix N2 (2026-04-24): entry_price is current market mid, NOT
-                # the actual fill price. Sync runs every 5 min so the drift
-                # can be up to ±1% depending on volatility. Acceptable per
-                # user decision 2026-04-24 (option D — don't call Revolut X
-                # trades API). The (synced) tag on entry_time flags the trade
-                # as approximate; PnL consumers must tolerate ±0.5-1% error.
+                # M-10 fix (2026-04-25): try to recover the ACTUAL fill price
+                # via /trades/private (Revolut's recent-trades endpoint).
+                # Match by side+quantity. If found, basis is exact. Falls
+                # back to mid-price (Fix N2 behavior) only when reconciliation
+                # fails (rate limit, no recent trade, qty mismatch).
+                actual_price, actual_ts = _reconcile_orphan_trade(symbol, 'BUY', actual_amount)
+                if actual_price is not None and actual_price > 0:
+                    use_price = actual_price
+                    src_tag = 'reconciled'
+                    print(f"  🔄 SYNC: {asset} manual BUY reconciled — fill ${actual_price:,.2f} (vs mid ${price:,.2f})")
+                else:
+                    use_price = price
+                    src_tag = 'synced'
                 pos['state'] = 'invested'
                 pos['base_amount'] = actual_amount
-                pos['entry_price'] = price  # approximate — see Fix N2 note above
-                pos['entry_time'] = _now_utc_iso() + ' (synced)'
-                pos['usd_invested'] = actual_usd
+                pos['entry_price'] = use_price
+                pos['entry_time'] = _now_utc_iso() + f' ({src_tag})'
+                pos['usd_invested'] = actual_amount * use_price
                 pos['trades'].append({
-                    'action': 'BUY', 'price': price,
-                    'time': pos['entry_time'], 'usd': actual_usd,
-                    'auto': False, 'synced': True,
+                    'action': 'BUY', 'price': use_price,
+                    'time': pos['entry_time'], 'usd': pos['usd_invested'],
+                    'auto': False, src_tag: True,
                 })
                 updated = True
-                changes.append(f"🔄 {asset}: Detected MANUAL BUY — {actual_amount:.6f} {asset} (≈${actual_usd:,.2f})")
-                print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${price:,.2f}")
+                changes.append(f"🔄 {asset}: Detected MANUAL BUY — {actual_amount:.6f} {asset} (≈${pos['usd_invested']:,.2f}, {src_tag})")
+                if src_tag == 'synced':
+                    print(f"  🔄 SYNC: {asset} manual BUY detected — {actual_amount:.6f} @ ~${use_price:,.2f} (mid fallback, no /trades/private match)")
 
             elif actual_usd <= MIN_POSITION_USD and local_state == 'invested':
                 # Detected manual SELL — update local state.
-                # Fix N2 (2026-04-24): sell `price` is current mid at sync
-                # time, NOT the actual sell fill price. Both sides of this
-                # PnL calc carry ±1% noise: entry_price if the original BUY
-                # was also synced, and `price` here for the SELL. So reported
-                # PnL on a synced-buy + synced-sell could be off by ±2%
-                # cumulatively. The (synced) tag flags the approximation.
-                pnl_pct = (price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
+                # M-10 fix (2026-04-25): reconcile SELL fill price via
+                # /trades/private using the recorded base_amount as the
+                # match key. Falls back to current mid only if reconciliation
+                # fails (Fix N2 fallback behavior).
+                target_qty = pos.get('base_amount', 0)
+                actual_price, _ = _reconcile_orphan_trade(symbol, 'SELL', target_qty) if target_qty > 0 else (None, None)
+                if actual_price is not None and actual_price > 0:
+                    sell_price = actual_price
+                    src_tag = 'reconciled'
+                    print(f"  🔄 SYNC: {asset} manual SELL reconciled — fill ${actual_price:,.2f} (vs mid ${price:,.2f})")
+                else:
+                    sell_price = price
+                    src_tag = 'synced'
+                pnl_pct = (sell_price - pos['entry_price']) / pos['entry_price'] * 100 if pos['entry_price'] > 0 else 0
                 pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
                 pos['trades'].append({
-                    'action': 'SELL', 'price': price,
-                    'time': datetime.now().strftime('%Y-%m-%d %H:%M') + ' (synced)',
+                    'action': 'SELL', 'price': sell_price,
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M') + f' ({src_tag})',
                     'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-                    'auto': False, 'synced': True,
+                    'auto': False, src_tag: True,
                 })
                 pos['state'] = 'cash'
                 pos['entry_price'] = 0
