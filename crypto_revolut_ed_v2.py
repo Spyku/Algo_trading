@@ -1260,13 +1260,21 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
     # Disaster brake: force SELL on severe unrealized loss, bypassing shield.
     # Acts as free downside insurance — only fires in rare catastrophic moves.
     # Configured per-asset via `disaster_brake_pct` (default 0 = OFF).
+    # M-04 fix (2026-04-25): use live exchange mid, not last-closed-candle
+    # close. Without this, an intra-hour disaster move was invisible until
+    # the candle closed (~1h delay), gutting the brake's protective intent.
     if position['state'] == 'invested' and position.get('entry_price', 0) > 0:
         brake_pct = float(trading_cfg.get('disaster_brake_pct', 0))
         if brake_pct > 0:
-            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
+            try:
+                _bid, _ask = get_best_bid_ask(symbol)
+                live_mid = (_bid + _ask) / 2 if _bid > 0 and _ask > 0 else price
+            except Exception:
+                live_mid = price
+            cur_pnl = (live_mid - position['entry_price']) / position['entry_price'] * 100
             if cur_pnl <= -brake_pct:
-                print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% — forcing SELL")
-                send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}%")
+                print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live mid ${live_mid:,.2f}) — forcing SELL")
+                send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live ${live_mid:,.2f})")
                 action = 'SELL'
                 disaster_brake = True
 
