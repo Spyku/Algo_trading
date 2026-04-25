@@ -4236,11 +4236,27 @@ def main():
                 print("=" * 60)
                 print("  Fix the source freshness issues above, OR run with")
                 print("  --skip-preflight to bypass (NOT recommended).")
+                # M-24 fix (2026-04-25): rate-limit the preflight-failure
+                # Telegram so a restart loop (preflight fails -> bat sleeps
+                # 30s -> restarts -> fails again) doesn't spam the user
+                # every 30 seconds. 1h cooldown keyed on the failure list
+                # so different failures still alert once per hour.
                 try:
                     failures = '\n'.join(f'  • {m}' for m in report['failures'][:5])
-                    send_telegram(f"🚨 Trader startup BLOCKED — pre-flight failed:\n{failures}")
+                    _rate_limited_telegram(
+                        f'preflight_blocked',
+                        f"🚨 Trader startup BLOCKED — pre-flight failed:\n{failures}",
+                    )
                 except Exception:
                     pass
+                # M-24 fix: also sleep 5 minutes before exiting so the bat's
+                # 30s restart loop doesn't hammer the trader 120 times/hour.
+                # If pre-flight is going to fail repeatedly (e.g., upstream
+                # data source is publishing-delayed), better to retry every
+                # ~5 minutes than every 30 seconds. _stop_event.wait makes
+                # the sleep interruptible.
+                print("  Sleeping 5 min before exit to throttle restart loop...")
+                _stop_event.wait(300)
                 sys.exit(2)
             # Fix #6: mark startup complete so hot-reloads will re-run preflight.
             global _TRADER_PREFLIGHT_PASSED

@@ -35,8 +35,8 @@
       "match_prefix": ["oc_"],
       "source_file": "data/macro_data/onchain_{asset}.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 36,
-      "description": "CoinMetrics on-chain data (MVRV, SOPR, netflow, hashrate, tx_count, etc.). Daily, delay ~24h typical."
+      "max_age_hours": 60,
+      "description": "CoinMetrics on-chain data (MVRV, SOPR, netflow, hashrate, tx_count, etc.). Daily; CoinMetrics free tier publishes T-1 with ~24h base delay AND occasional later catch-up — SLA 60h to absorb publish gaps without restart-looping the trader (M-24 fix 2026-04-25)."
     },
     {
       "match_prefix": ["stable_mcap_"],
