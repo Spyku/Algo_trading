@@ -618,9 +618,17 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
     # fires at the inference row. Without this, the trader silently ran in
     # "degraded features" mode — the exact pathology behind the 86%-pin bug.
     #
-    # Drop only label-NaN (needed for training window). Don't drop on feature
-    # NaN — that's what froze `i` on a 49h-stale row.
-    df = df_full.dropna(subset=['label']).reset_index(drop=True)
+    # Two views of the same data:
+    #   df_train  — labelled rows only (last `horizon` rows of df_full have NaN
+    #               labels because future_return is undefined at the tail per
+    #               Fix #1 2026-04-24). Used for the model training window.
+    #   df        — every row (label may be NaN at tail). Used for inference at
+    #               the freshest bar.
+    # Decoupling these is what lets the staleness check below see lag≈0 instead
+    # of lag≈horizon (Fix M-01 2026-04-25). Predicting a NaN-label row is fine;
+    # the model only consumes features.
+    df_train = df_full.dropna(subset=['label']).reset_index(drop=True)
+    df = df_full.reset_index(drop=True).copy()
     feat_na_tail = df[feature_cols].iloc[-1].isna()
     if metrics_out is not None:
         metrics_out['n_features_nan_inference'] = int(feat_na_tail.sum())
@@ -635,10 +643,12 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         )
     # Forward-fill carries last known value through NaN tails (correct for log-
     # returns, ratios, indicators). fillna(0.0) is final safety for columns
-    # that have NEVER had data (cold start).
+    # that have NEVER had data (cold start). Apply to BOTH views.
     df[feature_cols] = df[feature_cols].ffill().fillna(0.0)
+    df_train[feature_cols] = df_train[feature_cols].ffill().fillna(0.0)
     n = len(df)
-    if n < window + 100:
+    n_train = len(df_train)
+    if n_train < window + 100:
         return None
 
     i = n - 1
@@ -691,8 +701,9 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         print(f"  [!!] {asset_name} {horizon}h: staleness check raised {e} — REFUSING")
         return None
 
-    train_start = max(0, i - window)
-    train = df.iloc[train_start:i]
+    # Train on labelled rows only; predict on freshest bar from df.
+    train_start = max(0, n_train - window)
+    train = df_train.iloc[train_start:]
     X_train = train[feature_cols]
     y_train = train['label'].values
     X_test = df.iloc[i:i+1][feature_cols]
