@@ -710,22 +710,46 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
             )
             return None
 
-        # N-07 fix (2026-04-25): per-feature staleness check. The wall-clock
-        # check above only validates the asset's OWN freshest bar. A model
-        # feature sourced from a different asset's CSV (e.g. xa_btc_lag* on
-        # ETH's model when BTC OHLCV is stale) would silently ffill at
-        # inference, producing degraded predictions on imputed leader data —
-        # the exact pathology behind the original 86%-pinned bug.
-        # For each feature_col, find the last non-NaN bar's age. Any feature
-        # whose last-valid bar is >2h behind df_full's tail = REFUSE.
-        # Sparse-by-design features (orderbook, IV, deriv_oi) skipped — they
-        # have intentional NaN gaps the design tolerates.
-        sparse_prefixes = ('ob_', 'avg_iv', 'iv_skew', 'deriv_oi_', 'stable_mcap_', 'whale_')
-        per_feat_max_lag = 0.0
+        # N-07 + M-25 fix (2026-04-25): cadence-aware per-feature staleness.
+        # The wall-clock check above only validates the asset's OWN freshest
+        # bar. A leader-asset feature stale (xa_btc_lag* when BTC OHLCV is
+        # stale) would silently ffill at inference — root pathology of the
+        # original 86%-pinned bug.
+        # Different feature families have different natural cadences:
+        #   - Hourly (OHLCV-derived, derivatives funding/basis, intraday
+        #     lead-lag) must be ≤2h fresh.
+        #   - Daily (on-chain, fear&greed, macro_daily, daily cross-asset)
+        #     publishes T-1 with 24h+ delay; 36-48h is normal, not broken.
+        #   - PySR formulas reference daily features → inherit daily SLA.
+        #   - Sparse-by-design (orderbook, IV, OI, stablecoin) skipped:
+        #     intentional NaN gaps tolerated by model.
+        # M-25 uses prefix-keyed thresholds so the trader doesn't refuse on
+        # daily-cadence data that's normally 24h old.
+        SPARSE_SKIP_PREFIXES = ('ob_', 'avg_iv', 'iv_skew', 'deriv_oi_', 'stable_mcap_', 'whale_')
+        PER_FEATURE_MAX_AGE_H = (
+            ('oc_', 60),                # CoinMetrics on-chain — T-1 daily, ~24-48h delay
+            ('fg_', 36),                # Fear & Greed — daily, ~24h cadence
+            ('m_', 60),                 # macro daily (yfinance EOD) — T-1
+            ('xa_dax_', 60),            # daily cross-asset relstr/corr
+            ('xa_eth_usd_', 60),
+            ('xa_btc_usd_', 60),
+            ('xa_nasdaq_', 60),
+            ('xa_sp500_', 60),
+            ('pysr_', 60),              # PySR formulas may reference daily inputs — inherit
+        )
+        HOURLY_DEFAULT_MAX_AGE_H = 2
+
         per_feat_offender = None
+        per_feat_offender_lag = 0.0
+        per_feat_offender_sla = 0.0
         for fc in feature_cols:
-            if fc.startswith(sparse_prefixes):
+            if fc.startswith(SPARSE_SKIP_PREFIXES):
                 continue
+            max_age_h = HOURLY_DEFAULT_MAX_AGE_H
+            for prefix, age in PER_FEATURE_MAX_AGE_H:
+                if fc.startswith(prefix):
+                    max_age_h = age
+                    break
             col_data = df_full[fc] if fc in df_full.columns else None
             if col_data is None:
                 continue
@@ -737,15 +761,19 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
             if last_valid_dt.tzinfo is None:
                 last_valid_dt = last_valid_dt.tz_localize('UTC')
             feat_lag_h = (latest_raw_dt - last_valid_dt).total_seconds() / 3600.0
-            if feat_lag_h > per_feat_max_lag:
-                per_feat_max_lag = feat_lag_h
+            # Track the WORST offender relative to its OWN SLA, not absolute lag.
+            relative_excess = feat_lag_h - max_age_h
+            if relative_excess > 0 and relative_excess > (per_feat_offender_lag - per_feat_offender_sla):
                 per_feat_offender = fc
-        if per_feat_max_lag > 2:
-            print(f"  [!!] {asset_name} {horizon}h: feature '{per_feat_offender}' last-valid bar is {per_feat_max_lag:.1f}h behind df_full tail — REFUSING")
+                per_feat_offender_lag = feat_lag_h
+                per_feat_offender_sla = max_age_h
+        if per_feat_offender is not None:
+            print(f"  [!!] {asset_name} {horizon}h: feature '{per_feat_offender}' last-valid bar is "
+                  f"{per_feat_offender_lag:.1f}h behind df_full tail (SLA: {per_feat_offender_sla}h) — REFUSING")
             _rate_limited_telegram_lt(
                 f'stale_feat_{asset_name}_{horizon}',
-                f"🛑 {asset_name} {horizon}h: REFUSING — feature '{per_feat_offender}' is {per_feat_max_lag:.1f}h stale "
-                f"(non-sparse feature exceeded 2h staleness). Likely upstream source download failed.",
+                f"🛑 {asset_name} {horizon}h: REFUSING — feature '{per_feat_offender}' is {per_feat_offender_lag:.1f}h stale "
+                f"(SLA {per_feat_offender_sla}h exceeded). Likely upstream source download failed.",
                 severity='critical',
             )
             return None

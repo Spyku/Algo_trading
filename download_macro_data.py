@@ -598,10 +598,39 @@ def download_derivatives_data(assets=None):
         # is still written with whatever we got (option B: visibility over
         # safety), so the feature build continues — but a Telegram alert
         # names the missing sub-source so the user knows features are degraded.
+        # M-26 fix (2026-04-25): suppress partial-download alerts for
+        # sub-sources whose features are ALL in always_disabled_exact. The
+        # user doesn't want noise about features they intentionally
+        # quarantined. Each sub-source maps to its produced feature names.
+        _SUB_FEATURES = {
+            'funding_rate': {'deriv_funding_chg1d', 'deriv_funding_chg3d', 'deriv_funding_zscore'},
+            'open_interest': {'deriv_oi_chg1d', 'deriv_oi_chg3d', 'deriv_oi_zscore'},
+            'perp_klines': {'deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore'},
+        }
+        try:
+            from crypto_trading_system_ed import _load_disabled_features
+            _, _, _, _always_disabled = _load_disabled_features()
+            _always_disabled = set(_always_disabled or [])
+        except Exception:
+            _always_disabled = set()
+
+        def _is_sub_fully_disabled(sub_name):
+            feats = _SUB_FEATURES.get(sub_name)
+            return bool(feats) and feats.issubset(_always_disabled)
+
         missing = []
-        if fr_hourly is None: missing.append('funding_rate')
-        if oi_df is None:     missing.append('open_interest')
-        if perp_df is None:   missing.append('perp_klines')
+        if fr_hourly is None and not _is_sub_fully_disabled('funding_rate'):
+            missing.append('funding_rate')
+        elif fr_hourly is None:
+            print(f"    [info] funding_rate failed for {asset} — features always-disabled, alert suppressed")
+        if oi_df is None and not _is_sub_fully_disabled('open_interest'):
+            missing.append('open_interest')
+        elif oi_df is None:
+            print(f"    [info] open_interest failed for {asset} — features always-disabled, alert suppressed")
+        if perp_df is None and not _is_sub_fully_disabled('perp_klines'):
+            missing.append('perp_klines')
+        elif perp_df is None:
+            print(f"    [info] perp_klines failed for {asset} — features always-disabled, alert suppressed")
         dfs = [df for df in [fr_hourly, oi_df, perp_df] if df is not None]
         if not dfs:
             print(f"  [!!] No derivatives data for {asset}!")
