@@ -727,9 +727,12 @@ def load_position(asset):
     }
 
 def save_position(asset, pos):
+    """Atomic write — `_position_lock` serialises within the process; the PID
+    suffix on tmp protects against cross-process collisions if a second trader
+    instance is accidentally launched (parity with save_trading_config)."""
     os.makedirs('config', exist_ok=True)
     path = _position_file(asset)
-    tmp = path + '.tmp'
+    tmp = f"{path}.{os.getpid()}.tmp"
     with _position_lock:
         with open(tmp, 'w') as f:
             json.dump(pos, f, indent=2)
@@ -1729,35 +1732,40 @@ def _answer_callback_query(callback_query_id):
 
 
 def check_telegram_commands():
+    """Return ALL pending commands in arrival order (M-16 fix 2026-04-25).
+
+    Previous behavior returned only the last message in the batch, silently
+    dropping any earlier messages — including legitimate /sell during a
+    market drop racing with a typed-then-button-pressed command. Now every
+    text message and callback in a getUpdates batch is queued for dispatch.
+    """
     global _last_update_id
     token = TELEGRAM_CONFIG.get('token', '')
     if not token:
-        return None
+        return []
     try:
         url = f"https://api.telegram.org/bot{token}/getUpdates?offset={_last_update_id + 1}&timeout=0"
         req = urllib.request.Request(url, headers={'Accept': 'application/json'})
         with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx) as resp:
             data = json.loads(resp.read().decode())
         if not data.get('ok') or not data.get('result'):
-            return None
-        last_text = None
+            return []
+        msgs = []
         for update in data['result']:
             _last_update_id = update['update_id']
-            # Handle text messages
             text = update.get('message', {}).get('text', '').strip()
             if text:
-                last_text = text
-            # Handle inline button presses (callback queries)
+                msgs.append(text)
             cb = update.get('callback_query')
             if cb:
                 _answer_callback_query(cb['id'])
                 cb_data = cb.get('data', '').strip()
                 if cb_data:
-                    last_text = cb_data
-        return last_text
+                    msgs.append(cb_data)
+        return msgs
     except Exception:
         pass
-    return None
+    return []
 
 def _flush_old_updates():
     global _last_update_id
@@ -3092,61 +3100,74 @@ def _handle_gate_command(msg, trading_cfg):
 
 # ---- Command loop ----
 
+def _dispatch_telegram_message(msg, trading_cfg):
+    """Run command dispatch for a single Telegram message. Extracted from
+    _telegram_command_loop so M-16's batch processing can call this for
+    every message instead of just the last one in a poll batch."""
+    if not msg:
+        return
+    if _setup_state.get('active'):
+        if msg.lower() == '/stop':
+            _setup_state['active'] = False
+            print("\n  STOP via Telegram")
+            send_telegram("🛑 <b>Trader Stopped</b>")
+            _stop_event.set()
+        else:
+            _setup_handle(msg, trading_cfg)
+        return
+    cmd = msg.lower()
+    if cmd == '/stop':
+        print("\n  STOP via Telegram")
+        send_telegram("🛑 <b>Trader Stopped</b>")
+        _stop_event.set()
+    elif cmd == '/status':
+        _handle_status_command()
+    elif cmd == '/pause':
+        with _paused_lock:
+            _paused_flag[0] = True
+        send_telegram("⏸ <b>PAUSED</b> — /resume to continue")
+        print("  PAUSED via Telegram")
+    elif cmd == '/resume':
+        with _paused_lock:
+            _paused_flag[0] = False
+        send_telegram("▶️ <b>RESUMED</b>")
+        print("  RESUMED via Telegram")
+    elif cmd == '/sync':
+        sync_positions(trading_cfg, notify=True)
+        send_telegram("🔄 <b>Synced</b>")
+    elif cmd == '/buy' or cmd.startswith('/buy '):
+        _handle_manual_buy_command(msg, trading_cfg)
+    elif cmd == '/sell' or cmd.startswith('/sell '):
+        _handle_manual_sell_command(msg, trading_cfg)
+    elif cmd == '/hold' or cmd.startswith('/hold '):
+        _handle_hold_shield_command(msg, trading_cfg)
+    elif cmd.startswith('/chart'):
+        _handle_chart_command(msg, trading_cfg)
+    elif cmd == '/setup' or cmd.startswith('/cfg_'):
+        if not _setup_state.get('active'):
+            _setup_start(trading_cfg)
+        if cmd.startswith('/cfg_'):
+            _setup_handle(msg, trading_cfg)
+    elif cmd == '/gate' or cmd.startswith('/gate '):
+        _handle_gate_command(msg, trading_cfg)
+    elif cmd == '/help':
+        _handle_help_command()
+
+
 def _telegram_command_loop(trading_cfg):
-    """Background thread: polls Telegram commands every 5 seconds."""
+    """Background thread: polls Telegram commands every 5 seconds.
+    M-16 fix (2026-04-25): processes EVERY message in the poll batch in
+    arrival order. Old code only acted on the last message and silently
+    dropped earlier ones (including a /sell racing with a button press)."""
     while not _stop_event.is_set():
         try:
-            msg = check_telegram_commands()
-            if not msg:
-                pass
-            elif _setup_state.get('active'):
-                # During setup: /stop and /cancel bypass, everything else goes to wizard
-                if msg.lower() == '/stop':
-                    _setup_state['active'] = False
-                    print("\n  STOP via Telegram")
-                    send_telegram("🛑 <b>Trader Stopped</b>")
-                    _stop_event.set()
-                else:
-                    _setup_handle(msg, trading_cfg)
-            else:
-                # Normal mode: only process commands
-                cmd = msg.lower()
-                if cmd == '/stop':
-                    print("\n  STOP via Telegram")
-                    send_telegram("🛑 <b>Trader Stopped</b>")
-                    _stop_event.set()
-                elif cmd == '/status':
-                    _handle_status_command()
-                elif cmd == '/pause':
-                    with _paused_lock:
-                        _paused_flag[0] = True
-                    send_telegram("⏸ <b>PAUSED</b> — /resume to continue")
-                    print("  PAUSED via Telegram")
-                elif cmd == '/resume':
-                    with _paused_lock:
-                        _paused_flag[0] = False
-                    send_telegram("▶️ <b>RESUMED</b>")
-                    print("  RESUMED via Telegram")
-                elif cmd == '/sync':
-                    sync_positions(trading_cfg, notify=True)
-                    send_telegram("🔄 <b>Synced</b>")
-                elif cmd == '/buy' or cmd.startswith('/buy '):
-                    _handle_manual_buy_command(msg, trading_cfg)
-                elif cmd == '/sell' or cmd.startswith('/sell '):
-                    _handle_manual_sell_command(msg, trading_cfg)
-                elif cmd == '/hold' or cmd.startswith('/hold '):
-                    _handle_hold_shield_command(msg, trading_cfg)
-                elif cmd.startswith('/chart'):
-                    _handle_chart_command(msg, trading_cfg)
-                elif cmd == '/setup' or cmd.startswith('/cfg_'):
-                    if not _setup_state.get('active'):
-                        _setup_start(trading_cfg)
-                    if cmd.startswith('/cfg_'):
-                        _setup_handle(msg, trading_cfg)
-                elif cmd == '/gate' or cmd.startswith('/gate '):
-                    _handle_gate_command(msg, trading_cfg)
-                elif cmd == '/help':
-                    _handle_help_command()
+            for msg in check_telegram_commands():
+                if _stop_event.is_set():
+                    break
+                try:
+                    _dispatch_telegram_message(msg, trading_cfg)
+                except Exception as exc:
+                    print(f"  [telegram] dispatch error on {msg!r}: {exc}")
         except Exception:
             pass
         _stop_event.wait(5)  # sleep 5s but wake immediately on stop
