@@ -105,6 +105,13 @@ def _append_cycle_metrics(row_dict):
 _asset_trade_locks = {}                # {asset: threading.Lock}
 _asset_trade_locks_guard = threading.Lock()
 
+# Serialises writes to regime_config_ed.json. PID-suffixed tmp paths protect
+# against cross-process races but two threads in the SAME process share the
+# same PID — Telegram command thread and main loop must not collide on the
+# tmp file (would land a half-written JSON via os.replace). Held only for the
+# duration of the write itself; readers (load_trading_config) are unaffected.
+_config_write_lock = threading.Lock()
+
 def _get_asset_trade_lock(asset):
     """Return (creating if needed) a per-asset lock. Thread-safe lazy init."""
     with _asset_trade_locks_guard:
@@ -184,12 +191,17 @@ def save_trading_config(cfg):
     """Atomic write — trader hot-reloads regime_config_ed.json on mtime change;
     a direct `open('w') + json.dump` creates a race window where readers could
     see an empty or partial file. tempfile + os.replace is atomic on modern
-    filesystems. Tmp path includes PID so concurrent writers don't collide."""
+    filesystems. Tmp path includes PID so cross-process writers don't collide.
+
+    Lock is needed because the Telegram command thread and the main loop both
+    call this; two threads in the same process share PID, so without the lock
+    they race on the same tmp file and one truncates the other mid-write."""
     os.makedirs('config', exist_ok=True)
     tmp = f"{REGIME_CONFIG_FILE}.{os.getpid()}.tmp"
-    with open(tmp, 'w') as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp, REGIME_CONFIG_FILE)
+    with _config_write_lock:
+        with open(tmp, 'w') as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, REGIME_CONFIG_FILE)
 
 
 # ============================================================
@@ -582,9 +594,15 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
                 print(f"    Partially filled: {pct:.0f}% — waiting...")
                 # Adaptive patience: partial fill means the order is working,
                 # extend the total window once to give the residual more time.
+                # IMPORTANT: do NOT recompute max_attempts. The SELL price slide
+                # uses progress = (attempt - 1) / (max_attempts - 1); growing
+                # the denominator mid-slide would shrink progress and re-quote
+                # UPWARD (closer to ask), the opposite of what the boost intends.
+                # Keep the original slide trajectory; the boost simply lets the
+                # final aggressive-price step (bid + $0.02) sit longer before
+                # the market fallback fires.
                 if not boost_applied and partial_boost > 0:
                     maker_window += partial_boost
-                    max_attempts = maker_window // check_interval
                     boost_applied = True
                     print(f"    [+] Partial-fill boost: window extended +{partial_boost}s -> {maker_window}s total")
                 # Give partial fills extra time
