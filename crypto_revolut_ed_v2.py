@@ -1274,20 +1274,32 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
     # M-04 fix (2026-04-25): use live exchange mid, not last-closed-candle
     # close. Without this, an intra-hour disaster move was invisible until
     # the candle closed (~1h delay), gutting the brake's protective intent.
+    # N-03 hardening (2026-04-25): require both a non-zero candle close AND
+    # a non-zero live mid before evaluating PnL. Otherwise a data-pipeline
+    # failure (all signals refused → price=0) combined with bid/ask=0 would
+    # compute cur_pnl = -100% and force-sell the position on phantom data.
     if position['state'] == 'invested' and position.get('entry_price', 0) > 0:
         brake_pct = float(trading_cfg.get('disaster_brake_pct', 0))
         if brake_pct > 0:
             try:
                 _bid, _ask = get_best_bid_ask(symbol)
-                live_mid = (_bid + _ask) / 2 if _bid > 0 and _ask > 0 else price
             except Exception:
+                _bid, _ask = 0.0, 0.0
+            if _bid > 0 and _ask > 0:
+                live_mid = (_bid + _ask) / 2
+            elif price > 0:
                 live_mid = price
-            cur_pnl = (live_mid - position['entry_price']) / position['entry_price'] * 100
-            if cur_pnl <= -brake_pct:
-                print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live mid ${live_mid:,.2f}) — forcing SELL")
-                send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live ${live_mid:,.2f})")
-                action = 'SELL'
-                disaster_brake = True
+            else:
+                live_mid = 0.0  # data pipeline broken — refuse to evaluate brake
+            if live_mid > 0:
+                cur_pnl = (live_mid - position['entry_price']) / position['entry_price'] * 100
+                if cur_pnl <= -brake_pct:
+                    print(f"    ⚠️ DISASTER BRAKE: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live mid ${live_mid:,.2f}) — forcing SELL")
+                    send_telegram(f"⚠️ {asset} disaster brake triggered: PnL {cur_pnl:+.2f}% ≤ -{brake_pct}% (live ${live_mid:,.2f})")
+                    action = 'SELL'
+                    disaster_brake = True
+            else:
+                print(f"    [!] {asset} disaster brake: live_mid=0 (data pipeline broken) — skipping brake evaluation this cycle")
 
     # Fix N1 (2026-04-24): acquire the per-asset trade lock BEFORE any auto
     # trade execution. Non-blocking — if the Telegram thread is mid-manual-
@@ -1321,6 +1333,15 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             if balances is None:
                 print(f"    ❌ Cannot buy {asset} — balance API unreachable")
                 send_telegram(f"❌ {asset} BUY aborted: balance API failed")
+                # N-01 fix (2026-04-25): release the per-asset trade lock
+                # before early-return. Otherwise a single balance-API hiccup
+                # leaks the lock forever and the trader gets stuck — all
+                # future auto-cycles for this asset skip with "manual trade
+                # in progress" and any blocking Telegram handler deadlocks.
+                if _trade_lock_held:
+                    try: _asset_lock.release()
+                    except Exception: pass
+                    _trade_lock_held = False
                 return {
                     'asset': asset, 'action': 'BUY', 'confidence': confidence,
                     'reason': 'api_failure', 'price': price, 'executed': False,
@@ -1459,6 +1480,11 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             if balances is None:
                 print(f"    ❌ Cannot sell {asset} — balance API unreachable, keeping position")
                 send_telegram(f"❌ {asset} SELL aborted: balance API failed (position kept as invested)")
+                # N-01 fix (2026-04-25): release lock before early-return.
+                if _trade_lock_held:
+                    try: _asset_lock.release()
+                    except Exception: pass
+                    _trade_lock_held = False
                 return {
                     'asset': asset, 'action': 'SELL', 'confidence': confidence,
                     'reason': 'api_failure', 'price': price, 'executed': False,
@@ -1484,6 +1510,11 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     if balances is None:
                         print(f"    ❌ Cannot re-check balance after cancel — aborting sell")
                         send_telegram(f"❌ {asset} SELL aborted: balance API failed after order cancel")
+                        # N-01 fix (2026-04-25): release lock before early-return.
+                        if _trade_lock_held:
+                            try: _asset_lock.release()
+                            except Exception: pass
+                            _trade_lock_held = False
                         return {
                             'asset': asset, 'action': 'SELL', 'confidence': confidence,
                             'reason': 'api_failure', 'price': price, 'executed': False,
@@ -2943,15 +2974,20 @@ def _setup_handle(text, trading_cfg):
 
         # /cfg_{ASSET}_auto — toggle auto-trade
         if text_l == f'/cfg_{asset}_auto':
-            # M-07 fix (2026-04-25): hold the per-asset trade lock for the
-            # full load→modify→save sequence so a mid-flight main-loop trade
-            # doesn't lose this toggle (its save_position would clobber ours
-            # with stale auto_trade state).
+            # M-07 fix (2026-04-25) + N-05 hardening (2026-04-25): hold the
+            # per-asset trade lock for the load→modify→save sequence, but
+            # use timed acquire so a mid-flight maker order (up to 5min) or
+            # a leaked lock can't deadlock the Telegram thread.
             _lk = _get_asset_trade_lock(asset)
-            with _lk:
+            if not _lk.acquire(timeout=2.0):
+                send_telegram(f"⚠️ {asset} busy — try again in a few seconds")
+                return
+            try:
                 pos = load_position(asset)
                 pos['auto_trade'] = not pos.get('auto_trade', False)
                 save_position(asset, pos)
+            finally:
+                _lk.release()
             st = "🔵 ON" if pos['auto_trade'] else "🔴 OFF"
             send_telegram(f"✅ {asset} auto-trade → {st}")
             _setup_send_menu(asset, cfg[asset])
@@ -3116,16 +3152,21 @@ def _handle_gate_command(msg, trading_cfg):
             send_telegram(f"🚦 {asset} gate {action.upper()} (both regimes)")
             _show_status(); return
         if action == 'clear':
-            # M-07 fix (2026-04-25): hold the per-asset trade lock around
-            # load→modify→save so a mid-cycle main-loop save_position can't
-            # clobber our gate-clear (or vice versa).
+            # M-07 fix + N-05 hardening (2026-04-25): timed acquire so a
+            # mid-flight maker order or leaked lock can't deadlock the
+            # Telegram thread.
             _lk = _get_asset_trade_lock(asset)
-            with _lk:
+            if not _lk.acquire(timeout=2.0):
+                send_telegram(f"⚠️ {asset} busy — try again in a few seconds")
+                return
+            try:
                 pos = load_position(asset)
                 had_cooldown = bool(pos.get('rally_cooldown_until'))
                 if had_cooldown:
                     pos['rally_cooldown_until'] = ''
                     save_position(asset, pos)
+            finally:
+                _lk.release()
             if had_cooldown:
                 send_telegram(f"🧹 {asset} cooldown window cleared (one-time override)")
             else:
