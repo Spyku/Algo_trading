@@ -505,7 +505,36 @@ Same class of bug almost certainly caused the prior **7h@99% pinned for 31+ hour
 
 ---
 
-**🧪 CURRENTLY RUNNING — AB MATRIX 4-VARIANT FOCUS (2026-04-24 22:40 CEST → ETA ~14:00 2026-04-25):**
+**🧪 NEXT LAUNCH — AB MATRIX RE-RUN with new priority order (post-2026-04-25 trader-bug-fix bundle):**
+
+Command (run when laptop is free; safe-to-run-overnight after the Modern Standby + power-config fixes shipped 2026-04-25 morning):
+
+```
+python tools/ab_matrix_runner.py --variants focus --skip-vol
+```
+
+**Variant order updated 2026-04-25 (commit `91ccabd`)** — `focus` now launches in priority sequence so a partial completion preserves the strongest candidate. New order:
+
+| # | Variant | Floor | Trim | Meta | Why first | Last result |
+|---|---|---|---|---|---|---|
+| 1 | **C_floorOFF_trimOFF** | OFF | OFF | — | Current winner, replicating it confirms infra trustworthy | t_ref +72.69% (2026-04-25 12:38) |
+| 2 | B_floorON_trimON | ON | ON | — | Replicates live HRST, sanity check | t_ref +62.31% (2026-04-25 07:58) |
+| 3 | A_floorON_trimOFF | ON | OFF | — | Lowest of completed | t_ref +43.27% (2026-04-25 03:56) |
+| 4 | **D_floorON_trimON_metaON** | ON | ON | p≥0.45 | Meta-filter retest — never produced clean result | NOT RUN |
+
+**Today's matrix (2026-04-24 22:40 launch) is STILL VALID** — none of the 2026-04-25 bug fixes touched the engine training paths (Mode D/V/H/S/R/T/HRST). M-01b's `keep_label_nan_tail` flag defaults False for engine paths; matrix used the default. The C variant's `optimal_features` are buildable by current `build_all_features` and contain no `always_disabled_exact` features. **No need to re-run A/B/C from scratch — only D is needed for the meta-filter answer.**
+
+**Lightweight option: just run D alone (~4h):** `python tools/ab_matrix_runner.py --variants D_floorON_trimON_metaON --skip-vol`
+
+**Decision rules (unchanged):**
+- C beats live HRST by +10.38pp → C is candidate for promotion if matrix infra is trusted (B's 2026-04-25 result confirmed it).
+- D > C by ≥5pp → meta filter shippable behind config flag (resolves R3).
+- D within ±5pp of C → shelve meta permanently.
+- All within noise → keep current production, revisit next week.
+
+---
+
+**🧪 PRIOR LAUNCH — AB MATRIX 4-VARIANT FOCUS (2026-04-24 22:40 CEST → completed 2026-04-25 12:38 CEST, partial — D never ran due to system freeze):**
 
 Launched AFTER the third-pass audit shipped (file-handle leak + div-by-zero guards, commit `eaf80e9`) and AFTER today's 22:07 HRST promoted a clean winner (`sma168>sma480 bull=7h@65% bear=6h@85%` — already live). This matrix runs on the first fully-clean data snapshot: 1432/1440 rows, label-tail fix, sparse-feature quarantine, div-by-zero guards, atomic writes — none of the prior 3 weeks' results were trained on this data quality.
 
