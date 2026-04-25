@@ -1317,26 +1317,44 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
     any_sig = next((s for s in sigs_by_horizon.values() if s), None)
     price = any_sig['close'] if any_sig else 0
 
-    # Reload position (sync may have updated it)
-    position = load_position(asset)
-
     # Rally-cooldown trigger detection — runs EVERY tick (regardless of position state),
     # so a rally that fires while invested still extends the cooldown for the next BUY.
     # Per-regime: use the current regime's gate params (falls back to asset-level for legacy).
+    #
+    # F-02 fix (2026-04-25): hold the per-asset trade lock around the
+    # load→modify→save for the rally-cooldown field. The previous code
+    # read position at line 1252/1321 (no lock), modified it in-memory,
+    # and saved at line 1339 — clobbering any concurrent change made by
+    # sync_positions or a Telegram handler in that window. Now: brief
+    # lock acquire (timed 2s; if busy, defer to next cycle), re-read,
+    # update, save, release. The whole RMW takes <10ms typically.
     rc_cfg = _rally_cfg_for_regime(trading_cfg, regime_label)
-    rc_update = _update_rally_cooldown(asset, df_raw, position, rc_cfg)
-    if rc_update is not None:
-        rs_pct, rl_pct, rc_fresh = rc_update
-        rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
-        h_s = int(rc_cfg['h_short']); h_l = int(rc_cfg['h_long'])
-        rc_tag = f"[{regime_label}] rr{h_s}={rs_pct:+.2f}% rr{h_l}={rl_pct:+.2f}%"
-        if rc_fresh:
-            rc_tag += f" | TRIGGER -> cd active {rc_hours_left:.1f}h"
-            send_telegram(f"⏸ {asset} rally trigger fired: {rc_tag}")
-        elif rc_active:
-            rc_tag += f" | cd {rc_hours_left:.1f}h left"
-        print(f"  {asset} rally-cd: {rc_tag}")
-        save_position(asset, position)
+    _rc_lock = _get_asset_trade_lock(asset)
+    if _rc_lock.acquire(timeout=2.0):
+        try:
+            # Re-read position INSIDE the lock so any sync/Telegram update
+            # that landed between line 1252 and now is visible.
+            position = load_position(asset)
+            rc_update = _update_rally_cooldown(asset, df_raw, position, rc_cfg)
+            if rc_update is not None:
+                rs_pct, rl_pct, rc_fresh = rc_update
+                rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
+                h_s = int(rc_cfg['h_short']); h_l = int(rc_cfg['h_long'])
+                rc_tag = f"[{regime_label}] rr{h_s}={rs_pct:+.2f}% rr{h_l}={rl_pct:+.2f}%"
+                if rc_fresh:
+                    rc_tag += f" | TRIGGER -> cd active {rc_hours_left:.1f}h"
+                    send_telegram(f"⏸ {asset} rally trigger fired: {rc_tag}")
+                elif rc_active:
+                    rc_tag += f" | cd {rc_hours_left:.1f}h left"
+                print(f"  {asset} rally-cd: {rc_tag}")
+                save_position(asset, position)
+        finally:
+            _rc_lock.release()
+    else:
+        # Trade lock busy (sync or Telegram thread mid-flight). Defer the
+        # rally-cooldown update to the next cycle rather than racing.
+        print(f"  {asset}: trade lock busy — rally-cooldown update deferred this cycle")
+        position = load_position(asset)  # use whatever's on disk now
 
     # Log - show all available horizons
     sig_strs = []
@@ -1391,10 +1409,19 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             else:
                 print(f"    [!] {asset} disaster brake: live_mid=0 (data pipeline broken) — skipping brake evaluation this cycle")
 
-    # Fix N1 (2026-04-24): acquire the per-asset trade lock BEFORE any auto
-    # trade execution. Non-blocking — if the Telegram thread is mid-manual-
-    # trade for this asset, skip this cycle's auto trade rather than double-
-    # trading. Released in finally after the trade blocks.
+    # Fix N1 (2026-04-24) + F-01 (2026-04-25): acquire the per-asset trade
+    # lock BEFORE any auto trade execution. Non-blocking — if the Telegram
+    # thread is mid-manual-trade for this asset, skip this cycle's auto
+    # trade rather than double-trading.
+    #
+    # F-01 fix: wrap the entire BUY/SELL execution body in try/finally so
+    # an uncaught exception (balance API JSON parse error, os.replace
+    # OSError, signal-interrupted sleep, etc.) cannot leak the lock. The
+    # in-block early-release stanzas from N-01 set _trade_lock_held=False
+    # on their normal-path success, which makes the finally a no-op for
+    # those paths; finally only fires for true exception paths or for
+    # successful BUY/SELL completion (the existing release at the bottom
+    # of the function is now subsumed into this finally).
     _asset_lock = _get_asset_trade_lock(asset)
     _trade_lock_held = False
     if action in ('BUY', 'SELL') and not dry_run and position.get('auto_trade'):
@@ -1408,313 +1435,320 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             )
             action = 'HOLD'
 
-    if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
-        rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
-        if rc_active:
-            msg = f'rally_cooldown {rc_hours_left:.1f}h left'
-            print(f"    ⏸ {asset} BUY skipped — {msg}")
-            send_telegram(f"⏸ {asset} BUY skipped — {msg}")
-            action = 'HOLD'
-
-    if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
-        if not dry_run and position.get('auto_trade'):
-            # Pre-trade balance check
-            balances = get_balances()
-            if balances is None:
-                print(f"    ❌ Cannot buy {asset} — balance API unreachable")
-                send_telegram(f"❌ {asset} BUY aborted: balance API failed")
-                # N-01 fix (2026-04-25): release the per-asset trade lock
-                # before early-return. Otherwise a single balance-API hiccup
-                # leaks the lock forever and the trader gets stuck — all
-                # future auto-cycles for this asset skip with "manual trade
-                # in progress" and any blocking Telegram handler deadlocks.
-                if _trade_lock_held:
-                    try: _asset_lock.release()
-                    except Exception: pass
-                    _trade_lock_held = False
-                return {
-                    'asset': asset, 'action': 'BUY', 'confidence': confidence,
-                    'reason': 'api_failure', 'price': price, 'executed': False,
-                    'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
-                    'sig_short': sig_short, 'sig_long': sig_long,
-                    'position': position, 'strategy': strategy,
-                    'min_confidence': min_conf,
-                    'gamma': '', 'regime': regime_label,
-                    'horizon': regime_horizon or '',
-                }
-            usd_avail = balances.get('USD', {}).get('available', 0)
-            pre_usd = float(usd_avail)
-            pre_crypto = float(balances.get(asset, {}).get('total', 0))
-            print(f"    Pre-trade USD: ${usd_avail:,.2f}")
-
-            # Minimum $300 to trade, target full max, or all available if < max
-            if usd_avail < MIN_TRADE_USD:
-                send_telegram(f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum")
-            else:
-                buy_amount = min(max_usd, usd_avail)
-                # BUG 1 fix: Revolut rejects maker orders where amount > balance even by $0.01
-                # (rounding in qty*price). Floor to cents and subtract $0.01 safety margin.
-                buy_amount = math.floor(buy_amount * 100) / 100 - 0.01
-                if buy_amount < max_usd:
-                    print(f"    Partial buy: ${buy_amount:,.2f} of ${max_usd:,.2f} (limited by balance)")
-                use_maker = trading_cfg.get('use_maker_orders', False)
-                if use_maker:
-                    status, data = execute_maker_buy(symbol, buy_amount)
-                else:
-                    status, data = place_market_buy(symbol, buy_amount)
-                if status in (200, 201):
-                    order = data.get('data', data)
-                    # Ledger-delta basis (M-02 + M-03 fix 2026-04-25): API field
-                    # `filled_size` doesn't exist (Revolut returns `filled_quantity`),
-                    # and multi-leg maker fills only return the LAST leg's data —
-                    # both bugs silently corrupted recorded basis. Compute from
-                    # actual balance delta instead; this captures every leg + every
-                    # API field-name variant + market fallbacks correctly.
-                    time.sleep(2)
-                    post_bal = get_balances() or {}
-                    post_usd = float(post_bal.get('USD', {}).get('available', pre_usd))
-                    post_crypto = float(post_bal.get(asset, {}).get('total', pre_crypto))
-                    delta_usd = max(pre_usd - post_usd, 0.0)
-                    delta_crypto = max(post_crypto - pre_crypto, 0.0)
-                    if delta_crypto > 0 and delta_usd > 0:
-                        position['base_amount'] = delta_crypto
-                        position['entry_price'] = delta_usd / delta_crypto
-                        position['usd_invested'] = delta_usd
-                    else:
-                        # Balance API failed or returned zero delta — fall back to
-                        # API order fields with the correct field names.
-                        filled = float(order.get('filled_quantity') or order.get('filled_size') or 0)
-                        avg_fill = float(order.get('average_fill_price') or 0)
-                        if filled > 0 and avg_fill > 0:
-                            position['base_amount'] = filled
-                            position['entry_price'] = avg_fill
-                            position['usd_invested'] = filled * avg_fill
-                        else:
-                            # Last-resort fallback (preserves prior behavior).
-                            position['base_amount'] = buy_amount / price
-                            position['entry_price'] = price
-                            position['usd_invested'] = buy_amount
-                    executed = True
-                    print(f"    Post-trade: {post_crypto:.6f} {asset} | ${post_usd:,.2f} USD "
-                          f"(ledger basis ${position['usd_invested']:,.2f} @ ${position['entry_price']:,.2f})")
-                else:
-                    send_telegram(f"⚠️ {asset} BUY failed: {status} {data}")
-
-        if not executed and not dry_run and not position.get('auto_trade'):
-            # Manual mode — just track
-            position['base_amount'] = max_usd / price
-            position['entry_price'] = price
-            position['usd_invested'] = max_usd
-
-        if executed or (not dry_run and not position.get('auto_trade')):
-            position['state'] = 'invested'
-            position['entry_time'] = _now_utc_iso()
-            if not executed:
-                position['usd_invested'] = max_usd
-            position['trades'].append({
-                'action': 'BUY', 'price': position['entry_price'],
-                'time': position['entry_time'], 'usd': position['usd_invested'],
-                'auto': executed,
-            })
-            save_position(asset, position)
-
-    elif action == 'SELL' and position['state'] == 'invested':
-        # Hold-until-profitable: block sell if unrealized P&L below threshold
-        # Shield is per-regime; falls back to asset-level hold_shield for legacy config
-        # Disaster brake (if triggered above) bypasses shield entirely.
-        shield_on = (not disaster_brake) and _shield_on_for_regime(trading_cfg, regime_label)
-        min_sell_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
-        max_hold_h = trading_cfg.get('max_hold_hours', 10)
-        if shield_on and min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
-            cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
-            hours_held = 0
-            entry_dt_utc = _parse_entry_time_utc(position.get('entry_time'))
-            if entry_dt_utc is not None:
-                hours_held = (datetime.now(timezone.utc) - entry_dt_utc).total_seconds() / 3600
-            # Quick-release: if the model flips SELL with very high confidence shortly
-            # after entry, the BUY was likely a false positive — trust the signal.
-            # Guards the 2026-04-19 failure mode where shield held through a 12h trend
-            # reversal while the model screamed SELL @ 97-99% for 9 consecutive cycles.
-            # Shield quick-release: default OFF (empirically neutral in backtests —
-            # see 2026-04-19 test_qr_windows.py). Opt-in by setting
-            # shield_quick_release.enabled=true in regime_config_ed.json.
-            qr_cfg = trading_cfg.get('shield_quick_release', {})
-            qr_enabled = bool(qr_cfg.get('enabled', False))
-            qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
-            qr_max_hours = float(qr_cfg.get('max_hours', 3))
-            quick_release = (qr_enabled and hours_held <= qr_max_hours
-                             and confidence >= qr_min_conf)
-            if quick_release:
-                print(f"    🛡→ QUICK-RELEASE: SELL @ {confidence:.2f}% confidence within "
-                      f"{hours_held:.1f}h of entry (thr {qr_min_conf}%/{qr_max_hours}h) — trusting model")
-                send_telegram(f"🛡→ {asset} shield released: strong SELL ({confidence:.2f}%) "
-                              f"at {hours_held:.1f}h / PnL {cur_pnl:+.2f}%")
-            elif cur_pnl < min_sell_pnl and hours_held < max_hold_h:
-                print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
-                # M-17 fix (2026-04-25): rate-limit so a 12h shield window
-                # doesn't spam 12 essentially-identical Telegram messages.
-                _rate_limited_telegram(
-                    f'shield_block_{asset}',
-                    f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)",
-                )
+    try:
+        if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
+            rc_active, rc_hours_left, _ = _is_rally_cooldown_active(position)
+            if rc_active:
+                msg = f'rally_cooldown {rc_hours_left:.1f}h left'
+                print(f"    ⏸ {asset} BUY skipped — {msg}")
+                send_telegram(f"⏸ {asset} BUY skipped — {msg}")
                 action = 'HOLD'
-                hold_override_active = True
-            elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
-                print(f"    ⚠ Failsafe: held {hours_held:.0f}h >= {max_hold_h}h, selling at {cur_pnl:+.2f}%")
-                send_telegram(f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%")
 
-    if action == 'SELL' and position['state'] == 'invested':
-        if not dry_run and position.get('auto_trade'):
-            # Get ACTUAL holdings from exchange — sell everything
-            balances = get_balances()
-            if balances is None:
-                print(f"    ❌ Cannot sell {asset} — balance API unreachable, keeping position")
-                send_telegram(f"❌ {asset} SELL aborted: balance API failed (position kept as invested)")
-                # N-01 fix (2026-04-25): release lock before early-return.
-                if _trade_lock_held:
-                    try: _asset_lock.release()
-                    except Exception: pass
-                    _trade_lock_held = False
-                return {
-                    'asset': asset, 'action': 'SELL', 'confidence': confidence,
-                    'reason': 'api_failure', 'price': price, 'executed': False,
-                    'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
-                    'sig_short': sig_short, 'sig_long': sig_long,
-                    'position': position, 'strategy': strategy,
-                    'min_confidence': min_conf,
-                    'gamma': '', 'regime': regime_label,
-                    'horizon': regime_horizon or '',
-                }
-            actual_held = balances.get(asset, {}).get('available', 0)
-            total_held = balances.get(asset, {}).get('total', 0)
-            print(f"    Pre-trade: {actual_held:.6f} {asset} available, {total_held:.6f} total (selling ALL)")
+        if action == 'BUY' and position['state'] == 'cash' and max_usd > 0:
+            if not dry_run and position.get('auto_trade'):
+                # Pre-trade balance check
+                balances = get_balances()
+                if balances is None:
+                    print(f"    ❌ Cannot buy {asset} — balance API unreachable")
+                    send_telegram(f"❌ {asset} BUY aborted: balance API failed")
+                    # N-01 fix (2026-04-25): release the per-asset trade lock
+                    # before early-return. Otherwise a single balance-API hiccup
+                    # leaks the lock forever and the trader gets stuck — all
+                    # future auto-cycles for this asset skip with "manual trade
+                    # in progress" and any blocking Telegram handler deadlocks.
+                    if _trade_lock_held:
+                        try: _asset_lock.release()
+                        except Exception: pass
+                        _trade_lock_held = False
+                    return {
+                        'asset': asset, 'action': 'BUY', 'confidence': confidence,
+                        'reason': 'api_failure', 'price': price, 'executed': False,
+                        'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                        'sig_short': sig_short, 'sig_long': sig_long,
+                        'position': position, 'strategy': strategy,
+                        'min_confidence': min_conf,
+                        'gamma': '', 'regime': regime_label,
+                        'horizon': regime_horizon or '',
+                    }
+                usd_avail = balances.get('USD', {}).get('available', 0)
+                pre_usd = float(usd_avail)
+                pre_crypto = float(balances.get(asset, {}).get('total', 0))
+                print(f"    Pre-trade USD: ${usd_avail:,.2f}")
 
-            # If available=0 but total>0, funds are locked by an open order — cancel it first
-            if actual_held <= 0 < total_held:
-                print(f"    ⚠ {asset} balance locked (available=0, total={total_held:.6f}) — cancelling open orders...")
-                send_telegram(f"⚠️ {asset} balance locked — cancelling open orders before sell")
-                cancelled = cancel_all_open_orders(symbol)
-                if cancelled > 0:
-                    time.sleep(2)
-                    balances = get_balances()
-                    if balances is None:
-                        print(f"    ❌ Cannot re-check balance after cancel — aborting sell")
-                        send_telegram(f"❌ {asset} SELL aborted: balance API failed after order cancel")
-                        # N-01 fix (2026-04-25): release lock before early-return.
-                        if _trade_lock_held:
-                            try: _asset_lock.release()
-                            except Exception: pass
-                            _trade_lock_held = False
-                        return {
-                            'asset': asset, 'action': 'SELL', 'confidence': confidence,
-                            'reason': 'api_failure', 'price': price, 'executed': False,
-                            'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
-                            'sig_short': sig_short, 'sig_long': sig_long,
-                            'position': position, 'strategy': strategy,
-                            'min_confidence': min_conf,
-                            'gamma': '', 'regime': regime_label,
-                            'horizon': regime_horizon or '',
-                        }
-                    actual_held = balances.get(asset, {}).get('available', 0)
-                    print(f"    After cancel: {actual_held:.6f} {asset} available")
-
-            if actual_held > 0:
-                pre_usd_sell = float(balances.get('USD', {}).get('available', 0))
-                pre_crypto_sell = float(balances.get(asset, {}).get('total', actual_held))
-                use_maker = trading_cfg.get('use_maker_orders', False)
-                if use_maker:
-                    status, data = execute_maker_sell(symbol, actual_held)
+                # Minimum $300 to trade, target full max, or all available if < max
+                if usd_avail < MIN_TRADE_USD:
+                    send_telegram(f"⚠️ {asset} BUY skipped — ${usd_avail:.2f} < ${MIN_TRADE_USD} minimum")
                 else:
-                    status, data = place_market_sell(symbol, actual_held)
-                if status in (200, 201):
-                    order = data.get('data', data)
-                    # Ledger-delta exit price (M-02 + M-03 fix 2026-04-25):
-                    # average_fill_price may reflect only the last maker leg;
-                    # use actual USD received / crypto sold.
-                    time.sleep(2)
-                    post_bal = get_balances() or {}
-                    usd_now = float(post_bal.get('USD', {}).get('available', pre_usd_sell))
-                    crypto_left = float(post_bal.get(asset, {}).get('total', 0))
-                    delta_usd_recv = max(usd_now - pre_usd_sell, 0.0)
-                    delta_crypto_sold = max(pre_crypto_sell - crypto_left, 0.0)
-                    if delta_crypto_sold > 0 and delta_usd_recv > 0:
-                        price = delta_usd_recv / delta_crypto_sold
+                    buy_amount = min(max_usd, usd_avail)
+                    # BUG 1 fix: Revolut rejects maker orders where amount > balance even by $0.01
+                    # (rounding in qty*price). Floor to cents and subtract $0.01 safety margin.
+                    buy_amount = math.floor(buy_amount * 100) / 100 - 0.01
+                    if buy_amount < max_usd:
+                        print(f"    Partial buy: ${buy_amount:,.2f} of ${max_usd:,.2f} (limited by balance)")
+                    use_maker = trading_cfg.get('use_maker_orders', False)
+                    if use_maker:
+                        status, data = execute_maker_buy(symbol, buy_amount)
                     else:
-                        price = float(order.get('average_fill_price', price))
-                    executed = True
-                    print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD "
-                          f"(ledger fill ${price:,.2f}, received ${delta_usd_recv:,.2f})")
+                        status, data = place_market_buy(symbol, buy_amount)
+                    if status in (200, 201):
+                        order = data.get('data', data)
+                        # Ledger-delta basis (M-02 + M-03 fix 2026-04-25): API field
+                        # `filled_size` doesn't exist (Revolut returns `filled_quantity`),
+                        # and multi-leg maker fills only return the LAST leg's data —
+                        # both bugs silently corrupted recorded basis. Compute from
+                        # actual balance delta instead; this captures every leg + every
+                        # API field-name variant + market fallbacks correctly.
+                        time.sleep(2)
+                        post_bal = get_balances() or {}
+                        post_usd = float(post_bal.get('USD', {}).get('available', pre_usd))
+                        post_crypto = float(post_bal.get(asset, {}).get('total', pre_crypto))
+                        delta_usd = max(pre_usd - post_usd, 0.0)
+                        delta_crypto = max(post_crypto - pre_crypto, 0.0)
+                        if delta_crypto > 0 and delta_usd > 0:
+                            position['base_amount'] = delta_crypto
+                            position['entry_price'] = delta_usd / delta_crypto
+                            position['usd_invested'] = delta_usd
+                        else:
+                            # Balance API failed or returned zero delta — fall back to
+                            # API order fields with the correct field names.
+                            filled = float(order.get('filled_quantity') or order.get('filled_size') or 0)
+                            avg_fill = float(order.get('average_fill_price') or 0)
+                            if filled > 0 and avg_fill > 0:
+                                position['base_amount'] = filled
+                                position['entry_price'] = avg_fill
+                                position['usd_invested'] = filled * avg_fill
+                            else:
+                                # Last-resort fallback (preserves prior behavior).
+                                position['base_amount'] = buy_amount / price
+                                position['entry_price'] = price
+                                position['usd_invested'] = buy_amount
+                        executed = True
+                        print(f"    Post-trade: {post_crypto:.6f} {asset} | ${post_usd:,.2f} USD "
+                              f"(ledger basis ${position['usd_invested']:,.2f} @ ${position['entry_price']:,.2f})")
+                    else:
+                        send_telegram(f"⚠️ {asset} BUY failed: {status} {data}")
+
+            if not executed and not dry_run and not position.get('auto_trade'):
+                # Manual mode — just track
+                position['base_amount'] = max_usd / price
+                position['entry_price'] = price
+                position['usd_invested'] = max_usd
+
+            if executed or (not dry_run and not position.get('auto_trade')):
+                position['state'] = 'invested'
+                position['entry_time'] = _now_utc_iso()
+                if not executed:
+                    position['usd_invested'] = max_usd
+                position['trades'].append({
+                    'action': 'BUY', 'price': position['entry_price'],
+                    'time': position['entry_time'], 'usd': position['usd_invested'],
+                    'auto': executed,
+                })
+                save_position(asset, position)
+
+        elif action == 'SELL' and position['state'] == 'invested':
+            # Hold-until-profitable: block sell if unrealized P&L below threshold
+            # Shield is per-regime; falls back to asset-level hold_shield for legacy config
+            # Disaster brake (if triggered above) bypasses shield entirely.
+            shield_on = (not disaster_brake) and _shield_on_for_regime(trading_cfg, regime_label)
+            min_sell_pnl = trading_cfg.get('min_sell_pnl_pct', 0)
+            max_hold_h = trading_cfg.get('max_hold_hours', 10)
+            if shield_on and min_sell_pnl > 0 and position.get('entry_price', 0) > 0:
+                cur_pnl = (price - position['entry_price']) / position['entry_price'] * 100
+                hours_held = 0
+                entry_dt_utc = _parse_entry_time_utc(position.get('entry_time'))
+                if entry_dt_utc is not None:
+                    hours_held = (datetime.now(timezone.utc) - entry_dt_utc).total_seconds() / 3600
+                # Quick-release: if the model flips SELL with very high confidence shortly
+                # after entry, the BUY was likely a false positive — trust the signal.
+                # Guards the 2026-04-19 failure mode where shield held through a 12h trend
+                # reversal while the model screamed SELL @ 97-99% for 9 consecutive cycles.
+                # Shield quick-release: default OFF (empirically neutral in backtests —
+                # see 2026-04-19 test_qr_windows.py). Opt-in by setting
+                # shield_quick_release.enabled=true in regime_config_ed.json.
+                qr_cfg = trading_cfg.get('shield_quick_release', {})
+                qr_enabled = bool(qr_cfg.get('enabled', False))
+                qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
+                qr_max_hours = float(qr_cfg.get('max_hours', 3))
+                quick_release = (qr_enabled and hours_held <= qr_max_hours
+                                 and confidence >= qr_min_conf)
+                if quick_release:
+                    print(f"    🛡→ QUICK-RELEASE: SELL @ {confidence:.2f}% confidence within "
+                          f"{hours_held:.1f}h of entry (thr {qr_min_conf}%/{qr_max_hours}h) — trusting model")
+                    send_telegram(f"🛡→ {asset} shield released: strong SELL ({confidence:.2f}%) "
+                                  f"at {hours_held:.1f}h / PnL {cur_pnl:+.2f}%")
+                elif cur_pnl < min_sell_pnl and hours_held < max_hold_h:
+                    print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
+                    # M-17 fix (2026-04-25): rate-limit so a 12h shield window
+                    # doesn't spam 12 essentially-identical Telegram messages.
+                    _rate_limited_telegram(
+                        f'shield_block_{asset}',
+                        f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)",
+                    )
+                    action = 'HOLD'
+                    hold_override_active = True
+                elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
+                    print(f"    ⚠ Failsafe: held {hours_held:.0f}h >= {max_hold_h}h, selling at {cur_pnl:+.2f}%")
+                    send_telegram(f"⚠️ {asset} failsafe sell: held {hours_held:.0f}h, PnL {cur_pnl:+.2f}%")
+
+        if action == 'SELL' and position['state'] == 'invested':
+            if not dry_run and position.get('auto_trade'):
+                # Get ACTUAL holdings from exchange — sell everything
+                balances = get_balances()
+                if balances is None:
+                    print(f"    ❌ Cannot sell {asset} — balance API unreachable, keeping position")
+                    send_telegram(f"❌ {asset} SELL aborted: balance API failed (position kept as invested)")
+                    # N-01 fix (2026-04-25): release lock before early-return.
+                    if _trade_lock_held:
+                        try: _asset_lock.release()
+                        except Exception: pass
+                        _trade_lock_held = False
+                    return {
+                        'asset': asset, 'action': 'SELL', 'confidence': confidence,
+                        'reason': 'api_failure', 'price': price, 'executed': False,
+                        'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                        'sig_short': sig_short, 'sig_long': sig_long,
+                        'position': position, 'strategy': strategy,
+                        'min_confidence': min_conf,
+                        'gamma': '', 'regime': regime_label,
+                        'horizon': regime_horizon or '',
+                    }
+                actual_held = balances.get(asset, {}).get('available', 0)
+                total_held = balances.get(asset, {}).get('total', 0)
+                print(f"    Pre-trade: {actual_held:.6f} {asset} available, {total_held:.6f} total (selling ALL)")
+
+                # If available=0 but total>0, funds are locked by an open order — cancel it first
+                if actual_held <= 0 < total_held:
+                    print(f"    ⚠ {asset} balance locked (available=0, total={total_held:.6f}) — cancelling open orders...")
+                    send_telegram(f"⚠️ {asset} balance locked — cancelling open orders before sell")
+                    cancelled = cancel_all_open_orders(symbol)
+                    if cancelled > 0:
+                        time.sleep(2)
+                        balances = get_balances()
+                        if balances is None:
+                            print(f"    ❌ Cannot re-check balance after cancel — aborting sell")
+                            send_telegram(f"❌ {asset} SELL aborted: balance API failed after order cancel")
+                            # N-01 fix (2026-04-25): release lock before early-return.
+                            if _trade_lock_held:
+                                try: _asset_lock.release()
+                                except Exception: pass
+                                _trade_lock_held = False
+                            return {
+                                'asset': asset, 'action': 'SELL', 'confidence': confidence,
+                                'reason': 'api_failure', 'price': price, 'executed': False,
+                                'pnl_msg': '', 'sigs_by_horizon': sigs_by_horizon,
+                                'sig_short': sig_short, 'sig_long': sig_long,
+                                'position': position, 'strategy': strategy,
+                                'min_confidence': min_conf,
+                                'gamma': '', 'regime': regime_label,
+                                'horizon': regime_horizon or '',
+                            }
+                        actual_held = balances.get(asset, {}).get('available', 0)
+                        print(f"    After cancel: {actual_held:.6f} {asset} available")
+
+                if actual_held > 0:
+                    pre_usd_sell = float(balances.get('USD', {}).get('available', 0))
+                    pre_crypto_sell = float(balances.get(asset, {}).get('total', actual_held))
+                    use_maker = trading_cfg.get('use_maker_orders', False)
+                    if use_maker:
+                        status, data = execute_maker_sell(symbol, actual_held)
+                    else:
+                        status, data = place_market_sell(symbol, actual_held)
+                    if status in (200, 201):
+                        order = data.get('data', data)
+                        # Ledger-delta exit price (M-02 + M-03 fix 2026-04-25):
+                        # average_fill_price may reflect only the last maker leg;
+                        # use actual USD received / crypto sold.
+                        time.sleep(2)
+                        post_bal = get_balances() or {}
+                        usd_now = float(post_bal.get('USD', {}).get('available', pre_usd_sell))
+                        crypto_left = float(post_bal.get(asset, {}).get('total', 0))
+                        delta_usd_recv = max(usd_now - pre_usd_sell, 0.0)
+                        delta_crypto_sold = max(pre_crypto_sell - crypto_left, 0.0)
+                        if delta_crypto_sold > 0 and delta_usd_recv > 0:
+                            price = delta_usd_recv / delta_crypto_sold
+                        else:
+                            price = float(order.get('average_fill_price', price))
+                        executed = True
+                        print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD "
+                              f"(ledger fill ${price:,.2f}, received ${delta_usd_recv:,.2f})")
+                    else:
+                        send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
                 else:
-                    send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
+                    print(f"    ⚠ Nothing to sell (exchange balance = 0)")
+                    send_telegram(f"⚠️ {asset} SELL skipped: exchange balance = 0 (position kept as invested)")
+
+            if not dry_run and position.get('auto_trade') and not executed:
+                # Auto-trade sell failed or nothing to sell — keep position as invested
+                pass
             else:
-                print(f"    ⚠ Nothing to sell (exchange balance = 0)")
-                send_telegram(f"⚠️ {asset} SELL skipped: exchange balance = 0 (position kept as invested)")
+                pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
+                # M-21 fix (2026-04-25): residual detection. If the SELL only
+                # partially completed (maker→market fallback returned 200 but
+                # didn't sell everything), preserve the residual position
+                # instead of zeroing state. Without this, a partial sell leaves
+                # ETH in the wallet that sync_positions later mis-records as
+                # a synced BUY at the wrong price.
+                residual_qty = float((post_bal or {}).get(asset, {}).get('total', 0)) if executed else 0
+                mid_for_residual = price if price > 0 else 0
+                residual_value_usd = residual_qty * mid_for_residual
+                partial_sell = executed and residual_value_usd > MIN_POSITION_USD
 
-        if not dry_run and position.get('auto_trade') and not executed:
-            # Auto-trade sell failed or nothing to sell — keep position as invested
-            pass
-        else:
-            pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
-            # M-21 fix (2026-04-25): residual detection. If the SELL only
-            # partially completed (maker→market fallback returned 200 but
-            # didn't sell everything), preserve the residual position
-            # instead of zeroing state. Without this, a partial sell leaves
-            # ETH in the wallet that sync_positions later mis-records as
-            # a synced BUY at the wrong price.
-            residual_qty = float((post_bal or {}).get(asset, {}).get('total', 0)) if executed else 0
-            mid_for_residual = price if price > 0 else 0
-            residual_value_usd = residual_qty * mid_for_residual
-            partial_sell = executed and residual_value_usd > MIN_POSITION_USD
+                if partial_sell:
+                    # Compute realized PnL on the SOLD portion only
+                    pre_qty = position.get('base_amount', delta_crypto_sold + residual_qty)
+                    sold_fraction = (delta_crypto_sold / pre_qty) if pre_qty > 0 else 1.0
+                    realized_pnl_usd = delta_usd_recv - position.get('usd_invested', 0) * sold_fraction
+                    position['trades'].append({
+                        'action': 'SELL', 'price': price,
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        'pnl_pct': round(pnl_pct, 2),
+                        'pnl_usd': round(realized_pnl_usd, 2),
+                        'auto': executed,
+                        'partial': True,
+                        'sold_qty': round(delta_crypto_sold, 8),
+                        'residual_qty': round(residual_qty, 8),
+                    })
+                    # Keep position alive on the residual at unchanged entry_price
+                    position['base_amount'] = residual_qty
+                    position['usd_invested'] = position.get('usd_invested', 0) * (1 - sold_fraction)
+                    # state, entry_price, entry_time UNCHANGED
+                    save_position(asset, position)
+                    send_telegram(
+                        f"⚠️ <b>{asset} PARTIAL SELL</b>\n"
+                        f"Sold: {delta_crypto_sold:.6f} {asset} @ ${price:,.2f} = ${delta_usd_recv:,.2f}\n"
+                        f"Residual: {residual_qty:.6f} {asset} (~${residual_value_usd:,.0f}) — position kept open\n"
+                        f"Realized PnL: {realized_pnl_usd:+,.2f} USD"
+                    )
+                    pnl_msg = f" | PARTIAL SELL: {delta_crypto_sold:.4f} sold, {residual_qty:.4f} residual"
+                else:
+                    pnl_usd = position['usd_invested'] * pnl_pct / 100
+                    pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
+                    position['trades'].append({
+                        'action': 'SELL', 'price': price,
+                        'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                        'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                        'auto': executed,
+                    })
+                    position['state'] = 'cash'
+                    position['entry_price'] = 0
+                    position['entry_time'] = ''
+                    position['base_amount'] = 0
+                    position['usd_invested'] = 0
+                    save_position(asset, position)
 
-            if partial_sell:
-                # Compute realized PnL on the SOLD portion only
-                pre_qty = position.get('base_amount', delta_crypto_sold + residual_qty)
-                sold_fraction = (delta_crypto_sold / pre_qty) if pre_qty > 0 else 1.0
-                realized_pnl_usd = delta_usd_recv - position.get('usd_invested', 0) * sold_fraction
-                position['trades'].append({
-                    'action': 'SELL', 'price': price,
-                    'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                    'pnl_pct': round(pnl_pct, 2),
-                    'pnl_usd': round(realized_pnl_usd, 2),
-                    'auto': executed,
-                    'partial': True,
-                    'sold_qty': round(delta_crypto_sold, 8),
-                    'residual_qty': round(residual_qty, 8),
-                })
-                # Keep position alive on the residual at unchanged entry_price
-                position['base_amount'] = residual_qty
-                position['usd_invested'] = position.get('usd_invested', 0) * (1 - sold_fraction)
-                # state, entry_price, entry_time UNCHANGED
-                save_position(asset, position)
-                send_telegram(
-                    f"⚠️ <b>{asset} PARTIAL SELL</b>\n"
-                    f"Sold: {delta_crypto_sold:.6f} {asset} @ ${price:,.2f} = ${delta_usd_recv:,.2f}\n"
-                    f"Residual: {residual_qty:.6f} {asset} (~${residual_value_usd:,.0f}) — position kept open\n"
-                    f"Realized PnL: {realized_pnl_usd:+,.2f} USD"
-                )
-                pnl_msg = f" | PARTIAL SELL: {delta_crypto_sold:.4f} sold, {residual_qty:.4f} residual"
-            else:
-                pnl_usd = position['usd_invested'] * pnl_pct / 100
-                pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
-                position['trades'].append({
-                    'action': 'SELL', 'price': price,
-                    'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                    'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-                    'auto': executed,
-                })
-                position['state'] = 'cash'
-                position['entry_price'] = 0
-                position['entry_time'] = ''
-                position['base_amount'] = 0
-                position['usd_invested'] = 0
-                save_position(asset, position)
-
-    # Fix N1: release per-asset trade lock now that trade execution is done
-    if _trade_lock_held:
-        try:
-            _asset_lock.release()
-        except Exception:
-            pass
+    finally:
+        # F-01 fix (2026-04-25): guaranteed release even if BUY/SELL block
+        # raises an uncaught exception. In-block early-release stanzas (N-01)
+        # already set _trade_lock_held=False on their normal-path success,
+        # so this finally is a no-op for those paths; only fires for true
+        # exception paths or successful completion.
+        if _trade_lock_held:
+            try:
+                _asset_lock.release()
+            except Exception:
+                pass
+            _trade_lock_held = False
 
     # Get gamma from the primary horizon model
     gamma_val = ''
