@@ -122,6 +122,16 @@ from datetime import datetime, timedelta
 from itertools import combinations
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.parallel import Parallel, delayed
+# Latent-bug fix (2026-04-25 evening): RandomForestClassifier,
+# GradientBoostingClassifier, LogisticRegression are referenced by the
+# lambdas in _get_deku_models / _get_deku_diagnostic_models (lines ~1734
+# and ~1747) but were never imported at module level. Result: every RF /
+# GB / LR factory call raised NameError, swallowed by _log_fit_exception
+# (audit fix) and the loop continued. Combos like "RF+LGBM" effectively
+# had ONLY LGBM voting — silent feature-coverage degradation across
+# every Mode D / Mode V / HRST run since Ed V1.0 (2026-03-29).
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 try:
     import optuna
 except ImportError:
