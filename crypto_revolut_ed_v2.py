@@ -397,23 +397,44 @@ def get_recent_private_trades(symbol, limit=50):
         return []
 
 
-def _reconcile_orphan_trade(symbol, side, target_qty, qty_tolerance=0.001):
-    """Search recent private trades for a match by side + quantity (within
-    `qty_tolerance` relative). Returns (price, timestamp) or (None, None).
+def _reconcile_orphan_trade(symbol, side, target_qty, qty_tolerance=0.005):
+    """Walk recent private trades newest-first, maintaining a running NET
+    position (BUYs += qty, SELLs -= qty). When net == target_qty within
+    `qty_tolerance`, the SAME-side trades up to that point reconstruct
+    the position. Return (weighted_avg_price, ts_of_oldest_matched_leg).
 
-    Used during sync_positions when local state is 'cash' but exchange
-    holds the asset (manual BUY detected) — to recover the ACTUAL fill
-    price instead of using current mid (which drifts ±1%/5min).
+    M-22 fix (2026-04-25): supports multi-leg fills with opposite-side
+    trades interleaved (e.g., a maker order fills across 4 BUY legs,
+    then later partial-sells happen). Net-position walk converges on
+    the cost basis of the residual exactly.
+
+    Used by sync_positions when local state was 'cash' but the exchange
+    holds `target_qty` of the asset (manual or orphan BUY detected).
+    Returns (None, None) when no clean match is found.
     """
     if target_qty <= 0:
         return None, None
     side = side.upper()
+    net = 0.0
+    same_side_qty = 0.0
+    same_side_usd = 0.0
+    oldest_ts = ''
+    sign = 1 if side == 'BUY' else -1
     for t in get_recent_private_trades(symbol):
-        if t['side'] != side:
-            continue
-        rel_diff = abs(t['quantity'] - target_qty) / target_qty
-        if rel_diff < qty_tolerance:
-            return t['price'], t['timestamp']
+        if t['side'] == side:
+            net += t['quantity'] * sign
+            same_side_qty += t['quantity']
+            same_side_usd += t['quantity'] * t['price']
+            oldest_ts = t['timestamp']
+        else:
+            net -= t['quantity'] * sign
+        # After applying this trade, does net match target?
+        if abs(net - target_qty) / target_qty < qty_tolerance and same_side_qty > 0:
+            avg_price = same_side_usd / same_side_qty
+            return avg_price, oldest_ts
+        # Overshooting target hugely means no clean match coming.
+        if net > target_qty * 2:
+            break
     return None, None
 
 
@@ -1634,21 +1655,59 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             pass
         else:
             pnl_pct = (price - position['entry_price']) / position['entry_price'] * 100 if position['entry_price'] > 0 else 0
-            pnl_usd = position['usd_invested'] * pnl_pct / 100
-            pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
+            # M-21 fix (2026-04-25): residual detection. If the SELL only
+            # partially completed (maker→market fallback returned 200 but
+            # didn't sell everything), preserve the residual position
+            # instead of zeroing state. Without this, a partial sell leaves
+            # ETH in the wallet that sync_positions later mis-records as
+            # a synced BUY at the wrong price.
+            residual_qty = float((post_bal or {}).get(asset, {}).get('total', 0)) if executed else 0
+            mid_for_residual = price if price > 0 else 0
+            residual_value_usd = residual_qty * mid_for_residual
+            partial_sell = executed and residual_value_usd > MIN_POSITION_USD
 
-            position['trades'].append({
-                'action': 'SELL', 'price': price,
-                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-                'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-                'auto': executed,
-            })
-            position['state'] = 'cash'
-            position['entry_price'] = 0
-            position['entry_time'] = ''
-            position['base_amount'] = 0
-            position['usd_invested'] = 0
-            save_position(asset, position)
+            if partial_sell:
+                # Compute realized PnL on the SOLD portion only
+                pre_qty = position.get('base_amount', delta_crypto_sold + residual_qty)
+                sold_fraction = (delta_crypto_sold / pre_qty) if pre_qty > 0 else 1.0
+                realized_pnl_usd = delta_usd_recv - position.get('usd_invested', 0) * sold_fraction
+                position['trades'].append({
+                    'action': 'SELL', 'price': price,
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    'pnl_pct': round(pnl_pct, 2),
+                    'pnl_usd': round(realized_pnl_usd, 2),
+                    'auto': executed,
+                    'partial': True,
+                    'sold_qty': round(delta_crypto_sold, 8),
+                    'residual_qty': round(residual_qty, 8),
+                })
+                # Keep position alive on the residual at unchanged entry_price
+                position['base_amount'] = residual_qty
+                position['usd_invested'] = position.get('usd_invested', 0) * (1 - sold_fraction)
+                # state, entry_price, entry_time UNCHANGED
+                save_position(asset, position)
+                send_telegram(
+                    f"⚠️ <b>{asset} PARTIAL SELL</b>\n"
+                    f"Sold: {delta_crypto_sold:.6f} {asset} @ ${price:,.2f} = ${delta_usd_recv:,.2f}\n"
+                    f"Residual: {residual_qty:.6f} {asset} (~${residual_value_usd:,.0f}) — position kept open\n"
+                    f"Realized PnL: {realized_pnl_usd:+,.2f} USD"
+                )
+                pnl_msg = f" | PARTIAL SELL: {delta_crypto_sold:.4f} sold, {residual_qty:.4f} residual"
+            else:
+                pnl_usd = position['usd_invested'] * pnl_pct / 100
+                pnl_msg = f" | PnL: {pnl_pct:+.1f}% (${pnl_usd:+,.2f})"
+                position['trades'].append({
+                    'action': 'SELL', 'price': price,
+                    'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                    'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                    'auto': executed,
+                })
+                position['state'] = 'cash'
+                position['entry_price'] = 0
+                position['entry_time'] = ''
+                position['base_amount'] = 0
+                position['usd_invested'] = 0
+                save_position(asset, position)
 
     # Fix N1: release per-asset trade lock now that trade execution is done
     if _trade_lock_held:
@@ -2306,25 +2365,55 @@ def _manual_sell_impl_locked(msg, trading_cfg, asset):
             else:
                 pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
 
-        pos['trades'].append({
-            'action': 'SELL', 'price': fill_price,
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
-            'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
-            'auto': False, 'manual': True,
-        })
-        pos['state'] = 'cash'
-        pos['entry_price'] = 0
-        pos['entry_time'] = ''
-        pos['base_amount'] = 0
-        pos['usd_invested'] = 0
-        save_position(asset, pos)
-
-        pnl_line = f"\nPnL: {pnl_pct:+.2f}% (${pnl_usd:+,.2f})" if entry_price > 0 else ""
-        send_telegram(
-            f"✅ <b>{asset} SELL filled</b>\n"
-            f"Fill: ${fill_price:,.2f}{pnl_line}\n"
-            f"USD: ${usd_now:,.2f}"
-        )
+        # M-21 fix (2026-04-25): residual detection. If the manual SELL only
+        # partially completed (maker→market fallback returned 200 but didn't
+        # sell everything), preserve the residual position. Without this,
+        # ETH left in the wallet gets later mis-recorded as a synced BUY.
+        residual_value_usd = crypto_left_msell * fill_price
+        partial_sell = residual_value_usd > MIN_POSITION_USD
+        if partial_sell:
+            pre_qty = pos.get('base_amount', delta_crypto_sold + crypto_left_msell)
+            sold_fraction = (delta_crypto_sold / pre_qty) if pre_qty > 0 else 1.0
+            realized_pnl_usd = delta_usd_recv - pos.get('usd_invested', 0) * sold_fraction
+            pos['trades'].append({
+                'action': 'SELL', 'price': fill_price,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'pnl_pct': round(pnl_pct, 2),
+                'pnl_usd': round(realized_pnl_usd, 2),
+                'auto': False, 'manual': True,
+                'partial': True,
+                'sold_qty': round(delta_crypto_sold, 8),
+                'residual_qty': round(crypto_left_msell, 8),
+            })
+            pos['base_amount'] = crypto_left_msell
+            pos['usd_invested'] = pos.get('usd_invested', 0) * (1 - sold_fraction)
+            # state, entry_price, entry_time UNCHANGED — keep residual position alive
+            save_position(asset, pos)
+            send_telegram(
+                f"⚠️ <b>{asset} PARTIAL SELL</b>\n"
+                f"Sold: {delta_crypto_sold:.6f} {asset} @ ${fill_price:,.2f} = ${delta_usd_recv:,.2f}\n"
+                f"Residual: {crypto_left_msell:.6f} {asset} (~${residual_value_usd:,.0f}) — position kept open\n"
+                f"Realized PnL: {realized_pnl_usd:+,.2f} USD"
+            )
+        else:
+            pos['trades'].append({
+                'action': 'SELL', 'price': fill_price,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'pnl_pct': round(pnl_pct, 2), 'pnl_usd': round(pnl_usd, 2),
+                'auto': False, 'manual': True,
+            })
+            pos['state'] = 'cash'
+            pos['entry_price'] = 0
+            pos['entry_time'] = ''
+            pos['base_amount'] = 0
+            pos['usd_invested'] = 0
+            save_position(asset, pos)
+            pnl_line = f"\nPnL: {pnl_pct:+.2f}% (${pnl_usd:+,.2f})" if entry_price > 0 else ""
+            send_telegram(
+                f"✅ <b>{asset} SELL filled</b>\n"
+                f"Fill: ${fill_price:,.2f}{pnl_line}\n"
+                f"USD: ${usd_now:,.2f}"
+            )
     else:
         send_telegram(f"❌ {asset} SELL failed: {status} {data}")
 
@@ -3733,7 +3822,13 @@ def _send_startup_telegram(trading_cfg):
             f"    {icon} | {tp_str} | {maker_str}"
         )
 
-    send_telegram(
+    # M-23 fix (2026-04-25): rate-limit so a start_ed_v2.bat restart loop
+    # (trader crashes on startup → bat sleeps 30s → restarts → banner →
+    # crashes → ...) doesn't spam the user with startup messages every
+    # 30 seconds. 1h cooldown means at most one banner per hour even if
+    # the trader is in a tight restart loop.
+    _rate_limited_telegram(
+        'startup_banner',
         f"🚀 <b>Ed V2 Trader Started</b>\n\n"
         + "\n".join(asset_lines) + "\n\n"
         f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
@@ -3785,7 +3880,11 @@ def run_loop(trading_cfg, dry_run=False):
     stale = cancel_all_open_orders()
     if stale > 0:
         print(f"  Cancelled {stale} stale open order(s) from previous run")
-        send_telegram(f"🧹 Startup: cancelled {stale} stale open order(s)")
+        # Rate-limited to suppress restart-loop spam (M-23 2026-04-25).
+        _rate_limited_telegram(
+            'startup_stale_cancelled',
+            f"🧹 Startup: cancelled {stale} stale open order(s)",
+        )
 
     # Initial sync — detect any existing positions on exchange
     print("\n  Initial position sync from Revolut X...")
