@@ -743,7 +743,9 @@ def save_position(asset, pos):
 # SYNC POSITIONS FROM EXCHANGE
 # ============================================================
 MIN_POSITION_USD = 5    # Below this = treat as zero (dust)
-MIN_TRADE_USD = 300     # Minimum USD to execute a trade
+MIN_TRADE_USD = 299.9   # Minimum USD to execute a trade. Set 0.10 below the policy
+                        # minimum ($300) so an exact-$300 input survives BUG 1's
+                        # $0.01 safety margin: 300.00 -> floor -> 299.99 (>=299.9 ok).
 
 def sync_positions(trading_cfg, notify=True):
     """
