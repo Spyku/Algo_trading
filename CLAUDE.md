@@ -439,6 +439,39 @@ there for post-incident forensics.
 
 ---
 
+**🛠 DEFERRED TRADER AUDIT FIXES (after 2026-04-25 bundle 1) — bundle 2 candidates:**
+
+Bundle 1 (committed + pushed 2026-04-25 ~12:00 CEST) shipped Patches A+B,
+M-01 (staleness/horizon refusal), M-02+M-03 (ledger-delta basis), M-13
+(save_position PID-tmp), M-16 (Telegram batch). The findings below were
+verified real by the audit but DEFERRED — none affect money correctness
+on the next trade with bundle 1 in place. Rollback anchor for bundle 1:
+`git tag pre-trader-bundle-20260425` (commit `8766d05`).
+
+**Bundle 2 — SHIPPED 2026-04-25 ~12:30 CEST** (commits `a8bea84`, `881da46`, `f758f46`, `a441d09`):
+
+- ✅ **M-04** — Disaster brake now uses live exchange mid via `get_best_bid_ask(symbol)`, falling back to candle close only if the price API fails. **Note:** `disaster_brake_pct` is currently UNSET in `regime_config_ed.json` — fix is dormant until the user re-enables the brake (CLAUDE.md "Current Regime Config" still claims `disaster_brake_pct: 5` for ETH but the JSON has no key — config drift). User decision pending: re-enable at 5% or update doc to "currently disabled."
+- ✅ **M-17** — Shield-block Telegram message wrapped in `_rate_limited_telegram` (key `shield_block_{asset}`, 1h cooldown). Stdout print stays unrestricted.
+- ✅ **M-06** — `sync_positions` now `try_acquire(blocking=False)` per-asset trade lock; skips that asset for the cycle if main loop / Telegram is mid-trade. Stops duplicate `(synced)` trade records.
+- ✅ **M-07** — `/cfg_{ASSET}_auto` toggle and `/gate ASSET clear` now hold the per-asset trade lock around `load_position → modify → save_position`. Other settings paths that go through `save_trading_config` are already serialised via Patch B.
+- ✅ **M-19** — Hot-reload now does per-asset wholesale replace, not per-key merge. Deleting a key from JSON now propagates to running process. Diff lines logged for visibility.
+- ✅ **M-15** — Main-loop error handler `time.sleep(120)` → `_stop_event.wait(120)`; /stop wakes immediately.
+
+**Still deferred (rare or invasive):**
+
+- **M-10 (MEDIUM)** — No startup reconciliation of orphan in-flight trades (trader killed mid-`execute_maker_buy` → exchange filled, local state stale → sync records wrong basis). Fix needs a new Revolut API call (`/trades/private/{symbol}` for past N hours) — ~30 lines. Defer until orphan reconciliation pattern actually bites.
+- **M-20 (LOW)** — Hot-reload regenerates feature manifest via subprocess every 5 min; ~3-10s blocking. Cache mtime; only regen on prod-CSV change. ~5 lines.
+
+**Falsely flagged or auto-mitigated (do NOT fix):**
+
+- M-05 — Auto-SELL PnL phantom basis: auto-mitigated by M-02/M-03 going forward.
+- M-08 — Cancel-vs-fill drops first-leg data: ledger-delta now captures it.
+- M-09 — Market fallback uses pre-partial size: scenario unreachable; ledger-delta captures basis even if it did fire.
+- M-11, M-12, M-14 — defensive coding only, no real failure path.
+- M-18 — `/pause` not gating sync is intentional (sync should always run).
+
+---
+
 **🚨🚨🚨 UPMOST IMPORTANT — LIVE TRADER DATA-UPDATE SANITY CHECK (2026-04-23 morning, root cause of 86%-pinned bug):**
 
 **Root cause discovered this morning:** The 5h@86% stuck signal (7+ consecutive identical BUY signals) was caused by `xa_btc_lag2h` being NaN in all recent ETH rows because BTC OHLCV hadn't been downloaded in 49 hours (BTC is disabled/not traded → no downloader touches it → stale → merge yields NaN on recent rows). `generate_live_signal` at `crypto_live_trader_ed.py:379` does `df.dropna(subset=feature_cols + ['label'])` which kills every recent row, then `i = n - 1` points to a row from 49h ago. Model retrains each cycle but on the SAME frozen row → SAME 86% output every hour.
@@ -869,6 +902,40 @@ Optional flags:
 9. **Ein results review** — 15-minute candle BTC results from earlier laptop run. Separate research track.
 
 10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
+
+### Closed 2026-04-25 midday (trader audit bundle 2 — 4 commits, ~50 lines)
+
+Bundle 2 cleared all real-bug findings from the bundle-1 audit deferral list. Commits land on top of bundle 1 (`pre-trader-bundle-20260425` tag still works as the nuclear-rollback anchor — it predates both bundles). Each bundle-2 commit is independently revertable.
+
+- **`a8bea84` M-04** — Disaster brake now reads live exchange mid via `get_best_bid_ask(symbol)`, fallback to last-closed-candle close only if price API fails. Fix is dormant in current config: `disaster_brake_pct` is unset in `regime_config_ed.json`. Doc still claims `disaster_brake_pct: 5` for ETH (config drift); user decision pending.
+- **`881da46` M-17** — Shield-block Telegram message rate-limited via `_rate_limited_telegram` keyed `shield_block_{asset}` (1h cooldown). One alert per shield event instead of one per cycle.
+- **`f758f46` M-06 + M-07** — `sync_positions` and Telegram settings handlers (`/cfg_{ASSET}_auto`, `/gate ASSET clear`) now acquire the per-asset trade lock around their load→modify→save sequences. Eliminates the race window that was producing duplicate `(synced)` trade records and clobbered toggle state.
+- **`a441d09` M-19 + M-15** — Hot-reload does per-asset wholesale replace (not per-key merge) so deleted keys propagate; diff lines logged. Main-loop error sleep `time.sleep(120)` → `_stop_event.wait(120)` so /stop is responsive after exceptions.
+
+**Bundle 2 deferred:** M-10 (orphan reconciliation, ~30 lines, requires new API endpoint), M-20 (manifest regen mtime cache, polish).
+
+### Closed 2026-04-25 morning (trader audit bundle 1 — 4 commits, ~70 lines)
+
+Triggered by user observing $9.85 phantom basis on the 2026-04-24 22:01 BUY (recorded $12008.85 vs actual exchange charge $11999). Spawned a thorough audit; surfaced 20 findings; verified each against source. Bundle 1 covers the 6 with money or restart-blocker impact.
+
+**Rollback anchor:** `git tag pre-trader-bundle-20260425` on commit `8766d05` (last known-good before bundle 1). Nuclear revert: `git reset --hard pre-trader-bundle-20260425 && git push --force-with-lease`. Per-commit revert: `git revert <sha>` for any of the four below — they touch different code regions.
+
+**Commits (in chronological order on `main`):**
+
+- **`69177a2` Patches A + B** — `crypto_revolut_ed_v2.py`. Patch A: removed `max_attempts = maker_window // check_interval` recompute inside the partial-fill branch (the SELL slide was jumping backwards on boost — denominator grew, progress fraction shrank, price re-quoted upward). Patch B: added `_config_write_lock = threading.Lock()` around `save_trading_config()` writes — PID-suffixed tmp protected cross-process collisions but two threads in same process (Telegram thread + main loop) shared PID and could half-write `regime_config_ed.json`.
+
+- **`ef542e9` M-01 staleness/horizon refusal blocker** — `crypto_live_trader_ed.py:617-655`. CRITICAL: Fix #1 (label-tail NaN) + Fix #5 (staleness threshold = 2h) silently conflicted. After `df = df_full.dropna(subset=['label'])`, the inference row was `horizon` hours behind `df_full.iloc[-1]`. `lag_hours = horizon`, threshold `> 2` → REFUSE every cycle for any horizon ≥ 3h. Trader still ran only because the in-memory process loaded pre-fix code; on next restart it would have stopped trading entirely. Fixed by decoupling: `df_train = df_full.dropna(['label'])` for training, `df = df_full` (label may be NaN at tail) for inference. lag_hours now ~0.
+
+- **`47c0dae` M-02 + M-03 ledger-delta basis** — `crypto_revolut_ed_v2.py`. Two coupled bugs corrupted recorded basis on every trade: (M-02) `order.get('filled_size')` always returned None — Revolut API returns `filled_quantity`. Trader fell back to `buy_amount/candle_close`, then multiplied by actual `average_fill_price` → inconsistent ratio gave drift up to ~$10 on a $12k trade. (M-03) Multi-leg maker fills (partial → cancel → re-price → next leg fills) only returned the LAST leg's `od`; first leg's filled portion was real on exchange but invisible to position recorder. Both fixed simultaneously by computing basis from balance delta around the order on all 4 trade execution paths (auto BUY, auto SELL, manual /buy, manual /sell). API fields kept as fallback with correct field names. SELL pnl_usd now also computed from `delta_usd_recv - usd_invested` when both ledger deltas are present.
+
+- **`68acd30` M-13 + M-16** — `crypto_revolut_ed_v2.py`. M-13: `save_position` PID-suffixed tmp path (parity with `save_trading_config`); protects against accidental dual-trader-instance collision. M-16: `check_telegram_commands()` returned only the LAST message in each poll batch — earlier messages had their `update_id` consumed (gone forever) but were silently dropped. Concrete failure: user clicks Buy then types /sell during a market drop; both arrive in same 5s poll batch; only one survives. Now returns a list of all pending messages in arrival order; `_telegram_command_loop` iterates and dispatches each through new `_dispatch_telegram_message` helper with per-message try/except.
+
+**Verified empirically:**
+- Today's recorded basis $12008.85 = `(buy_amount/price) × actual_fill_price` (the M-02 fallback formula), $9.85 above actual exchange charge $11999.
+- Today's recorded PnL of +$6.84 was within $0.05 of actual (~$6.79) by accident — two basis errors cancelled almost exactly through the percentage math.
+- The PnL cancellation will NOT hold for trades where bid-mid spread is wider or where multi-leg fills happen. Bundle 1 prevents this going forward.
+
+**8 findings deferred to bundle 2** — see "DEFERRED TRADER AUDIT FIXES" in the TODO section above for M-04, M-06, M-07, M-10, M-15, M-17, M-19, M-20.
 
 ### Closed 2026-04-24 evening (7-point safety audit — all critical paths hardened)
 
