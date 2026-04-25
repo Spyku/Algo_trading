@@ -466,19 +466,36 @@ def get_best_bid_ask(symbol):
     return 0, 0
 
 
-def _execute_maker_order(symbol, size, side, maker_window=180, check_interval=10):
+def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=None, partial_boost=None):
     """Try maker order, market fallback after maker_window.
 
     Buy at bid+0.01 — top of bid queue, filled by incoming market sells.
-    Sell: starts at ask-0.01, steps down toward bid+0.01 each retry (20 attempts).
+    Sell: starts at ask-0.01, steps down toward bid+0.01 each retry.
     Progressively undercuts to maximise fill chance while saving fees.
+
+    Per-asset overrides via regime_config_ed.json -> <ASSET>.maker:
+      window_secs (default 300) — total patience budget before market fallback
+      check_interval_secs (default 15) — how long each quote sits on book
+      partial_boost_secs (default 150) — one-time extension if any partial fill observed
+
     Returns: (status, order_data) same format as place_market_buy/sell
     """
+    asset_name = symbol.split('-')[0]
+    cfg = load_trading_config().get(asset_name, {}) or {}
+    maker_cfg = cfg.get('maker', {}) or {}
+    if maker_window is None:
+        maker_window = int(maker_cfg.get('window_secs', 300))
+    if check_interval is None:
+        check_interval = int(maker_cfg.get('check_interval_secs', 15))
+    if partial_boost is None:
+        partial_boost = int(maker_cfg.get('partial_boost_secs', 150))
+
     is_buy = (side == 'buy')
     place_limit = place_limit_buy if is_buy else place_limit_sell
     place_market = place_market_buy if is_buy else place_market_sell
     side_label = 'buy' if is_buy else 'sell'
     max_attempts = maker_window // check_interval
+    boost_applied = False
 
     # Cancel any stale open orders for this symbol to free locked funds
     stale = cancel_all_open_orders(symbol)
@@ -563,6 +580,13 @@ def _execute_maker_order(symbol, size, side, maker_window=180, check_interval=10
                 total_qty = float(od.get('quantity', 1))
                 pct = filled_qty / total_qty * 100 if total_qty > 0 else 0
                 print(f"    Partially filled: {pct:.0f}% — waiting...")
+                # Adaptive patience: partial fill means the order is working,
+                # extend the total window once to give the residual more time.
+                if not boost_applied and partial_boost > 0:
+                    maker_window += partial_boost
+                    max_attempts = maker_window // check_interval
+                    boost_applied = True
+                    print(f"    [+] Partial-fill boost: window extended +{partial_boost}s -> {maker_window}s total")
                 # Give partial fills extra time
                 time.sleep(check_interval)
                 elapsed += check_interval
