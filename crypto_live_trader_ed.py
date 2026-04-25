@@ -549,7 +549,13 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         if df_raw is None:
             return None
 
-    df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose)
+    # M-01 root cause fix (2026-04-25): keep_label_nan_tail=True so the last
+    # `horizon` rows (label NaN at the tail per Fix #1 2026-04-24) are NOT
+    # stripped by build_hourly_features's dropna. Without this flag df_full's
+    # last row was `horizon` hours behind the freshest raw bar, making the
+    # wall-clock staleness check at line 690 see lag = horizon and refuse
+    # every signal. Engine training paths leave the flag False (default).
+    df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon, verbose=verbose, keep_label_nan_tail=True)
     _compute_pysr_features(df_full, all_cols, asset_name, horizon, verbose=False)
     if metrics_out is not None:
         metrics_out['feature_build_sec'] = round(_tm.time() - _fb_start, 2)

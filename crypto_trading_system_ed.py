@@ -681,7 +681,7 @@ def load_data(asset_name):
 # ============================================================
 # HOURLY FEATURE ENGINEERING (ALL 36 technical features)
 # ============================================================
-def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
+def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, keep_label_nan_tail=False):
     df = df_hourly.copy()
 
     for period in [1, 2, 3, 4, 5, 6, 7, 8, 12, 24, 48, 72, 120, 240]:
@@ -851,10 +851,18 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     if verbose:
         print(f"    Rows before dropna: {len(df)}")
 
-    df = df.dropna(subset=core_cols + ['label']).reset_index(drop=True)
+    # M-01 root cause fix (2026-04-25): when caller is the LIVE TRADER (which
+    # passes keep_label_nan_tail=True), we must NOT drop the last `horizon`
+    # rows just because their forward-return label is NaN. Those rows are the
+    # freshest bars — they're what the model needs to predict on. Training
+    # callers (Mode D/V/H/S/R/T) leave the flag False and still get the clean
+    # labelled dataframe they need.
+    drop_subset = core_cols if keep_label_nan_tail else core_cols + ['label']
+    df = df.dropna(subset=drop_subset).reset_index(drop=True)
     if verbose:
         n_sparse = len([c for c in feature_cols if any(c.startswith(p) for p in sparse_prefixes)])
-        print(f"    Rows after dropna: {len(df)} (core only; {n_sparse} sparse features keep NaN)")
+        tail_msg = " (label-NaN tail kept for live inference)" if keep_label_nan_tail else ""
+        print(f"    Rows after dropna: {len(df)} (core only; {n_sparse} sparse features keep NaN){tail_msg}")
     return df, feature_cols
 
 
@@ -1012,8 +1020,8 @@ def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     return features
 
 
-def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True):
-    df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose)
+def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True, keep_label_nan_tail=False):
+    df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose, keep_label_nan_tail=keep_label_nan_tail)
     all_cols = list(base_cols)
     added = 0
 
