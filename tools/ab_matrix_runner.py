@@ -415,10 +415,16 @@ def main():
         ('trimON_metaON_floorOFF', True,  0.45, True),
     ]
     # Focused 4-variant validation for floor+trim+meta on clean data
+    # Priority order updated 2026-04-25 evening: based on the run that
+    # finished mid-day, C beat B by +10.38pp and B replicated the live
+    # HRST. Re-running this matrix should test the strongest candidates
+    # first so a partial run still produces actionable data. Order:
+    # C (winner so far) → B (sanity-check / live baseline) → A → D (open
+    # question on meta-filter, lowest-priority because never ran cleanly).
     focus_variants = [
-        ('A_floorON_trimOFF',      False, None, False),
-        ('B_floorON_trimON',       True,  None, False),
         ('C_floorOFF_trimOFF',     False, None, True),
+        ('B_floorON_trimON',       True,  None, False),
+        ('A_floorON_trimOFF',      False, None, False),
         ('D_floorON_trimON_metaON', True, 0.45, False),
     ]
     if args.variants == 'focus':
