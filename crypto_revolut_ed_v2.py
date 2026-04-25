@@ -1429,7 +1429,12 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                               f"at {hours_held:.1f}h / PnL {cur_pnl:+.2f}%")
             elif cur_pnl < min_sell_pnl and hours_held < max_hold_h:
                 print(f"    🛡 HOLD override: PnL {cur_pnl:+.2f}% < {min_sell_pnl:+.2f}% (held {hours_held:.0f}h / {max_hold_h}h max)")
-                send_telegram(f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)")
+                # M-17 fix (2026-04-25): rate-limit so a 12h shield window
+                # doesn't spam 12 essentially-identical Telegram messages.
+                _rate_limited_telegram(
+                    f'shield_block_{asset}',
+                    f"🛡 {asset} SELL blocked: PnL {cur_pnl:+.2f}% vs {min_sell_pnl}% target (held {hours_held:.0f}h / {max_hold_h}h)",
+                )
                 action = 'HOLD'
                 hold_override_active = True
             elif cur_pnl < min_sell_pnl and hours_held >= max_hold_h:
