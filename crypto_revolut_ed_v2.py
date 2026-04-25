@@ -3298,17 +3298,32 @@ def _reload_trading_config(trading_cfg):
 
     fresh = load_trading_config()
     changed = False
-    for asset in list(fresh.keys()):
-        if asset not in trading_cfg:
-            trading_cfg[asset] = fresh[asset]
+    # M-19 fix (2026-04-25): wholesale replace per-asset block, not merge.
+    # Old per-key merge was additive-only — if the user removed a key from
+    # the JSON (e.g., deleted disaster_brake_pct to disable the brake), the
+    # old in-memory value persisted indefinitely. Wholesale replace makes
+    # the JSON the single source of truth.
+    for asset in list(trading_cfg.keys()):
+        if asset not in fresh:
+            del trading_cfg[asset]
+            print(f"  CONFIG RELOAD: removed asset {asset}")
             changed = True
-        else:
-            for key in fresh[asset]:
-                if trading_cfg[asset].get(key) != fresh[asset][key]:
-                    old_val = trading_cfg[asset].get(key)
-                    trading_cfg[asset][key] = fresh[asset][key]
-                    print(f"  CONFIG RELOAD: {asset}.{key}: {old_val} -> {fresh[asset][key]}")
-                    changed = True
+    for asset, fresh_block in fresh.items():
+        if asset not in trading_cfg:
+            trading_cfg[asset] = fresh_block
+            print(f"  CONFIG RELOAD: added asset {asset}")
+            changed = True
+        elif trading_cfg[asset] != fresh_block:
+            # Diff display before clobber for log visibility.
+            cur_block = trading_cfg[asset]
+            removed = [k for k in cur_block if k not in fresh_block]
+            added_or_changed = [k for k in fresh_block if cur_block.get(k) != fresh_block[k]]
+            for k in removed:
+                print(f"  CONFIG RELOAD: {asset}.{k}: {cur_block[k]} -> <removed>")
+            for k in added_or_changed:
+                print(f"  CONFIG RELOAD: {asset}.{k}: {cur_block.get(k)} -> {fresh_block[k]}")
+            trading_cfg[asset] = fresh_block
+            changed = True
 
     if changed:
         # Validate — revert on failure. No-op if trader hasn't finished startup.
@@ -3791,7 +3806,10 @@ def run_loop(trading_cfg, dry_run=False):
             import traceback
             traceback.print_exc()
             send_telegram(f"⚠️ <b>Error</b>\n<code>{e}</code>")
-            time.sleep(120)
+            # M-15 fix (2026-04-25): wake immediately on /stop instead of
+            # sleeping the full 120s.
+            if _stop_event.wait(120):
+                break
 
 
 # ============================================================
