@@ -1310,6 +1310,8 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     'horizon': regime_horizon or '',
                 }
             usd_avail = balances.get('USD', {}).get('available', 0)
+            pre_usd = float(usd_avail)
+            pre_crypto = float(balances.get(asset, {}).get('total', 0))
             print(f"    Pre-trade USD: ${usd_avail:,.2f}")
 
             # Minimum $300 to trade, target full max, or all available if < max
@@ -1329,17 +1331,39 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     status, data = place_market_buy(symbol, buy_amount)
                 if status in (200, 201):
                     order = data.get('data', data)
-                    position['base_amount'] = float(order.get('filled_size', buy_amount / price))
-                    position['entry_price'] = float(order.get('average_fill_price', price))
-                    position['usd_invested'] = position['base_amount'] * position['entry_price']
-                    executed = True
-
-                    # Post-trade verification
+                    # Ledger-delta basis (M-02 + M-03 fix 2026-04-25): API field
+                    # `filled_size` doesn't exist (Revolut returns `filled_quantity`),
+                    # and multi-leg maker fills only return the LAST leg's data —
+                    # both bugs silently corrupted recorded basis. Compute from
+                    # actual balance delta instead; this captures every leg + every
+                    # API field-name variant + market fallbacks correctly.
                     time.sleep(2)
-                    post_bal = get_balances()
-                    crypto_held = post_bal.get(asset, {}).get('total', 0)
-                    usd_left = post_bal.get('USD', {}).get('available', 0)
-                    print(f"    Post-trade: {crypto_held:.6f} {asset} | ${usd_left:,.2f} USD")
+                    post_bal = get_balances() or {}
+                    post_usd = float(post_bal.get('USD', {}).get('available', pre_usd))
+                    post_crypto = float(post_bal.get(asset, {}).get('total', pre_crypto))
+                    delta_usd = max(pre_usd - post_usd, 0.0)
+                    delta_crypto = max(post_crypto - pre_crypto, 0.0)
+                    if delta_crypto > 0 and delta_usd > 0:
+                        position['base_amount'] = delta_crypto
+                        position['entry_price'] = delta_usd / delta_crypto
+                        position['usd_invested'] = delta_usd
+                    else:
+                        # Balance API failed or returned zero delta — fall back to
+                        # API order fields with the correct field names.
+                        filled = float(order.get('filled_quantity') or order.get('filled_size') or 0)
+                        avg_fill = float(order.get('average_fill_price') or 0)
+                        if filled > 0 and avg_fill > 0:
+                            position['base_amount'] = filled
+                            position['entry_price'] = avg_fill
+                            position['usd_invested'] = filled * avg_fill
+                        else:
+                            # Last-resort fallback (preserves prior behavior).
+                            position['base_amount'] = buy_amount / price
+                            position['entry_price'] = price
+                            position['usd_invested'] = buy_amount
+                    executed = True
+                    print(f"    Post-trade: {post_crypto:.6f} {asset} | ${post_usd:,.2f} USD "
+                          f"(ledger basis ${position['usd_invested']:,.2f} @ ${position['entry_price']:,.2f})")
                 else:
                     send_telegram(f"⚠️ {asset} BUY failed: {status} {data}")
 
@@ -1447,6 +1471,8 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     print(f"    After cancel: {actual_held:.6f} {asset} available")
 
             if actual_held > 0:
+                pre_usd_sell = float(balances.get('USD', {}).get('available', 0))
+                pre_crypto_sell = float(balances.get(asset, {}).get('total', actual_held))
                 use_maker = trading_cfg.get('use_maker_orders', False)
                 if use_maker:
                     status, data = execute_maker_sell(symbol, actual_held)
@@ -1454,16 +1480,22 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                     status, data = place_market_sell(symbol, actual_held)
                 if status in (200, 201):
                     order = data.get('data', data)
-                    price = float(order.get('average_fill_price', price))
-                    executed = True
-
-                    # Post-trade verification
+                    # Ledger-delta exit price (M-02 + M-03 fix 2026-04-25):
+                    # average_fill_price may reflect only the last maker leg;
+                    # use actual USD received / crypto sold.
                     time.sleep(2)
-                    post_bal = get_balances()
-                    if post_bal:
-                        usd_now = post_bal.get('USD', {}).get('available', 0)
-                        crypto_left = post_bal.get(asset, {}).get('total', 0)
-                        print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD")
+                    post_bal = get_balances() or {}
+                    usd_now = float(post_bal.get('USD', {}).get('available', pre_usd_sell))
+                    crypto_left = float(post_bal.get(asset, {}).get('total', 0))
+                    delta_usd_recv = max(usd_now - pre_usd_sell, 0.0)
+                    delta_crypto_sold = max(pre_crypto_sell - crypto_left, 0.0)
+                    if delta_crypto_sold > 0 and delta_usd_recv > 0:
+                        price = delta_usd_recv / delta_crypto_sold
+                    else:
+                        price = float(order.get('average_fill_price', price))
+                    executed = True
+                    print(f"    Post-trade: {crypto_left:.6f} {asset} | ${usd_now:,.2f} USD "
+                          f"(ledger fill ${price:,.2f}, received ${delta_usd_recv:,.2f})")
                 else:
                     send_telegram(f"⚠️ {asset} SELL failed: {status} {data}")
             else:
@@ -1972,17 +2004,36 @@ def _manual_buy_impl_locked(msg, trading_cfg, asset, amount_usd):
         f"Executing..."
     )
 
+    pre_usd_buy = float(usd_avail)
+    pre_crypto_buy = float(balances.get(asset, {}).get('total', 0))
     status, data = execute_maker_buy(symbol, amount_usd)
     if status in (200, 201):
         order = data.get('data', data)
         mid = (bid + ask) / 2
-        fill_price = float(order.get('average_fill_price', mid))
-        filled_size = float(order.get('filled_size', amount_usd / fill_price if fill_price > 0 else 0))
+
+        # Ledger-delta basis (M-02 + M-03 fix 2026-04-25): use balance delta as
+        # ground truth, fall back to API order fields with correct names.
+        time.sleep(2)
+        pb = get_balances() or {}
+        usd_left = float(pb.get('USD', {}).get('available', pre_usd_buy))
+        crypto_now = float(pb.get(asset, {}).get('total', pre_crypto_buy))
+        delta_usd = max(pre_usd_buy - usd_left, 0.0)
+        delta_crypto = max(crypto_now - pre_crypto_buy, 0.0)
+        if delta_crypto > 0 and delta_usd > 0:
+            filled_size = delta_crypto
+            fill_price = delta_usd / delta_crypto
+            usd_invested = delta_usd
+        else:
+            filled_size = float(order.get('filled_quantity') or order.get('filled_size') or 0)
+            fill_price = float(order.get('average_fill_price') or mid)
+            if filled_size <= 0 and fill_price > 0:
+                filled_size = amount_usd / fill_price
+            usd_invested = filled_size * fill_price
 
         pos['state'] = 'invested'
         pos['base_amount'] = filled_size
         pos['entry_price'] = fill_price
-        pos['usd_invested'] = filled_size * fill_price
+        pos['usd_invested'] = usd_invested
         pos['entry_time'] = _now_utc_iso()
         pos['trades'].append({
             'action': 'BUY', 'price': fill_price,
@@ -1990,10 +2041,7 @@ def _manual_buy_impl_locked(msg, trading_cfg, asset, amount_usd):
         })
         save_position(asset, pos)
 
-        time.sleep(2)
-        pb = get_balances()
-        crypto = pb.get(asset, {}).get('total', filled_size) if pb else filled_size
-        usd_left = pb.get('USD', {}).get('available', 0) if pb else 0
+        crypto = crypto_now
         send_telegram(
             f"✅ <b>{asset} BUY filled</b>\n"
             f"Fill: ${fill_price:,.2f}\n"
@@ -2095,17 +2143,36 @@ def _manual_sell_impl_locked(msg, trading_cfg, asset):
         f"Executing..."
     )
 
+    pre_usd_msell = float(balances.get('USD', {}).get('available', 0))
+    pre_crypto_msell = float(balances.get(asset, {}).get('total', actual_held))
     status, data = execute_maker_sell(symbol, actual_held)
     if status in (200, 201):
         order = data.get('data', data)
         mid = (bid + ask) / 2
-        fill_price = float(order.get('average_fill_price', mid))
+
+        # Ledger-delta exit price (M-02 + M-03 fix 2026-04-25): use balance
+        # delta as ground truth; fall back to API field if balance API fails.
+        time.sleep(2)
+        pb = get_balances() or {}
+        usd_now = float(pb.get('USD', {}).get('available', pre_usd_msell))
+        crypto_left_msell = float(pb.get(asset, {}).get('total', 0))
+        delta_usd_recv = max(usd_now - pre_usd_msell, 0.0)
+        delta_crypto_sold = max(pre_crypto_msell - crypto_left_msell, 0.0)
+        if delta_crypto_sold > 0 and delta_usd_recv > 0:
+            fill_price = delta_usd_recv / delta_crypto_sold
+        else:
+            fill_price = float(order.get('average_fill_price', mid))
 
         pnl_pct = 0
         pnl_usd = 0
         if entry_price > 0:
             pnl_pct = (fill_price - entry_price) / entry_price * 100
-            pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
+            # PnL in USD: prefer the actual-received-minus-invested when both
+            # ledger deltas are present; otherwise fall back to pct × basis.
+            if delta_usd_recv > 0 and pos.get('usd_invested', 0) > 0:
+                pnl_usd = delta_usd_recv - pos['usd_invested']
+            else:
+                pnl_usd = pos.get('usd_invested', 0) * pnl_pct / 100
 
         pos['trades'].append({
             'action': 'SELL', 'price': fill_price,
@@ -2120,9 +2187,6 @@ def _manual_sell_impl_locked(msg, trading_cfg, asset):
         pos['usd_invested'] = 0
         save_position(asset, pos)
 
-        time.sleep(2)
-        pb = get_balances()
-        usd_now = pb.get('USD', {}).get('available', 0) if pb else 0
         pnl_line = f"\nPnL: {pnl_pct:+.2f}% (${pnl_usd:+,.2f})" if entry_price > 0 else ""
         send_telegram(
             f"✅ <b>{asset} SELL filled</b>\n"
