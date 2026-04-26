@@ -611,9 +611,25 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
 
         spread_bps = (ask - bid) / bid * 10000
         if is_buy:
-            limit_price = round(bid + 0.01, 2)
+            # Option A fix (2026-04-26): BUY-side slide, mirror of SELL.
+            # Old behavior: stuck at bid+0.01 for the entire window. In low-
+            # liquidity hours (e.g. 03:06 CEST Saturday) the bid sat there
+            # for 300s with zero fills, then market fallback at ask = TAKER.
+            # New: start at bid+0.01 (passive, full spread captured), slide
+            # linearly UP to ask-0.01 across `max_attempts`. Final attempts
+            # are at ask-0.01 — almost crossing — which catches incoming
+            # taker-SELL flow that the old fixed bid+0.01 missed.
+            bottom = bid + 0.01
+            top = ask - 0.01
+            if top < bottom:
+                top = bottom  # spread too tight to slide; stay at bid+0.01
+            progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
+            limit_price = round(bottom + progress * (top - bottom), 2)
             if limit_price >= ask:
-                limit_price = bid
+                # Defensive: never cross. post_only would reject anyway.
+                limit_price = round(ask - 0.01, 2)
+            if limit_price < bid + 0.01:
+                limit_price = bid  # fall back to bid level if rounded below
         else:
             # BUG 2 fix: SELL post_only requires price STRICTLY above best bid.
             # Slide from ask-0.01 down to bid+0.02 (2 cents above bid for tick-race safety).
