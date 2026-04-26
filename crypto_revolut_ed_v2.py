@@ -649,6 +649,51 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
                 time.sleep(2)
                 elapsed += 2
                 continue
+            # M-27 fix (2026-04-26): "Insufficient balance" is a partial-fill
+            # race condition — the exchange has filled some of our order
+            # (reducing wallet) faster than the balance API reflects it. The
+            # error message contains the actual available size; parse it and
+            # retry with the corrected size. Do NOT fall through to market —
+            # that would force a TAKER order on the residual when maker would
+            # have worked. Was the most common cause of "maker not working,
+            # only taker fills" symptom: every partial fill triggered the 422
+            # → market fallback path.
+            if 'insufficient balance' in err_msg:
+                # Parse "Insufficient balance of Ξ1.73122052; required Ξ2.22..."
+                # The first number is the actual available size.
+                import re
+                m = re.search(r'insufficient balance of [^\d-]*([\d.]+)', err_msg)
+                if m:
+                    new_size = float(m.group(1))
+                    if is_buy:
+                        # BUY size is in QUOTE (USD); apply same safety margin
+                        new_size = math.floor(new_size * 100) / 100 - 0.01
+                    if new_size > 0 and new_size < size:
+                        print(f"    [!] Insufficient balance race — corrected size: {size:.6f} → {new_size:.6f}, retrying maker")
+                        size = new_size
+                        cancel_all_open_orders(symbol)
+                        time.sleep(1)
+                        elapsed += 1
+                        continue
+                # Could not parse; fall through to balance API recheck path below.
+                print(f"    [!] Insufficient balance (couldn't parse error), recomputing from balance API")
+                cancel_all_open_orders(symbol)
+                time.sleep(1)
+                bal = get_balances() or {}
+                asset_name = symbol.split('-')[0]
+                if is_buy:
+                    new_size = float(bal.get('USD', {}).get('available', 0))
+                    new_size = math.floor(new_size * 100) / 100 - 0.01
+                else:
+                    new_size = float(bal.get(asset_name, {}).get('available', 0))
+                if new_size > 0 and new_size < size:
+                    print(f"    [!] Corrected size from balance API: {size:.6f} → {new_size:.6f}, retrying maker")
+                    size = new_size
+                    elapsed += 1
+                    continue
+                # Genuinely no balance — give up.
+                print(f"    [!] No balance available — aborting (no market fallback for empty wallet)")
+                return status, order
             print(f"    [!] Limit order failed (status={status}, error={err_detail}), going market")
             cancel_all_open_orders(symbol)
             time.sleep(1)
