@@ -3825,6 +3825,16 @@ def run_mode_p(assets_list, horizons):
         print("  Make sure it's in the same directory as this script.")
         return
 
+    # Auto-pull missing hourly OHLCV before per-horizon loop. Mode D/V/H/HRST
+    # do this in their data-update block; Mode P historically did not, so a
+    # brand-new asset (e.g. BNB freshly added to ASSETS) would fail every
+    # horizon with "data not found". Cheap incremental update is a no-op for
+    # already-present files (download_asset(update_only=True) appends only).
+    missing = [a for a in assets_list if not os.path.exists(ASSETS[a]['file'])]
+    if missing:
+        print(f"\n  [Mode P] Hourly OHLCV missing for: {missing} — auto-downloading...")
+        update_all_data(missing)
+
     for asset in assets_list:
         for h in horizons:
             print(f"\n{'#'*60}")
@@ -7584,34 +7594,31 @@ Examples:
 
 
 # ╔════════════════════════════════════════════════════════════════════╗
+# ║  PARALLEL DISPATCH                                                  ║
 # ║                                                                    ║
-# ║  PARALLEL EXTENSIONS — merged from crypto_trading_system_ed.py     ║
-# ║  (parallel wrapper) into the engine 2026-05-02.                    ║
+# ║  Mode V Step 1/3 backtests, Mode S/T signal cache, and Mode V's    ║
+# ║  refine all run across multiple workers by default. Per-machine    ║
+# ║  knobs in hardware_config.py: PARALLEL_BACKTESTS controls worker   ║
+# ║  count, PARALLEL_LGBM_DEVICE picks GPU vs CPU for the parallel     ║
+# ║  sections. Set PARALLEL_BACKTESTS=1 to fall back to sequential     ║
+# ║  execution (only useful for debugging).                             ║
 # ║                                                                    ║
-# ║  Inlines:                                                           ║
-# ║    - run_mode_v_parallel  (Step 1 + Step 3 backtests via loky)     ║
-# ║    - run_mode_s_parallel  (per-horizon signal cache via loky)      ║
-# ║    - run_mode_t_parallel  (per-horizon signal cache via loky)      ║
-# ║    - _refine_top_configs_hybrid  (GPU+CPU dispatch, 1+1 worker)    ║
-# ║                                                                    ║
-# ║  At __main__ time, these replace the sequential entry points via   ║
-# ║  globals() reassignment. Engine's sequential implementations stay  ║
-# ║  reachable as _ENG_*_ORIG for fallback paths.                       ║
-# ║                                                                    ║
-# ║  Per-machine policy lives in hardware_config.PARALLEL_BACKTESTS    ║
-# ║  + hardware_config.PARALLEL_LGBM_DEVICE.                           ║
-# ║                                                                    ║
+# ║  Sequential implementations are preserved as _ENG_*_SERIAL and     ║
+# ║  used as fallbacks when there's only one item to dispatch.         ║
 # ╚════════════════════════════════════════════════════════════════════╝
 
-# ──────────────────────────────────────────────────────────────
-# Capture sequential entry points (engine's own def's above) BEFORE the
-# parallel functions (which fall back to these for sequential paths) and
-# BEFORE the __main__ monkey-patch reassigns the public names.
-# ──────────────────────────────────────────────────────────────
-_ENG_RUN_MODE_S_ORIG = run_mode_s
-_ENG_RUN_MODE_T_ORIG = run_mode_t
-_ENG_RUN_MODE_V_ORIG = run_mode_v
-_ENG_REFINE_TOP_CONFIGS_ORIG = _refine_top_configs
+# Preserve the sequential implementations defined earlier. The parallel
+# entry points fall back to these when len(items) <= 1.
+_ENG_RUN_MODE_S_SERIAL = run_mode_s
+_ENG_RUN_MODE_T_SERIAL = run_mode_t
+_ENG_RUN_MODE_V_SERIAL = run_mode_v
+_ENG_REFINE_TOP_CONFIGS_SERIAL = _refine_top_configs
+
+# Legacy aliases — kept so any in-flight references in this module still resolve.
+_ENG_RUN_MODE_S_ORIG = _ENG_RUN_MODE_S_SERIAL
+_ENG_RUN_MODE_T_ORIG = _ENG_RUN_MODE_T_SERIAL
+_ENG_RUN_MODE_V_ORIG = _ENG_RUN_MODE_V_SERIAL
+_ENG_REFINE_TOP_CONFIGS_ORIG = _ENG_REFINE_TOP_CONFIGS_SERIAL
 
 
 # ──────────────────────────────────────────────────────────────
@@ -8671,8 +8678,17 @@ def _refine_top_configs_hybrid(asset, horizon, top3_for_refine, df_raw,
 
 
 # ──────────────────────────────────────────────────────────────
-# Entry point — monkey-patch and call engine.main()
+# Bind parallel dispatch as the default for the public entry points.
+# Sequential implementations remain reachable as _ENG_*_SERIAL for the
+# fallback paths inside the parallel functions (single-item dispatch).
+# Done at module-import time so workers, the trader, and __main__ all
+# see the parallel versions through normal name resolution.
 # ──────────────────────────────────────────────────────────────
+run_mode_v = run_mode_v_parallel
+run_mode_s = run_mode_s_parallel
+run_mode_t = run_mode_t_parallel
+_refine_top_configs = _refine_top_configs_hybrid
+
 
 if __name__ == '__main__':
     # Parse --refine-trials N (test-only override for hybrid refine).
@@ -8690,30 +8706,13 @@ if __name__ == '__main__':
             sys.exit(2)
 
     print("=" * 80)
-    print("  EXPERIMENTAL: Parallel wrapper (Mode V + Mode S + Mode T + hybrid refine)")
-    print(f"  Machine: {MACHINE}  |  Workers: {PARALLEL_BACKTESTS}  |  "
-          f"LGBM (parallel section): {PARALLEL_LGBM_DEVICE}")
-    print("  Production engine NOT modified — only this process patches:")
-    print("    run_mode_v          ← run_mode_v_parallel  (Step 1 + Step 3 backtests)")
-    print("    run_mode_s          ← run_mode_s_parallel  (signal cache parallel)")
-    print("    run_mode_t          ← run_mode_t_parallel  (signal cache parallel)")
-    print("    _refine_top_configs ← _refine_top_configs_hybrid  (GPU+CPU dispatch)")
+    print(f"  CRYPTO TRADING SYSTEM ED — {MACHINE}")
+    print(f"  Parallel dispatch: {PARALLEL_BACKTESTS} workers, "
+          f"LGBM={PARALLEL_LGBM_DEVICE} for parallel sections")
+    print("  Active paths: run_mode_v, run_mode_s, run_mode_t, _refine_top_configs")
+    print("  (set hardware_config.PARALLEL_BACKTESTS=1 to fall back to sequential)")
     print("=" * 80)
 
-    # Replace engine entry points in THIS process. Workers re-import the
-    # engine module fresh; they only run the worker functions defined at
-    # this module's scope, so they don't need the patches applied.
-    globals()['run_mode_v'] = run_mode_v_parallel
-    globals()['run_mode_s'] = run_mode_s_parallel
-    globals()['run_mode_t'] = run_mode_t_parallel
-    # Hybrid GPU+CPU refine dispatch — 1 GPU worker + 1 CPU worker concurrent,
-    # 3rd config picks up the first-freed device. Falls back to engine's
-    # sequential refine for ≤1 config (via captured original).
-    globals()['_refine_top_configs'] = _refine_top_configs_hybrid
-
-    # Hand off to the engine's main(). It will route:
-    #   HRST → run_mode_h → (patched run_mode_v) → (patched _refine_top_configs)
-    #        → run_mode_r → (patched run_mode_s) → (patched run_mode_t)
     main()
 
     # ──────────────────────────────────────────────────────────────

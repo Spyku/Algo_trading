@@ -27,8 +27,15 @@ from datetime import datetime, timedelta
 MACRO_DIR = 'data/macro_data'
 os.makedirs(MACRO_DIR, exist_ok=True)
 
-# Freshness threshold — skip re-download if file updated within this many seconds
-FRESHNESS_SECONDS = 3600  # 1 hour
+# Freshness threshold — skip re-download if file updated within this many seconds.
+# 6h (21600s) is safe because:
+#  - macro features are 1d/5d/10d log-changes — within-day staleness invisible to LGBM
+#  - on-chain CoinMetrics is daily-frequency anyway
+#  - derivatives funding rate updates every 8h
+#  - F&G index updates daily
+# Bumped 2026-05-02 from 1h. Saves ~3 min per HRST cycle when files are still fresh.
+# Live trader's data-freshness gate (Critical Rule 9) is independent and stays at 2h.
+FRESHNESS_SECONDS = 21600  # 6 hours
 
 
 def _binance_get(url, ctx, timeout=30, retries=4, backoff=(1, 2, 5, 10), verbose=False):
@@ -130,7 +137,12 @@ def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
 # 1. YFINANCE MACRO DATA
 # ============================================================
 def download_yfinance_data():
-    """Download macro indicators via yfinance."""
+    """Download macro indicators via yfinance batch download.
+
+    Uses yfinance's native multi-ticker download (`yf.download([list,...])` with
+    threads=True default) — yfinance handles internal parallelism safely; an
+    external ThreadPoolExecutor caused 2D-shape race conditions in its state.
+    """
     try:
         import yfinance as yf
     except ImportError:
@@ -155,27 +167,40 @@ def download_yfinance_data():
     start_date = '2022-01-01'
     end_date = datetime.now().strftime('%Y-%m-%d')
 
-    print(f"\n  Downloading {len(tickers)} macro indicators from yfinance...")
+    print(f"\n  Downloading {len(tickers)} macro indicators from yfinance (batch)...")
     print(f"  Period: {start_date} to {end_date}")
+
+    # Single batch call — yfinance downloads all tickers internally with threads=True
+    ticker_list = list(tickers.values())
+    name_for_ticker = {v: k for k, v in tickers.items()}
+    raw = yf.download(ticker_list, start=start_date, end=end_date, progress=False, group_by='ticker')
 
     all_data = {}
     for name, ticker in tickers.items():
         try:
-            print(f"    {name:10s} ({ticker})...", end=' ')
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if len(df) == 0:
-                print("NO DATA")
+            # yf.download with multiple tickers returns MultiIndex columns: (ticker, field)
+            if isinstance(raw.columns, pd.MultiIndex):
+                # MultiIndex: get the (ticker, 'Close') column
+                if (ticker, 'Close') in raw.columns:
+                    series = raw[(ticker, 'Close')].dropna()
+                else:
+                    print(f"    {name:10s} ({ticker})... NO DATA (ticker not in response)")
+                    continue
+            else:
+                # Single-ticker fallback (shouldn't happen with list input but be safe)
+                series = raw['Close'].dropna() if 'Close' in raw.columns else None
+                if series is None:
+                    print(f"    {name:10s} ({ticker})... NO DATA")
+                    continue
+
+            if len(series) == 0:
+                print(f"    {name:10s} ({ticker})... NO DATA (empty)")
                 continue
 
-            # Keep only Close column, rename
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            
-            series = df['Close'].dropna()
             all_data[name] = series
-            print(f"{len(series)} days")
+            print(f"    {name:10s} ({ticker})... {len(series)} days")
         except Exception as e:
-            print(f"ERROR: {e}")
+            print(f"    {name:10s} ({ticker})... ERROR: {e}")
 
     if not all_data:
         print("  [!!] No macro data downloaded!")
@@ -318,19 +343,33 @@ def download_cross_asset():
     start_date = '2022-01-01'
     end_date = datetime.now().strftime('%Y-%m-%d')
 
-    print(f"\n  Downloading cross-asset pairs for correlation features...")
+    print(f"\n  Downloading cross-asset pairs for correlation features (batch)...")
+    ticker_list = list(pairs.values())
+    raw = yf.download(ticker_list, start=start_date, end=end_date, progress=False, group_by='ticker')
+
     all_data = {}
     for name, ticker in pairs.items():
         try:
-            print(f"    {name:10s} ({ticker})...", end=' ')
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            series = df['Close'].dropna()
+            if isinstance(raw.columns, pd.MultiIndex):
+                if (ticker, 'Close') in raw.columns:
+                    series = raw[(ticker, 'Close')].dropna()
+                else:
+                    print(f"    {name:10s} ({ticker})... NO DATA (ticker not in response)")
+                    continue
+            else:
+                series = raw['Close'].dropna() if 'Close' in raw.columns else None
+                if series is None:
+                    print(f"    {name:10s} ({ticker})... NO DATA")
+                    continue
+
+            if len(series) == 0:
+                print(f"    {name:10s} ({ticker})... NO DATA (empty)")
+                continue
+
             all_data[name] = series
-            print(f"{len(series)} days")
+            print(f"    {name:10s} ({ticker})... {len(series)} days")
         except Exception as e:
-            print(f"ERROR: {e}")
+            print(f"    {name:10s} ({ticker})... ERROR: {e}")
 
     if all_data:
         # Fix #8 (2026-04-24): partial-success alerting
@@ -1131,9 +1170,11 @@ def main():
     print("  MACRO & SENTIMENT DATA DOWNLOAD")
     print("=" * 60)
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     # 1. Macro indicators
     if _is_fresh(os.path.join(MACRO_DIR, 'macro_daily.csv')):
-        print("\n  Macro data: fresh (< 1h) — skipping")
+        print("\n  Macro data: fresh (< 6h) — skipping")
         macro_df = None
     else:
         macro_df = download_yfinance_data()
@@ -1154,18 +1195,31 @@ def main():
     else:
         cross_df = download_cross_asset()
 
-    # 5. On-chain data (BTC + ETH + XRP + SOL + LINK + BNB)
-    # Note: BNB likely not on CoinMetrics free tier (proprietary chain) — will fail gracefully like SOL.
-    for _asset in ['btc', 'eth', 'xrp', 'sol', 'link', 'bnb']:
-        if _is_fresh(os.path.join(MACRO_DIR, f'onchain_{_asset}.csv')):
-            print(f"  On-chain {_asset.upper()}: fresh — skipping")
-        else:
-            download_onchain_data(asset=_asset)
+    # 5. On-chain data (BTC + ETH + XRP + SOL + LINK + BNB) — parallel across stale assets
+    onchain_assets = ['btc', 'eth', 'xrp', 'sol', 'link', 'bnb']
+    stale_onchain = [a for a in onchain_assets if not _is_fresh(os.path.join(MACRO_DIR, f'onchain_{a}.csv'))]
+    fresh_onchain = [a for a in onchain_assets if a not in stale_onchain]
+    for a in fresh_onchain:
+        print(f"  On-chain {a.upper()}: fresh — skipping")
+    if stale_onchain:
+        with ThreadPoolExecutor(max_workers=min(6, len(stale_onchain))) as ex:
+            futs = {ex.submit(download_onchain_data, asset=a): a for a in stale_onchain}
+            for fut in as_completed(futs):
+                # Surface any unhandled exception now rather than swallowing
+                fut.result()
 
-    # 6. Derivatives data (funding rate + open interest — BTC + ETH + XRP + SOL + LINK + BNB)
-    stale_assets = [a for a in ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
+    # 6. Derivatives data (funding rate + open interest + perp klines — parallel across stale assets)
+    deriv_assets = ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']
+    stale_assets = [a for a in deriv_assets if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
     if stale_assets:
-        deriv_df = download_derivatives_data(assets=stale_assets)
+        # download_derivatives_data() loops internally; parallelize that loop by
+        # calling it once per stale asset in a thread pool. Each call is independent
+        # (writes its own file). Binance public API rate limit (2400 req/min/IP)
+        # comfortably handles 6 concurrent worker threads × ~15-50 requests each.
+        with ThreadPoolExecutor(max_workers=min(6, len(stale_assets))) as ex:
+            futs = {ex.submit(download_derivatives_data, assets=[a]): a for a in stale_assets}
+            for fut in as_completed(futs):
+                fut.result()
     else:
         print("  Derivatives: fresh — skipping")
 

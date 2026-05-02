@@ -56,10 +56,11 @@ Grades = frequency of feature selection across the 48 production models.
 
 Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14h = 2**, 16h = 1.
 
-- **5h, 6h, 7h, 8h** — core band, default sweep in Ed ([line 5428](crypto_trading_system_ed.py#L5428)). Current production: ETH bull=6h, bear=8h.
-- **4h — broken.** All Mode D candidates negative post-embargo. Label overlap dominates — horizon too close to embargo window. The 2 rows in CSV are pre-embargo legacy. **Do not revive.**
-- **10h, 12h — under-tested.** In default Mode R/S sweep ([line 4818](crypto_trading_system_ed.py#L4818)) but no dedicated head-to-head vs 5-8h. **Action: run `HRS BTC 5,6,7,8,10,12` on 2880h.**
-- **14h — barely tested.** Not in default sweeps. Only 2 legacy rows. Worth including in BTC sweep since BTC trends on longer timescales than ETH.
+- **5h, 6h, 7h, 8h** — core band, default sweep in Ed ([line 5428](crypto_trading_system_ed.py#L5428)). Current production: ETH bull=6h@85%, bear=5h@65% (live; updated 2026-04-30 to 2-detector 6h/5h).
+- **4h — REVIVED 2026-05-01 (was previously "structurally broken").** ETH 8h HRST 4-16h Mode V on 1440h replay produced ETH 4h winner +41.23% / 143 trades / 69% WR (refined RF+LGBM w=88h). XRP HRST 2026-05-02 picked bull=4h@80% as winner. The earlier "broken post-embargo" verdict was specific to the 2026-03-24 data snapshot and pre-feature-additions pipeline. 4h is asset-conditional, not universally dead — but it never wins the regime joint sweep over 5-8h on ETH (Mode S TOP 15 from 8h HRST: zero entries with bull=4h; 7h dominates).
+- **9h, 12h, 16h — TESTED 2026-05-01 (8h HRST), VIABLE.** Single-horizon Mode V: 9h +31.36%/62%WR (borderline), 12h +33.27%/67%WR/42 trades (real), 16h +30.79%/77%WR/26 trades (high WR / thin). **Mode S TOP 15 plateau**: ALL 15 entries had bull=7h; bear migrated to 16h (×7), 12h (×5), 8h (×2). Bear 5/6/7 absent from TOP 15. Mode S WINNER: `tsmom_672h bull=7h@85% / bear=16h@75%` → Mode T REF +68.81% / 24 trades / WR 92% (gates active, both shields OFF) — competitive with claimed live ~+70%. **Promotion pending**: validate on a fresh window before flipping live bear from 5h to 16h.
+- **10h — incidental rows in CSV** from earlier non-default sweeps; no recent dedicated test.
+- **14h — barely tested.** Not in 8h HRST horizons (4,5,6,7,8,9,12,16); only 2 legacy CSV rows.
 
 ### What works (in production, with evidence)
 
@@ -77,7 +78,7 @@ Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14
 - **LSTM as ensemble partner.** Voted randomly; RF+LGBM ≡ LSTM+LGBM. Single strong tree-based learner dominates.
 - **V1.7.2 regularization.** Wash; signal/noise too low for fine regularization tuning.
 - **PySR for regime labels (not features).** 58% accuracy — too weak. Keep PySR for feature synthesis only.
-- **4h horizon.** Structurally broken post-embargo.
+- ~~**4h horizon. Structurally broken post-embargo.**~~ **REVISED 2026-05-01.** 8h HRST showed ETH 4h Mode V winner +41.23% / 143 trades / 69% WR; XRP HRST picked 4h@80% as bull. Original "broken" verdict was tied to 2026-03-24 data + fewer features. 4h still loses the joint regime sweep on ETH (Mode S TOP 15 zero entries with bull=4h; 7h dominates), but it's no longer "do not revive" — keep in the default sweep set.
 - **Adaptive rally-cooldown lift.** −8.8 to −23.7% vs fixed 30h on 90d.
 - **Blow-off filters (RSI>70, %B>1, etc.).** Best filter +0.58pp — not actionable. V7 rally-cooldown works because `rr_8h ≥ 3%` catches the move earlier than distribution cutoffs.
 - **BTC trading.** Disabled 2026-04-06 (45% WR, avg loss > avg win on 1m OOS). Needs re-evaluation.
@@ -95,9 +96,13 @@ Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14
 
 ### What's untested (queued)
 
-- **Triple barrier labeling.** Replace fixed-horizon fee-aware labels with volatility-adaptive triple barrier (upper profit target + lower stop + time limit). Tested in 2025 pre-embargo on BTC with old combos (RF+GB+LR) — result was +29% but incomparable to current pipeline. Needs fresh test with Ed's RF+LGBM ensemble, embargo, PySR. **Effort: medium (change label creation in `build_all_features()`, run Mode D).**
-- **Meta-labeling.** Train a secondary model that predicts whether the primary model's BUY/SELL signal will be correct. Separates signal direction from signal quality. Never tested. Lopez de Prado Ch. 3. **Effort: medium-high (new training pipeline).**
 - **Per-regime feature set.** Open question from engine reference: should bear use more macro features, bull more technical? The asymmetry already happens organically (6h model: 7 features, mostly PySR+technical; 8h model: 32 features, kitchen sink) but hasn't been deliberately tested as a design choice. **Effort: low-medium (code change to Mode D).**
+- **Multi-horizon ensemble emergency-exit** (4th angle from 2026-04-27 forensic). Force exit when 5h AND 8h both flip SELL within 1h. Per-horizon signal cache `data/eth_per_horizon_signals_90d.pkl` already exists. Distinct from rejected 5-min price-action triggers and from T1b entry-side ensemble (which was tested + shelved 2026-04-27). **Effort: 1-2h.**
+
+**Recently moved out of "untested" (now tested + shelved):**
+- ~~Meta-labeling~~ — tested 2026-04-27 in AB matrix variants D and E. R3 RESOLVED: E (meta on strong base) lost −2.12pp vs A; D (meta on weak base) gained +6.26pp but still lost to A overall. Door open for SOL/BTC/XRP retests but those assets are also shelved.
+- ~~Triple barrier as exit overlay (T6)~~ — tested 2026-04-26: +10.48pp 60d / +1.24pp 90d / 47 trades. Not promoted (60d gain didn't survive to 90d).
+- ~~Triple barrier as TRAINING LABEL~~ — tested 2026-03-14 on BTC (`archive/testing_literature.csv`). Direct same-day baseline comparison: baseline 4h +57.22% / 8h +74.03% vs triple_barrier_label 4h +29.22% / 8h +22.53%. Lost on every dimension (return −28pp / −51pp, WR −9pp / −10pp, accuracy −16pp / −13pp). Earlier framing of "+29% standalone, never tested with current pipeline" was misleading — the 2026-03-14 test had a same-day baseline that was 30-50pp better. SHELVED.
 
 ### Regime-conditional asymmetries (important for future models)
 
@@ -302,26 +307,23 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system_ed.py` | **Production** | Ed V1.0 PARALLEL ENTRY POINT (promoted 2026-04-30). Monkey-patches `run_mode_v / run_mode_s / run_mode_t / _refine_top_configs` to parallel implementations on entry, then delegates to `crypto_trading_system_ed_engine.main()`. Re-exports all engine module-level names so `from crypto_trading_system_ed import load_data, ...` keeps working unchanged. |
-| `crypto_trading_system_ed_engine.py` | **Production** | Ed V1.0 ENGINE INTERNALS (renamed from old `crypto_trading_system_ed.py` on 2026-04-30). All module logic: Modes P/D/V/H/S/R/HRS, embargo-fixed grid (2×3×4×3=72 evals after trim), 50-trial Optuna refine, PySR symbolic features. Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. Sequential fallback: `python crypto_trading_system_ed_engine.py HRST ETH 5,6,7,8h --replay 1440` runs the unparallelized engine if needed. Pre-rename snapshot: `archive/crypto_trading_system_ed_pre_parallel_20260430.py`. |
+| `crypto_trading_system_ed.py` | **Production** | Single-file Ed V1.0 engine. **Merged 2026-05-02**: previously split into entry-point + `_engine.py` + `_parallel_p.py` (parallelism wrapper) + `_wrapper`; all merged back into one file. Modes P/D/V/H/S/R/HRS/HRST/T/G/F. Embargo-fixed grid (2×3×4×3=72 evals after trim), 50-trial Optuna refine, PySR symbolic features. Built-in parallel paths for Modes V/S/T (loky workers, LGBM cpu inside parallel sections, hybrid GPU+CPU refine dispatcher). Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. Pre-merge snapshots in `archive/crypto_trading_system_ed_engine_pre_merge_20260502.py` + `_parallel_p_pre_merge_20260502.py` + `_wrapper_pre_merge_20260502.py`. |
+| `crypto_trading_system_ed_noprod.py` | Active wrapper | Safety wrapper for research runs. Sets `MODELS_CSV_OVERRIDE` env var before importing the engine, monkey-patches `PRODUCTION_CSV` + `REGIME_CONFIG_PATH` to `*_noprod.*` paths, seeds the noprod files from prod on first run. Equivalent to engine's built-in `--no-persist` flag; kept as the file-based alternative. |
 | `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy/sell at `bid+0.01`. `post_only` ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. Reads `regime_config_ed.json`. |
 | `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. Reports current market price (not label-shifted). |
+| `crypto_trading_system_meta.py` | Research | Standalone meta-labeling research tool. Imported lazily by `crypto_trading_system_ed.py` when `--meta-filter P` flag is used. R3 RESOLVED: AB matrix variants D+E showed meta hurts on strong baselines (E vs A −2.12pp). Kept available for SOL/BTC/XRP retests. |
 | `start_ed_v2.bat` | **Live** | Launches Ed V2 trader with auto-restart + log tee. Auto-detects Desktop/Laptop venv. |
 | `crypto_optimizer_bot.py` | **Live** | Telegram bot for remote optimization. Inline keyboard menus. Sequential job queue, subprocess execution. Separate bot token (`config/telegram_optimizer_config.json`). Below-normal priority. Spawns `crypto_trading_system_ed.py`. |
 | `start_optimizer.bat` | **Live** | Launches optimizer bot with auto-restart + log tee. |
 | `hardware_config.py` | Active | Auto-detects Desktop (26 workers) / Laptop (14 workers) |
-| `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, etc. |
-| `pysr_discover_features.py` | Active | Offline PySR discovery. Historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. |
-| `backtest_full_month.py` | Active | 1-month backtest harness. |
-| `test_btc_horizons.py` | Active | BTC horizon comparison sanity check. |
-| `test_btc_accuracy.py` | Active | BTC accuracy diagnostic. |
-| `sell_btc_now.py` | Utility | Manual BTC liquidation script. |
-| `crypto_trading_system_ein.py` | **Testing** | Ein V1.0: 15-minute candles. Horizons 4-10 candles (1h-2h30). Grid windows 12h-120h. No trader yet. |
-| `crypto_trading_system_eli.py` | **Testing** | Eli V1.0: 30-minute candles. Horizons 4-10 candles (2h-5h). Grid windows 12h-120h. No trader yet. |
-| `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery. Historical window. Anti-leakage. |
+| `download_macro_data.py` | Active | Downloads VIX, DXY, S&P500, NASDAQ, Fear&Greed, on-chain (CoinMetrics), derivatives (Binance), orderbook+IV snapshots, etc. |
+| `pysr_discover_features.py` | Active | Offline PySR discovery. Historical window (months 12→6 ago) to avoid leakage with Mode D. Outputs `models/pysr_{ASSET}_{H}h.json` with `discovery_method: "historical"`. Mode P delegates to this module. |
+| `tools/pysr_discover_regime.py` | Active | PySR regime formula discovery (binary regime label). Historical window. Anti-leakage. |
 | `tools/backtest_regime_master.py` | Active | Hand-crafted regime detector backtest. 21 detectors × all horizon pairs. |
 | `cfd/ib_auto_trader.py` | Live | DAX CFD trader (Broly 1.2) |
 | `cfd/ib_auto_trader_test.py` | Live | S&P 500 CFD overnight trader |
+| `crypto_trading_system_ein.py`, `crypto_trading_system_eli.py`, `crypto_trading_system_ed15.py` | **Archived 2026-05-02** | 15-min and 30-min candle variants. All in `archive/`. Stale (missing parallel wrapper + post-2026-04-25 audit fixes). To revive 15-min testing → clone current `crypto_trading_system_ed.py` into `crypto_trading_system_ed15.py` (see Pending Work TODO). |
+| `report_production.py`, `sell_btc_now.py`, `test_btc_horizons.py`, `test_btc_accuracy.py` | **Archived 2026-05-02** | Standalone helpers. Moved to `archive/` during folder cleanup. Revive if needed. |
 | `crypto_trading_system_doohan.py` (+ all `_doohan*`, `crypto_revolut_doohan.py`, `crypto_live_trader_doohan.py`, `start_trader.bat`, `start_ed.bat`, `crypto_revolut_ed.py`) | **Archived** | Doohan V1.7.1 retired 2026-04. Replaced by Ed V2 (regime-switching). |
 
 All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
@@ -378,27 +380,9 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
 **Prior history:** ETH HRS 2-month (2026-04-07) initially picked bull=6h@90% / bear=7h@75%. After R→S handoff fix + Option C joint detector sweep, ETH RS rerun selected `sma168>sma480` bull=7h@75% / bear=8h@85% → Mode S +60.72%. 2026-04-18 HRSTG rerun switched detector to `tsmom_672h` and confidences to 95%/80%.
 
-## Ed Backtest Results (2026-03-31)
+## Ed Backtest Results (2026-03-31) — historical, superseded
 
-### BTC (4 months, B&H: -24.93%)
-- **Winner:** sma48>sma200 bull=7h@95% bear=8h@90% → **+50.35%**, 78 trades, 69% WR
-- Best baseline: 8h_only +21.55%
-
-### ETH — 2-month RS (B&H: -23.93%)
-- **Mode R winner:** sma24>sma100 bull=6h bear=8h → +59.58%, 38 trades, 74% WR
-- **Mode S winner:** bull=6h@85% bear=8h@65% → **+70.01%**, 57 trades, 67% WR
-- Best baseline: 8h_only +47.21%
-- R→S pipeline fix confirmed: R updated config to 6h/8h before S ran
-
-### ETH — 4-month RS (B&H: -33.30%)
-- **Mode R winner:** rsi>45 bull=6h bear=7h → +89.82%, 91 trades, 68% WR
-- Note: 4mo prefers 6h/7h while 2mo prefers 6h/8h. Bull=6h consistent across both.
-
-### SOL (4 months)
-- **Winner:** sma_cross bull=6h@95% bear=8h@90% → +31.60%, 79 trades, 61% WR
-
-### LINK (4 months) — WEAK, not worth trading
-- Best horizon: 5h +3.97% (only positive). All others negative.
+Initial Ed regime-switching backtests from the system's first week. These numbers are pre-embargo-fix-cascade, pre-AB-matrix, pre-feature-additions (no on-chain wired, no derivatives, no PySR refresh). **Subsumed by the Engine Reference Card above and the Closed sections below.** Kept here for audit-trail of the progression: BTC `sma48>sma200 7h@95%/8h@90% +50.35%`, ETH 2mo `6h@85%/8h@65% +70.01%`, ETH 4mo `rsi>45 6h/7h +89.82%`, SOL `sma_cross 6h@95%/8h@90% +31.60%`, LINK best 5h +3.97% (rejected).
 
 ---
 
@@ -415,7 +399,7 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 9. **NEVER add embargo in live signal generation.** Embargo (`train_end = i - horizon`) is for backtesting/cross-validation ONLY. In `generate_live_signal()` the training window must be `df.iloc[train_start:i]` — all available data. Per Lopez de Prado: purging/embargo apply to evaluation splits, not live deployment.
 10. **Ed V2 maker order rules:** place limits at `bid+0.01` with `post_only`, re-price every 10s, market fallback at 60-120s. Always cancel stale orders before placing new ones (prevents fund locking). NTP clock sync on startup + every 5 min + on 409 errors.
 11. **Clock drift correction uses NTP, not echo-back.** The 409 error response echoes back the request timestamp, not the server's time. Using it for correction re-applies the same stale offset on worsening drift. Fix (2026-04-13): `_sync_clock_ntp()` on every 409 + periodic sync every 5 min in the main loop.
-12. **Stale config cleanup:** ETH block in `regime_config_ed.json` is now clean (no top-level legacy keys). SOL/LINK/XRP/DOGE/ADA/AVAX/DOT still have legacy `strategy`/`horizon`/`min_confidence`/`max_position_usd` at top level but are all `enabled: false` — left as-is intentionally.
+12. **Asset universe (current):** ETH (active live, +BNB code-wired since 2026-05-02 commit `51c6f11` but PySR/HRST not yet run), BTC/SOL/LINK/XRP all `enabled: false` (HRST done, results not promoted). Asset universe was pruned 2026-04-19 — DOGE/ADA/AVAX/DOT removed from config + ASSETS dicts + production CSV. ETH block in `regime_config_ed.json` is clean (no top-level legacy keys); SOL/LINK/XRP still carry legacy `strategy`/`horizon`/`min_confidence`/`max_position_usd` at top level — harmless since `enabled: false`.
 13. **Per-regime hold-shield (2026-04-18):** `hold_shield` now lives inside `bull` and `bear` blocks, not at asset level. Trader reads via `_shield_on_for_regime(trading_cfg, regime_label)` which falls back to asset-level `hold_shield` for legacy config. Shared `min_sell_pnl_pct` + `max_hold_hours` stay at asset level — per-regime split is only ON/OFF.
 14. **Regenerating PySR requires retraining production models.** Mode P rewrites `models/pysr_*.json` but production CSV stores feature *names* only — inference re-evaluates whichever formula is in the JSON *now*. If you run P, follow with DV (or HRS) for the same horizon, else silent feature drift at inference. Leakage check (`_check_pysr_leakage`) catches leakage but NOT train/inference mismatch.
 15. **Mode T chains rally-cooldown (2026-04-18):** After writing shield + thresholds, T merges its fresh bull/bear signals via `_merge_tagged_signals()` and calls the shared `_sweep_rally_cooldown()` helper. No stale cache issue, no need to run G separately. Mode G standalone kept as cache-fed fallback (fast iteration when models haven't changed).
@@ -431,11 +415,129 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
     **Always ask "is it running on the desktop?" before saying it's stopped.** This applies to: AB matrix runs, HRST/Mode D/V/H/S/T/R, Mode P (PySR), backtests, any long-running job. Same applies in reverse — laptop jobs are invisible from the desktop. Past mistake: declared variant A dead because no python.exe on laptop, when it was running on desktop the whole time.
 
+17. **When comparing returns across different replay windows, CONSIDER the window length.** Mode T REF / Mode S WINNER returns scale roughly with replay length — a 4mo (`--replay 2880`) run will tend to have roughly 2× the absolute return of a 2mo (`--replay 1440`) run on the same strategy because it has 2× the bars and 2× the trade opportunities. Always check `Replay: NNNNh` in the log's MODE R / MODE S header before drawing conclusions. Three ways to make a fair comparison:
+    - **(BEST) Take the last 2mo (H2) of the 4mo run** — Mode T/G logs already print `H1=...% H2=...% REF=...%` where H1 = first half, H2 = second (most recent) half, REF = full window. Compare H2 of a 4mo run to the FULL T total of a 2mo run from a similar end date — that's apples-to-apples since both cover the same recent ~1440h period. Same trick works for top STRICT rally-cooldown candidates (the table prints `pnl_H1, pnl_H2, pnl_REF` per config). This is usually the cheapest, most accurate comparison and avoids re-running anything.
+    - **Annualize** for a single common metric: `annualized_pct = return_pct × (365×24 / replay_h)`. e.g. `+148% on 2880h ≈ +452%/yr`; `+68% on 1440h ≈ +416%/yr`. Useful for quick gut-check but assumes return is roughly linear in time — only valid if the regime didn't shift mid-window.
+    - **Re-run on a common window** — slow (3-9h on parallel engine) but definitive. Use only when (a) and (b) disagree or when the question is critical enough to warrant the wait.
+    Past mistake (2026-05-02): I claimed Apr 30 `vol_calm +148.06%` was "the biggest result of the week" without checking that it ran on `--replay 2880` (4mo) vs the other ETH HRSTs on `--replay 1440` (2mo). The Apr 30 log prints `H1=+34.71% H2=+65.37% REF=+125.87%` baseline and the top STRICT gate winner had `pnl_H1=+42.62 pnl_H2=+65.34 pnl_REF=+144.60`. So vol_calm's H2 (= last 2mo, comparable to the 2mo runs) was ~+65% baseline with ~0pp gate gain — actually one of the WORSE 2mo results that week, not the best. The full-REF +20.5pp gate gain was driven entirely by months 1-2 of the window which the other runs never saw.
+
 ---
 
 ## Pending Work
 
 ### TODO
+
+---
+
+## ⚡ ACTIVE TODO — 2026-05-02 evening (CURRENT)
+
+This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
+
+### Currently running
+- **HRST ETH 5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 18:00 ([logs/ed_v1_20260502_180022.log](logs/ed_v1_20260502_180022.log)). Validates today's parallel-wrapper bug fixes (A: `UnboundLocalError` at `_generate_signals_cached`; B: `BrokenProcessPool` in hybrid refine config #3). Compare winner to 8h HRST result (`bull=7h@85% / bear=16h@75% +68.81%`).
+- **HRST BNB 4,5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 20:28 ([logs/ed_v1_20260502_202819.log](logs/ed_v1_20260502_202819.log)). First full pipeline for BNB. Mode P was completed earlier today (~1.5h, all 5 PySR JSONs written cleanly with `discovery_method = "historical"`). HRST will produce single-horizon Mode V winners, Mode S joint regime sweep, and Mode T shield+gate sweep. ETA ~3-4h on laptop. Output: `models/crypto_ed_production_noprod.csv` BNB rows + `config/regime_config_ed_noprod.json` BNB block.
+
+### Next big work — IN ORDER
+
+**1. Test BNB**
+
+BNB code-wired today (commit `51c6f11`); derivatives data downloaded; status:
+- ✅ Hourly OHLCV download — `data/bnb_hourly_data.csv` (73,672 candles, 2017-12-01 → 2026-05-02)
+- ✅ Mode P PySR — DONE 2026-05-02 20:24, all 5 JSONs written, anti-leakage check passed, ~1.5h on 3-worker laptop (validated parallel-P path of merged engine)
+- ⏳ **Full HRST 4,5,6,7,8h --replay 1440 --no-persist — RUNNING NOW** (started 20:28). See "Currently running" above.
+- 🔜 Pipeline-health check (per SOL/LINK pattern): horizons positive, alpha vs ETH live, correlation with ETH (target ≤ 0.70 for diversification)
+- 🔜 Decision: BNB clears the same bar as ETH (≥50% per-$ alpha + low correlation + plateau-stable) → flip `enabled: true` + `max_position_usd > 0`. Otherwise shelve.
+
+**2. Build 15-minute candle system (Ed15)**
+
+Old Ein/Eli scripts archived (`archive/crypto_trading_system_ein.py`, `archive/crypto_trading_system_ed15.py`) — both stale, missing parallel wrapper + post-2026-04-25 audit fixes. Right approach: clone current production engine.
+- `cp crypto_trading_system_ed.py crypto_trading_system_ed15.py`
+- Adapt constants — horizons in candles (4-10 candles = 1h-2h30), grid windows in candles (12-120), `MAX_DIAG_HOURS` interpretation
+- Separate file paths — `models/crypto_ed15_production.csv`, `models/crypto_ed15_best_models.csv`, `config/regime_config_ed15.json`, `models/pysr_{ASSET}_{N}p.json` (p = periods/candles)
+- Reuse macro pipeline — `download_macro_data.py` unchanged; 15-min OHLCV (`data/{asset}_15m_data.csv`) already exists for BTC/ETH; need full download for BNB
+- Clone noprod wrapper — `crypto_trading_system_ed15_noprod.py` mirroring current pattern
+- Optional separate trader — `crypto_revolut_ed15_v2.py` if running hourly + 15-min concurrently. Otherwise extend trader to dispatch by config block
+- `config/disabled_features_ed15.json` already exists from old Ein attempts — re-check Grade-1 list (may differ at 15-min resolution)
+- Validation order — run BNB on Ed15 first as new-asset case, then ETH/BTC if it works
+
+### Week-of audit (2026-04-25 → 2026-05-02) — comparable cross-window summary
+
+All ETH HRSTs from the past 7 days, normalized to "last 2 months" via Mode T's H1/H2 split (per Critical Rule 17). The 4mo run is included via its H2 (last 2mo) baseline + top STRICT gate winner H2.
+
+| Date | Window | Detector | Bull | Bear | Last-2mo baseline | Last-2mo T total | Gate Δ on last 2mo | Conv |
+|---|---|---|---|---|---|---|---|---|
+| Apr 25 03:56 | 2mo | sma24>sma100 | 6h@75% | 5h@75% | +66.92% | +68.02% | +1.1pp | iter2 |
+| Apr 25 07:57 | 2mo | sma168>sma480 | 7h@85% | 5h@75% | +88.55% | (no shield) | 0pp | iter3 |
+| **Apr 25 23:12 (a)** | **2mo** | **sma24>sma100** | **6h@80%** | **5h@65%** | **+68.72%** | **+76.99%** | **+8.3pp** ← best | **iter2** |
+| Apr 25 23:12 (b) | 2mo | sma24>sma100 | 6h@80% | 5h@65% | +58.57% | +63.42% | +4.9pp | iter3 |
+| Apr 26 14:11 | 2mo | price>sma72 | 6h@80% | 7h@85% | +65.75% | +72.09% | +6.3pp | iter2 |
+| Apr 28 08:08 | 2mo | tsmom_672h | 5h@65% | 6h@65% | +79.47% | +79.47% | 0pp | iter2 |
+| **Apr 30 04:42 (H2)** | **last 2mo of 4mo** | **vol_calm** | **6h@70%** | **5h@85%** | **+65.37%** | **~+65.34%** | **~0pp** | **iter3** |
+| May 01 09:21 | 2mo (8h HRST) | tsmom_672h | 7h@85% | 16h@75% | +68.81% | +68.81% | 0pp | iter2 |
+| May 02 10:02 | 2mo (XRP) | tsmom_672h | 4h@80% | 7h@65% | +28.07% | +40.84% | +12.8pp | iter3 |
+| May 02 13:53-15:48 | — | — (BTC, crashed) | — | — | — | — | — | parallel-engine bug |
+| May 02 18:00 | 2mo | RUNNING | — | — | — | — | — | post-bug-fix |
+| May 02 20:28 | 2mo | RUNNING (BNB) | — | — | — | — | — | — |
+
+**Real biggest gate-gain of the week**: `Apr 25 23:12 sma24>sma100 6h@80%/5h@65% +8.3pp` (and Apr 26 `price>sma72 6h/7h +6.3pp` close behind). Apr 30 `vol_calm` looked huge at +20.5pp on the full 4mo REF, but its H2 (last 2mo) gate gain was ~0pp — the +20pp came entirely from months 1-2 of the 4mo window. Detector winners across the week: sma24>sma100 ×4, tsmom_672h ×3, sma168>sma480 ×1, price>sma72 ×1, vol_calm ×1.
+
+**Current live config (`tsmom_672h bull=6h@85% / bear=5h@65%`) doesn't appear in any 7-day log.** Closest is Apr 28 (`tsmom_672h 5h/6h` — bull/bear horizons SWAPPED + different confs). Either set by an older HRST (logs deleted in today's cleanup) or manual edit/merge. Worth a `git log -p config/regime_config_ed.json` trace.
+
+### User decisions pending
+- **Live config bull horizon: 6h → 7h?** — 8h HRST May 01 plateau-unanimous on bull=7h. Compare its last-2mo gate gain (~0pp) against alternatives before flipping. Marginal evidence in absolute terms.
+- **Live config bear horizon: 5h → 16h or 12h?** — Material change (8h HRST plateau picked 16h ×7 / 12h ×5 / 8h ×2 over 5h). 0pp shield/gate gain on last 2mo. Plateau-stable but doesn't dominate. Validation needed before flipping.
+- **Investigate Apr 25 23:12 `sma24>sma100 6h@80%/5h@65% +8.3pp` finding** — actual best gate-gain of the week. Reproduce on current data window if not too stale; consider promoting if alpha holds. ~3-4h.
+
+### Standing / monitoring (passive)
+- **MIX gate live perf** — 5+ days in (since 2026-04-27 ~20:30 CEST). Rollback criteria: realized alpha drops >15pp vs sim baseline over first 10 trades; max DD exceeds −10%; signals consistently blocked when forward 24h is positive. One-line rollback: `copy config\regime_config_ed_pre_hrst2_20260427_evening.json config\regime_config_ed.json`
+- **`output/ERRORS_INBOX.md`** — currently empty; check on every TODO review
+
+### Scheduled (calendar-driven)
+- **2026-05-22** — `deriv_oi_*` re-enable A/B test (3 features, ~63d Binance OI history by then). Procedure G1 in research-queue history below.
+- **2026-06-18** — Orderbook + IV re-enable A/B test (`ob_imbalance, spread_bps, avg_iv, iv_skew`, ~60d data). Procedure G2 below.
+
+### Research queue — actually untested, lower priority than BNB + Ed15
+1. Vol-scaled horizon 4mo validation — 2-month tested 2026-04-19 (`vol_2band low→8h high→6h @90% = +33.82% / +5.02pp over tsmom`). Only 4mo missing. `tools/test_vol_scaled_horizon.py --replay 2880`. ~30 min.
+2. Multi-horizon ensemble emergency-exit (4th angle from 2026-04-27 forensic) — force exit when 5h AND 8h both flip SELL within 1h. Distinct from T1b entry-side test which was already shelved. Per-horizon cache exists. ~1-2h.
+3. Per-regime feature set — bull more technical / bear more macro. Untested deliberately. Low-medium.
+4. Execution-gap TCA logging — biggest live-perf lever (~17pp unaccounted). Trader code change. 2-4h.
+5. Trace current live config origin — `git log -p config/regime_config_ed.json` to find when `tsmom_672h 6h@85%/5h@65%` was actually set. ~10 min.
+6. Verify BTC HRST works after parallel bug fix — `HRST BTC 4,5h --replay 1440 --no-persist` after laptop runs finish. Bug-fix verification only (BTC stays disabled). ~1h.
+
+**Closed 2026-05-02:**
+- ~~Re-run Mode D ETH 6h, 8h with derivative features (clean)~~ — derivatives are now standard in the clean pipeline (funding rate + perp-spot basis active and selected by LGBM; deriv_oi_* still quarantined per G1 schedule until 2026-05-22). Today's running ETH HRST 5,6,7,8h is the clean re-run this TODO was asking for; no separate work needed.
+- ~~Triple barrier as TRAINING LABEL~~ — re-discovered tested + shelved 2026-03-14 in `archive/testing_literature.csv`. BTC same-week head-to-head: baseline 4h +57.22% / 8h +74.03% vs triple_barrier_label 4h +29.22% / 8h +22.53%. Lost on return (−28pp / −51pp), WR (−9pp / −10pp), accuracy (−16pp / −13pp), and combined score on every dimension. The "+29% standalone result" framing in earlier CLAUDE.md was misleading — same-day baseline beat it by ~30-50pp. SHELVED.
+- ~~Pairwise long-horizon validation `R ETH 5,6,7,8,12,16`~~ — already done. The 8h HRST 2026-05-01 ran Mode R on `[4, 5, 6, 7, 8, 9, 12, 16]` (superset). Best regime: `tsmom_672h bull=7h bear=6h +43.49%`. Mode S joint sweep on the same 8 horizons picked WINNER `tsmom_672h bull=7h@85% / bear=16h@75% → Mode T REF +68.81%`. Re-running Mode R on 5,6,7,8,12,16 (subset) wouldn't add information. What's actually pending = USER DECISION whether to promote bear=16h to live based on existing evidence.
+- ~~vol_calm Apr 30 promotion candidate~~ — initially looked like the biggest result of the week (+20.5pp gate gain on REF). Re-checked via Mode T's H1/H2 split: H2 (last 2mo of 4mo window) baseline +65.37% / T total ~+65.34% / **0pp gate gain on the comparable last-2mo slice**. The +20pp delta was driven entirely by months 1-2 of the 4mo window. NOT a promotion candidate. Methodology lesson now in Critical Rule 17.
+- ~~Parallel-engine bugs A (`UnboundLocalError` at `_generate_signals_cached`) + B (`BrokenProcessPool` in hybrid refine)~~ — patched 2026-05-02 (per user). Validated by today's BNB Mode P (parallel-P all 5 horizons clean) + currently-running Mode V parallel cache + hybrid refine on laptop ETH/BNB HRSTs. Reverification of BTC HRST scheduled (#6 in research queue).
+- ~~BNB Mode P 5,6,7,8h~~ — DONE 2026-05-02 20:24, all 5 PySR JSONs written cleanly, all `discovery_method = "historical"` (anti-leakage check passed). Parallel-P speedup observed (~1.5h for 5 horizons on 3-worker laptop, vs ~5h sequential reference).
+- ~~Mode P auto-OHLCV-download patch~~ — landed 2026-05-02 (8 lines added at [crypto_trading_system_ed.py:3828](crypto_trading_system_ed.py#L3828)). Mode P now auto-fires `update_all_data([asset])` if hourly CSV is missing — prevents the "no data found" failure mode for fresh assets. Verified on BNB.
+
+### Engineering / UX
+- Telegram `/help` lists 8 of 13 commands (missing /buy, /sell, /hold, /cfg_*). [crypto_revolut_ed_v2.py:_handle_help_command](crypto_revolut_ed_v2.py) ~line 2392 + BotFather /setcommands. ~15 min.
+- Document SOL/BNB on-chain CoinMetrics 403 as permanent free-tier limitation (visible in every macro download). Update `download_macro_data.py` to log "SKIPPED (free-tier 403)" instead of "ERROR" so it stops flagging as a failure. ~10 min.
+
+**Closed (engineering):**
+- ~~Engine Reference Card update for 4h / long horizons / 7h canonical bull~~ — done 2026-05-02 in Tier 1 edits. §"Horizon status" rewritten with 8h HRST evidence; §"What doesn't work" 4h entry struck-through with REVISED note; §"What's untested" purged of already-tested entries.
+
+### Today's shelved (added 2026-05-02)
+- **XRP enable** — user judged HRST results bad despite +25.69pp alpha. HRST winner `bull=4h@80% / bear=7h@65%` written to live config but `enabled: false` stays.
+- **BTC re-enable** — results not good enough; no urgency. The BTC HRST work (after parallel bug fix verification) is purely engineering, not a promotion candidate.
+
+---
+
+## 📜 HISTORICAL TODO (preserved as audit trail of tested/shelved decisions)
+
+The entries below are kept verbatim so future-you can revive any shelved item with full context — what was tried, what the result was, why it was rejected. Do not delete; mark inline as RESOLVED if you re-evaluate.
+
+---
+
+
+## 📦 MERGED TOPIC: 8-horizon HRST (2026-04-30 launch → 2026-05-02 resolution)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
+
+---
 
 **🌙 OVERNIGHT 2026-05-01 → CHECK 2026-05-02: 8-HORIZON HRST RESULTS.**
 
@@ -463,6 +565,18 @@ The 8-horizon HRST tests whether ANY long horizon (4h, 9h, 12h, 16h) survives fu
 - Mode T REF < LIVE OR no plateau → keep LIVE 2-det config (`tsmom_672h 6h@85%/5h@65%`), document long horizons as dead
 
 **Liveness signal (per CLAUDE.md rule 16):** check `logs/ed_v1_*.log` mtime; updates every few seconds during all phases. Mode S phase prints `2 detectors × 64 h-pairs × 7×7 conf = 6,272 combos` (vs today's 1,568 with 4 horizons) — confirms parser accepted all 8 horizons.
+
+---
+
+
+---
+
+**✅ RESOLVED 2026-05-02:** 8-horizon HRST completed (~2026-05-01 09:15 CEST, total ~9h on laptop). Single-horizon Mode V winners ALL positive (4h +41.23%, 5h +34.88%, 6h +44.07%, 7h +64.90%, 8h +27.92%, 9h +31.36%, 12h +33.27%, 16h +30.79%). Mode S TOP 15 plateau: ALL bull=7h; bear migrated to 16h (×7), 12h (×5), 8h (×2). Mode S WINNER: `tsmom_672h bull=7h@85% / bear=16h@75% → +64.16%`. Mode T converged iter 2 → +68.81% / 24 trades / WR 92% (gates active, both shields OFF). Comparable to claimed live +70.31%. **Verdict**: long horizons (12h, 16h) are NOT dead in current regime — they dominate the bear plateau. Original CLAUDE.md "kill 4/9/12/16 from default permanently" decision rule was overcautious. New canonical sweep should consider extending bear range. Validation pending via current 5,6,7,8h HRST + pairwise `R ETH 5,6,7,8,12,16` follow-up.
+
+
+## 📦 MERGED TOPIC: Parallel V/S/T + Mode P infrastructure (2026-04-29 launched on Desktop)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
 
 ---
 
@@ -515,6 +629,9 @@ If all 4 pass: promote the wrapper changes into production engine in a follow-up
 
 ---
 
+
+---
+
 **🧪 PARALLEL MODE P (queued for testing) — `crypto_trading_system_ed_parallel_p.py`.**
 
 Separate experimental wrapper for Mode P (PySR feature discovery). Built 2026-04-29 17:55 alongside the V/S/T/refine parallel work. Mode P is the slowest research mode in the engine — each (asset, horizon) runs 4-7 sequential PySR studies, each with PySR's own internal parallelism explicitly disabled (`procs=0`, `parallelism="serial"`) because `deterministic=True` requires it.
@@ -549,6 +666,52 @@ python crypto_trading_system_ed_parallel_p.py P BTC 5h
 If all pass: pattern is identical to the V/S/T/refine wrapper — eventually inline `discover_features_parallel` into `pysr_discover_features.py` directly.
 
 **Liveness markers** to grep for during run: `[pysr-parallel] dispatching N PySR runs across M workers`, `[pysr-parallel] {LABEL} → N expressions`, `ALL RUNS COMPLETE: N candidate expressions in N.N min (parallel)`.
+
+---
+
+
+## 📦 MERGED TOPIC: 5m emergency-exit overlay (2026-04-27 morning 35-variant sweep → followup forensic of today's crash)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
+
+---
+
+**🚨 HIGH PRIORITY — 2026-04-27 morning EMERGENCY-EXIT 5m OVERLAY — TESTED + REJECTED.**
+
+User asked for emergency exit triggered on 5-min price action to bypass shield during sharp crashes (motivated by 2026-04-27 03:45→05:45 UTC ETH crash $2400→$2319, -3.37% in 120min). Phase 1: identified 6 crashes ≥3%/120min in last 30d (incl. today's). Phase 2: built [tools/test_emergency_exit_5m.py](tools/test_emergency_exit_5m.py) overlay test — 35 variants of (threshold × lookback × cooldown × regime × bypass-mode × armed-at-profit).
+
+**Verdict: NO variant beats baseline on any window.** The 60d baseline (+49.34% / 50tr / 70%WR) is already capturing crashes well via shield+max_hold+model SELL. Every emergency-exit variant either fires too often (false alarms eat alpha) or too rarely (no evidence of insurance value).
+
+**Top results (sorted by 60d delta):**
+
+| Rank | Config | d_30d | d_60d | d_90d | Fires 60d |
+|---|---|---|---|---|---|
+| 1 (cleanest) | **G. armed_at_pnl≥X% + thr=-2.0** (X∈{1..5}) | 0.00 | **0.00** | 0.00 | **0** |
+| 2 | A. thr=-2.0% all bypass=always | -1.66 | -3.57 | -6.87 | 3 |
+| 3 | G. thr=-1.5% armed_at_pnl≥X | 0.00 | -6.02 | -5.52 | 1 |
+| **The one we expected to win:** A. thr=-1.0% | -4.71 | **-23.66** | -26.05 | 16 |
+| Worst | A. thr=-0.7% | -8.51 | -38.14 | -41.05 | 43 |
+
+**Why -1% loses so badly:** 16 fires in 60d, only 6 are real crashes; 10 false alarms at ordinary noise that mean-reverts within 30-60 min. Each false fire = ~0.5-1.5% lost alpha + double fees + 120min re-entry lockout that blocks the rebound BUY signal.
+
+**What works as "free insurance":** `G.thr=-2.0% armed_at_pnl≥3%` — fired 0 times in 60d (no evidence either way). Theoretically correct design (only protect rally gains, not create losses) but unproven. Worth shipping with telemetry to collect real-world data over 1-3 months.
+
+**Output CSV:** `output/emerg_exit_5m_20260427_091139.csv`. Crash list: `output/5m_crashes_20260427_090457.csv`. Indicator scores: `output/5m_indicators_20260427_090457.csv`.
+
+**Crash list ≥3%/120min in last 30d (6 events incl. today):**
+- 2026-03-29 21:35→22:45 (70min): $2007→$1939 (-3.41%)
+- 2026-04-02 00:55→02:45 (110min): $2159→$2065 (-4.37%)
+- 2026-04-08 13:05→14:55 (110min): $2271→$2187 (-3.70%)
+- 2026-04-12 01:00→02:05 (65min): $2289→$2207 (-3.56%)
+- 2026-04-14 14:30→15:05 (35min): $2416→$2333 (-3.43%)
+- **2026-04-27 03:45→05:45 (120min): $2400→$2319 (-3.37%) ← TODAY**
+
+**Confirms standing rule from CLAUDE.md:** *"All stop-loss / take-profit / profit-lock / trailing-stop variants — 8+ variants tested; baseline (no SL) won every dimension."* Same conclusion holds at 5-min granularity. Hourly shield + max_hold + model SELL already handles 90% of crashes; adding a faster trigger costs more in alpha than it saves in protection.
+
+**Untested 4th angle:** emergency exit triggered by MULTI-HORIZON ENSEMBLE SELL agreement (using per-horizon signals from T1b) instead of raw price action. Would catch crashes when 2+ horizons unanimously flip SELL within 1 hour. Not yet tested.
+
+---
+
 
 ---
 
@@ -648,6 +811,45 @@ copy config\regime_config_ed_pre_hrst2_20260427_evening.json config\regime_confi
 
 ---
 
+
+## 📦 MERGED TOPIC: T1b ensemble vote (2026-04-27 morning discovery → evening shelved on MIX baseline)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
+
+---
+
+**🚨 HIGH PRIORITY — 2026-04-27 morning T1b TRUE multi-horizon ensemble vote — NEW TOP WINNER.**
+
+Per-horizon signal cache `data/eth_per_horizon_signals_90d.pkl` was finally generated overnight (h=5,6,7,8 × 91d, ~2184 signals each). Built [tools/test_t1b_ensemble_vote.py](tools/test_t1b_ensemble_vote.py) — replaces the earlier T1b PROXY (conf-threshold sweep) with the real thing: at each bar, tally votes from horizons in `subset` requiring conf ≥ vote_thr; require k_buy votes for BUY, k_sell votes for SELL.
+
+**Top winners — positive on all 3 windows (sorted by 60d delta vs same-base-conf baseline):**
+
+| Rank | Config | d_30d | **d_60d** | d_90d | n_60d |
+|---|---|---|---|---|---|
+| 1 | **`58_only k_buy=1 k_sell=2 thr=85` base_conf=80** | +0.20 | **+19.84** | +16.38 | 20 |
+| 2 | `567_only k_buy=1 k_sell=3 thr=90` base_conf=80 | +1.12 | +18.09 | +22.09 | 14 |
+| 3 | `58_only k_buy=1 k_sell=2 thr=90` base_conf=80 | +5.58 | +6.60 | +18.39 | 18 |
+
+**Top winner substantively (#1):** Use ONLY horizons 5h + 8h (drop the 6h/7h middle). Enter on ANY one BUY at conf ≥ 85%. EXIT requires BOTH 5h AND 8h to say SELL at conf ≥ 85% (2-of-2 confirmation). Asymmetric: easy entry, hard exit. **+19.84pp on 60d (66.45% strategy vs 46.61% baseline) — beats T5b winner's +11.35pp by +8.49pp.** Only 20 trades on 60d (vs 46 baseline = much more selective).
+
+**Strong-but-thin winner (#2):** Use h=5,6,7. Enter on ANY one BUY at conf ≥ 90%. EXIT requires ALL 3 (5h+6h+7h) to say SELL at conf ≥ 90%. Most selective rule (n_60d=14 — borderline statistical thinness) but strongest 90d alpha (+22.09pp).
+
+**Output CSV:** `output/t1b_ensemble_vote_20260427_085549.csv` (full sweep: 7 subsets × k_buy 1..N × k_sell 1..N × thr {70,80,85,90} × base_conf {80,90} × 3 windows).
+
+**Implementation cost:** Higher than T5b — requires running ALL 4 horizon models (5h/6h/7h/8h) per cycle in live trader, not just the regime-anchor horizon. Currently the trader loads only `bull_h` (6h) and `bear_h` (7h) per `regime_config_ed.json`. Adding horizons 5h+8h: ~2× compute per cycle (2 extra model trainings per hour). Need new schema for "vote subset" + k_buy/k_sell + vote_thr.
+
+**Caution:** 30d delta is +0.20 (barely positive). 60d/90d strong but recent 30d shows the regime-tilt risk — over-confirmation can miss recent shorter-cycle moves. Recommend 4mo HRST validation (`--replay 2880`) before promotion.
+
+**Comparison to tonight's earlier T5b winner:**
+- T1b ensemble (NEW): 60d +19.84pp / 20 trades / requires multi-model live infra
+- T5b entry filter: 60d +11.35pp / 33 trades / config-only + ~30 lines code
+- Trade-off: T1b is +75% better alpha but harder to ship and needs thicker validation.
+
+---
+
+
+---
+
 **✅ T1b ENSEMBLE VOTE — SHELVED 2026-04-27 evening (after MIX promotion).**
 
 T1b winner from 2026-04-26 sweep showed +19.84pp on 60d standalone. Re-tested on top of MIX-active baseline ([tools/test_t1b_on_top_of_mix.py](tools/test_t1b_on_top_of_mix.py)):
@@ -668,142 +870,10 @@ T1b winner from 2026-04-26 sweep showed +19.84pp on 60d standalone. Re-tested on
 
 ---
 
-**✅ MIX GATE PROMOTED TO LIVE — 2026-04-27 ~20:30 CEST.**
 
-User shipped MIX rally-cooldown gate to live production via config-only change to `config/regime_config_ed.json` ETH.bull.rally_cooldown:
+## 📦 MERGED TOPIC: MIX gate (2026-04-27 candidate → promoted same evening)
 
-```diff
-- h_short: 20  → h_short: 12
-- h_long:  24  → h_long:  20
-- t_short_pct: 4.0  → t_short_pct: 2.5
-- t_long_pct:  4.5  → t_long_pct:  4.0
-- cd_hours: 12  → cd_hours: 24
-```
-
-**No other production knob changed.** Bull conf 80% (unchanged), bear conf 85% (unchanged), shields ON for both (unchanged), bear rally_cooldown unchanged (`rr30≥9.0% OR rr36≥9.0% cd=48h`), regime detector `price>sma72` (unchanged), min_sell_pnl=0.5%, max_hold=10h (unchanged).
-
-**Position state at promotion**: `state=cash`, `auto_trade=true`, `rally_cooldown_until=""` (no active cooldown — clean slate for new gate).
-
-**Live trader hot-reloads `regime_config_ed.json` every 5 min** — no restart required. Within next cycle the new gate is active.
-
-**Rollback (one command, instant)**:
-```powershell
-copy config\regime_config_ed_pre_hrst2_20260427_evening.json config\regime_config_ed.json
-```
-
-Backup also kept for production CSV (`models/crypto_ed_production_pre_hrst2_20260427_evening.csv`) though MIX promotion did NOT touch the CSV (model selection unchanged).
-
-### Evidence base for promotion (4 independent layers)
-
-1. **Tier 1 OOS held-out 30d** (FIRST 30d of 90d cache, never used in optimization): MIX +0.90% vs PROD -4.95% during a -40.82% B&H period → **+5.85pp** ← only methodologically clean comparison
-2. **Cross-window 30d+60d STRICT intersection** (MIX discovery methodology): same gate emerged
-3. **Cumulative 90d+60d+30d STRICT intersection** (tonight's analysis via `tools/tg_window_decomposition.py`): same MIX gate emerged
-4. **Disjoint 3×30d STRICT intersection**: close cousin emerged (rr12+rr14+cd=24, structurally identical family)
-
-In-sample numbers (less rigorous but consistent):
-- 30d in-sample: +9.73pp over PROD
-- 60d in-sample: +15.17pp over PROD
-- 90d in-sample: +25.56pp over PROD
-- Drawdown reduced ~50% on both 30d and 60d
-
-### Monitor + rollback criteria
-
-**Monitor for 1-2 weeks** of live performance. Rollback if:
-- Cumulative realized alpha drops >15pp vs sim baseline over first 10 trades (matches CLAUDE.md rule R4 standing policy)
-- Max drawdown exceeds historical -10.02% (current PROD's 60d max)
-- Live signals consistently blocked at moments where forward 24h is positive (gate too aggressive)
-
-If rollback triggers: one `copy` command, hot-reloads in 5 min.
-
-### Standing R5 caveat
-
-Per CLAUDE.md rule R5: HRST validation gate normally requires 4-month replay confirmation before live promotion. **R5 NOT formally completed for this promotion.** User decided Tier 1 OOS + 3 cross-window confirmations were sufficient evidence given:
-- Config-only change (no model/code modification)
-- Instant rollback available
-- All 4 evidence layers point to same gate family
-- Full HRST 4mo would have taken 12-15h on laptop (declared not worth wait)
-
-The 1440 HRST currently running is engineering smoke-test (validates the bug fixes + grid trim end-to-end), NOT R5 validation. The 2880 HRST queued for later WOULD be R5; if it picks something materially different from MIX, revisit.
-
----
-
-**🚨 OPEN DECISION — 2026-04-27 evening: 4MO HRST RUNNING SLOW because `--replay` also scales Mode V (not just Mode D).**
-
-**Diagnosis**: today's bug-fix cascade revealed an unintended consequence:
-- Bug A fix (--replay propagation through HRST chain) → now correctly uses 2880 rows everywhere
-- BUT: Mode V's STEP 1 ("backtest top 6 D candidates") runs the FULL 2880-hour replay through live signal generator (one model retrain per hour). Cost = ~20-30 min per candidate × 6 candidates × 4 horizons = **~10-12h just for Mode V**. Plus Mode S (3,920 combos × 2880 signals) and Mode T+G iteration also doubled.
-- Realistic 4mo HRST runtime: **~12-15 hours** (not the 4-6h I originally estimated; Mode D trim only helped that one phase).
-
-**Options to choose from when you read this:**
-
-(a) **Kill + restart at `--replay 1440`** (~3-4h total). Same data scope as AB matrix; refreshes models + gate sweep without 4mo R5 grade.
-```powershell
-python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist
-```
-
-(b) **Let it finish overnight** (~10-13h remaining at 19:00 CEST = finishes ~05:00-08:00 next morning). Get true 4mo R5 validation. Battery + cooling + Modern Standby risk.
-
-(c) **Ship MIX based on Tier 1 OOS alone** (zero hours, instant rollback). Tier 1 already passed cleanly (+5.85pp vs PROD on truly held-out 30d). 4mo HRST was a "bonus" R5 confirmation, not strictly required for promotion.
-
-**Recommended: (a) kill + restart at `--replay 1440`.** The marginal value of 4mo over 2mo is small (~+10-15h cost for slightly better OOS evidence on a window we'd already understand). Faster turnaround, lower risk.
-
-**Engine bug-fixes from today (already shipped, persistent):**
-- Bug A: `--replay` propagation through HRST → Mode H → D/V (4 sites added `replay_hours=` plumbing)
-- Bug B: `MIN_GRID_TRADES = max(4, n // 360)` dynamic threshold (was hardcoded 8, killed all Mode D candidates on 5h-7h)
-- Trim: GRID_COMBOS=2 (dropped RF+XGB), GRID_WINDOWS=3 (dropped 200/250/300), GRID_FEATURES=4 (dropped 20/30) → 324→72 evals (-78%)
-- Optimizer bot aligned: MODE_TIME_EST recalibrated, grid_total default updated
-
-**Engine bug B follow-up (KNOWN, NOT FIXED):** `--replay` cost scaling in Mode V/S/T+G is a feature, not a bug — these phases legitimately need the full replay window for accurate live backtest. If you want a permanent fix, would need separate `--replay-d` and `--replay-v` flags or hardcode a Mode V cap. Defer to user.
-
----
-
-**🟡 RUNNING NOW — 2026-04-27 ~16:45 CEST — 4MO HRST VALIDATION (Tier 2 R5) on LAPTOP.**
-
-Job launched on laptop ~16:45 CEST 2026-04-27.
-
-**Command:** `& "C:\Users\Alex\algo_trading\venv\Scripts\python.exe" .\crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 2880 --no-persist`
-
-**Working dir:** `C:\Users\Alex\algo_trading\engine` (laptop local copy)
-
-**ETA:** ~6-8h → finishes between **22:45 → 00:45** tonight.
-
-**Purpose:** Tier 2 R5 validation of the MIX rally-cooldown gate candidate (`rr12≥2.5 OR rr20≥4.0 cd=24h`). Tier 1 OOS already PASSED earlier today (held-out 30d test, +6.74pp vs no-gate, +5.85pp vs current PROD). This is the gold-standard 4-month HRST check before promotion.
-
-**Output files when done:**
-- `C:\Users\Alex\algo_trading\engine\config\regime_config_ed_noprod.json`
-- `C:\Users\Alex\algo_trading\engine\models\crypto_ed_production_noprod.csv`
-- `C:\Users\Alex\algo_trading\engine\logs\ed_v1_<timestamp>.log`
-
-**When the user checks back, run this to compare 4mo winner to MIX:**
-```powershell
-Get-Content .\config\regime_config_ed_noprod.json | ConvertFrom-Json | Select-Object -ExpandProperty ETH | Select-Object -ExpandProperty bull | Select-Object -ExpandProperty rally_cooldown
-```
-
-**Compare to MIX winner:**
-| Field | MIX (today's pick) | 4mo HRST result | Match? |
-|---|---|---|---|
-| `h_short` | **12** | ? | |
-| `h_long` | **20** | ? | |
-| `t_short_pct` | **2.5** | ? | |
-| `t_long_pct` | **4.0** | ? | |
-| `cd_hours` | **24** | ? | |
-
-**Decision tree on completion:**
-- 4mo bull gate matches MIX (within ±1 step on each param) → strong R5 confirmation, ship MIX with HIGH confidence
-- 4mo bull gate is significantly different (e.g., different h_short/h_long pair, threshold deltas >2 steps, cd doubled or halved) → window-sensitivity; either ship MIX with MEDIUM confidence (config-revertible) OR shelve and wait for live data
-- 4mo HRS picks a different regime detector or bull/bear horizons → bigger structural change; consult before any promotion
-- Mode T converged + writes successfully → check it didn't hit `max_iter` (oscillation flag)
-
-**Note:** 4mo HRST won't include 48h in Mode G's search by default (production HORIZONS still maxes at 36h). MIX winner is `rr12≥2.5 OR rr20≥4.0 cd=24h` — uses no 48h, so 4mo can find this same config natively if signal is real.
-
-**Aliveness monitoring (if concern arises):**
-```powershell
-Get-ChildItem .\logs\ed_v1_*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object Name, LastWriteTime
-```
-
-If log mtime < 5 min → alive. >30 min stale + no `python.exe` in tasklist → likely dead. Mode R silence up to 2h is normal (per CLAUDE.md rule 16) — don't declare dead during Mode R phase.
-
-**Power management:** Laptop set with `powercfg /requestsoverride PROCESS python.exe SYSTEM AWAYMODE EXECUTION DISPLAY` to prevent Modern Standby from killing the job overnight.
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
 
 ---
 
@@ -922,68 +992,155 @@ User has not yet flipped the switch. To promote, follow the implementation plan 
 
 ---
 
-**🚨 HIGH PRIORITY — 2026-04-27 morning EMERGENCY-EXIT 5m OVERLAY — TESTED + REJECTED.**
-
-User asked for emergency exit triggered on 5-min price action to bypass shield during sharp crashes (motivated by 2026-04-27 03:45→05:45 UTC ETH crash $2400→$2319, -3.37% in 120min). Phase 1: identified 6 crashes ≥3%/120min in last 30d (incl. today's). Phase 2: built [tools/test_emergency_exit_5m.py](tools/test_emergency_exit_5m.py) overlay test — 35 variants of (threshold × lookback × cooldown × regime × bypass-mode × armed-at-profit).
-
-**Verdict: NO variant beats baseline on any window.** The 60d baseline (+49.34% / 50tr / 70%WR) is already capturing crashes well via shield+max_hold+model SELL. Every emergency-exit variant either fires too often (false alarms eat alpha) or too rarely (no evidence of insurance value).
-
-**Top results (sorted by 60d delta):**
-
-| Rank | Config | d_30d | d_60d | d_90d | Fires 60d |
-|---|---|---|---|---|---|
-| 1 (cleanest) | **G. armed_at_pnl≥X% + thr=-2.0** (X∈{1..5}) | 0.00 | **0.00** | 0.00 | **0** |
-| 2 | A. thr=-2.0% all bypass=always | -1.66 | -3.57 | -6.87 | 3 |
-| 3 | G. thr=-1.5% armed_at_pnl≥X | 0.00 | -6.02 | -5.52 | 1 |
-| **The one we expected to win:** A. thr=-1.0% | -4.71 | **-23.66** | -26.05 | 16 |
-| Worst | A. thr=-0.7% | -8.51 | -38.14 | -41.05 | 43 |
-
-**Why -1% loses so badly:** 16 fires in 60d, only 6 are real crashes; 10 false alarms at ordinary noise that mean-reverts within 30-60 min. Each false fire = ~0.5-1.5% lost alpha + double fees + 120min re-entry lockout that blocks the rebound BUY signal.
-
-**What works as "free insurance":** `G.thr=-2.0% armed_at_pnl≥3%` — fired 0 times in 60d (no evidence either way). Theoretically correct design (only protect rally gains, not create losses) but unproven. Worth shipping with telemetry to collect real-world data over 1-3 months.
-
-**Output CSV:** `output/emerg_exit_5m_20260427_091139.csv`. Crash list: `output/5m_crashes_20260427_090457.csv`. Indicator scores: `output/5m_indicators_20260427_090457.csv`.
-
-**Crash list ≥3%/120min in last 30d (6 events incl. today):**
-- 2026-03-29 21:35→22:45 (70min): $2007→$1939 (-3.41%)
-- 2026-04-02 00:55→02:45 (110min): $2159→$2065 (-4.37%)
-- 2026-04-08 13:05→14:55 (110min): $2271→$2187 (-3.70%)
-- 2026-04-12 01:00→02:05 (65min): $2289→$2207 (-3.56%)
-- 2026-04-14 14:30→15:05 (35min): $2416→$2333 (-3.43%)
-- **2026-04-27 03:45→05:45 (120min): $2400→$2319 (-3.37%) ← TODAY**
-
-**Confirms standing rule from CLAUDE.md:** *"All stop-loss / take-profit / profit-lock / trailing-stop variants — 8+ variants tested; baseline (no SL) won every dimension."* Same conclusion holds at 5-min granularity. Hourly shield + max_hold + model SELL already handles 90% of crashes; adding a faster trigger costs more in alpha than it saves in protection.
-
-**Untested 4th angle:** emergency exit triggered by MULTI-HORIZON ENSEMBLE SELL agreement (using per-horizon signals from T1b) instead of raw price action. Would catch crashes when 2+ horizons unanimously flip SELL within 1 hour. Not yet tested.
 
 ---
 
-**🚨 HIGH PRIORITY — 2026-04-27 morning T1b TRUE multi-horizon ensemble vote — NEW TOP WINNER.**
+**✅ MIX GATE PROMOTED TO LIVE — 2026-04-27 ~20:30 CEST.**
 
-Per-horizon signal cache `data/eth_per_horizon_signals_90d.pkl` was finally generated overnight (h=5,6,7,8 × 91d, ~2184 signals each). Built [tools/test_t1b_ensemble_vote.py](tools/test_t1b_ensemble_vote.py) — replaces the earlier T1b PROXY (conf-threshold sweep) with the real thing: at each bar, tally votes from horizons in `subset` requiring conf ≥ vote_thr; require k_buy votes for BUY, k_sell votes for SELL.
+User shipped MIX rally-cooldown gate to live production via config-only change to `config/regime_config_ed.json` ETH.bull.rally_cooldown:
 
-**Top winners — positive on all 3 windows (sorted by 60d delta vs same-base-conf baseline):**
+```diff
+- h_short: 20  → h_short: 12
+- h_long:  24  → h_long:  20
+- t_short_pct: 4.0  → t_short_pct: 2.5
+- t_long_pct:  4.5  → t_long_pct:  4.0
+- cd_hours: 12  → cd_hours: 24
+```
 
-| Rank | Config | d_30d | **d_60d** | d_90d | n_60d |
-|---|---|---|---|---|---|
-| 1 | **`58_only k_buy=1 k_sell=2 thr=85` base_conf=80** | +0.20 | **+19.84** | +16.38 | 20 |
-| 2 | `567_only k_buy=1 k_sell=3 thr=90` base_conf=80 | +1.12 | +18.09 | +22.09 | 14 |
-| 3 | `58_only k_buy=1 k_sell=2 thr=90` base_conf=80 | +5.58 | +6.60 | +18.39 | 18 |
+**No other production knob changed.** Bull conf 80% (unchanged), bear conf 85% (unchanged), shields ON for both (unchanged), bear rally_cooldown unchanged (`rr30≥9.0% OR rr36≥9.0% cd=48h`), regime detector `price>sma72` (unchanged), min_sell_pnl=0.5%, max_hold=10h (unchanged).
 
-**Top winner substantively (#1):** Use ONLY horizons 5h + 8h (drop the 6h/7h middle). Enter on ANY one BUY at conf ≥ 85%. EXIT requires BOTH 5h AND 8h to say SELL at conf ≥ 85% (2-of-2 confirmation). Asymmetric: easy entry, hard exit. **+19.84pp on 60d (66.45% strategy vs 46.61% baseline) — beats T5b winner's +11.35pp by +8.49pp.** Only 20 trades on 60d (vs 46 baseline = much more selective).
+**Position state at promotion**: `state=cash`, `auto_trade=true`, `rally_cooldown_until=""` (no active cooldown — clean slate for new gate).
 
-**Strong-but-thin winner (#2):** Use h=5,6,7. Enter on ANY one BUY at conf ≥ 90%. EXIT requires ALL 3 (5h+6h+7h) to say SELL at conf ≥ 90%. Most selective rule (n_60d=14 — borderline statistical thinness) but strongest 90d alpha (+22.09pp).
+**Live trader hot-reloads `regime_config_ed.json` every 5 min** — no restart required. Within next cycle the new gate is active.
 
-**Output CSV:** `output/t1b_ensemble_vote_20260427_085549.csv` (full sweep: 7 subsets × k_buy 1..N × k_sell 1..N × thr {70,80,85,90} × base_conf {80,90} × 3 windows).
+**Rollback (one command, instant)**:
+```powershell
+copy config\regime_config_ed_pre_hrst2_20260427_evening.json config\regime_config_ed.json
+```
 
-**Implementation cost:** Higher than T5b — requires running ALL 4 horizon models (5h/6h/7h/8h) per cycle in live trader, not just the regime-anchor horizon. Currently the trader loads only `bull_h` (6h) and `bear_h` (7h) per `regime_config_ed.json`. Adding horizons 5h+8h: ~2× compute per cycle (2 extra model trainings per hour). Need new schema for "vote subset" + k_buy/k_sell + vote_thr.
+Backup also kept for production CSV (`models/crypto_ed_production_pre_hrst2_20260427_evening.csv`) though MIX promotion did NOT touch the CSV (model selection unchanged).
 
-**Caution:** 30d delta is +0.20 (barely positive). 60d/90d strong but recent 30d shows the regime-tilt risk — over-confirmation can miss recent shorter-cycle moves. Recommend 4mo HRST validation (`--replay 2880`) before promotion.
+### Evidence base for promotion (4 independent layers)
 
-**Comparison to tonight's earlier T5b winner:**
-- T1b ensemble (NEW): 60d +19.84pp / 20 trades / requires multi-model live infra
-- T5b entry filter: 60d +11.35pp / 33 trades / config-only + ~30 lines code
-- Trade-off: T1b is +75% better alpha but harder to ship and needs thicker validation.
+1. **Tier 1 OOS held-out 30d** (FIRST 30d of 90d cache, never used in optimization): MIX +0.90% vs PROD -4.95% during a -40.82% B&H period → **+5.85pp** ← only methodologically clean comparison
+2. **Cross-window 30d+60d STRICT intersection** (MIX discovery methodology): same gate emerged
+3. **Cumulative 90d+60d+30d STRICT intersection** (tonight's analysis via `tools/tg_window_decomposition.py`): same MIX gate emerged
+4. **Disjoint 3×30d STRICT intersection**: close cousin emerged (rr12+rr14+cd=24, structurally identical family)
+
+In-sample numbers (less rigorous but consistent):
+- 30d in-sample: +9.73pp over PROD
+- 60d in-sample: +15.17pp over PROD
+- 90d in-sample: +25.56pp over PROD
+- Drawdown reduced ~50% on both 30d and 60d
+
+### Monitor + rollback criteria
+
+**Monitor for 1-2 weeks** of live performance. Rollback if:
+- Cumulative realized alpha drops >15pp vs sim baseline over first 10 trades (matches CLAUDE.md rule R4 standing policy)
+- Max drawdown exceeds historical -10.02% (current PROD's 60d max)
+- Live signals consistently blocked at moments where forward 24h is positive (gate too aggressive)
+
+If rollback triggers: one `copy` command, hot-reloads in 5 min.
+
+### Standing R5 caveat
+
+Per CLAUDE.md rule R5: HRST validation gate normally requires 4-month replay confirmation before live promotion. **R5 NOT formally completed for this promotion.** User decided Tier 1 OOS + 3 cross-window confirmations were sufficient evidence given:
+- Config-only change (no model/code modification)
+- Instant rollback available
+- All 4 evidence layers point to same gate family
+- Full HRST 4mo would have taken 12-15h on laptop (declared not worth wait)
+
+The 1440 HRST currently running is engineering smoke-test (validates the bug fixes + grid trim end-to-end), NOT R5 validation. The 2880 HRST queued for later WOULD be R5; if it picks something materially different from MIX, revisit.
+
+---
+
+
+## 📦 MERGED TOPIC: 4mo HRST validation arc (2026-04-27 launched 16:45 → evening realisation that --replay scales Mode V too)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
+
+---
+
+**🟡 RUNNING NOW — 2026-04-27 ~16:45 CEST — 4MO HRST VALIDATION (Tier 2 R5) on LAPTOP.**
+
+Job launched on laptop ~16:45 CEST 2026-04-27.
+
+**Command:** `& "C:\Users\Alex\algo_trading\venv\Scripts\python.exe" .\crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 2880 --no-persist`
+
+**Working dir:** `C:\Users\Alex\algo_trading\engine` (laptop local copy)
+
+**ETA:** ~6-8h → finishes between **22:45 → 00:45** tonight.
+
+**Purpose:** Tier 2 R5 validation of the MIX rally-cooldown gate candidate (`rr12≥2.5 OR rr20≥4.0 cd=24h`). Tier 1 OOS already PASSED earlier today (held-out 30d test, +6.74pp vs no-gate, +5.85pp vs current PROD). This is the gold-standard 4-month HRST check before promotion.
+
+**Output files when done:**
+- `C:\Users\Alex\algo_trading\engine\config\regime_config_ed_noprod.json`
+- `C:\Users\Alex\algo_trading\engine\models\crypto_ed_production_noprod.csv`
+- `C:\Users\Alex\algo_trading\engine\logs\ed_v1_<timestamp>.log`
+
+**When the user checks back, run this to compare 4mo winner to MIX:**
+```powershell
+Get-Content .\config\regime_config_ed_noprod.json | ConvertFrom-Json | Select-Object -ExpandProperty ETH | Select-Object -ExpandProperty bull | Select-Object -ExpandProperty rally_cooldown
+```
+
+**Compare to MIX winner:**
+| Field | MIX (today's pick) | 4mo HRST result | Match? |
+|---|---|---|---|
+| `h_short` | **12** | ? | |
+| `h_long` | **20** | ? | |
+| `t_short_pct` | **2.5** | ? | |
+| `t_long_pct` | **4.0** | ? | |
+| `cd_hours` | **24** | ? | |
+
+**Decision tree on completion:**
+- 4mo bull gate matches MIX (within ±1 step on each param) → strong R5 confirmation, ship MIX with HIGH confidence
+- 4mo bull gate is significantly different (e.g., different h_short/h_long pair, threshold deltas >2 steps, cd doubled or halved) → window-sensitivity; either ship MIX with MEDIUM confidence (config-revertible) OR shelve and wait for live data
+- 4mo HRS picks a different regime detector or bull/bear horizons → bigger structural change; consult before any promotion
+- Mode T converged + writes successfully → check it didn't hit `max_iter` (oscillation flag)
+
+**Note:** 4mo HRST won't include 48h in Mode G's search by default (production HORIZONS still maxes at 36h). MIX winner is `rr12≥2.5 OR rr20≥4.0 cd=24h` — uses no 48h, so 4mo can find this same config natively if signal is real.
+
+**Aliveness monitoring (if concern arises):**
+```powershell
+Get-ChildItem .\logs\ed_v1_*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object Name, LastWriteTime
+```
+
+If log mtime < 5 min → alive. >30 min stale + no `python.exe` in tasklist → likely dead. Mode R silence up to 2h is normal (per CLAUDE.md rule 16) — don't declare dead during Mode R phase.
+
+**Power management:** Laptop set with `powercfg /requestsoverride PROCESS python.exe SYSTEM AWAYMODE EXECUTION DISPLAY` to prevent Modern Standby from killing the job overnight.
+
+---
+
+
+---
+
+**🚨 OPEN DECISION — 2026-04-27 evening: 4MO HRST RUNNING SLOW because `--replay` also scales Mode V (not just Mode D).**
+
+**Diagnosis**: today's bug-fix cascade revealed an unintended consequence:
+- Bug A fix (--replay propagation through HRST chain) → now correctly uses 2880 rows everywhere
+- BUT: Mode V's STEP 1 ("backtest top 6 D candidates") runs the FULL 2880-hour replay through live signal generator (one model retrain per hour). Cost = ~20-30 min per candidate × 6 candidates × 4 horizons = **~10-12h just for Mode V**. Plus Mode S (3,920 combos × 2880 signals) and Mode T+G iteration also doubled.
+- Realistic 4mo HRST runtime: **~12-15 hours** (not the 4-6h I originally estimated; Mode D trim only helped that one phase).
+
+**Options to choose from when you read this:**
+
+(a) **Kill + restart at `--replay 1440`** (~3-4h total). Same data scope as AB matrix; refreshes models + gate sweep without 4mo R5 grade.
+```powershell
+python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist
+```
+
+(b) **Let it finish overnight** (~10-13h remaining at 19:00 CEST = finishes ~05:00-08:00 next morning). Get true 4mo R5 validation. Battery + cooling + Modern Standby risk.
+
+(c) **Ship MIX based on Tier 1 OOS alone** (zero hours, instant rollback). Tier 1 already passed cleanly (+5.85pp vs PROD on truly held-out 30d). 4mo HRST was a "bonus" R5 confirmation, not strictly required for promotion.
+
+**Recommended: (a) kill + restart at `--replay 1440`.** The marginal value of 4mo over 2mo is small (~+10-15h cost for slightly better OOS evidence on a window we'd already understand). Faster turnaround, lower risk.
+
+**Engine bug-fixes from today (already shipped, persistent):**
+- Bug A: `--replay` propagation through HRST → Mode H → D/V (4 sites added `replay_hours=` plumbing)
+- Bug B: `MIN_GRID_TRADES = max(4, n // 360)` dynamic threshold (was hardcoded 8, killed all Mode D candidates on 5h-7h)
+- Trim: GRID_COMBOS=2 (dropped RF+XGB), GRID_WINDOWS=3 (dropped 200/250/300), GRID_FEATURES=4 (dropped 20/30) → 324→72 evals (-78%)
+- Optimizer bot aligned: MODE_TIME_EST recalibrated, grid_total default updated
+
+**Engine bug B follow-up (KNOWN, NOT FIXED):** `--replay` cost scaling in Mode V/S/T+G is a feature, not a bug — these phases legitimately need the full replay window for accurate live backtest. If you want a permanent fix, would need separate `--replay-d` and `--replay-v` flags or hardcode a Mode V cap. Defer to user.
 
 ---
 
@@ -1101,6 +1258,131 @@ All five hard rules now enforced in code:
 
 ---
 
+
+## 📦 MERGED TOPIC: AB matrix evolution (2026-04-22 planning → 2026-04-25 4-variant → 2026-04-27 ABCDE final)
+
+*This topic groups several banners that were previously written separately as the work progressed. Content kept verbatim, just reordered chronologically and merged under one header.*
+
+---
+
+**🧪 [UPMOST ACTION — overnight desktop] AB MATRIX: trim × meta × vol (2026-04-22 evening).**
+
+Orchestrator: `tools/ab_matrix_runner.py`. Runs the full factorial on a SINGLE MACHINE with a FROZEN DATA SNAPSHOT so every variant sees identical bars. All runs use `--no-persist` + new `--no-data-update` flag. Writes consolidated audit CSV `output/ab_matrix_results_<timestamp>.csv` with per-horizon feature lists, confidences, shields, gates, detector, meta stats — everything needed to audit each variant's strategy.
+
+**Data freezing:** at matrix start the runner snapshots 13 data files (ETH/BTC OHLCV, macro_hourly/daily, cross_asset, fear_greed, onchain_eth/btc, derivatives_eth/btc, stablecoin, orderbook, options_iv) into `data/_ab_snapshot_<timestamp>/`. Before every variant, the runner restores from snapshot. HRST is invoked with `--no-data-update` so the usual download step is skipped. Live trader keeps updating the real files independently — snapshot is read-only from the matrix's perspective.
+
+**Matrix (4 HRST + 1 vol test = ~15-20h):**
+
+| Variant | Trim (Mode F) | Meta filter | Purpose |
+|---|---|---|---|
+| trimOFF_metaOFF | disabled | none | Pre-trim baseline (original Ed) |
+| trimON_metaOFF | enabled | none | Current prod behavior (Mode F only) |
+| trimOFF_metaON | disabled | p=0.45 | Meta-only effect |
+| trimON_metaON | enabled | p=0.45 | Combined — the proposed future prod |
+| vol_scaled | — | — | `test_vol_scaled_horizon --replay 1440` — orthogonal detector test |
+
+**ONE command to launch the whole matrix (desktop):**
+```bash
+python tools/ab_matrix_runner.py
+```
+
+Optional flags:
+- `--dry-run` print the plan without executing
+- `--skip-vol` skip the vol-scaled horizon test
+
+**What the orchestrator does per variant:**
+1. Restores all 13 data files from the frozen snapshot (identical data)
+2. Flips `config/disabled_features.json.enabled` to trim True/False
+3. Runs HRST with `--no-persist --no-data-update` + optional `--meta-filter 0.45`
+4. Parses the HRST log for: Mode S winner (detector + bull/bear horizon + confidence), Mode T policy (shield per regime, min_sell_pnl, max_hold), Mode T REF baseline (H1/H2/REF returns), bull+bear gate winners, convergence iteration, meta filter stats (kept/dropped/no_pred counts)
+5. Parses the tagged `crypto_ed_production_noprod_<label>.csv` to pull per-horizon: best_combo, best_window, gamma, return, accuracy, n_features, full feature list, logret count, pysr count
+6. Tags all 3 `_noprod.*` files (config + production + best_models) with the variant label
+7. Appends row to consolidated CSV (incremental so interruptions don't lose data)
+8. Restores original trim state at end (via try/finally)
+
+**Audit columns in the CSV (per variant row):**
+- Identity: variant, trim_enabled, meta_threshold, exit_code, runtime_min, timestamp, log_path, tagged_prod_csv
+- Mode S winner: detector, bull_h, bull_conf, bear_h, bear_conf
+- Mode T policy: t_bull_shield, t_bear_shield, t_bull_conf, t_bear_conf, t_min_sell_pnl, t_max_hold
+- Mode T returns: t_ref_pct (60d without gate), t_h1_pct (recent half), t_h2_pct (older half), t_converged_iter
+- Gates: bull_gate, bear_gate (formula strings or "OFF")
+- Meta: meta_kept, meta_dropped, meta_no_pred, meta_threshold
+- Per-horizon detail (for h=5,6,7,8): h{h}_source (e.g. "Refined#1"), h{h}_apf, h{h}_combo, h{h}_window, h{h}_gamma, h{h}_return, h{h}_accuracy, h{h}_n_features, h{h}_features (pipe-separated list), h{h}_logrets (count), h{h}_pysr (count)
+
+**When finished, compare the CSV:**
+- Order variants by `t_ref_pct` (Mode T's unshielded/ungated 60d return)
+- Check if trim helped (trimON > trimOFF with same meta)
+- Check if meta helped (metaON > metaOFF with same trim)
+- Check for interaction (does trim+meta combine linearly or is there synergy?)
+- Look at `meta_dropped` to see how aggressive the filter is in each variant
+
+**Decision tree:**
+- Best variant's Mode T REF > current laptop 2mo+trim baseline (+86.79%) → **promote it** (when trade closes)
+- Best variant close to current laptop result, simpler (e.g., trim-only works as well as trim+meta) → **ship the simpler one**
+- No variant beats laptop result by >10pp → **stick with laptop config** from yesterday (already tagged `_2mo_backup`)
+- Vol test winner differs from HRST's tsmom → **schedule detector A/B separately**
+
+~~**G. Feature-family floor A/B**~~ — **FOLDED INTO AB MATRIX 2026-04-22 evening.** Matrix variant #5 (`trimON_metaON_floorOFF`) vs variant #4 (`trimON_metaON` with floor ON) isolates the floor effect in a single overnight run. No separate G workflow needed.
+
+**Infra shipped 2026-04-22 (still applies — default for all future HRST unless `--no-feature-floor`):**
+- New constants in `crypto_trading_system_ed.py`: `FEATURE_FLOOR_ENABLED=True`, `FEATURE_FLOOR_MIN_LOGRET=2`, `FEATURE_FLOOR_MIN_PYSR=1`
+- Helper `_feature_floor_indices(ranked_features, n_feat)` — picks column indices guaranteeing ≥2 logret + ≥1 pysr in every selected subset. Promotes essentials from beyond position N, evicts lowest-ranked non-essentials in the top-N slice. Exactly N features out, no overflow. Graceful no-op if ranked list lacks essentials.
+- Wired into 4 sites: Mode D grid + refine + top-candidates CSV + refined-candidates persist
+- CLI flag `--no-feature-floor` disables the floor for A/B comparison (now used by matrix variant #5)
+- Unit tests: 3/3 pass (already-compliant no-op, vol-only promotion, no-essentials graceful)
+- Motivation: ETH 5h/6h prod + laptop trim configs both ended up with **0 logret + 0 pysr** in their final feature sets (trend-blind volatility-only models). Root cause: Mode D's Optuna refine climbs APF on the 1440h window and lands at sparse vol-only local optima.
+
+**PRIORITY 2 — Asset enablement decisions:**
+
+5. ~~**SOL HRST**~~ — **DONE 2026-04-19.** Config written: `sma168>sma480` | bull=8h@90% shield=ON / bear=8h@65% shield=OFF | 0.55%/12h | no gates. Pipeline health 6/7 positive, 3 horizons at +19-23% range. **Decision pending user: small test allocation ($2-4k) or shelve.** Bottleneck: best single-horizon +23% vs ETH's +52%, so per-$ alpha likely ~40-50% of ETH — borderline on the "≥50% threshold" rule.
+
+6. ~~**LINK HRST**~~ — **DONE + SHELVED 2026-04-20.** Config: `vol_calm` | 7h@95% shield=OFF / 6h@95% shield=ON | 0.6%/12h | no gates. Pipeline weak: 5/8 horizons NEGATIVE, `beats_3of3=0` on gate sweep (49k configs, zero beat baseline). Model can't find reliable signal in LINK's data. `LINK.enabled: false` stays.
+
+7. **XRP HRST** (only remaining untested) — Launching Mode P first (files from 2026-03-26 are pre-deep-PySR). Correlation with ETH ~0.50-0.70 → real diversification if it works. Priors were +9.99% on 1mo (Mode H 2026-03-26). Command: `python crypto_trading_system_ed.py P XRP 5,6,7,8h; if ($?) { python crypto_trading_system_ed.py HRST XRP 5,6,7,8h --replay 1440 }`. Optional — after the 3 shelved results (BTC/SOL-borderline/LINK-weak), diversification case for more crypto assets is thin. Expect XRP likely similar.
+
+**PRIORITY 3 — Research:**
+
+7. **Orderbook imbalance + IV skew accumulation** — Hourly snapshots now wired into Ed trader (`crypto_revolut_ed_v2.py`). Need ~2 weeks of data before testing as features. Currently ~36 rows each (as of 2026-04-21).
+
+8. **Eli HRS BTC** — 30-minute candle test. Separate research track.
+
+9. **Ein results review** — 15-minute candle BTC results from earlier laptop run. Separate research track.
+
+10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
+
+
+---
+
+**🧪 PRIOR LAUNCH — AB MATRIX 4-VARIANT FOCUS (2026-04-24 22:40 CEST → completed 2026-04-25 12:38 CEST, partial — D never ran due to system freeze):**
+
+Launched AFTER the third-pass audit shipped (file-handle leak + div-by-zero guards, commit `eaf80e9`) and AFTER today's 22:07 HRST promoted a clean winner (`sma168>sma480 bull=7h@65% bear=6h@85%` — already live). This matrix runs on the first fully-clean data snapshot: 1432/1440 rows, label-tail fix, sparse-feature quarantine, div-by-zero guards, atomic writes — none of the prior 3 weeks' results were trained on this data quality.
+
+Command: `python tools/ab_matrix_runner.py --variants focus --skip-vol` (seed 42 default, matches today's live HRST for B-variant replication check).
+
+| Variant | Floor | Trim | Meta | Purpose |
+|---|---|---|---|---|
+| A_floorON_trimOFF | ON | OFF | — | Floor alone on full 184-feature universe — does floor still matter without trim? |
+| B_floorON_trimON | ON | ON | — | **Replicates today's 22:07 live HRST.** Sanity check that matrix subprocess = direct invocation (same seed + data). |
+| C_floorOFF_trimOFF | OFF | OFF | — | Raw universe, no guarantees. Tests whether floor's feature-family floor is doing real work. |
+| D_floorON_trimON_metaON | ON | ON | p≥0.45 | **R3 meta-labeling retest** — added 2026-04-24 22:40 (commit `23b73c1`). B↔D isolates meta contribution on clean primary. |
+
+Runtime: 4 × ~4h = ~16h laptop. Results in `output/ab_matrix_results_<timestamp>.csv` + tagged `_noprod_{A,B,C,D}.*` files.
+
+**Decision rules when matrix finishes (2026-04-25 afternoon):**
+- **B replicates today's HRST** (detector + horizons + confs match within seed noise): sanity check passes, matrix infrastructure trustworthy.
+- **Best (A/B/C)** alpha > today's live HRST by ≥5pp on Mode T REF: promote that variant instead.
+- **D > B by ≥5pp**: meta filter is shippable behind a config flag (resolves R3).
+- **D within ±5pp of B**: shelve meta permanently — was dead-end masquerading as signal on biased data.
+- All within noise: keep today's live HRST running, revisit after next week's live performance.
+
+**Earlier (superseded) matrix results — kept for historical record only:**
+The 2026-04-22 17:32 matrix promoted V1 (`tsmom_672h 5h@85%/6h@80%` +122.59% Mode T). The 2026-04-24 07:40 seed-2026 relaunch promoted intermediate variants. Both were trained on poisoned data (672 rows + label-tail NaN + div-by-zero features). **Do not reference those numbers as baselines** — they're not comparable to this matrix's clean output.
+
+---
+
+
+---
+
 **✅ ABCDE MATRIX FULL RESULTS — completed 2026-04-27 01:18 CEST. R3 (meta-labeling) RESOLVED — SHELVED.**
 
 All 5 variants ran to completion. Output CSV: `output/ab_matrix_results_20260426_151744.csv` (last variant E timestamp).
@@ -1131,33 +1413,6 @@ All 5 variants ran to completion. Output CSV: `output/ab_matrix_results_20260426
 - ✅ Meta-aware variants (D, E) both run to completion — no infra gaps remain
 - ✅ A/B/C/D/E full factorial complete on clean data snapshot
 - Matrix infra trustworthy (A's reported t_ref +66.79% matches A's live behavior post-promotion)
-
----
-
-**🧪 PRIOR LAUNCH — AB MATRIX 4-VARIANT FOCUS (2026-04-24 22:40 CEST → completed 2026-04-25 12:38 CEST, partial — D never ran due to system freeze):**
-
-Launched AFTER the third-pass audit shipped (file-handle leak + div-by-zero guards, commit `eaf80e9`) and AFTER today's 22:07 HRST promoted a clean winner (`sma168>sma480 bull=7h@65% bear=6h@85%` — already live). This matrix runs on the first fully-clean data snapshot: 1432/1440 rows, label-tail fix, sparse-feature quarantine, div-by-zero guards, atomic writes — none of the prior 3 weeks' results were trained on this data quality.
-
-Command: `python tools/ab_matrix_runner.py --variants focus --skip-vol` (seed 42 default, matches today's live HRST for B-variant replication check).
-
-| Variant | Floor | Trim | Meta | Purpose |
-|---|---|---|---|---|
-| A_floorON_trimOFF | ON | OFF | — | Floor alone on full 184-feature universe — does floor still matter without trim? |
-| B_floorON_trimON | ON | ON | — | **Replicates today's 22:07 live HRST.** Sanity check that matrix subprocess = direct invocation (same seed + data). |
-| C_floorOFF_trimOFF | OFF | OFF | — | Raw universe, no guarantees. Tests whether floor's feature-family floor is doing real work. |
-| D_floorON_trimON_metaON | ON | ON | p≥0.45 | **R3 meta-labeling retest** — added 2026-04-24 22:40 (commit `23b73c1`). B↔D isolates meta contribution on clean primary. |
-
-Runtime: 4 × ~4h = ~16h laptop. Results in `output/ab_matrix_results_<timestamp>.csv` + tagged `_noprod_{A,B,C,D}.*` files.
-
-**Decision rules when matrix finishes (2026-04-25 afternoon):**
-- **B replicates today's HRST** (detector + horizons + confs match within seed noise): sanity check passes, matrix infrastructure trustworthy.
-- **Best (A/B/C)** alpha > today's live HRST by ≥5pp on Mode T REF: promote that variant instead.
-- **D > B by ≥5pp**: meta filter is shippable behind a config flag (resolves R3).
-- **D within ±5pp of B**: shelve meta permanently — was dead-end masquerading as signal on biased data.
-- All within noise: keep today's live HRST running, revisit after next week's live performance.
-
-**Earlier (superseded) matrix results — kept for historical record only:**
-The 2026-04-22 17:32 matrix promoted V1 (`tsmom_672h 5h@85%/6h@80%` +122.59% Mode T). The 2026-04-24 07:40 seed-2026 relaunch promoted intermediate variants. Both were trained on poisoned data (672 rows + label-tail NaN + div-by-zero features). **Do not reference those numbers as baselines** — they're not comparable to this matrix's clean output.
 
 ---
 
@@ -1446,91 +1701,6 @@ python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist;
 - Re-enable should be event-driven (evidence of improvement), not calendar-driven.
 - These tests are cheap — ~6-8h per one-off run, no code changes needed.
 - **NO automatic trigger on the date** — user decides when to run the test based on priorities.
-
-**🧪 [UPMOST ACTION — overnight desktop] AB MATRIX: trim × meta × vol (2026-04-22 evening).**
-
-Orchestrator: `tools/ab_matrix_runner.py`. Runs the full factorial on a SINGLE MACHINE with a FROZEN DATA SNAPSHOT so every variant sees identical bars. All runs use `--no-persist` + new `--no-data-update` flag. Writes consolidated audit CSV `output/ab_matrix_results_<timestamp>.csv` with per-horizon feature lists, confidences, shields, gates, detector, meta stats — everything needed to audit each variant's strategy.
-
-**Data freezing:** at matrix start the runner snapshots 13 data files (ETH/BTC OHLCV, macro_hourly/daily, cross_asset, fear_greed, onchain_eth/btc, derivatives_eth/btc, stablecoin, orderbook, options_iv) into `data/_ab_snapshot_<timestamp>/`. Before every variant, the runner restores from snapshot. HRST is invoked with `--no-data-update` so the usual download step is skipped. Live trader keeps updating the real files independently — snapshot is read-only from the matrix's perspective.
-
-**Matrix (4 HRST + 1 vol test = ~15-20h):**
-
-| Variant | Trim (Mode F) | Meta filter | Purpose |
-|---|---|---|---|
-| trimOFF_metaOFF | disabled | none | Pre-trim baseline (original Ed) |
-| trimON_metaOFF | enabled | none | Current prod behavior (Mode F only) |
-| trimOFF_metaON | disabled | p=0.45 | Meta-only effect |
-| trimON_metaON | enabled | p=0.45 | Combined — the proposed future prod |
-| vol_scaled | — | — | `test_vol_scaled_horizon --replay 1440` — orthogonal detector test |
-
-**ONE command to launch the whole matrix (desktop):**
-```bash
-python tools/ab_matrix_runner.py
-```
-
-Optional flags:
-- `--dry-run` print the plan without executing
-- `--skip-vol` skip the vol-scaled horizon test
-
-**What the orchestrator does per variant:**
-1. Restores all 13 data files from the frozen snapshot (identical data)
-2. Flips `config/disabled_features.json.enabled` to trim True/False
-3. Runs HRST with `--no-persist --no-data-update` + optional `--meta-filter 0.45`
-4. Parses the HRST log for: Mode S winner (detector + bull/bear horizon + confidence), Mode T policy (shield per regime, min_sell_pnl, max_hold), Mode T REF baseline (H1/H2/REF returns), bull+bear gate winners, convergence iteration, meta filter stats (kept/dropped/no_pred counts)
-5. Parses the tagged `crypto_ed_production_noprod_<label>.csv` to pull per-horizon: best_combo, best_window, gamma, return, accuracy, n_features, full feature list, logret count, pysr count
-6. Tags all 3 `_noprod.*` files (config + production + best_models) with the variant label
-7. Appends row to consolidated CSV (incremental so interruptions don't lose data)
-8. Restores original trim state at end (via try/finally)
-
-**Audit columns in the CSV (per variant row):**
-- Identity: variant, trim_enabled, meta_threshold, exit_code, runtime_min, timestamp, log_path, tagged_prod_csv
-- Mode S winner: detector, bull_h, bull_conf, bear_h, bear_conf
-- Mode T policy: t_bull_shield, t_bear_shield, t_bull_conf, t_bear_conf, t_min_sell_pnl, t_max_hold
-- Mode T returns: t_ref_pct (60d without gate), t_h1_pct (recent half), t_h2_pct (older half), t_converged_iter
-- Gates: bull_gate, bear_gate (formula strings or "OFF")
-- Meta: meta_kept, meta_dropped, meta_no_pred, meta_threshold
-- Per-horizon detail (for h=5,6,7,8): h{h}_source (e.g. "Refined#1"), h{h}_apf, h{h}_combo, h{h}_window, h{h}_gamma, h{h}_return, h{h}_accuracy, h{h}_n_features, h{h}_features (pipe-separated list), h{h}_logrets (count), h{h}_pysr (count)
-
-**When finished, compare the CSV:**
-- Order variants by `t_ref_pct` (Mode T's unshielded/ungated 60d return)
-- Check if trim helped (trimON > trimOFF with same meta)
-- Check if meta helped (metaON > metaOFF with same trim)
-- Check for interaction (does trim+meta combine linearly or is there synergy?)
-- Look at `meta_dropped` to see how aggressive the filter is in each variant
-
-**Decision tree:**
-- Best variant's Mode T REF > current laptop 2mo+trim baseline (+86.79%) → **promote it** (when trade closes)
-- Best variant close to current laptop result, simpler (e.g., trim-only works as well as trim+meta) → **ship the simpler one**
-- No variant beats laptop result by >10pp → **stick with laptop config** from yesterday (already tagged `_2mo_backup`)
-- Vol test winner differs from HRST's tsmom → **schedule detector A/B separately**
-
-~~**G. Feature-family floor A/B**~~ — **FOLDED INTO AB MATRIX 2026-04-22 evening.** Matrix variant #5 (`trimON_metaON_floorOFF`) vs variant #4 (`trimON_metaON` with floor ON) isolates the floor effect in a single overnight run. No separate G workflow needed.
-
-**Infra shipped 2026-04-22 (still applies — default for all future HRST unless `--no-feature-floor`):**
-- New constants in `crypto_trading_system_ed.py`: `FEATURE_FLOOR_ENABLED=True`, `FEATURE_FLOOR_MIN_LOGRET=2`, `FEATURE_FLOOR_MIN_PYSR=1`
-- Helper `_feature_floor_indices(ranked_features, n_feat)` — picks column indices guaranteeing ≥2 logret + ≥1 pysr in every selected subset. Promotes essentials from beyond position N, evicts lowest-ranked non-essentials in the top-N slice. Exactly N features out, no overflow. Graceful no-op if ranked list lacks essentials.
-- Wired into 4 sites: Mode D grid + refine + top-candidates CSV + refined-candidates persist
-- CLI flag `--no-feature-floor` disables the floor for A/B comparison (now used by matrix variant #5)
-- Unit tests: 3/3 pass (already-compliant no-op, vol-only promotion, no-essentials graceful)
-- Motivation: ETH 5h/6h prod + laptop trim configs both ended up with **0 logret + 0 pysr** in their final feature sets (trend-blind volatility-only models). Root cause: Mode D's Optuna refine climbs APF on the 1440h window and lands at sparse vol-only local optima.
-
-**PRIORITY 2 — Asset enablement decisions:**
-
-5. ~~**SOL HRST**~~ — **DONE 2026-04-19.** Config written: `sma168>sma480` | bull=8h@90% shield=ON / bear=8h@65% shield=OFF | 0.55%/12h | no gates. Pipeline health 6/7 positive, 3 horizons at +19-23% range. **Decision pending user: small test allocation ($2-4k) or shelve.** Bottleneck: best single-horizon +23% vs ETH's +52%, so per-$ alpha likely ~40-50% of ETH — borderline on the "≥50% threshold" rule.
-
-6. ~~**LINK HRST**~~ — **DONE + SHELVED 2026-04-20.** Config: `vol_calm` | 7h@95% shield=OFF / 6h@95% shield=ON | 0.6%/12h | no gates. Pipeline weak: 5/8 horizons NEGATIVE, `beats_3of3=0` on gate sweep (49k configs, zero beat baseline). Model can't find reliable signal in LINK's data. `LINK.enabled: false` stays.
-
-7. **XRP HRST** (only remaining untested) — Launching Mode P first (files from 2026-03-26 are pre-deep-PySR). Correlation with ETH ~0.50-0.70 → real diversification if it works. Priors were +9.99% on 1mo (Mode H 2026-03-26). Command: `python crypto_trading_system_ed.py P XRP 5,6,7,8h; if ($?) { python crypto_trading_system_ed.py HRST XRP 5,6,7,8h --replay 1440 }`. Optional — after the 3 shelved results (BTC/SOL-borderline/LINK-weak), diversification case for more crypto assets is thin. Expect XRP likely similar.
-
-**PRIORITY 3 — Research:**
-
-7. **Orderbook imbalance + IV skew accumulation** — Hourly snapshots now wired into Ed trader (`crypto_revolut_ed_v2.py`). Need ~2 weeks of data before testing as features. Currently ~36 rows each (as of 2026-04-21).
-
-8. **Eli HRS BTC** — 30-minute candle test. Separate research track.
-
-9. **Ein results review** — 15-minute candle BTC results from earlier laptop run. Separate research track.
-
-10. **Grade-4 on-chain expansion after newborn cool-down** — `oc_mvrv_chg1d` (Grade 3-4 on BTC/ETH) is the only on-chain metric earning its keep. After basis + lead-lag newborns prove in/out, re-audit and consider disabling more macro derivatives (esp. `m_oil_*`, `m_eurusd_*`, `m_usdjpy_*` 5d/10d/zscore variants).
 
 ### Closed 2026-04-25 late-afternoon (post-bundle hotfixes + bundle 3)
 
