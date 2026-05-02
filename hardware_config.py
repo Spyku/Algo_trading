@@ -42,6 +42,17 @@ else:  # LAPTOP
     PARALLEL_BACKTESTS = 6
     PARALLEL_LGBM_DEVICE = 'cpu'
 
+# --- Parallel Mode P (PySR feature discovery) config ---
+# Number of concurrent PySR studies per (asset, horizon) call. Each PySR
+# Julia worker uses ~2-3 GB RAM and 1 CPU core (parallelism="serial" inside
+# each, deterministic=True). Cold-start ~10-20s per worker for Julia init.
+if MACHINE == 'DESKTOP':
+    PYSR_PARALLEL_RUNS = 4   # 26 cores, 32 GB — plenty of headroom
+elif MACHINE == 'YOGA':
+    PYSR_PARALLEL_RUNS = 2   # 14 GB RAM — keep tight
+else:  # LAPTOP
+    PYSR_PARALLEL_RUNS = 3   # 16 GB RAM — 3 × ~2.5 GB Julia ≈ 7.5 GB peak
+
 # --- Model Definitions ---
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression

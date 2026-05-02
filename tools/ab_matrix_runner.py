@@ -426,6 +426,7 @@ def main():
         ('B_floorON_trimON',       True,  None, False),
         ('A_floorON_trimOFF',      False, None, False),
         ('D_floorON_trimON_metaON', True, 0.45, False),
+        ('E_floorON_trimOFF_metaON', False, 0.45, False),
     ]
     if args.variants == 'focus':
         variants = focus_variants

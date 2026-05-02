@@ -41,12 +41,11 @@ _seed('models/crypto_ed_best_models.csv', _NOPROD_BEST_MODELS)
 _seed('models/crypto_ed_production.csv',  _NOPROD_PRODUCTION)
 _seed('config/regime_config_ed.json',     _NOPROD_REGIME)
 
-# Engine internals were renamed from `crypto_trading_system_ed` to
-# `crypto_trading_system_ed_engine` on 2026-04-30. Path overrides must land
-# on the engine module's globals (not the new top-level wrapper) so that
-# engine functions reading PRODUCTION_CSV / REGIME_CONFIG_PATH see the
-# noprod values.
-import crypto_trading_system_ed_engine as _ed
+# Engine + parallel wrapper merged into single `crypto_trading_system_ed`
+# module on 2026-05-02. Path overrides land on the merged module's globals
+# so that engine functions reading PRODUCTION_CSV / REGIME_CONFIG_PATH see
+# the noprod values.
+import crypto_trading_system_ed as _ed
 
 # Patch module-level paths so all reads/writes land in the noprod namespace.
 _ed.PRODUCTION_CSV     = _NOPROD_PRODUCTION

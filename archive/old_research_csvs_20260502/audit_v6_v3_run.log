@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "G:\Autres ordinateurs\My laptop\engine\audit_v6_v3.py", line 33, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'

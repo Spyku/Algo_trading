@@ -177,6 +177,13 @@ def _run_single_pysr(X, y, all_cols, feature_subset, seed, iterations, run_label
         procs=0,
         parallelism="serial",
         temp_equation_file=False,
+        # output_directory: redirect PySR's per-run checkpoint dirs from
+        # the default 'outputs/' (auto-created at cwd) into 'output/' so all
+        # research output lives in ONE folder instead of two near-identically
+        # named ones. Engine's own writes (rally_cd_*.csv, meta_*.csv,
+        # ERRORS_INBOX.md) already use 'output/' (singular) — see grep
+        # confirmation 2026-05-02.
+        output_directory='output',
         verbosity=verbosity,
         progress=progress,
     )

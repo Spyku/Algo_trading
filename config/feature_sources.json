@@ -77,15 +77,15 @@
       "match_prefix": ["xa_sp500", "xa_nasdaq", "xa_dax", "xa_cac", "xa_smi"],
       "source_file": "data/macro_data/macro_daily.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 72,
-      "description": "Cross-asset relative-strength + correlation vs equity indices. Daily bars = market close; weekend/holiday gaps can push last-bar age to 72h (Fri close → Mon morning check)."
+      "max_age_hours": 96,
+      "description": "Cross-asset relative-strength + correlation vs equity indices. Daily bars = yfinance market-close. SLA bumped 72h→96h on 2026-04-27 — Monday morning before US market close means most-recent yfinance daily is still Friday (Fri close → Mon morning = ~91h gap). 96h handles Mon-morning + Mon-holiday cases."
     },
     {
       "match_prefix": ["m_vix", "m_dxy", "m_sp500", "m_nasdaq", "m_gold", "m_oil", "m_eurusd", "m_us10y", "m_usdjpy"],
       "source_file": "data/macro_data/macro_daily.csv",
       "source_kind": "daily_series",
-      "max_age_hours": 72,
-      "description": "Macro daily — VIX, DXY, equity, commodities, rates, FX. yfinance daily bars = market close; weekend/holiday gaps can push last-bar age to 72h."
+      "max_age_hours": 96,
+      "description": "Macro daily — VIX, DXY, equity, commodities, rates, FX. yfinance daily bars publish at market close. SLA bumped 72h→96h on 2026-04-27: Monday-morning trading sees Fri close + ~3 days = ~91h gap before Monday's bar publishes. 96h handles Mon-morning + Mon-holiday."
     },
     {
       "match_prefix": ["gdelt_", "gp_"],

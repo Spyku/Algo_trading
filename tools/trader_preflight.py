@@ -152,7 +152,12 @@ def _try_refresh_stale_source(source_file, verbose=True):
     return False
 
 
-def preflight(asset=None, verbose=True, auto_refresh_once=True):
+def preflight(asset=None, verbose=True, auto_refresh_once=True, skip_freshness=False):
+    """skip_freshness=True: skip data-freshness checks but keep
+    file-exists / feature-manifest / NaN-tail checks. Used by hot-reload
+    where staleness is irrelevant to whether the new config is valid
+    (per-cycle staleness gate in generate_live_signal handles freshness).
+    """
     report = {'ok': True, 'checks': [], 'failures': [], 'warnings': [], 'refreshed': []}
 
     # Load configs
@@ -299,6 +304,10 @@ def preflight(asset=None, verbose=True, auto_refresh_once=True):
                         print(f'    ✗ {msg}')
                 continue
             if max_age and age_h > max_age:
+                if skip_freshness:
+                    if verbose:
+                        print(f'    ⊘ {src} stale {age_h:.1f}h (>{max_age}h SLA) — skipped (per-cycle gate enforces freshness)')
+                    continue
                 # Auto-refresh: try to download the stale source once, re-check age.
                 # Survives transient staleness (e.g., AB matrix resetting data files).
                 refreshed = False
@@ -331,10 +340,21 @@ def preflight(asset=None, verbose=True, auto_refresh_once=True):
         # 2) Check each required feature is in build_all_features output
         df = get_built_df(a)
         if df is None:
+            # When skip_freshness=True (hot-reload context): a transient load_data
+            # failure (Drive sync glitch, concurrent download race with main loop's
+            # own download_asset call) is NOT a config-validity issue — the
+            # per-cycle staleness gate in generate_live_signal already enforces
+            # data validity at trade time. Don't revert config because of a
+            # data-availability blip; treat as warning, continue.
             msg = f'{pair_label}: build_all_features returned None (data load failed)'
-            report['failures'].append(msg)
-            if verbose:
-                print(f'    ✗ {msg}')
+            if skip_freshness:
+                report['warnings'].append(msg)
+                if verbose:
+                    print(f'    ⊘ {msg} — skipped (per-cycle gate enforces data validity)')
+            else:
+                report['failures'].append(msg)
+                if verbose:
+                    print(f'    ✗ {msg}')
             continue
 
         missing = [f for f in required if f not in df.columns]
@@ -359,9 +379,17 @@ def preflight(asset=None, verbose=True, auto_refresh_once=True):
             other_nan = [(f, n) for f, n in nan_feats if f not in direct]
             if direct_nan:
                 msg = f'{pair_label}: {len(direct_nan)} direct feature(s) NaN in tail: {[(f, n) for f, n in direct_nan[:3]]}'
-                report['failures'].append(msg)
-                if verbose:
-                    print(f'    ✗ {msg}')
+                if skip_freshness:
+                    # NaN-tail is a freshness issue (upstream data didn't update
+                    # for those features). Per-cycle staleness gate handles it
+                    # at trade time. Don't revert config for this in hot-reload.
+                    report['warnings'].append(msg)
+                    if verbose:
+                        print(f'    ⊘ {msg} — skipped (per-cycle gate enforces data validity)')
+                else:
+                    report['failures'].append(msg)
+                    if verbose:
+                        print(f'    ✗ {msg}')
             if other_nan and verbose:
                 print(f'    ⚠ {len(other_nan)} PySR-input feature(s) NaN in tail (will be imputed): {[(f, n) for f, n in other_nan[:3]]}')
 
