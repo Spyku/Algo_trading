@@ -635,6 +635,35 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
         print(f"    Cleared {stale} stale order(s) for {symbol}")
         time.sleep(1)
 
+    # M-29 fix (2026-05-02): partial-fill recalc was setting size = full
+    # available cash instead of (target − already_filled), causing over-spend
+    # when wallet > target. Today's reproduction: target $12,000, wallet
+    # $12,609.55, partial filled $2,026.12, recalc set next-leg = $10,583.41
+    # (all remaining cash) instead of $9,973.88 (target − filled). Total
+    # spent: $12,609.53 = $609.53 over.
+    # Fix: track total_filled (in BUY: USD; in SELL: base qty) by reading
+    # filled_quantity × average_fill_price from each cancelled order's
+    # status. Cross-check against wallet delta from baseline_avail. Use
+    # min(SourceA, SourceB) when they disagree to be conservative.
+    original_size = size
+    total_filled_usd = 0.0   # BUY-side accumulator
+    total_filled_qty = 0.0   # SELL-side accumulator
+    baseline_usd = None
+    baseline_qty = None
+    # Bug A fix: only set baseline if get_balances actually returned data;
+    # falsy {} would set baseline = 0.0 which is NOT None and would cause
+    # spurious cross-check warnings + treat empty wallet as our baseline.
+    _bal0 = get_balances()
+    if _bal0:
+        if is_buy:
+            v = _bal0.get('USD', {}).get('available')
+            if v is not None:
+                baseline_usd = float(v)
+        else:
+            v = _bal0.get(asset_name, {}).get('available')
+            if v is not None:
+                baseline_qty = float(v)
+
     elapsed = 0
     attempt = 0
 
@@ -802,9 +831,19 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
         time.sleep(1)
         elapsed += 1
         vs, vo = get_order_status(order_id)
+        leg_filled_qty = 0.0
+        leg_avg_price = limit_price
         if vs == 200 and vo:
             vd = vo.get('data', vo)
             vstatus = vd.get('status', vd.get('state', ''))
+            # M-29: capture this order leg's actual fills (post-cancel) BEFORE
+            # the recalc branch. filled_quantity = base-asset units filled
+            # cumulatively on this order; average_fill_price = VWAP across
+            # those fills. These are immutable once the order is cancelled.
+            # Bug B fix: `or 0` / `or limit_price` guard against None values
+            # (Revolut returns null for unfilled orders' average_fill_price).
+            leg_filled_qty = float(vd.get('filled_quantity') or 0)
+            leg_avg_price = float(vd.get('average_fill_price') or limit_price)
             if vstatus == 'filled':
                 avg = float(vd.get('average_fill_price', limit_price))
                 print(f"    Maker {side_label} FILLED at ${avg:,.2f} (0% fee) (filled during cancel)")
@@ -814,26 +853,66 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
                 cancel_all_open_orders(symbol)
                 time.sleep(1)
                 elapsed += 1
+        # M-29: accumulate this leg's contribution to running total. Source A.
+        if leg_filled_qty > 0:
+            if is_buy:
+                total_filled_usd += leg_filled_qty * leg_avg_price
+            else:
+                total_filled_qty += leg_filled_qty
 
-        # After partial fill, recalculate size from actual available balance
+        # M-29 (2026-05-02): recalculate size = min(available, target − already_filled).
+        # OLD bug: set size = full available cash; over-spent when wallet > target.
+        # NEW: cap by remaining_target so we never exceed the original ask.
         if is_buy:
             bal = get_balances()
             if bal:
-                usd_avail = bal.get('USD', {}).get('available', 0)
+                usd_avail = float(bal.get('USD', {}).get('available', 0))
+                # Source B cross-check: wallet delta from baseline.
+                # If different from Source A by > $1, log warning and use the
+                # MORE conservative (larger) estimate of spent → smaller remaining.
+                spent_by_wallet = max(0.0, baseline_usd - usd_avail) if baseline_usd is not None else total_filled_usd
+                spent_by_orders = total_filled_usd
+                if abs(spent_by_wallet - spent_by_orders) > 1.0 and baseline_usd is not None:
+                    print(f"    [M-29 cross-check] wallet says spent ${spent_by_wallet:,.2f}, orders say ${spent_by_orders:,.2f} (delta ${abs(spent_by_wallet - spent_by_orders):,.2f}). Using max → smaller remaining.")
+                spent_so_far = max(spent_by_wallet, spent_by_orders)
+                remaining_target = max(0.0, original_size - spent_so_far)
+
+                # Bottom-out check: any remaining trade < MIN_TRADE_USD or no cash
                 if usd_avail < MIN_TRADE_USD:
-                    print(f"    Remaining balance ${usd_avail:,.2f} < ${MIN_TRADE_USD} minimum, going market for residual")
-                    return place_market(symbol, usd_avail)
-                if usd_avail < size:
-                    print(f"    Balance updated after partial fill: ${size:,.2f} → ${usd_avail:,.2f}")
-                    size = math.floor(usd_avail * 100) / 100 - 0.01
+                    if remaining_target >= MIN_TRADE_USD:
+                        print(f"    Remaining cash ${usd_avail:,.2f} < ${MIN_TRADE_USD} min, target unmet — going market for residual ${usd_avail:,.2f}")
+                        return place_market(symbol, usd_avail)
+                    print(f"    Remaining target ${remaining_target:,.2f} below trade minimum — stopping (target ${original_size:,.2f} reached within ${original_size - spent_so_far:,.2f})")
+                    return 200, {'status': 'filled_target_reached', 'spent_usd': spent_so_far}
+                if remaining_target < MIN_TRADE_USD:
+                    # Target essentially met (within min trade size). Stop placing more orders.
+                    print(f"    Target reached: spent ${spent_so_far:,.2f} of ${original_size:,.2f} — remaining ${remaining_target:,.2f} below ${MIN_TRADE_USD} min trade. Stopping.")
+                    return 200, {'status': 'filled_target_reached', 'spent_usd': spent_so_far}
+
+                next_size = min(math.floor(usd_avail * 100) / 100 - 0.01, remaining_target)
+                if abs(next_size - size) > 0.01:
+                    print(f"    [M-29 recalc] target=${original_size:,.2f}  filled=${spent_so_far:,.2f}  remaining=${remaining_target:,.2f}  cash=${usd_avail:,.2f}  next_size=${next_size:,.2f}")
+                    size = next_size
         else:
             bal = get_balances()
             if bal:
-                asset_name = symbol.split('-')[0]
-                crypto_avail = bal.get(asset_name, {}).get('available', 0)
-                if crypto_avail < size and crypto_avail > 0:
-                    print(f"    Balance updated after partial fill: {size:.6f} → {crypto_avail:.6f}")
-                    size = crypto_avail
+                crypto_avail = float(bal.get(asset_name, {}).get('available', 0))
+                # Same cross-check pattern for SELL side
+                sold_by_wallet = max(0.0, baseline_qty - crypto_avail) if baseline_qty is not None else total_filled_qty
+                sold_by_orders = total_filled_qty
+                if abs(sold_by_wallet - sold_by_orders) > 1e-6 and baseline_qty is not None:
+                    print(f"    [M-29 cross-check] wallet says sold {sold_by_wallet:.6f}, orders say {sold_by_orders:.6f} (delta {abs(sold_by_wallet - sold_by_orders):.6f}). Using max → smaller remaining.")
+                sold_so_far = max(sold_by_wallet, sold_by_orders)
+                remaining_target = max(0.0, original_size - sold_so_far)
+
+                if crypto_avail <= 0 or remaining_target <= 0:
+                    print(f"    Sell target reached: sold {sold_so_far:.6f} of {original_size:.6f} (holdings now {crypto_avail:.6f}). Stopping.")
+                    return 200, {'status': 'filled_target_reached', 'sold_qty': sold_so_far}
+
+                next_size = min(crypto_avail, remaining_target)
+                if abs(next_size - size) > 1e-9 and next_size > 0:
+                    print(f"    [M-29 recalc] target={original_size:.6f}  sold={sold_so_far:.6f}  remaining={remaining_target:.6f}  holdings={crypto_avail:.6f}  next_size={next_size:.6f}")
+                    size = next_size
 
     print(f"    Not filled after {maker_window}s, going MARKET")
     cancel_all_open_orders(symbol)

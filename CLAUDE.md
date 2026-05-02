@@ -433,6 +433,49 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
+### 🚨 MAJOR BUG — partial-fill recalc spends ALL available cash instead of `target − already_filled`
+
+Found 2026-05-02 from today's `/buy` event ([logs/ed_v2_20260429_230924.log](logs/ed_v2_20260429_230924.log) lines 9012-9027). **Real overspend: $609.53** on a $12,000 target → recorded position `usd_invested = $12,609.53` ([config/position_ed_v2_ETH.json](config/position_ed_v2_ETH.json) latest BUY entry timestamped `2026-05-02T14:03:57Z`).
+
+**What actually happened (per position file + log)**:
+1. Wallet cash before /buy: ~$12,609.55 (MORE than the $12,000 target — this is the catastrophic-scenario condition)
+2. User issued `/buy` → default size = `max_position_usd = $12,000.00` (logged as `$11,999.99` after the $0.01 safety-margin floor)
+3. Phase 1 partial fill: $2,026.12 actually filled (log displayed "Partially filled: 11%" but that was rounding — true partial was 16.9%)
+4. After partial: wallet cash dropped to $10,583.43 (= $12,609.55 − $2,026.12)
+5. **Buggy recalc** at [crypto_revolut_ed_v2.py:826-828](crypto_revolut_ed_v2.py#L826): `if usd_avail < size: size = math.floor(usd_avail * 100) / 100 - 0.01` → `size = $10,583.41` (full remaining cash) instead of `target − already_filled = $12,000 − $2,026.12 = $9,973.88`
+6. Phase 2 fill: $10,583.41 at $2,308.06 = 4.586 ETH
+7. **Total spent: $2,026.12 + $10,583.41 = $12,609.53** ($609.53 over target)
+
+**Bug location**: [crypto_revolut_ed_v2.py:818-828](crypto_revolut_ed_v2.py#L818) inside `_execute_maker_order()`:
+```python
+if usd_avail < size:
+    print(f"    Balance updated after partial fill: ${size:,.2f} → ${usd_avail:,.2f}")
+    size = math.floor(usd_avail * 100) / 100 - 0.01
+```
+The print statement writes `(target_size → wallet_avail)` — the log line `$11,999.99 → $10,583.42` is NOT before/after wallet, it's `target_var → avail_var` from the same moment. Subtle source of confusion when reading logs.
+
+**Why it matters more broadly**: the same code path applies to every BUY (auto + manual). Today's overspend was bounded because wallet only had ~$12,610. With a larger wallet (e.g., $20k cash, /buy $12k target):
+- Phase 1 partial fill ~17% = $2,026
+- After: `usd_avail = $17,974`, `size = $12,000`. Condition `$17,974 < $12,000` is False → size stays $12k
+- Phase 2 fills $12,000 (the original target — second time!) → **total $14,026, $2,026 over target**
+- If THAT phase 2 also partial-fills, the bug compounds
+
+For SELL side ([crypto_revolut_ed_v2.py:830-836](crypto_revolut_ed_v2.py#L830)): same logic, same bug, but less catastrophic because we're selling everything we own (the original `size = base_amount` already equals total holdings, and `crypto_avail < size` only fires after partial fill removes some — then we sell what's left, which IS what we want).
+
+**Fix sketch (BUY-side)**:
+1. Track `total_filled_usd` across the maker loop (sum of `filled_quantity × average_fill_price` per leg, accumulated from each `od.get('filled_quantity')` × `od.get('average_fill_price')` in the partial-fill branch at line 771-789)
+2. After partial fill, compute `remaining_target = original_size - total_filled_usd`
+3. Set next leg's `size = min(usd_avail - 0.01, remaining_target)` — never exceed remaining target, never exceed available cash
+4. SELL-side current behavior is actually OK (always selling 100% of holdings), but apply same pattern for correctness if `original_size != base_amount`
+
+Effort: ~30-40 lines in `_execute_maker_order()`. Need to thread `total_filled_usd` through the partial-fill loop branch — currently only tracked implicitly via `bal` checks.
+
+**Test**: simulate a partial fill on a wallet with cash > target, assert `usd_invested ≤ target × 1.001`. Add to bundle-4 trader audit fixes.
+
+**Priority**: HIGH — silent over-spend bug, money-correctness class. Same severity as the M-02/M-03 ledger-delta bugs from 2026-04-25 bundle. Today's $609 overspend reproduces the bug clearly. Should be next bundle 4 fix.
+
+---
+
 ### Currently running
 - **HRST ETH 5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 18:00 ([logs/ed_v1_20260502_180022.log](logs/ed_v1_20260502_180022.log)). Validates today's parallel-wrapper bug fixes (A: `UnboundLocalError` at `_generate_signals_cached`; B: `BrokenProcessPool` in hybrid refine config #3). Compare winner to 8h HRST result (`bull=7h@85% / bear=16h@75% +68.81%`).
 - **HRST BNB 4,5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 20:28 ([logs/ed_v1_20260502_202819.log](logs/ed_v1_20260502_202819.log)). First full pipeline for BNB. Mode P was completed earlier today (~1.5h, all 5 PySR JSONs written cleanly with `discovery_method = "historical"`). HRST will produce single-horizon Mode V winners, Mode S joint regime sweep, and Mode T shield+gate sweep. ETA ~3-4h on laptop. Output: `models/crypto_ed_production_noprod.csv` BNB rows + `config/regime_config_ed_noprod.json` BNB block.
