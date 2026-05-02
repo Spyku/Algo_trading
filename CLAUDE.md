@@ -433,7 +433,35 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🚨 MAJOR BUG — partial-fill recalc spends ALL available cash instead of `target − already_filled`
+### 🔴 #1 PRIORITY (TOMORROW, 2026-05-03) — LIVE-TEST the M-29 partial-fill fix
+
+**Status**: code shipped 2026-05-02 evening (commit `d568a30`, pushed to `origin/main`). Trader picks it up automatically on next restart via `start_ed_v2.bat`. **Cannot be unit-tested any further — needs a real `/buy` event against Revolut's actual API to validate end-to-end.**
+
+**Test protocol for tomorrow's first BUY (manual `/buy` OR auto regime BUY — both exercise the same code path)**:
+
+1. **Verify trader is on the new code**: in the engine dir, `git log -1 --oneline` should show `d568a30 M-29 fix...`. If trader was running before the restart, confirm restart picked up the fix.
+2. **Let a BUY happen during normal use** — don't manufacture a test trade. The fix only fires on partial-filled BUYs, so it might take a few entries before it's exercised.
+3. **Watch the trader log for new diagnostic lines**:
+   - `[M-29 recalc] target=$X filled=$Y remaining=$Z cash=$C next_size=$N` — fires after every partial-fill cancel cycle
+   - `[M-29 cross-check] wallet says spent $A, orders say $B (delta $C). Using max → smaller remaining.` — fires only if the two sources disagree by >$1 (interesting telemetry, harmless)
+   - `Target reached: spent $X of $T — remaining $Y below $300 min trade. Stopping.` — clean stop without market-fallback (replaces the case where old code would have over-spent the residual)
+4. **After the trade completes, verify in [config/position_ed_v2_ETH.json](config/position_ed_v2_ETH.json)**:
+   - `usd_invested` should be ≤ target (within ~$5 tolerance for rounding)
+   - **Compare to today's bug**: today was $12,609.53 = $609.53 over. Tomorrow's value should be $11,995-$12,005 range for `/buy 12000`.
+5. **If it overshoots again**: capture the log + position file, then revert immediately:
+   ```bash
+   git revert d568a30 && git push
+   ```
+   Restart trader. Back to old behavior (with the bug, but known-tolerable).
+6. **If it works correctly across 3-5 BUYs (at least 1 with a partial fill)**: this entry moves to Closed and the bug is officially fixed.
+
+**Expected first-BUY behavior** when wallet ≥ target, no partials encountered: trader places maker, fills fully, no `[M-29 recalc]` log line ever fires (recalc only fires on cancel-after-partial). Position file shows `usd_invested ≈ target`. This is the hot path — fix should be invisible.
+
+**Expected partial-fill behavior** (the one we care about): trader places maker, partial fill, cancels, `[M-29 recalc]` fires, places SMALLER next leg (capped at `remaining_target`), eventually fills target. Position file shows `usd_invested ≤ target`. **NEVER over-target.**
+
+---
+
+### Background: the bug + the fix shipped
 
 Found 2026-05-02 from today's `/buy` event ([logs/ed_v2_20260429_230924.log](logs/ed_v2_20260429_230924.log) lines 9012-9027). **Real overspend: $609.53** on a $12,000 target → recorded position `usd_invested = $12,609.53` ([config/position_ed_v2_ETH.json](config/position_ed_v2_ETH.json) latest BUY entry timestamped `2026-05-02T14:03:57Z`).
 
@@ -462,17 +490,21 @@ The print statement writes `(target_size → wallet_avail)` — the log line `$1
 
 For SELL side ([crypto_revolut_ed_v2.py:830-836](crypto_revolut_ed_v2.py#L830)): same logic, same bug, but less catastrophic because we're selling everything we own (the original `size = base_amount` already equals total holdings, and `crypto_avail < size` only fires after partial fill removes some — then we sell what's left, which IS what we want).
 
-**Fix sketch (BUY-side)**:
-1. Track `total_filled_usd` across the maker loop (sum of `filled_quantity × average_fill_price` per leg, accumulated from each `od.get('filled_quantity')` × `od.get('average_fill_price')` in the partial-fill branch at line 771-789)
-2. After partial fill, compute `remaining_target = original_size - total_filled_usd`
-3. Set next leg's `size = min(usd_avail - 0.01, remaining_target)` — never exceed remaining target, never exceed available cash
-4. SELL-side current behavior is actually OK (always selling 100% of holdings), but apply same pattern for correctness if `original_size != base_amount`
+**Fix shipped (`d568a30`, 2026-05-02 evening)**:
+1. Track `total_filled_usd` (BUY) / `total_filled_qty` (SELL) by reading `filled_quantity × average_fill_price` from each cancelled order's status (Source A — immune to other-asset USD activity contaminating wallet)
+2. Cross-check against wallet-delta from `baseline_avail` captured at function entry (Source B — immune to order-status read failures)
+3. Use `max(spent_by_wallet, spent_by_orders)` → smaller `remaining_target` → never overspend
+4. `next_size = min(usd_avail - 0.01, original_size - total_filled_so_far)`
+5. Two early-stop branches: cash-below-min (market-fallback for residual or stop) and target-met-within-tolerance (stop, don't place sub-min orders)
+6. Symmetric SELL-side patch (currently benign because trader always sells 100% holdings, but partial-sell scenarios would have hit same bug)
 
-Effort: ~30-40 lines in `_execute_maker_order()`. Need to thread `total_filled_usd` through the partial-fill loop branch — currently only tracked implicitly via `bal` checks.
+**Verified by 9 unit tests** in [tools/test_m29_partial_fill_bug.py](tools/test_m29_partial_fill_bug.py): today's exact bug ($12,610 wallet, $12k target, $2,026 partial → next leg correctly capped at $9,973.88 instead of buggy $10,584.42), $50k wallet catastrophic scenario, wallet < target, cash near minimum, target essentially met, baseline read failed, cross-check disagreement, first-iter no fill.
 
-**Test**: simulate a partial fill on a wallet with cash > target, assert `usd_invested ≤ target × 1.001`. Add to bundle-4 trader audit fixes.
+**Caller-compat verified**: all 4 callers (auto BUY/SELL + manual `/buy`/`/sell`) use balance-delta as primary basis source via M-02/M-03 ledger-delta logic. New early-stop return dict `{'status': 'filled_target_reached', 'spent_usd': X}` gracefully falls back to balance-delta in callers — `filled_quantity`/`average_fill_price` missing fields don't cause issues.
 
-**Priority**: HIGH — silent over-spend bug, money-correctness class. Same severity as the M-02/M-03 ledger-delta bugs from 2026-04-25 bundle. Today's $609 overspend reproduces the bug clearly. Should be next bundle 4 fix.
+**Audit completed**: 12 risk dimensions checked (return-dict compat, baseline race, double-counting, partial→full path, MIN_TRADE_USD edge cases, SELL-side asymmetry, M-02/M-03 interaction, retry paths, syntax/compile, etc.). No regressions identified. See conversation log 2026-05-02 evening for full audit.
+
+**Priority severity**: HIGH — silent money-correctness bug, same class as M-02/M-03 ledger-delta bugs from 2026-04-25 bundle. Live test required because Revolut's actual API behavior on partial fills can't be mocked perfectly.
 
 ---
 
