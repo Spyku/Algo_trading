@@ -1172,7 +1172,7 @@ def main():
         if ch == '3': setup_telegram(); return
         if ch == '2': loop_mode = True
         a = input(f"  Asset [{asset_name}]: ").strip().upper()
-        if a in ['BTC','ETH','SOL','XRP','DOGE']: asset_name = a
+        if a in ['BTC','ETH','SOL','LINK','XRP','BNB']: asset_name = a
 
     print(f"\n  Asset: {asset_name} | Min conf: {MIN_CONFIDENCE}%")
 

@@ -130,8 +130,22 @@ def _prepare_data(asset, horizon, load_data_fn=None, build_features_fn=None):
     return X, y, all_cols, len(X)
 
 
-def _run_single_pysr(X, y, all_cols, feature_subset, seed, iterations, run_label):
-    """Run a single PySR instance on a feature subset. Returns list of result dicts."""
+def _run_single_pysr(X, y, all_cols, feature_subset, seed, iterations, run_label,
+                     progress=True, verbosity=1):
+    """Run a single PySR instance on a feature subset. Returns list of result dicts.
+
+    progress: forwarded to PySRRegressor. Default True (interactive dashboard
+    + 'Press q + enter' prompt — fine when only one PySR runs at a time).
+    Parallel callers (crypto_trading_system_ed_parallel_p.py) pass False to
+    disable the interactive prompt entirely — multiple workers sharing the
+    parent's stdin would otherwise deadlock waiting for keypresses.
+
+    verbosity: forwarded to PySRRegressor. Default 1 (live equation-search
+    prints). Parallel callers pass 0 to suppress the OS-level stdin poll —
+    Julia opens stdin at the file-handle level, bypassing Python's
+    sys.stdin, so closing sys.stdin in the worker isn't enough on its own.
+    verbosity=0 disables the polling code path entirely.
+    """
     from pysr import PySRRegressor
 
     # Select feature subset columns
@@ -163,7 +177,8 @@ def _run_single_pysr(X, y, all_cols, feature_subset, seed, iterations, run_label
         procs=0,
         parallelism="serial",
         temp_equation_file=False,
-        verbosity=1,
+        verbosity=verbosity,
+        progress=progress,
     )
 
     model.fit(X_sub, y, variable_names=feature_subset)

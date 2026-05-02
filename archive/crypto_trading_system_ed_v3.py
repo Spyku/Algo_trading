@@ -1,7 +1,7 @@
 """
 Doohan — Production ML Trading System
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
+ML trading system for BTC, ETH, XRP, SOL, LINK, BNB.
 130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
 Variable horizon per asset (5h, 6h, 7h, 8h etc.)
 
@@ -23,16 +23,16 @@ Modes:
   H.   Horizon sweep (DV per horizon → compare → save best)
 
 CLI Usage:
-  python crypto_trading_system_eli.py P BTC 6h
-  python crypto_trading_system_eli.py DV BTC 8h
-  python crypto_trading_system_eli.py H BTC 5,6,7,8h
-  python crypto_trading_system_eli.py D BTC,ETH 6,7h
+  python crypto_trading_system_ed.py P BTC 6h
+  python crypto_trading_system_ed.py DV BTC 8h
+  python crypto_trading_system_ed.py H BTC 5,6,7,8h
+  python crypto_trading_system_ed.py D BTC,ETH 6,7h
 
 Outputs:
-  models/crypto_eli_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_eli_production.csv         (best live performer from Mode V)
-  config/regime_config_eli.json                  (horizon + min_confidence per asset)
-  logs/eli_v1_*.log                             (auto-saved terminal output)
+  models/crypto_ed_best_models.csv       (top 6 candidates from Mode D)
+  models/crypto_ed_production.csv         (best live performer from Mode V)
+  config/regime_config_ed.json                  (horizon + min_confidence per asset)
+  logs/ed_v1_*.log                             (auto-saved terminal output)
 
 ============================================================
 TODO (V1.7.1 → production readiness):
@@ -43,8 +43,8 @@ TODO (V1.7.1 → production readiness):
      for diagnostics and as input to pick top 3 for refinement.
 
   2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_eli.py DV BTC 7h
-       python crypto_trading_system_eli.py DV BTC 8h
+       python crypto_trading_system_ed.py DV BTC 7h
+       python crypto_trading_system_ed.py DV BTC 8h
      Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
 
   3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
@@ -182,7 +182,7 @@ class _TeeWriter:
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"eli_v1_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+_log_path = os.path.join(_LOG_DIR, f"ed_v1_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
 _log_fh = open(_log_path, 'w', encoding='utf-8')
 sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
 sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
@@ -309,15 +309,15 @@ if sys.platform == 'win32':
 # ============================================================
 
 FEATURE_SET_A = [
-    'hour_cos', 'logret_240', 'vol_ratio_12_48', 'logret_72',
-    'rsi_14', 'logret_120', 'stoch_k_14', 'sma20_to_sma50',
-    'volatility_12', 'xa_dax_relstr5d', 'xa_sp500_relstr5d',
-    'spread_24_4', 'atr_pct_14', 'volume_ratio', 'volatility_48',
-    'price_to_sma100', 'logret_4', 'spread_120_12',
+    'hour_cos', 'logret_240h', 'vol_ratio_12_48', 'logret_72h',
+    'rsi_14h', 'logret_120h', 'stoch_k_14h', 'sma20_to_sma50h',
+    'volatility_12h', 'xa_dax_relstr5d', 'xa_sp500_relstr5d',
+    'spread_24h_4h', 'atr_pct_14h', 'volume_ratio_h', 'volatility_48h',
+    'price_to_sma100h', 'logret_4h', 'spread_120h_12h',
 ]
 
 FEATURE_SET_B = [
-    'rsi_14', 'hour_cos', 'hour_sin', 'sma20_to_sma50', 'logret_72',
+    'rsi_14h', 'hour_cos', 'hour_sin', 'sma20_to_sma50h', 'logret_72h',
     'm_sp500_chg5d', 'm_dxy_vol5d', 'xa_dax_corr30d', 'xa_dax_relstr5d',
     'fg_chg5d', 'm_us10y_chg10d', 'm_eurusd_vol5d', 'm_eurusd_chg5d',
     'vix_spike',
@@ -331,16 +331,18 @@ ACTIVE_FEATURE_SET = 'A'
 # ============================================================
 ASSETS = {
     # Pruned 2026-04-19 — see crypto_trading_system_ed.py ASSETS for rationale.
-    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_30m_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_30m_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_30m_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_30m_data.csv',  'start': '2020-08-01T00:00:00Z'},
-    'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_30m_data.csv', 'start': '2019-01-01T00:00:00Z'},
+    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
+    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
+    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
+    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
+    'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_hourly_data.csv', 'start': '2019-01-01T00:00:00Z'},
+    'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
+    'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
+    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
 }
 
-CANDLE_MINUTES = 30               # Eli = 30-minute candles
-HORIZON_SHORT = 4                 # short horizon in candles (= 1h)
-HORIZON_LONG = 10                 # long horizon in candles (= 2h30)
+HORIZON_SHORT = 4                 # short horizon (parametric — change here to switch)
+HORIZON_LONG = 8                  # long horizon (parametric — change here to switch)
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
 PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 
@@ -352,13 +354,13 @@ SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used for `2*TRADING_FEE` label threshold only
 BACKTEST_FEE_PER_LEG = 0.0005  # 5 bps/leg — realistic maker-blend, used in all backtest sims
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
-REPLAY_HOURS = 400          # ~200h at 30min candles
-REPLAY_HOURS_S = 800       # Mode S — longer window
-DIAG_STEP = 72             # walk-forward step (= 36h at 30min)
-DIAG_WINDOWS = [24, 48, 96, 192]  # candle windows (12h to 96h at 30min)
+REPLAY_HOURS = 200
+REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
+DIAG_STEP = 36
+DIAG_WINDOWS = [72, 100, 150, 200]  # V1.2: min 72h — 48h also underperforms in live backtests
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
-EMBARGO_CANDLES_DEFAULT = 10  # gap between train/test — must be >= horizon
+EMBARGO_CANDLES_DEFAULT = 8  # gap between train/test — must be >= horizon to prevent label overlap leakage
 
 
 # Per-horizon feature ranges — short tighter to avoid overfitting, long keeps full range
@@ -385,10 +387,10 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 LABEL_MODE = 'fee_aware'
 
 # Mode V: live backtest validation of top 6 candidates
-MODE_G_REPLAY_HOURS = 672      # 2 full weeks at 30min candles (336*2)
+MODE_G_REPLAY_HOURS = 336       # 2 full weeks
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_eli_production.csv'
+PRODUCTION_CSV = 'models/crypto_ed_production.csv'
 
 
 
@@ -481,7 +483,7 @@ def download_binance(asset_name, update_only=True):
     filepath = config['file']
     exchange = ccxt.binance()
     symbol = config['ticker']
-    timeframe = '30m'
+    timeframe = '1h'
     limit = 1000
 
     if os.path.exists(filepath) and update_only:
@@ -662,76 +664,76 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df = df_hourly.copy()
 
     for period in [1, 2, 3, 4, 5, 6, 7, 8, 12, 24, 48, 72, 120, 240]:
-        df[f'logret_{period}'] = np.log(df['close'] / df['close'].shift(period))
+        df[f'logret_{period}h'] = np.log(df['close'] / df['close'].shift(period))
 
-    df['spread_24_4']   = df['logret_24']  - df['logret_4']
-    df['spread_48_4']   = df['logret_48']  - df['logret_4']
-    df['spread_120_8']  = df['logret_120'] - df['logret_8']
-    df['spread_240_24'] = df['logret_240'] - df['logret_24']
-    df['spread_48_12']  = df['logret_48']  - df['logret_12']
-    df['spread_120_12'] = df['logret_120'] - df['logret_12']
+    df['spread_24h_4h']   = df['logret_24h']  - df['logret_4h']
+    df['spread_48h_4h']   = df['logret_48h']  - df['logret_4h']
+    df['spread_120h_8h']  = df['logret_120h'] - df['logret_8h']
+    df['spread_240h_24h'] = df['logret_240h'] - df['logret_24h']
+    df['spread_48h_12h']  = df['logret_48h']  - df['logret_12h']
+    df['spread_120h_12h'] = df['logret_120h'] - df['logret_12h']
 
-    df['sma20']  = df['close'].rolling(20).mean()
-    df['sma50']  = df['close'].rolling(50).mean()
-    df['sma100'] = df['close'].rolling(100).mean()
-    df['sma200'] = df['close'].rolling(200).mean()
-    df['price_to_sma20']  = df['close'] / df['sma20'] - 1
-    df['price_to_sma50']  = df['close'] / df['sma50'] - 1
-    df['price_to_sma100'] = df['close'] / df['sma100'] - 1
-    df['sma20_to_sma50']  = df['sma20'] / df['sma50'] - 1
+    df['sma20h']  = df['close'].rolling(20).mean()
+    df['sma50h']  = df['close'].rolling(50).mean()
+    df['sma100h'] = df['close'].rolling(100).mean()
+    df['sma200h'] = df['close'].rolling(200).mean()
+    df['price_to_sma20h']  = df['close'] / df['sma20h'] - 1
+    df['price_to_sma50h']  = df['close'] / df['sma50h'] - 1
+    df['price_to_sma100h'] = df['close'] / df['sma100h'] - 1
+    df['sma20_to_sma50h']  = df['sma20h'] / df['sma50h'] - 1
 
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
-    df['rsi_14'] = 100 - (100 / (1 + rs))
+    df['rsi_14h'] = 100 - (100 / (1 + rs))
 
     low14  = df['low'].rolling(14).min()
     high14 = df['high'].rolling(14).max()
-    df['stoch_k_14'] = 100 * (df['close'] - low14) / (high14 - low14)
+    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
 
     bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
-    df['bb_position_20'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
 
     roll_mean = df['close'].rolling(50).mean()
     roll_std  = df['close'].rolling(50).std()
-    df['zscore_50'] = (df['close'] - roll_mean) / roll_std
+    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
 
     tr = pd.DataFrame({
         'hl': df['high'] - df['low'],
         'hc': abs(df['high'] - df['close'].shift(1)),
         'lc': abs(df['low'] - df['close'].shift(1))
     }).max(axis=1)
-    df['atr_pct_14'] = tr.rolling(14).mean() / df['close']
+    df['atr_pct_14h'] = tr.rolling(14).mean() / df['close']
 
     df['intraday_range'] = (df['high'] - df['low']) / df['close']
 
-    df['volatility_12'] = df['logret_1'].rolling(12).std()
-    df['volatility_48'] = df['logret_1'].rolling(48).std()
-    df['vol_ratio_12_48'] = df['volatility_12'] / df['volatility_48']
+    df['volatility_12h'] = df['logret_1h'].rolling(12).std()
+    df['volatility_48h'] = df['logret_1h'].rolling(48).std()
+    df['vol_ratio_12_48'] = df['volatility_12h'] / df['volatility_48h']
 
     if df['volume'].sum() == 0 or df['volume'].isna().all():
-        df['volume_ratio'] = 1.0
+        df['volume_ratio_h'] = 1.0
     else:
         df['volume'] = df['volume'].replace(0, np.nan).ffill().bfill()
         vol_sma = df['volume'].rolling(20).mean()
-        df['volume_ratio'] = df['volume'] / vol_sma
-        df['volume_ratio'] = df['volume_ratio'].fillna(1.0)
+        df['volume_ratio_h'] = df['volume'] / vol_sma
+        df['volume_ratio_h'] = df['volume_ratio_h'].fillna(1.0)
 
     # VVR: Volume-to-Volatility Ratio (distinguishes real moves from noise)
     vol_12 = df['close'].pct_change().rolling(12).std()
     vol_12 = vol_12.replace(0, np.nan)
-    df['vvr_12'] = df['volume_ratio'] / vol_12
-    df['vvr_12'] = df['vvr_12'].fillna(1.0)
-    df['vvr_12'] = df['vvr_12'].clip(0, 20)  # cap outliers
+    df['vvr_12h'] = df['volume_ratio_h'] / vol_12
+    df['vvr_12h'] = df['vvr_12h'].fillna(1.0)
+    df['vvr_12h'] = df['vvr_12h'].clip(0, 20)  # cap outliers
 
     # ---- Garman-Klass volatility (1980): uses OHLC, 7.4x more efficient than close-to-close ----
     log_hl = np.log(df['high'] / df['low'])
     log_co = np.log(df['close'] / df['open'])
     gk_single = 0.5 * log_hl**2 - (2 * np.log(2) - 1) * log_co**2
-    df['gk_volatility_14'] = gk_single.rolling(14).mean().apply(np.sqrt)
-    df['gk_volatility_48'] = gk_single.rolling(48).mean().apply(np.sqrt)
+    df['gk_volatility_14h'] = gk_single.rolling(14).mean().apply(np.sqrt)
+    df['gk_volatility_48h'] = gk_single.rolling(48).mean().apply(np.sqrt)
 
     # ---- ADX — trend strength (Wilder 1978) ----
     _tr = pd.DataFrame({
@@ -747,9 +749,9 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     plus_di = 100 * (plus_dm.rolling(14).mean() / (atr_14 + 1e-10))
     minus_di = 100 * (minus_dm.rolling(14).mean() / (atr_14 + 1e-10))
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    df['adx_14'] = dx.rolling(14).mean()
-    df['plus_di_14'] = plus_di
-    df['minus_di_14'] = minus_di
+    df['adx_14h'] = dx.rolling(14).mean()
+    df['plus_di_14h'] = plus_di
+    df['minus_di_14h'] = minus_di
 
     hour = df['datetime'].dt.hour
     df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
@@ -759,18 +761,18 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     df['dow_cos'] = np.cos(2 * np.pi * dow / 7)
 
     # ---- DERIVATIVES ----
-    # First derivative (velocity) -- already captured by logret_1, but explicit:
-    df['price_velocity_1'] = df['close'].diff() / df['close'].shift(1)     # pct change
-    df['price_velocity_4'] = df['close'].diff(4) / df['close'].shift(4)
+    # First derivative (velocity) -- already captured by logret_1h, but explicit:
+    df['price_velocity_1h'] = df['close'].diff() / df['close'].shift(1)     # pct change
+    df['price_velocity_4h'] = df['close'].diff(4) / df['close'].shift(4)
 
     # Second derivative (acceleration) -- change in the rate of change
-    df['price_accel_1'] = df['logret_1'].diff()          # d^2price/dt^2 (1h resolution)
-    df['price_accel_4'] = df['logret_4'].diff(4)         # d^2price/dt^2 (4h resolution)
-    df['price_accel_12'] = df['logret_12'].diff(12)      # d^2price/dt^2 (12h resolution)
-    df['price_accel_24'] = df['logret_24'].diff(24)      # d^2price/dt^2 (24h resolution)
+    df['price_accel_1h'] = df['logret_1h'].diff()          # d^2price/dt^2 (1h resolution)
+    df['price_accel_4h'] = df['logret_4h'].diff(4)         # d^2price/dt^2 (4h resolution)
+    df['price_accel_12h'] = df['logret_12h'].diff(12)      # d^2price/dt^2 (12h resolution)
+    df['price_accel_24h'] = df['logret_24h'].diff(24)      # d^2price/dt^2 (24h resolution)
 
     # Jerk (third derivative) -- change in acceleration
-    df['price_jerk_1'] = df['price_accel_1'].diff()      # d^3price/dt^3
+    df['price_jerk_1h'] = df['price_accel_1h'].diff()      # d^3price/dt^3
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
 
@@ -784,23 +786,23 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
         df['label'] = (future_return > rolling_median).astype(int)
 
     feature_cols = [
-        'logret_1', 'logret_2', 'logret_3', 'logret_4', 'logret_5',
-        'logret_6', 'logret_7', 'logret_8', 'logret_12', 'logret_24',
-        'logret_48', 'logret_72',
-        'logret_120', 'logret_240',
-        'spread_24_4', 'spread_48_4', 'spread_120_8',
-        'spread_240_24', 'spread_48_12', 'spread_120_12',
-        'price_to_sma20', 'price_to_sma50', 'price_to_sma100', 'sma20_to_sma50',
-        'rsi_14', 'stoch_k_14', 'bb_position_20', 'zscore_50',
-        'atr_pct_14', 'intraday_range',
-        'volatility_12', 'volatility_48', 'vol_ratio_12_48',
-        'volume_ratio', 'vvr_12',
-        'gk_volatility_14', 'gk_volatility_48',
-        'adx_14', 'plus_di_14', 'minus_di_14',
+        'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_5h',
+        'logret_6h', 'logret_7h', 'logret_8h', 'logret_12h', 'logret_24h',
+        'logret_48h', 'logret_72h',
+        'logret_120h', 'logret_240h',
+        'spread_24h_4h', 'spread_48h_4h', 'spread_120h_8h',
+        'spread_240h_24h', 'spread_48h_12h', 'spread_120h_12h',
+        'price_to_sma20h', 'price_to_sma50h', 'price_to_sma100h', 'sma20_to_sma50h',
+        'rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
+        'atr_pct_14h', 'intraday_range',
+        'volatility_12h', 'volatility_48h', 'vol_ratio_12_48',
+        'volume_ratio_h', 'vvr_12h',
+        'gk_volatility_14h', 'gk_volatility_48h',
+        'adx_14h', 'plus_di_14h', 'minus_di_14h',
         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
-        'price_velocity_1', 'price_velocity_4',
-        'price_accel_1', 'price_accel_4', 'price_accel_12', 'price_accel_24',
-        'price_jerk_1',
+        'price_velocity_1h', 'price_velocity_4h',
+        'price_accel_1h', 'price_accel_4h', 'price_accel_12h', 'price_accel_24h',
+        'price_jerk_1h',
     ]
 
     # Persist forward return for return-weighted sampling (not a feature, underscore prefix)
@@ -837,16 +839,16 @@ def _get_models_csv_path():
     if MODELS_CSV_OVERRIDE:
         return MODELS_CSV_OVERRIDE
     if OPTUNA_METRIC != 'apf':
-        return f'{MODELS_DIR}/crypto_eli_best_models_{OPTUNA_METRIC}.csv'
-    return f'{MODELS_DIR}/crypto_eli_best_models.csv'
+        return f'{MODELS_DIR}/crypto_ed_best_models_{OPTUNA_METRIC}.csv'
+    return f'{MODELS_DIR}/crypto_ed_best_models.csv'
 
 
 def _backup_models_csv():
     """Create a timestamped backup of production CSV before writing (failsafe against contamination)."""
-    src = f'{MODELS_DIR}/crypto_eli_best_models.csv'
+    src = f'{MODELS_DIR}/crypto_ed_best_models.csv'
     if os.path.exists(src) and not MODELS_CSV_OVERRIDE:
         import shutil
-        bak = f'{MODELS_DIR}/crypto_eli_best_models_backup.csv'
+        bak = f'{MODELS_DIR}/crypto_ed_best_models_backup.csv'
         shutil.copy2(src, bak)
 _macro_cache = {}
 
@@ -966,7 +968,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     if cross_df is not None:
         asset_map = {
             'BTC': 'BTC_USD', 'ETH': 'ETH_USD',
-            'XRP': 'BTC_USD', 'DOGE': 'BTC_USD',
+            'XRP': 'BTC_USD',
             'SMI': 'DAX', 'DAX': 'DAX', 'CAC40': 'DAX',
         }
         target_col = asset_map.get(asset_name, 'BTC_USD')
@@ -992,7 +994,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     if funding_series is not None:
         fr_df = funding_series.to_frame('_funding_rate')
         fr_df['_merge_dt'] = fr_df.index.floor('h')
-        df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('30min')
+        df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
         df = df.merge(fr_df[['_merge_dt', '_funding_rate']], on='_merge_dt', how='left')
         df = df.drop(columns=['_merge_dt'], errors='ignore')
         df['_funding_rate'] = df['_funding_rate'].ffill()
@@ -1014,7 +1016,7 @@ def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
     import sympy
 
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-    pysr_path = os.path.join(models_dir, f'pysr_{asset_name}_{horizon}c_30m.json')
+    pysr_path = os.path.join(models_dir, f'pysr_{asset_name}_{horizon}h.json')
 
     if not os.path.exists(pysr_path):
         if verbose:
@@ -1102,7 +1104,7 @@ def _check_pysr_leakage(features, asset, horizon):
         return True, "No PySR features"
 
     models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
-    pysr_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}c_30m.json')
+    pysr_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}h.json')
 
     if not os.path.exists(pysr_path):
         return False, f"PySR features used but no JSON found at {pysr_path}"
@@ -1766,12 +1768,12 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
             'confidence': round(float(confidence), 1),
             'buy_votes': int(buy_votes),
             'total_votes': int(total_votes),
-            'rsi': round(float(row.get('rsi_14', 0)), 1),
-            'bb_position': round(float(row.get('bb_position_20', 0)), 3),
-            'volume_ratio': round(float(row.get('volume_ratio', 1)), 2),
-            'hourly_change': round(float(row.get('logret_1', 0) * 100), 3),
+            'rsi': round(float(row.get('rsi_14h', 0)), 1),
+            'bb_position': round(float(row.get('bb_position_20h', 0)), 3),
+            'volume_ratio': round(float(row.get('volume_ratio_h', 1)), 2),
+            'hourly_change': round(float(row.get('logret_1h', 0) * 100), 3),
             'intraday_range': round(float(row.get('intraday_range', 0) * 100), 3),
-            'spread_120_8': round(float(row.get('spread_120_8', 0) * 100), 2),
+            'spread_120h_8h': round(float(row.get('spread_120h_8h', 0) * 100), 2),
             'actual': actual,
         })
 
@@ -2322,7 +2324,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
     # ========================================================
     if sorted_results:
         import csv
-        csv_path = f'{MODELS_DIR}/diagnostic_results_eli_{asset_name}.csv'
+        csv_path = f'{MODELS_DIR}/diagnostic_results_ed_v3_{asset_name}.csv'
         sorted_for_csv = sorted(sorted_results, key=lambda x: (-x[10], -x[4]))  # APF desc, then return desc
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -2822,7 +2824,7 @@ def run_mode_p(assets_list, horizons):
                 _, all_cols = build_all_features(df_raw, asset_name=asset, horizon=h, verbose=False)
                 save_results(asset, h, results, all_cols, pysr_rows=pysr_rows)
                 print(f"\n  Done! Now run Mode DV to test:")
-                print(f"  python crypto_trading_system_eli.py DV {asset} {h}h")
+                print(f"  python crypto_trading_system_ed.py DV {asset} {h}h")
             else:
                 print(f"\n  No useful expressions found for {asset} {h}h. Try increasing --iterations.")
 
@@ -2953,7 +2955,7 @@ GRID_COMBOS = [
     'RF+XGB',     # XGB without LGBM
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [24, 48, 96, 144, 192, 240]  # candle windows (12h, 24h, 48h, 72h, 96h, 120h at 30min)
+GRID_WINDOWS = [72, 100, 150, 200, 250, 300]  # 36/48 dropped (embargo eats too much), 250/300 added
 GRID_FEATURES = [10, 13, 17, 20, 25, 30]
 GRID_GAMMAS = [0.999, 0.997, 0.995]
 
@@ -3143,7 +3145,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
     n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
     print("\n" + "=" * 70)
-    print(f"  ELI V1.0 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
+    print(f"  ED V1.0 MODE D: EXHAUSTIVE GRID -- {horizon}h HORIZON")
     print(f"  {len(GRID_COMBOS)} combos × {len(GRID_WINDOWS)} windows × {len(GRID_FEATURES)} features × {len(GRID_GAMMAS)} gammas = {n_grid} evals")
     metric_label = f" | metric={OPTUNA_METRIC}" if OPTUNA_METRIC != 'apf' else ""
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
@@ -3179,7 +3181,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             continue
 
         # Step 1: Build ALL features, cap at 6 months
-        MAX_DIAG_CANDLES = 6 * 30 * 24 * (60 // CANDLE_MINUTES)  # 6 months in candles
+        MAX_DIAG_HOURS = 6 * 30 * 24
         print(f"\n  Building all features (horizon={horizon}h)...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
@@ -3199,8 +3201,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  [Feature build: {(time.time()-t0)/60:.1f} min]")
 
         total_rows = len(df_full)
-        if total_rows > MAX_DIAG_CANDLES:
-            df_full = df_full.tail(MAX_DIAG_CANDLES).reset_index(drop=True)
+        if total_rows > MAX_DIAG_HOURS:
+            df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
             print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
 
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
@@ -3353,7 +3355,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_elapsed = (time.time() - t_grid) / 60
 
         # Save full grid to CSV
-        grid_csv_path = os.path.join('models', f'crypto_eli_grid_{asset_name}_{horizon}h.csv')
+        grid_csv_path = os.path.join('models', f'crypto_ed_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -3630,7 +3632,7 @@ def _simulate_with_threshold(signals, conf_threshold):
     }
 
 
-def run_mode_v(assets_list, horizons=None):
+def run_mode_v(assets_list, horizons=None, replay_hours=None):
     """
     Mode V: Live backtest + Optuna refine + final comparison.
     1. Backtest top 6 from Mode D at conf 70/80/90%
@@ -3639,9 +3641,12 @@ def run_mode_v(assets_list, horizons=None):
     4. Backtest the 3 refined configs at conf 70/80/90%
     5. Show combined summary: D candidates vs refined
     6. Save best overall to production CSV
+
+    replay_hours: override MODE_G_REPLAY_HOURS (default 336h = 2 weeks).
     """
     if horizons is None:
         horizons = list(AVAILABLE_HORIZONS)
+    _replay = replay_hours or MODE_G_REPLAY_HOURS
 
     candidates_csv = _get_models_csv_path()
     if not os.path.exists(candidates_csv):
@@ -3652,7 +3657,7 @@ def run_mode_v(assets_list, horizons=None):
 
     print("=" * 80)
     print(f"  MODE V: LIVE BACKTEST + REFINE — {','.join(assets_list)} {','.join(str(h)+'h' for h in horizons)}")
-    print(f"  Period: last {MODE_G_REPLAY_HOURS} hours (2 weeks), every hour")
+    print(f"  Period: last {_replay} hours ({_replay/168:.1f} weeks), every hour")
     print(f"  Ranking by: conf>={MODE_G_PRIMARY_CONF}% return")
     print(f"  Pipeline: backtest top 6 → refine top 3 → backtest refined → pick best")
     print(f"  Candidates: {candidates_csv}")
@@ -3733,7 +3738,7 @@ def run_mode_v(assets_list, horizons=None):
 
             results = {}
             for label, cfg in configs.items():
-                results[label] = _backtest_one_config(asset, horizon, label, cfg)
+                results[label] = _backtest_one_config(asset, horizon, label, cfg, replay_hours=_replay)
 
             # ── STEP 2: Pick top 3 for refine ──
             doohan_results = [(lbl, r) for lbl, r in results.items()
@@ -3775,7 +3780,7 @@ def run_mode_v(assets_list, horizons=None):
                             'n_features': rcfg['n_features'],
                             'source': 'refined',
                         }
-                        results[label] = _backtest_one_config(asset, horizon, label, cfg)
+                        results[label] = _backtest_one_config(asset, horizon, label, cfg, replay_hours=_replay)
 
             all_results[key] = results
 
@@ -3874,7 +3879,7 @@ def run_mode_v(assets_list, horizons=None):
 
     # ── Combined Summary ──
     print(f"\n\n{'=' * 80}")
-    print(f"  SUMMARY: MODE V — D + Refined — Last {MODE_G_REPLAY_HOURS//24} days (scored by return × win_rate)")
+    print(f"  SUMMARY: MODE V — D + Refined — Last {_replay//24} days (scored by return × win_rate)")
     print(f"{'=' * 80}")
 
     for key, results in all_results.items():
@@ -3930,7 +3935,7 @@ def run_mode_v(assets_list, horizons=None):
                   f"g={prod_row['gamma']}  f={prod_row['n_features']}  conf>={best_conf}%")
 
         # Write trading config (horizon + min_confidence per asset)
-        tcfg_path = f'{CONFIG_DIR}/regime_config_eli.json'
+        tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
         try:
             with open(tcfg_path) as f:
                 trading_config = json.load(f)
@@ -3960,12 +3965,13 @@ def run_mode_v(assets_list, horizons=None):
     return all_results
 
 
-def _backtest_one_config(asset, horizon, label, cfg):
+def _backtest_one_config(asset, horizon, label, cfg, replay_hours=None):
     """Backtest a single config at all confidence thresholds. Returns results dict."""
     models = cfg['combo'].split('+')
     features = cfg['features']
     window = cfg['window']
     gamma = cfg['gamma']
+    _replay = replay_hours or MODE_G_REPLAY_HOURS
 
     print(f"\n{'─' * 70}")
     print(f"  {label}: {asset}")
@@ -3976,7 +3982,7 @@ def _backtest_one_config(asset, horizon, label, cfg):
         asset_name=asset,
         model_names=models,
         window_size=window,
-        replay_hours=MODE_G_REPLAY_HOURS,
+        replay_hours=_replay,
         feature_override=features,
         horizon=horizon,
         gamma=gamma,
@@ -4004,7 +4010,7 @@ def _backtest_one_config(asset, horizon, label, cfg):
 def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features):
     """Run Optuna refine on top 3 live-validated configs. Returns list of refined config dicts."""
 
-    MAX_DIAG_CANDLES = 6 * 30 * 24 * (60 // CANDLE_MINUTES)  # 6 months in candles
+    MAX_DIAG_HOURS = 6 * 30 * 24
     df_full_r, all_cols_r = build_all_features(df_raw, asset_name=asset, horizon=horizon)
     n_pysr = _compute_pysr_features(df_full_r, all_cols_r, asset, horizon, verbose=False)
     if n_pysr > 0:
@@ -4016,8 +4022,8 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
                 if pc in df_full_r.columns:
                     df_full_r.drop(columns=[pc], inplace=True)
     total_rows = len(df_full_r)
-    if total_rows > MAX_DIAG_CANDLES:
-        df_full_r = df_full_r.tail(MAX_DIAG_CANDLES).reset_index(drop=True)
+    if total_rows > MAX_DIAG_HOURS:
+        df_full_r = df_full_r.tail(MAX_DIAG_HOURS).reset_index(drop=True)
     df_clean_r = df_full_r.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
 
     # Prepare fold 1 data (same as Mode D)
@@ -4066,7 +4072,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         study = optuna.create_study(
             direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=42),
-            study_name=f'eli_v1_refine_{asset}_{horizon}h_{cfg_idx}',
+            study_name=f'ed_v1_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
         best_refine_apf = 0.0
@@ -4139,24 +4145,22 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 # ============================================================
 def run_mode_s(assets_list, horizons, args=None):
     """
-    Eli Mode S: Given a regime detector and bull/bear horizon pair (from regime_config_eli.json
-    or Mode R), optimize confidence thresholds per regime independently.
+    Ed V3 Mode S — FULL JOINT SWEEP including horizons.
+    Sweeps detector × bull_h × bear_h × bull_conf × bear_conf over 8 horizon pairs:
+        (6,6)(6,7)(6,8)(7,7)(7,8)(8,8)(7,6)(8,7)
+    = 5 detectors × 8 pairs × 49 conf combos = 1,960 evals per asset.
 
-    Sweeps bull_conf × bear_conf (7×7 = 49 combos), picks the best, writes config.
-
-    Flow:
-        1. Read regime_config_eli.json for detector + horizon pair
-        2. Generate signals for bull_h and bear_h
-        3. Build regime indicators
-        4. Sweep confidence per regime (65-95%)
-        5. Pick best combo by return × win_rate scoring
-        6. Write optimized config to regime_config_eli.json
+    Writes winner to regime_config_ed_v3.json (NOT the live prod config).
     """
     replay = int(getattr(args, 'replay', 0)) or 2880
     top_n = int(getattr(args, 'top', 0)) or 15
 
-    # Load regime config
-    tcfg_path = f'{CONFIG_DIR}/regime_config_eli.json'
+    HORIZON_PAIRS = [(b,r) for b in (5,6,7,8) for r in (5,6,7,8)]  # 16 pairs, full 5-8 grid
+    HORIZON_SET = sorted(set(h for pair in HORIZON_PAIRS for h in pair))
+
+    # Read prod config for asset structure, write winner to v3 file (no prod impact)
+    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    out_path = f'{CONFIG_DIR}/regime_config_ed_v3.json'
     try:
         with open(tcfg_path) as f:
             regime_config = json.load(f)
@@ -4167,8 +4171,9 @@ def run_mode_s(assets_list, horizons, args=None):
     CONF_LEVELS = [65, 70, 75, 80, 85, 90, 95]
 
     print(f"\n{'='*80}")
-    print(f"  MODE S: REGIME CONFIDENCE OPTIMIZATION")
+    print(f"  MODE S V3: FULL JOINT SWEEP (det × bull_h × bear_h × bull_conf × bear_conf)")
     print(f"  Assets: {', '.join(assets_list)} | Replay: {replay}h")
+    print(f"  Horizon pairs ({len(HORIZON_PAIRS)}): {HORIZON_PAIRS}")
     print(f"  Confidence sweep: {CONF_LEVELS}")
     print(f"{'='*80}")
 
@@ -4176,25 +4181,14 @@ def run_mode_s(assets_list, horizons, args=None):
 
     for asset in assets_list:
         acfg = regime_config.get(asset, {})
-        detector = acfg.get('regime_detector', {})
-        det_type = detector.get('type', 'sma_cross')
-        det_params = detector.get('params', {})
-        bull_h = acfg.get('bull', {}).get('horizon')
-        bear_h = acfg.get('bear', {}).get('horizon')
-
-        if not bull_h or not bear_h:
-            print(f"\n  {asset}: no bull/bear horizons in config — skipping")
-            continue
-
-        det_label = f"{det_type}({det_params.get('fast','?')}/{det_params.get('slow','?')})" if det_type == 'sma_cross' else det_type
 
         print(f"\n{'='*80}")
-        print(f"  {asset} — detector: {det_label} | bull={bull_h}h | bear={bear_h}h")
+        print(f"  {asset} — full joint sweep (horizons {HORIZON_SET})")
         print(f"{'='*80}")
 
-        # ── Generate signals for both horizons ──
+        # ── Generate signals for ALL horizons in HORIZON_SET ──
         signals_cache = {}
-        for h in [bull_h, bear_h]:
+        for h in HORIZON_SET:
             if h in signals_cache:
                 continue
             rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
@@ -4220,68 +4214,22 @@ def run_mode_s(assets_list, horizons, args=None):
             signals_cache[h] = result
             print(f"    {h}h: {len(result)} signals ({sum(1 for s in result.values() if s['signal']=='BUY')} BUY)")
 
-        if len(signals_cache) < len(set([bull_h, bear_h])):
-            print(f"  Skipping {asset} — missing signals")
+        if len(signals_cache) < len(HORIZON_SET):
+            print(f"  Skipping {asset} — missing signals for some horizons")
             continue
 
         all_dts = sorted(set().union(*[set(s.keys()) for s in signals_cache.values()]))
 
-        # ── Build regime detector ──
+        # ── Build regime indicators + detectors (shared helper) ──
         print(f"\n  Building regime indicators...")
-        df_raw = load_data(asset)
-        df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
-        df_ind = df_raw.set_index('datetime').sort_index()
+        ind, detectors = _build_regime_indicators_and_detectors(asset)
 
-        for w in [24, 48, 72, 100, 200]:
-            df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
-        delta = df_ind['close'].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss.replace(0, np.nan)
-        df_ind['rsi14'] = 100 - (100 / (1 + rs))
-        for w in [24, 48, 72]:
-            df_ind[f'high_{w}'] = df_ind['high'].rolling(w).max()
-            df_ind[f'dd_{w}'] = (df_ind['close'] / df_ind[f'high_{w}'] - 1) * 100
-        df_ind['ema12'] = df_ind['close'].ewm(span=12).mean()
-        df_ind['ema26'] = df_ind['close'].ewm(span=26).mean()
-        df_ind['macd_line'] = df_ind['ema12'] - df_ind['ema26']
-        ind = df_ind.to_dict('index')
+        # ── Full joint sweep ──
+        n_combos = len(detectors) * len(HORIZON_PAIRS) * len(CONF_LEVELS) * len(CONF_LEVELS)
+        print(f"\n  Sweeping {len(detectors)} det × {len(HORIZON_PAIRS)} h-pairs × "
+              f"{len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf = {n_combos} combos...")
 
-        def safe(dt, fn, default=True):
-            if dt not in ind:
-                return default
-            try:
-                return fn(ind[dt])
-            except (KeyError, TypeError):
-                return default
-
-        # Build detector function from config
-        if det_type == 'sma_cross':
-            fast = int(det_params.get('fast', 24))
-            slow = int(det_params.get('slow', 100))
-            det_fn = lambda dt, _f=fast, _s=slow: safe(dt, lambda r: r[f'sma{_f}'] > r[f'sma{_s}'])
-        elif det_type == 'rsi':
-            level = float(det_params.get('level', 50))
-            det_fn = lambda dt, _l=level: safe(dt, lambda r: r['rsi14'] > _l)
-        elif det_type == 'drawdown':
-            thresh = float(det_params.get('threshold', -3))
-            window = int(det_params.get('window', 48))
-            det_fn = lambda dt, _w=window, _t=thresh: safe(dt, lambda r: r[f'dd_{_w}'] > _t)
-        elif det_type == 'macd':
-            det_fn = lambda dt: safe(dt, lambda r: r['macd_line'] > 0)
-        else:
-            det_fn = lambda dt: True  # fallback: always bull
-
-        # Count regime distribution
-        bull_count = sum(1 for dt in all_dts if det_fn(dt))
-        bear_count = len(all_dts) - bull_count
-        print(f"  Regime split: {bull_count} bull ({bull_count/len(all_dts)*100:.0f}%) / "
-              f"{bear_count} bear ({bear_count/len(all_dts)*100:.0f}%)")
-
-        # ── Sweep confidence combos ──
-        print(f"\n  Sweeping {len(CONF_LEVELS)}×{len(CONF_LEVELS)} = {len(CONF_LEVELS)**2} confidence combos...")
-
-        def _sim(bull_conf, bear_conf):
+        def _sim(det_fn, bull_h, bear_h, bull_conf, bear_conf):
             cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
             trades, wins = 0, 0
             bull_trades, bear_trades = 0, 0
@@ -4338,53 +4286,67 @@ def run_mode_s(assets_list, horizons, args=None):
             bh = ((last_price / first_price - 1) * 100) if first_price and last_price else 0
             return ret, trades, wr, bh, bull_trades, bear_trades
 
+        import time as _t
+        t0 = _t.time()
         results = []
-        for bc in CONF_LEVELS:
-            for rc in CONF_LEVELS:
-                ret, tr, wr, bh, bt, rt = _sim(bc, rc)
-                score = ret * (wr / 100) if ret > 0 else ret
-                results.append({
-                    'bull_conf': bc, 'bear_conf': rc,
-                    'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
-                    'alpha': ret - bh, 'score': score,
-                    'bull_trades': bt, 'bear_trades': rt,
-                })
+        for det_name, det_fn in detectors.items():
+            bull_count = sum(1 for dt in all_dts if det_fn(dt))
+            bull_pct = bull_count / len(all_dts) * 100 if all_dts else 0
+            for (bull_h, bear_h) in HORIZON_PAIRS:
+                for bc in CONF_LEVELS:
+                    for rc in CONF_LEVELS:
+                        ret, tr, wr, bh, bt, rt = _sim(det_fn, bull_h, bear_h, bc, rc)
+                        score = ret * (wr / 100) if ret > 0 else ret
+                        results.append({
+                            'detector': det_name,
+                            'bull_h': bull_h, 'bear_h': bear_h,
+                            'bull_conf': bc, 'bear_conf': rc,
+                            'return': ret, 'trades': tr, 'wr': wr, 'bh': bh,
+                            'alpha': ret - bh, 'score': score,
+                            'bull_trades': bt, 'bear_trades': rt,
+                            'bull_pct': bull_pct,
+                        })
+        elapsed = _t.time() - t0
+        print(f"  Sweep done in {elapsed:.0f}s ({elapsed/60:.1f} min)")
 
         results.sort(key=lambda x: x['score'], reverse=True)
 
         # ── Results ──
-        print(f"\n  {'='*100}")
-        print(f"  TOP {top_n} CONFIDENCE COMBOS — {asset} ({det_label}, bull={bull_h}h, bear={bear_h}h)")
-        print(f"  {'='*100}")
-        print(f"  {'#':>3}  {'BullC':>6}  {'BearC':>6}  {'Return':>8}  {'Trades':>7}  {'WR':>5}  "
-              f"{'Alpha':>7}  {'Score':>7}  {'BullTr':>7}  {'BearTr':>7}")
-        print(f"  {'-'*3}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*7}")
-
+        print(f"\n  {'='*120}")
+        print(f"  TOP {top_n} JOINT COMBOS — {asset}")
+        print(f"  {'='*120}")
+        print(f"  {'#':>3}  {'Detector':>16}  {'BullH':>5}  {'BearH':>5}  {'BullC':>6}  {'BearC':>6}  "
+              f"{'Return':>8}  {'Trades':>7}  {'WR':>5}  {'Alpha':>7}  {'Score':>7}  {'Bull%':>6}")
+        print(f"  {'-'*3}  {'-'*16}  {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
         for i, r in enumerate(results[:top_n]):
-            print(f"  {i+1:>3}  {r['bull_conf']:>5}%  {r['bear_conf']:>5}%  {r['return']:>+7.2f}%  "
-                  f"{r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  {r['score']:>7.2f}  "
-                  f"{r['bull_trades']:>7}  {r['bear_trades']:>7}")
-
-        # Fixed confidence baseline (90/90)
-        fixed_90 = next((r for r in results if r['bull_conf'] == 90 and r['bear_conf'] == 90), None)
+            print(f"  {i+1:>3}  {r['detector']:>16}  {r['bull_h']:>4}h  {r['bear_h']:>4}h  "
+                  f"{r['bull_conf']:>5}%  {r['bear_conf']:>5}%  "
+                  f"{r['return']:>+7.2f}%  {r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  "
+                  f"{r['score']:>7.2f}  {r['bull_pct']:>5.0f}%")
 
         winner = results[0]
-        print(f"\n  {'='*100}")
-        print(f"  WINNER: bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"\n  {'='*120}")
+        print(f"  WINNER: detector={winner['detector']}  "
+              f"bull={winner['bull_h']}h@{winner['bull_conf']}%  bear={winner['bear_h']}h@{winner['bear_conf']}%")
         print(f"  Return: {winner['return']:+.2f}%  Trades: {winner['trades']}  WR: {winner['wr']:.0f}%  "
-              f"Alpha: {winner['alpha']:+.2f}%")
-        if fixed_90:
-            diff = winner['return'] - fixed_90['return']
-            print(f"  vs fixed 90/90: {fixed_90['return']:+.2f}% → improvement: {diff:+.2f}%")
-        print(f"  {'='*100}")
+              f"Alpha: {winner['alpha']:+.2f}%  Score: {winner['score']:.2f}")
+        print(f"  {'='*120}")
 
-        # ── Write to config ──
+        # ── Write winner to V3 config (NOT prod) ──
+        if asset not in regime_config:
+            regime_config[asset] = {'enabled': True, 'symbol': f'{asset}-USD',
+                                    'bull': {}, 'bear': {}, 'use_maker_orders': True}
+        regime_config[asset]['regime_detector'] = {'type': 'named', 'params': {'name': winner['detector']}}
+        regime_config[asset]['bull']['horizon'] = winner['bull_h']
         regime_config[asset]['bull']['min_confidence'] = winner['bull_conf']
+        regime_config[asset]['bear']['horizon'] = winner['bear_h']
         regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
-        with open(tcfg_path, 'w') as f:
+        with open(out_path, 'w') as f:
             json.dump(regime_config, f, indent=2)
-        print(f"\n  Config updated: {asset} bull={bull_h}h@{winner['bull_conf']}% / bear={bear_h}h@{winner['bear_conf']}%")
+        print(f"\n  V3 config written to {out_path}")
+        print(f"  {asset}: detector={winner['detector']} "
+              f"bull={winner['bull_h']}h@{winner['bull_conf']}% / bear={winner['bear_h']}h@{winner['bear_conf']}%")
 
     print(f"\n{'='*80}")
     print(f"  MODE S COMPLETE")
@@ -4400,8 +4362,8 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
     across horizons to find the best one per asset.
 
     Usage:
-        python crypto_trading_system_eli.py H BTC 4,5,6,7,8h          # full D+G per horizon
-        python crypto_trading_system_eli.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
+        python crypto_trading_system_ed.py H BTC 4,5,6,7,8h          # full D+G per horizon
+        python crypto_trading_system_ed.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
 
     Flow per asset:
         1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode V (backtest + refine)
@@ -4536,6 +4498,54 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
 # MODE R: REGIME BACKTEST
 # ============================================================
 
+def _build_regime_indicators_and_detectors(asset):
+    """Shared helper used by Mode R and Mode S.
+
+    Builds the regime indicator dataframe (SMAs, deseasonalized vol per
+    Andersen-Bollerslev, TSMOM per Liu & Tsyvinski) and the detector dict.
+    Single source of truth — keeps R and S in sync."""
+    df_raw = load_data(asset)
+    df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
+    df_ind = df_raw.set_index('datetime').sort_index()
+
+    for w in [24, 48, 72, 100, 168, 200, 240, 480]:
+        df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
+
+    # Deseasonalized realized volatility (Andersen-Bollerslev 1997/1998)
+    df_ind['logret_1h'] = np.log(df_ind['close'] / df_ind['close'].shift(1))
+    df_ind['abs_logret'] = df_ind['logret_1h'].abs()
+    df_ind['hour'] = df_ind.index.hour
+    df_ind['seasonal_factor'] = (
+        df_ind.groupby('hour')['abs_logret']
+              .transform(lambda s: s.rolling(30, min_periods=10).mean())
+    )
+    df_ind['abs_logret_deseason'] = df_ind['abs_logret'] / df_ind['seasonal_factor'].replace(0, np.nan)
+    df_ind['vol_24h_deseason'] = df_ind['abs_logret_deseason'].rolling(24).std()
+    df_ind['vol_24h_deseason_q70'] = df_ind['vol_24h_deseason'].rolling(720, min_periods=240).quantile(0.70)
+
+    # Time-Series Momentum (Liu & Tsyvinski 2021 RFS crypto replication)
+    df_ind['tsmom_672h'] = np.log(df_ind['close'] / df_ind['close'].shift(672))
+
+    ind = df_ind.to_dict('index')
+
+    def safe(dt, fn, default=True):
+        if dt not in ind:
+            return default
+        try:
+            return fn(ind[dt])
+        except (KeyError, TypeError):
+            return default
+
+    detectors = {
+        'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
+        'sma168>sma480':  lambda dt: safe(dt, lambda r: r['sma168'] > r['sma480']),
+        'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
+        'vol_calm':       lambda dt: safe(dt, lambda r: r['vol_24h_deseason'] < r['vol_24h_deseason_q70']),
+        'tsmom_672h':     lambda dt: safe(dt, lambda r: r['tsmom_672h'] > 0),
+    }
+    return ind, detectors
+
+
 def _run_mode_r(assets, horizons, args):
     """Regime-switching backtest: test bull/bear horizon combos with regime detectors."""
     import json as _json
@@ -4544,7 +4554,7 @@ def _run_mode_r(assets, horizons, args):
     asset = assets[0] if assets else 'BTC'
     replay = int(getattr(args, 'replay', 0)) or 2880  # default 4 months
     conf = int(getattr(args, 'conf', 0)) or 90
-    top_n = int(getattr(args, 'top', 0)) or 15
+    top_n = int(getattr(args, 'top', 0)) or 200
 
     # Determine available horizons from production CSV
     df_models = pd.read_csv(PRODUCTION_CSV)
@@ -4594,52 +4604,7 @@ def _run_mode_r(assets, horizons, args):
 
     # ── Step 2: Build regime indicators ──
     print(f"\n  Step 2: Building regime indicators...")
-    df_raw = load_data(asset)
-    df_raw['datetime'] = pd.to_datetime(df_raw['datetime'])
-    df_ind = df_raw.set_index('datetime').sort_index()
-
-    for w in [24, 48, 72, 100, 200]:
-        df_ind[f'sma{w}'] = df_ind['close'].rolling(w).mean()
-    delta = df_ind['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df_ind['rsi14'] = 100 - (100 / (1 + rs))
-    for w in [24, 48, 72]:
-        df_ind[f'high_{w}'] = df_ind['high'].rolling(w).max()
-        df_ind[f'dd_{w}'] = (df_ind['close'] / df_ind[f'high_{w}'] - 1) * 100
-    df_ind['ema12'] = df_ind['close'].ewm(span=12).mean()
-    df_ind['ema26'] = df_ind['close'].ewm(span=26).mean()
-    df_ind['macd_line'] = df_ind['ema12'] - df_ind['ema26']
-
-    ind = df_ind.to_dict('index')
-
-    def safe(dt, fn, default=True):
-        if dt not in ind:
-            return default
-        try:
-            return fn(ind[dt])
-        except (KeyError, TypeError):
-            return default
-
-    detectors = {
-        'sma24>sma72':    lambda dt: safe(dt, lambda r: r['sma24'] > r['sma72']),
-        'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
-        'sma48>sma100':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma100']),
-        'sma48>sma200':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma200']),
-        'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
-        'price>sma100':   lambda dt: safe(dt, lambda r: r['close'] > r['sma100']),
-        'rsi>55':         lambda dt: safe(dt, lambda r: r['rsi14'] > 55),
-        'rsi>50':         lambda dt: safe(dt, lambda r: r['rsi14'] > 50),
-        'rsi>45':         lambda dt: safe(dt, lambda r: r['rsi14'] > 45),
-        'dd48>-2%':       lambda dt: safe(dt, lambda r: r['dd_48'] > -2),
-        'dd48>-3%':       lambda dt: safe(dt, lambda r: r['dd_48'] > -3),
-        'dd72>-3%':       lambda dt: safe(dt, lambda r: r['dd_72'] > -3),
-        'dd72>-5%':       lambda dt: safe(dt, lambda r: r['dd_72'] > -5),
-        'macd>0':         lambda dt: safe(dt, lambda r: r['macd_line'] > 0),
-        'sma24>100+rsi>45': lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100'] and r['rsi14'] > 45),
-        'dd48>-3+rsi>45':   lambda dt: safe(dt, lambda r: r['dd_48'] > -3 and r['rsi14'] > 45),
-    }
+    ind, detectors = _build_regime_indicators_and_detectors(asset)
 
     # Also load PySR regime if available
     for bull_h in test_horizons:
@@ -4779,6 +4744,38 @@ def _run_mode_r(assets, horizons, args):
             print(f"  Baseline WINS by {-diff:+.2f}%")
     print(f"  {'='*100}")
 
+    # Return best regime for HRS pipeline (R → S)
+    return {asset: best_regime} if best_regime else {}
+
+
+def _apply_mode_r_to_config(r_results):
+    """Write Mode R's winning horizons to regime_config_ed.json so Mode S picks them up."""
+    if not r_results:
+        return
+    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    try:
+        with open(tcfg_path) as f:
+            regime_config = json.load(f)
+    except Exception:
+        return
+
+    for asset, best in r_results.items():
+        if not best:
+            continue
+        bull_h = best['bull_h']
+        bear_h = best['bear_h']
+        if asset not in regime_config:
+            continue
+        old_bull = regime_config[asset].get('bull', {}).get('horizon')
+        old_bear = regime_config[asset].get('bear', {}).get('horizon')
+        if old_bull != bull_h or old_bear != bear_h:
+            regime_config[asset]['bull']['horizon'] = bull_h
+            regime_config[asset]['bear']['horizon'] = bear_h
+            print(f"\n  Mode R → Config: {asset} horizons updated: bull={old_bull}h→{bull_h}h, bear={old_bear}h→{bear_h}h")
+
+    with open(tcfg_path, 'w') as f:
+        json.dump(regime_config, f, indent=2)
+
 
 # ============================================================
 # MAIN MENU
@@ -4789,15 +4786,15 @@ def main():
     has_macro = os.path.exists(MACRO_DIR)
 
     # ================================================================
-    # CLI: python crypto_trading_system_eli.py D BTC 4,8h
+    # CLI: python crypto_trading_system_ed.py D BTC 4,8h
     # ================================================================
     # Order-independent CLI parser
     # Any order works: MODE ASSETS HORIZONS, ASSETS MODE HORIZONS, etc.
     # Examples:
-    #   python crypto_trading_system_eli.py D BTC 4,8h
-    #   python crypto_trading_system_eli.py BTC D 4,8h --trials 150
-    #   python crypto_trading_system_eli.py H 5,6,7,8h BTC --skip
-    #   python crypto_trading_system_eli.py DF BTC,ETH 4,8h
+    #   python crypto_trading_system_ed.py D BTC 4,8h
+    #   python crypto_trading_system_ed.py BTC D 4,8h --trials 150
+    #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
+    #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
     VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'R', 'RS'}
 
@@ -4844,7 +4841,7 @@ def main():
     # --help
     if '--help' in sys.argv or '-h' in sys.argv:
         print("""
-Usage: python crypto_trading_system_eli.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
+Usage: python crypto_trading_system_ed.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
 
   Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
 
@@ -4856,7 +4853,7 @@ Modes:
   S       Regime confidence optimization (sweep bull/bear confidence → write config)
   RS      R then S (find best regime pair → optimize confidence)
   H       Horizon sweep (D+V per horizon — produces models, no winner picking)
-  HRS     Full Eli pipeline: H → R → S (all horizons → regime pair → confidence)
+  HRS     Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)
   DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
 
@@ -4877,17 +4874,17 @@ Options:
   --help, -h          Show this help
 
 Examples:
-  python crypto_trading_system_eli.py HRS BTC 5,6,7,8h          # full Ed pipeline
-  python crypto_trading_system_eli.py DVRS BTC 5,6,7,8h         # same as HRS
-  python crypto_trading_system_eli.py RS BTC 5,6,7,8h            # regime pair + confidence (skip D/V)
-  python crypto_trading_system_eli.py S BTC                       # optimize confidence only (uses current config)
-  python crypto_trading_system_eli.py R BTC 5,6,7,8h --replay 2880 --conf 85 --top 20
-  python crypto_trading_system_eli.py P BTC 6h                  # discover PySR features (~30-120 min)
-  python crypto_trading_system_eli.py H BTC 5,6,7,8h          # horizon sweep (D+V only)
-  python crypto_trading_system_eli.py H BTC 5,6,7h --skip     # skip D, re-run V only
-  python crypto_trading_system_eli.py DV ETH 6h               # optimize + validate ETH 6h
-  python crypto_trading_system_eli.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_eli.py V BTC 6h                 # re-validate existing results
+  python crypto_trading_system_ed.py HRS BTC 5,6,7,8h          # full Ed pipeline
+  python crypto_trading_system_ed.py DVRS BTC 5,6,7,8h         # same as HRS
+  python crypto_trading_system_ed.py RS BTC 5,6,7,8h            # regime pair + confidence (skip D/V)
+  python crypto_trading_system_ed.py S BTC                       # optimize confidence only (uses current config)
+  python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880 --conf 85 --top 20
+  python crypto_trading_system_ed.py P BTC 6h                  # discover PySR features (~30-120 min)
+  python crypto_trading_system_ed.py H BTC 5,6,7,8h          # horizon sweep (D+V only)
+  python crypto_trading_system_ed.py H BTC 5,6,7h --skip     # skip D, re-run V only
+  python crypto_trading_system_ed.py DV ETH 6h               # optimize + validate ETH 6h
+  python crypto_trading_system_ed.py D BTC,ETH 8h --trials 200
+  python crypto_trading_system_ed.py V BTC 6h                 # re-validate existing results
 """)
         return
 
@@ -4971,7 +4968,7 @@ Examples:
         print("  RS. R then S (find best regime pair + optimize confidence)")
         print("  V.  VALIDATE (top 6 candidates from Mode D, pick best)")
         print("  H.  HORIZON SWEEP (D+V per horizon — produces models)")
-        print("  HRS. Full Eli pipeline: H → R → S (all horizons → regime pair → confidence)")
+        print("  HRS. Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)")
         print("  R.  REGIME BACKTEST (bull/bear horizon switching with regime detectors)")
         print("  DVRS. Same as HRS for specified horizons")
         mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS: ").strip().upper()
@@ -4983,13 +4980,13 @@ Examples:
 
         print("\nWhich assets?")
         print("  1. All (crypto + indices)")
-        print("  2. Crypto only (BTC, ETH, XRP, DOGE)")
+        print("  2. Crypto only (BTC, ETH, XRP, SOL, LINK, BNB)")
         print("  3. Indices only (SMI, DAX, CAC40)")
         print("  4. Choose specific")
         choice = input("Enter choice (1-4): ").strip()
 
         if choice == '2':
-            assets_list = ['BTC', 'ETH', 'XRP', 'DOGE']
+            assets_list = ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']
         elif choice == '3':
             assets_list = ['SMI', 'DAX', 'CAC40']
         elif choice == '4':
@@ -5127,7 +5124,8 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
-        _run_mode_r(assets_list, horizons, _r_args)
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
     elif mode in ('HRS', 'DVRS'):
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
@@ -5136,7 +5134,8 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
-        _run_mode_r(assets_list, horizons, _r_args)
+        r_results = _run_mode_r(assets_list, horizons, _r_args)
+        _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
@@ -5152,7 +5151,7 @@ Examples:
                     print(f"{'#'*60}")
                 run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
             if mode in ('DVS', 'DV'):
-                run_mode_v([asset], horizons)
+                run_mode_v([asset], horizons, replay_hours=flag_replay or None)
                 if mode == 'DVS':
                     class _Args: pass
                     _r_args = _Args()
@@ -5160,7 +5159,7 @@ Examples:
                     _r_args.top = flag_top
                     run_mode_s([asset], horizons, _r_args)
     elif mode == 'V':
-        run_mode_v(assets_list, horizons)
+        run_mode_v(assets_list, horizons, replay_hours=flag_replay or None)
     elif mode == 'H':
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
 

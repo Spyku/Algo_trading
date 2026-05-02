@@ -31,6 +31,45 @@ os.makedirs(MACRO_DIR, exist_ok=True)
 FRESHNESS_SECONDS = 3600  # 1 hour
 
 
+def _binance_get(url, ctx, timeout=30, retries=4, backoff=(1, 2, 5, 10), verbose=False):
+    """Resilient Binance GET. Retries transient HTTP 400/429/5xx + connection
+    errors with exponential backoff. Captures response body on every HTTP
+    error so root-cause is visible on persistent failures.
+
+    The trader's morning download burst (funding-rate pagination → OI →
+    klines) periodically gets a transient 400 on the first OI request — same
+    URL works fine seconds later. Without retry, the entire OI fetch was
+    silently failing every day. Retry handles it; body capture makes any
+    persistent 4xx (e.g. delisted symbol, schema change) self-explanatory.
+    """
+    import urllib.request, urllib.error, time as _t
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode('utf-8', errors='replace')[:200]
+            except Exception:
+                body = ''
+            last_err = f'HTTP {e.code} body={body!r}'
+            # Retry on transient codes; fail fast on permanent (401/403/404)
+            transient = e.code in (400, 408, 425, 429, 500, 502, 503, 504)
+            if not transient or attempt == retries - 1:
+                raise RuntimeError(last_err) from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            last_err = f'{type(e).__name__}: {e}'
+            if attempt == retries - 1:
+                raise RuntimeError(last_err) from e
+        sleep_s = backoff[min(attempt, len(backoff) - 1)]
+        if verbose:
+            print(f'      [retry {attempt+1}/{retries} after {sleep_s}s] {last_err}')
+        _t.sleep(sleep_s)
+    raise RuntimeError(last_err or 'unknown error')
+
+
 def _alert_partial_download(key, msg, severity='warn'):
     """Fix #8 (2026-04-24): lazy-imported Telegram alert for partial-download
     scenarios. Kept as a separate helper to avoid a hard dependency on
@@ -516,14 +555,20 @@ def download_derivatives_data(assets=None):
             print(f"ERROR: {e}")
 
         # --- Open Interest (hourly, paginate backwards using endTime) ---
+        # Uses _binance_get for retries on transient 400/429/5xx — first
+        # request after the funding-rate pagination burst was failing daily
+        # with a transient 400 (Binance rate-limit-adjacent), no retry,
+        # silent OI loss. Retry resolves the transient; body capture surfaces
+        # the cause on any persistent failure (delisted symbol, schema change).
+        # Brief pre-call sleep also gives the funding-rate burst time to
+        # clear Binance's per-IP request window.
+        time.sleep(1.0)
         print(f"    Open interest (hourly)...", end=' ')
         all_oi = []
         try:
             url = (f"https://fapi.binance.com/futures/data/openInterestHist"
                    f"?symbol={symbol}&period=1h&limit=500")
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                data = json.loads(resp.read().decode())
+            data = _binance_get(url, ctx, verbose=True)
             if data:
                 all_oi.extend(data)
 
@@ -534,9 +579,7 @@ def download_derivatives_data(assets=None):
                 end_ms = earliest_ts - 1
                 url = (f"https://fapi.binance.com/futures/data/openInterestHist"
                        f"?symbol={symbol}&period=1h&endTime={end_ms}&limit=500")
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
-                    data = json.loads(resp.read().decode())
+                data = _binance_get(url, ctx, verbose=True)
                 if data:
                     all_oi.extend(data)
                 time.sleep(0.2)
@@ -1111,15 +1154,16 @@ def main():
     else:
         cross_df = download_cross_asset()
 
-    # 5. On-chain data (BTC + ETH + XRP + SOL + LINK)
-    for _asset in ['btc', 'eth', 'xrp', 'sol', 'link']:
+    # 5. On-chain data (BTC + ETH + XRP + SOL + LINK + BNB)
+    # Note: BNB likely not on CoinMetrics free tier (proprietary chain) — will fail gracefully like SOL.
+    for _asset in ['btc', 'eth', 'xrp', 'sol', 'link', 'bnb']:
         if _is_fresh(os.path.join(MACRO_DIR, f'onchain_{_asset}.csv')):
             print(f"  On-chain {_asset.upper()}: fresh — skipping")
         else:
             download_onchain_data(asset=_asset)
 
-    # 6. Derivatives data (funding rate + open interest — BTC + ETH + XRP + SOL + LINK)
-    stale_assets = [a for a in ['BTC', 'ETH', 'XRP', 'SOL', 'LINK'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
+    # 6. Derivatives data (funding rate + open interest — BTC + ETH + XRP + SOL + LINK + BNB)
+    stale_assets = [a for a in ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'] if not _is_fresh(os.path.join(MACRO_DIR, f'derivatives_{a.lower()}.csv'))]
     if stale_assets:
         deriv_df = download_derivatives_data(assets=stale_assets)
     else:

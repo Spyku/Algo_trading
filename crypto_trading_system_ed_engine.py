@@ -1,128 +1,43 @@
 """
-Doohan — Production ML Trading System
+Ed — Production ML Trading System
 ============================================================
-ML trading system for BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT.
-130 features -> walk-forward ML -> BUY/SELL/HOLD signals.
-Variable horizon per asset (5h, 6h, 7h, 8h etc.)
+ML trading system for BTC, ETH, XRP, SOL, LINK (5 assets post-2026-04-19 prune).
+130+ features -> walk-forward ML -> BUY/SELL/HOLD signals.
+Variable horizon per asset (5h, 6h, 7h, 8h, etc.) with regime-switching.
 
-Exhaustive grid search:
-  Grid: 3 combos × 6 windows × 6 features × 3 gammas = 324 evals (~20 min)
-     - Combos: RF+LGBM, XGB+LGBM, RF+XGB
-     - Windows: 72, 100, 150, 200, 250, 300
-     - Features: 10, 13, 17, 20, 25, 30
-     - Gammas: 0.999, 0.997, 0.995
+Pipeline:
+  Mode D: Exhaustive grid (3 combos × 6 windows × 6 features × 3 gammas = 324 evals)
+    - Combos: RF+LGBM, XGB+LGBM, RF+XGB
+    - Windows: 72, 100, 150, 200, 250, 300
+    - Features: 10, 13, 17, 20, 25, 30 (LGBM importance ranking)
+    - Gammas: 0.999, 0.997, 0.995
+  Mode V: Backtest top 6 → 50-trial Optuna refine per top 3 → pick winner
+  Mode R: Regime backtest (bull/bear horizon pairs × 5 detectors)
+  Mode S: Joint sweep (detector × horizon_pair × confidence_pair = 1960 evals)
+  Mode T: Per-regime shield sweep + auto-chains G (rally-cooldown)
+  Mode G: Standalone rally-cooldown sweep (49,716 configs, cache-fed)
+  Mode P: PySR symbolic-regression feature discovery (historical window, no leakage)
+  Chains: HRS = H→R→S | HRST = H→R→S→T(+G) | DVRS = DV→R→S | RS = R→S
 
-Modes:
-  P.   PySR feature discovery (symbolic regression → new features)
-  D.   Diagnose — grid optimization (combo × window × gamma × features)
-  V.   Validate — backtest top 6 → refine top 3 → pick production model
-  DV.  Diagnose + Validate (standard pipeline)
-  S.   Strategy comparison (both_agree / either_agree / Xh_only)
-  DS.  Diagnose + Strategy
-  DVS. Full pipeline: Diagnose → Validate → Strategy
-  H.   Horizon sweep (DV per horizon → compare → save best)
+Core contract:
+  - Embargo: train_end = i - horizon (dynamic, kills label overlap). Backtest only.
+  - Fee: BACKTEST_FEE_PER_LEG = 0.0005 (5 bps, realistic maker blend) for ALL sim code.
+  - Production scoring: return × (win_rate/100) for positives, raw return for negatives.
+  - Iterative T↔G: up to 4 passes until config fingerprint stable.
 
-CLI Usage:
+CLI (order-independent):
+  python crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440
+  python crypto_trading_system_ed.py T ETH --replay 1440 --max-iter 4
+  python crypto_trading_system_ed.py G ETH --replay 1440 --rank recent
   python crypto_trading_system_ed.py P BTC 6h
-  python crypto_trading_system_ed.py DV BTC 8h
-  python crypto_trading_system_ed.py H BTC 5,6,7,8h
-  python crypto_trading_system_ed.py D BTC,ETH 6,7h
+  python crypto_trading_system_ed.py --help
 
 Outputs:
-  models/crypto_ed_best_models.csv       (top 6 candidates from Mode D)
-  models/crypto_ed_production.csv         (best live performer from Mode V)
-  config/regime_config_ed.json                  (horizon + min_confidence per asset)
-  logs/ed_v1_*.log                             (auto-saved terminal output)
-
-============================================================
-TODO (V1.7.1 → production readiness):
-============================================================
-  1. REFINED-ONLY PRODUCTION SELECTION — D candidates consistently underperform
-     refined versions in live backtests. Mode V should select the production model
-     from refined configs only (not raw D candidates). D candidates are still used
-     for diagnostics and as input to pick top 3 for refinement.
-
-  2. COMPLETE HORIZON SWEEP — Run BTC 7h and 8h:
-       python crypto_trading_system_ed.py DV BTC 7h
-       python crypto_trading_system_ed.py DV BTC 8h
-     Results so far: 4h FAILED, 5h marginal (+2.46%), 6h BEST (+3.47% at 80%, holds at 90%).
-
-  3. PICK DOMINANT HORIZON — Compare all 4 horizons (5/6/7/8h) and select winner.
-     If 6h wins: run Mode S for strategy selection, expand to all 9 assets.
-
-  4. APPLY EMBARGO FIX TO DEKU — Deku production still uses fixed EMBARGO_CANDLES=4
-     for all horizons. Should use train_end = i - horizon like V1.7.1.
-
-  5. WIRE INTO LIVE TRADER — Once winner is validated:
-       - Update crypto_live_trader_doohan.py to read V1.7.1 production CSV
-       - Update crypto_revolut_doohan.py to point to V1.7.1 configs
-       - Or promote V1.7.1 as new Doohan production version
-
-============================================================
-Differences: V1.7.1 vs Deku production vs Doohan V1.6 production
-============================================================
-
-  EMBARGO (most critical difference):
-    V1.7.1:  train_end = i - horizon          (dynamic, scales with prediction horizon)
-    V1.6:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Deku:    train_end = i - EMBARGO_CANDLES   (fixed EMBARGO_CANDLES = 4, too small for 8h)
-    Impact:  Pre-embargo APFs were inflated 5-26×. Post-embargo realistic range is 1.0-3.0.
-             V1.6 and Deku results are NOT comparable to V1.7.1 due to label overlap leakage.
-
-  SEARCH METHOD:
-    V1.7.1:  Exhaustive grid (324 evals) + 50-trial Optuna refine per top 3
-    V1.6:    Exhaustive grid (432 evals) + 30-trial Optuna refine per top 3
-    Deku:    Optuna TPE+Hyperband (150 trials, auto-extend to 200/250)
-
-  COMBOS:
-    V1.7.1:  3 combos — RF+LGBM, XGB+LGBM, RF+XGB (dead combos dropped)
-    V1.6:    6 combos — RF+LGBM, XGB+LGBM, RF+XGB, RF+GB, RF+LR, GB+LR
-    Deku:    26 combos — all pairs + triples + quads + quint of RF/GB/XGB/LR/LGBM
-
-  WINDOWS:
-    V1.7.1:  [72, 100, 150, 200, 250, 300]  (36/48 dropped — embargo eats too much)
-    V1.6:    [72, 100, 150, 200]
-    Deku:    [24, 36, 48, 72, 100, 150, 200]  (Optuna picks from these)
-
-  REFINE:
-    V1.7.1:  50 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    V1.6:    30 trials per config, ±20h window, ±0.020 gamma, ±5 features
-    Deku:    N/A (Optuna does continuous search, no separate refine phase)
-
-  BACKTEST:
-    V1.7.1:  336h (2 weeks)
-    V1.6:    168h (1 week)
-    Deku:    200h (Mode D replay) / 400h (Mode S replay)
-
-  SCORING:
-    V1.7.1:  APF (Adjusted Profit Factor) = raw_PF / buyhold_PF
-    V1.6:    APF (same formula)
-    Deku:    APF default, supports --metric flag (apf/rawpf/calmar/return/rpf_sqrt)
-
-  HOLDOUT:
-    V1.7.1:  N/A (uses Mode V live backtest instead)
-    V1.6:    N/A (uses Mode V live backtest instead)
-    Deku:    3-fold rolling holdout with embargo=4, diversity-aware (top 10 + best per combo)
-
-  FEATURES:
-    V1.7.1:  Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    V1.6:    Grid tests [10, 13, 17, 20, 25, 30] — LGBM importance ranking
-    Deku:    Optuna picks n_features from LGBM-ranked list (continuous range)
-
-  GAMMAS:
-    V1.7.1:  Grid tests [0.995, 0.997, 0.999]
-    V1.6:    Grid tests [0.995, 0.997, 0.999]
-    Deku:    Optuna continuous (0.994, 1.0)
-
-  MODELS:
-    V1.7.1:  RF, XGB, LGBM (GB/LR only in combos that include them — but none do)
-    V1.6:    RF, GB, XGB, LR, LGBM (all 5 available in combos)
-    Deku:    RF, GB, XGB, LR, LGBM (all 5, 26 ensemble combinations)
-
-  WALK-FORWARD STEP:
-    V1.7.1:  DIAG_STEP = 36 (same as Deku)
-    V1.6:    DIAG_STEP = 36
-    Deku:    DIAG_STEP = 36
+  models/crypto_ed_best_models.csv   (top 6 candidates from Mode D)
+  models/crypto_ed_production.csv    (winner per (asset, horizon))
+  config/regime_config_ed.json       (per-asset: detector, bull/bear horizon+conf+shield, gate, brake)
+  output/rally_cd_<asset>_*.csv      (Mode G sweep details)
+  logs/ed_v1_*.log                   (auto-saved terminal output)
 """
 
 import sys
@@ -154,6 +69,7 @@ warnings.filterwarnings('ignore', message='.*does not have valid feature names.*
 
 import time
 import json
+import pickle
 import contextlib
 from datetime import datetime as _dt_log
 
@@ -162,23 +78,49 @@ from datetime import datetime as _dt_log
 # AUTO-LOGGING: mirror all stdout to timestamped log file
 # ============================================================
 class _TeeWriter:
-    """Write to both terminal and log file simultaneously."""
+    """Write to both terminal and log file simultaneously.
+    Resilient to terminal-handle death (Windows OSError 22 from Modern
+    Standby, console disconnect, parent shell exit). Once the terminal
+    write fails, we stop trying it and keep writing to the log file —
+    long unattended runs survive overnight standby cycles.
+    """
     def __init__(self, terminal, log_file):
         self.terminal = terminal
         self.log_file = log_file
         self.encoding = getattr(terminal, 'encoding', 'utf-8')
+        self._terminal_dead = False
     def write(self, message):
-        self.terminal.write(message)
-        self.log_file.write(message)
-        self.log_file.flush()
+        if not self._terminal_dead:
+            try:
+                self.terminal.write(message)
+            except (OSError, ValueError):
+                self._terminal_dead = True
+        try:
+            self.log_file.write(message)
+            self.log_file.flush()
+        except (OSError, ValueError):
+            pass
     def flush(self):
-        self.terminal.flush()
-        self.log_file.flush()
+        if not self._terminal_dead:
+            try:
+                self.terminal.flush()
+            except (OSError, ValueError):
+                self._terminal_dead = True
+        try:
+            self.log_file.flush()
+        except (OSError, ValueError):
+            pass
     def isatty(self):
-        return self.terminal.isatty()
+        try:
+            return False if self._terminal_dead else self.terminal.isatty()
+        except (OSError, ValueError):
+            return False
     def reconfigure(self, **kwargs):
         if hasattr(self.terminal, 'reconfigure'):
-            self.terminal.reconfigure(**kwargs)
+            try:
+                self.terminal.reconfigure(**kwargs)
+            except (OSError, ValueError):
+                pass
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
 os.makedirs(_LOG_DIR, exist_ok=True)
@@ -206,6 +148,16 @@ from datetime import datetime, timedelta
 from itertools import combinations
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.parallel import Parallel, delayed
+# Latent-bug fix (2026-04-25 evening): RandomForestClassifier,
+# GradientBoostingClassifier, LogisticRegression are referenced by the
+# lambdas in _get_deku_models / _get_deku_diagnostic_models (lines ~1734
+# and ~1747) but were never imported at module level. Result: every RF /
+# GB / LR factory call raised NameError, swallowed by _log_fit_exception
+# (audit fix) and the loop continued. Combos like "RF+LGBM" effectively
+# had ONLY LGBM voting — silent feature-coverage degradation across
+# every Mode D / Mode V / HRST run since Ed V1.0 (2026-03-29).
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 try:
     import optuna
 except ImportError:
@@ -231,6 +183,35 @@ except Exception:
         os.nice(10)  # Unix fallback
     except Exception:
         pass
+
+
+# Block Modern Standby for the lifetime of this process. Win32
+# SetThreadExecutionState with ES_CONTINUOUS keeps the request active until
+# the process exits or explicitly clears it — this is the only API-level way
+# to prevent Modern Standby (S0 idle), which ignores most powercfg timeouts.
+# Without this, an HRST that takes >5 min of low-CPU phases (refine I/O,
+# Optuna search) is liable to be silently suspended; on wake the FS / Drive
+# layer is in a transient state and previously-visible files / directories
+# go missing, killing the run with cryptic OSError. Resets the flag on
+# atexit so a second python process in the same shell isn't left holding
+# the OS awake forever.
+try:
+    import ctypes as _ctypes
+    _ES_CONTINUOUS = 0x80000000
+    _ES_SYSTEM_REQUIRED = 0x00000001
+    _ES_AWAYMODE_REQUIRED = 0x00000040
+    _kernel32 = _ctypes.windll.kernel32
+    # Try ES_AWAYMODE first (blocks Modern Standby); fall back without it on
+    # older Windows that don't support the flag.
+    _ses_flags = _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED | _ES_AWAYMODE_REQUIRED
+    _ses_prev = _kernel32.SetThreadExecutionState(_ses_flags)
+    if _ses_prev == 0:
+        _ses_prev = _kernel32.SetThreadExecutionState(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED)
+    if _ses_prev != 0:
+        import atexit as _atexit
+        _atexit.register(lambda: _kernel32.SetThreadExecutionState(_ES_CONTINUOUS))
+except Exception:
+    pass  # non-Windows or insufficient privileges — let it sleep
 
 
 def _kill_orphan_workers():
@@ -329,30 +310,106 @@ ACTIVE_FEATURE_SET = 'A'
 # ============================================================
 # ASSET CONFIGURATION
 # ============================================================
-ASSETS = {
-    # Pruned 2026-04-19 — see crypto_trading_system_ed.py ASSETS for rationale.
-    'BTC':   {'source': 'binance', 'ticker': 'BTC/USDT',  'file': 'data/btc_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'ETH':   {'source': 'binance', 'ticker': 'ETH/USDT',  'file': 'data/eth_hourly_data.csv',  'start': '2017-08-01T00:00:00Z'},
-    'XRP':   {'source': 'binance', 'ticker': 'XRP/USDT',  'file': 'data/xrp_hourly_data.csv',  'start': '2018-05-01T00:00:00Z'},
-    'SOL':   {'source': 'binance', 'ticker': 'SOL/USDT',  'file': 'data/sol_hourly_data.csv',  'start': '2020-08-01T00:00:00Z'},
-    'LINK':  {'source': 'binance', 'ticker': 'LINK/USDT', 'file': 'data/link_hourly_data.csv', 'start': '2019-01-01T00:00:00Z'},
-    'SMI':   {'source': 'yfinance', 'ticker': '^SSMI',    'file': 'data/smi_hourly_data.csv',  'start': None},
-    'DAX':   {'source': 'yfinance', 'ticker': '^GDAXI',   'file': 'data/dax_hourly_data.csv',  'start': None},
-    'CAC40': {'source': 'yfinance', 'ticker': '^FCHI',    'file': 'data/cac40_hourly_data.csv', 'start': None},
-}
+# Fix #10 (2026-04-24): data-dir is overridable via --data-dir CLI flag OR
+# ED_DATA_DIR env var. Matrix/research runners write their own copy to
+# data_matrix_<ts>/ and point here, so live trader's data/ is untouched.
+DATA_DIR = os.environ.get('ED_DATA_DIR', 'data')
+MACRO_DIR = os.environ.get('ED_MACRO_DIR', os.path.join(DATA_DIR, 'macro_data'))
+
+_ASSET_DEFS = [
+    # 2026-05-02: BNB added after Revolut X listing verified;
+    # DOGE/ADA/AVAX/DOT remain pruned (weak priors, no diversification).
+    ('BTC',   'binance',  'BTC/USDT',  'btc_hourly_data.csv',  '2017-08-01T00:00:00Z'),
+    ('ETH',   'binance',  'ETH/USDT',  'eth_hourly_data.csv',  '2017-08-01T00:00:00Z'),
+    ('XRP',   'binance',  'XRP/USDT',  'xrp_hourly_data.csv',  '2018-05-01T00:00:00Z'),
+    ('SOL',   'binance',  'SOL/USDT',  'sol_hourly_data.csv',  '2020-08-01T00:00:00Z'),
+    ('LINK',  'binance',  'LINK/USDT', 'link_hourly_data.csv', '2019-01-01T00:00:00Z'),
+    ('BNB',   'binance',  'BNB/USDT',  'bnb_hourly_data.csv',  '2017-12-01T00:00:00Z'),
+    ('SMI',   'yfinance', '^SSMI',     'smi_hourly_data.csv',  None),
+    ('DAX',   'yfinance', '^GDAXI',    'dax_hourly_data.csv',  None),
+    ('CAC40', 'yfinance', '^FCHI',     'cac40_hourly_data.csv', None),
+]
+
+def _build_assets_dict():
+    """Build ASSETS dict using current DATA_DIR. Call after DATA_DIR changes."""
+    return {
+        asset: {'source': src, 'ticker': tkr,
+                'file': os.path.join(DATA_DIR, fname),
+                'start': start}
+        for (asset, src, tkr, fname, start) in _ASSET_DEFS
+    }
+
+ASSETS = _build_assets_dict()
+
+def set_data_dir(new_dir):
+    """Override the data directory. Must be called BEFORE any load_data /
+    build_all_features. Rebuilds ASSETS dict to pick up new paths."""
+    global DATA_DIR, MACRO_DIR, ASSETS
+    DATA_DIR = new_dir
+    MACRO_DIR = os.path.join(new_dir, 'macro_data')
+    ASSETS = _build_assets_dict()
 
 HORIZON_SHORT = 4                 # short horizon (parametric — change here to switch)
 HORIZON_LONG = 8                  # long horizon (parametric — change here to switch)
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
 PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 
-# Create output folders
-for _d in ['data', 'data/macro_data', 'charts', 'models', 'config']:
+# Create output folders (keeps default data/ dir alive even if --data-dir points elsewhere)
+for _d in [DATA_DIR, MACRO_DIR, 'data', 'data/macro_data', 'charts', 'models', 'config']:
     os.makedirs(_d, exist_ok=True)
-TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (applied on BUY and SELL)
+TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
-TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used for `2*TRADING_FEE` label threshold only
-BACKTEST_FEE_PER_LEG = 0.0005  # 5 bps/leg — realistic maker-blend, used in all backtest sims
+TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY for LABEL generation (`2 * TRADING_FEE` break-even target)
+
+# Backtest simulations use a more realistic blend: live trader is maker-first
+# (~95% maker @ 0% fee, ~5% taker fallback @ 0.11%). Measured blend ≈ 1.6 bps/leg.
+# 5 bps/leg = 3× safety margin for periods when maker success degrades.
+# Applied uniformly across Mode D/V/R/S/T/G backtest sims so relative policy
+# comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
+BACKTEST_FEE_PER_LEG = 0.0005
+
+# ============================================================
+# Regime-detector search space (Mode R + Mode S)
+# ============================================================
+# Trimmed 5→2 on 2026-04-30 after cross-run analysis of 35 1440-window HRSTs:
+# tsmom_672h and sma24>sma100 are the only detectors that consistently appear
+# in TOP 15 (66% and 69% of runs respectively). The other 3 detectors are
+# either single-run wonders (price>sma72, sma168>sma480) or weak (vol_calm,
+# 37% presence and 4 wins by luck on biased 4mo runs). Restricting search to
+# the 2 robust detectors reduces Mode S multiple-testing 3920→1568 combos
+# (60% reduction) and gives much more reproducible HRST winners.
+#
+# To re-enable the full set for a quarterly detector-rediscovery run, edit
+# this set or wrap the filter site in `_build_regime_indicators_and_detectors`
+# with a CLI flag.
+ENABLED_DETECTORS = {'tsmom_672h', 'sma24>sma100'}
+# Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
+# Used for A/B testing so all matrix variants see the same data snapshot.
+NO_DATA_UPDATE = False
+# Session-scoped guard: Mode D sets this True after the first successful download,
+# so subsequent horizons in an HRST run reuse the same data snapshot instead of
+# redownloading 4× (which also drifts the tail timestamp across horizons).
+_DATA_DOWNLOADED_THIS_SESSION = False
+# Override for disabled_features.json's `enabled` flag. None = use file as-is.
+# True/False via --trim-override on|off so A/B matrix doesn't touch prod config.
+TRIM_ENABLED_OVERRIDE = None
+# Override for Optuna TPESampler seed. None = use default seed=42.
+# Set via --optuna-seed N for seed-robustness A/B testing.
+OPTUNA_SEED_OVERRIDE = None
+# Auto-drop features with >SPARSE_NAN_THRESHOLD fraction NaN in the training window.
+# Newer feeds (orderbook/IV) that haven't accumulated data yet would otherwise
+# collapse the training set via dropna(). 70% keeps useful-but-partial features
+# (e.g., deriv_oi at ~40% NaN has 820 valid rows — plenty of signal) and only
+# drops truly empty feeds (orderbook/IV at ~88% NaN = 175 valid rows).
+SPARSE_NAN_THRESHOLD = 0.70
+# Feature-family floor: force Mode D's selected feature subset to include
+# at least N logret_* features and M pysr_* features. Prevents Optuna from
+# picking trend-blind volatility-only subsets on short horizons (observed
+# 2026-04-22: ETH 5h/6h ending up with 0 logrets + 0 pysr across both prod
+# and laptop trim configs). Applied in grid + refine feature selection.
+FEATURE_FLOOR_ENABLED = True
+FEATURE_FLOOR_MIN_LOGRET = 2
+FEATURE_FLOOR_MIN_PYSR = 1
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
@@ -370,7 +427,7 @@ N_FEATURES_RANGE = {
 }
 N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
 
-# Doohan V1.4.1: Continuous search spaces
+# Optuna refine search spaces (continuous, ±window/±gamma/±features around Mode D winners)
 DOOHAN_GAMMA_MIN = 0.995
 DOOHAN_GAMMA_MAX = 0.999
 DOOHAN_FEAT_MIN = 10
@@ -385,13 +442,76 @@ VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 
 # Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
 LABEL_MODE = 'fee_aware'
+# Label threshold override (research/one-off). None = use LABEL_MODE default (2×fee=0.22%).
+# When set (via --label-threshold X), label=1 iff future_return > X. E.g., 0.01 = target ≥1% moves.
+LABEL_THRESHOLD_PCT = None
+# Meta-label filter threshold (research/A-B). None = no meta filter.
+# When set (via --meta-filter P), every BUY signal produced by generate_signals() is
+# audited by a walk-forward LGBM secondary; BUYs with meta_prob < P are downgraded to HOLD.
+# Enforces --no-persist so production never sees a meta-filtered result by accident.
+META_FILTER_THRESHOLD = None
 
 # Mode V: live backtest validation of top 6 candidates
-MODE_G_REPLAY_HOURS = 336       # 2 full weeks
+MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
 PRODUCTION_CSV = 'models/crypto_ed_production.csv'
+REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
 
+
+def _ensure_parent_dir(path):
+    """Re-create parent dir if Google Drive sync briefly hid it. The engine
+    lives on a synced drive and `models/`, `config/`, `data/` have all been
+    observed transiently invisible to the Python process while still
+    existing on disk. Without this, an entire HRST run dies on
+    OSError: 'Cannot save file into a non-existent directory'."""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError:
+            pass  # next-line write will surface a clearer error
+
+
+def _atomic_write_json(path, data):
+    """Write JSON atomically: temp file + os.replace, so a crash mid-write can't
+    corrupt the target. Tmp path includes PID so two concurrent HRST/trader
+    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit)."""
+    _ensure_parent_dir(path)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def _atomic_write_csv(df, path, **to_csv_kwargs):
+    """Write a DataFrame to CSV atomically: temp file + os.replace. Protects live
+    trader / other readers from seeing partial writes if the process crashes
+    mid-write. Tmp path includes PID so two concurrent writers don't race on the
+    same tmp file."""
+    _ensure_parent_dir(path)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    df.to_csv(tmp, **to_csv_kwargs)
+    os.replace(tmp, path)
+
+
+# Session-scoped seen-exception cache — suppresses duplicate error logs from
+# per-iteration model-fit exception handlers (Fix #7 2026-04-24). Previously
+# those blocks did `except Exception: continue` with zero visibility; if all
+# iterations failed, the outer loop produced "no votes" with no explanation.
+# Now the first occurrence of each (context, ExceptionClass, short_message)
+# is printed, later ones are silent — so logs stay clean but failures surface.
+_EXCEPTION_SEEN = set()
+
+
+def _log_fit_exception(context, exc):
+    """One-line print the first time a (context, exception-class, short-msg) triple
+    is seen in the process. Subsequent identical failures stay quiet."""
+    key = (context, type(exc).__name__, str(exc)[:120])
+    if key in _EXCEPTION_SEEN:
+        return
+    _EXCEPTION_SEEN.add(key)
+    print(f"    [fit-exc][{context}] {type(exc).__name__}: {str(exc)[:120]}")
 
 
 def _compute_optuna_score(result):
@@ -645,10 +765,32 @@ def update_all_data(assets_list=None):
 def load_data(asset_name):
     config = ASSETS[asset_name]
     filepath = config['file']
-    if not os.path.exists(filepath):
-        print(f"  WARNING: {filepath} not found. Run update first.")
+    # Retry on transient invisibility — engine sits on Google Drive synced
+    # storage; sync activity briefly hides existing files. Without retry,
+    # an HRST run can do Mode D fine, then refine reports "not found",
+    # losing ~30 min of work on a file that's actually there.
+    for attempt in range(6):
+        if os.path.exists(filepath):
+            break
+        if attempt == 0:
+            print(f"  [load_data] {filepath} not visible — retrying in case of sync glitch...")
+        time.sleep(min(2 ** attempt, 10))
+    else:
+        print(f"  WARNING: {filepath} not found after retries. Run update first.")
         return None
-    df = pd.read_csv(filepath)
+    # Same retry on the read itself — Drive can mark a file existent but
+    # briefly return PermissionError / IOError mid-sync.
+    last_exc = None
+    for attempt in range(6):
+        try:
+            df = pd.read_csv(filepath)
+            break
+        except (OSError, IOError, PermissionError) as e:
+            last_exc = e
+            time.sleep(min(2 ** attempt, 10))
+    else:
+        print(f"  WARNING: {filepath} unreadable after retries: {last_exc}")
+        return None
     df['datetime'] = pd.to_datetime(df['datetime'])
     df = df.sort_values('datetime').reset_index(drop=True)
     for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -660,7 +802,7 @@ def load_data(asset_name):
 # ============================================================
 # HOURLY FEATURE ENGINEERING (ALL 36 technical features)
 # ============================================================
-def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
+def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, keep_label_nan_tail=False):
     df = df_hourly.copy()
 
     for period in [1, 2, 3, 4, 5, 6, 7, 8, 12, 24, 48, 72, 120, 240]:
@@ -688,17 +830,21 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     rs = gain / loss
     df['rsi_14h'] = 100 - (100 / (1 + rs))
 
+    # Flat-price guards: all divisors below can be 0 on stablecoin hours or
+    # illiquid windows. +1e-10 matches the ATR-ratio safeguards elsewhere in
+    # this function (line 772-ish). Previously produced inf/NaN that silently
+    # degraded LGBM feature quality.
     low14  = df['low'].rolling(14).min()
     high14 = df['high'].rolling(14).max()
-    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14)
+    df['stoch_k_14h'] = 100 * (df['close'] - low14) / (high14 - low14 + 1e-10)
 
     bb_mid = df['close'].rolling(20).mean()
     bb_std = df['close'].rolling(20).std()
-    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std)
+    df['bb_position_20h'] = (df['close'] - (bb_mid - 2 * bb_std)) / (4 * bb_std + 1e-10)
 
     roll_mean = df['close'].rolling(50).mean()
     roll_std  = df['close'].rolling(50).std()
-    df['zscore_50h'] = (df['close'] - roll_mean) / roll_std
+    df['zscore_50h'] = (df['close'] - roll_mean) / (roll_std + 1e-10)
 
     tr = pd.DataFrame({
         'hl': df['high'] - df['low'],
@@ -711,7 +857,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 
     df['volatility_12h'] = df['logret_1h'].rolling(12).std()
     df['volatility_48h'] = df['logret_1h'].rolling(48).std()
-    df['vol_ratio_12_48'] = df['volatility_12h'] / df['volatility_48h']
+    df['vol_ratio_12_48'] = df['volatility_12h'] / (df['volatility_48h'] + 1e-10)
 
     if df['volume'].sum() == 0 or df['volume'].isna().all():
         df['volume_ratio_h'] = 1.0
@@ -776,14 +922,21 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
 
     future_return = df['close'].shift(-horizon) / df['close'] - 1
 
-    if LABEL_MODE == 'fee_aware':
+    # Compute labels as float (0.0/1.0) so NaN stays NaN at the tail. Previous
+    # code cast directly to int which coerced `NaN > threshold` (=False) to 0 —
+    # silently mislabeling the last `horizon` rows as "negative class" instead
+    # of dropping them. Downstream dropna(subset=['label']) removes the NaN tail.
+    if LABEL_THRESHOLD_PCT is not None:
+        label_raw = (future_return > LABEL_THRESHOLD_PCT).astype(float)
+    elif LABEL_MODE == 'fee_aware':
         # Fee-aware: label=1 only when future return exceeds round-trip cost
-        df['label'] = (future_return > 2 * TRADING_FEE).astype(int)
+        label_raw = (future_return > 2 * TRADING_FEE).astype(float)
     else:
         # Rolling median on PAST realized returns (no lookahead)
         past_return = df['close'] / df['close'].shift(horizon) - 1
         rolling_median = past_return.rolling(200, min_periods=50).median()
-        df['label'] = (future_return > rolling_median).astype(int)
+        label_raw = (future_return > rolling_median).astype(float)
+    df['label'] = label_raw.where(future_return.notna(), np.nan)
 
     feature_cols = [
         'logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_5h',
@@ -811,22 +964,35 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True):
     keep_cols = ['datetime', 'close', 'high', 'low', 'volume'] + feature_cols + ['label', '_forward_return']
     df = df[keep_cols].copy()
 
-    nan_counts = df[feature_cols + ['label']].isna().sum()
-    nan_cols = nan_counts[nan_counts > 0]
-    if verbose and len(nan_cols) > 0:
+    # Only drop rows where CORE features are NaN (base technical + label).
+    # Sparse features (OI, orderbook, IV) keep their NaN — LGBM handles missing natively.
+    sparse_prefixes = ('deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+    core_cols = [c for c in feature_cols if not any(c.startswith(p) for p in sparse_prefixes)]
+
+    if verbose:
         print(f"    Rows before dropna: {len(df)}")
 
-    df = df.dropna().reset_index(drop=True)
+    # M-01 root cause fix (2026-04-25): when caller is the LIVE TRADER (which
+    # passes keep_label_nan_tail=True), we must NOT drop the last `horizon`
+    # rows just because their forward-return label is NaN. Those rows are the
+    # freshest bars — they're what the model needs to predict on. Training
+    # callers (Mode D/V/H/S/R/T) leave the flag False and still get the clean
+    # labelled dataframe they need.
+    drop_subset = core_cols if keep_label_nan_tail else core_cols + ['label']
+    df = df.dropna(subset=drop_subset).reset_index(drop=True)
     if verbose:
-        print(f"    Rows after dropna: {len(df)}")
+        n_sparse = len([c for c in feature_cols if any(c.startswith(p) for p in sparse_prefixes)])
+        tail_msg = " (label-NaN tail kept for live inference)" if keep_label_nan_tail else ""
+        print(f"    Rows after dropna: {len(df)} (core only; {n_sparse} sparse features keep NaN){tail_msg}")
     return df, feature_cols
 
 
 # ============================================================
 # V2: MACRO & SENTIMENT FEATURES
 # ============================================================
-MACRO_DIR = 'data/macro_data'
-DATA_DIR = 'data'
+# Fix #10 (2026-04-24): DATA_DIR and MACRO_DIR are defined ABOVE (line ~248)
+# so that --data-dir override works. CHARTS/MODELS/CONFIG are never isolated
+# (matrix variants write to `_noprod_<label>.*` tagged names, not a separate dir).
 CHARTS_DIR = 'charts'
 MODELS_DIR = 'models'
 CONFIG_DIR = 'config'
@@ -861,7 +1027,8 @@ def _load_macro_csv(filename):
         return None
     try:
         df = pd.read_csv(path, parse_dates=[0], index_col=0)
-        df.index = pd.to_datetime(df.index).tz_localize(None)
+        idx = pd.to_datetime(df.index)
+        df.index = idx.tz_localize(None) if idx.tz is None else idx.tz_convert(None)
         _macro_cache[filename] = df
         return df
     except Exception as e:
@@ -914,6 +1081,47 @@ def _compute_fear_greed_features(fg_df, prefix='fg_'):
     return features
 
 
+def _compute_gdelt_features(gdelt_df, prefix='gp_'):
+    """Compute geopolitical tension features from GDELT data.
+    Input columns: iran_vol, iran_tone, geopolitical_vol, geopolitical_tone
+    Output features: volume spikes, tone shifts, rolling z-scores."""
+    features = pd.DataFrame(index=gdelt_df.index)
+    for col in gdelt_df.columns:
+        s = gdelt_df[col].astype(float)
+        tag = f"{prefix}{col}"
+        # Raw value
+        features[f'{tag}'] = s
+        # Z-score (rolling 168h = 1 week)
+        roll_mean = s.rolling(168, min_periods=24).mean()
+        roll_std = s.rolling(168, min_periods=24).std()
+        features[f'{tag}_zscore'] = (s - roll_mean) / (roll_std + 1e-10)
+        # Short-term change (spike detection)
+        features[f'{tag}_chg4h'] = s.diff(4)
+        features[f'{tag}_chg24h'] = s.diff(24)
+        # Spike flag (> 2 std above mean)
+        features[f'{tag}_spike'] = ((s - roll_mean) / (roll_std + 1e-10) > 2.0).astype(float)
+    return features
+
+
+def _compute_onchain_features(oc_df, prefix='oc_'):
+    """Compute on-chain feature derivations.
+    Input columns (daily): active_addresses, mvrv, fees_native, exchange_inflow,
+    exchange_outflow, hashrate, tx_count, exchange_netflow, [sopr for BTC].
+    Per column: chg1d, chg5d, chg10d, zscore30d, ratio_ma30d."""
+    features = pd.DataFrame(index=oc_df.index)
+    for col in oc_df.columns:
+        s = oc_df[col].astype(float)
+        tag = f"{prefix}{col}"
+        roll_mean_30 = s.rolling(30, min_periods=10).mean()
+        roll_std_30 = s.rolling(30, min_periods=10).std()
+        features[f'{tag}_chg1d'] = s.pct_change(1) * 100
+        features[f'{tag}_chg5d'] = s.pct_change(5) * 100
+        features[f'{tag}_chg10d'] = s.pct_change(10) * 100
+        features[f'{tag}_zscore30d'] = (s - roll_mean_30) / (roll_std_30 + 1e-10)
+        features[f'{tag}_ratio_ma30d'] = s / (roll_mean_30 + 1e-10)
+    return features
+
+
 def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     features = pd.DataFrame(index=cross_df.index)
     if target_col not in cross_df.columns:
@@ -933,8 +1141,8 @@ def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     return features
 
 
-def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True):
-    df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose)
+def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True, keep_label_nan_tail=False):
+    df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose, keep_label_nan_tail=keep_label_nan_tail)
     all_cols = list(base_cols)
     added = 0
 
@@ -968,7 +1176,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
     if cross_df is not None:
         asset_map = {
             'BTC': 'BTC_USD', 'ETH': 'ETH_USD',
-            'XRP': 'BTC_USD', 'DOGE': 'BTC_USD',
+            'XRP': 'BTC_USD', 'BNB': 'BTC_USD',
             'SMI': 'DAX', 'DAX': 'DAX', 'CAC40': 'DAX',
         }
         target_col = asset_map.get(asset_name, 'BTC_USD')
@@ -980,16 +1188,35 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             all_cols.extend(new_cols)
             added += len(new_cols)
 
-    df = df.drop(columns=['_merge_date'], errors='ignore')
+    # On-chain features (daily — merge on date with ffill)
+    onchain_asset_map = {'BTC': 'btc', 'ETH': 'eth', 'XRP': 'xrp', 'SOL': 'sol', 'LINK': 'link', 'BNB': 'bnb'}
+    oc_key = onchain_asset_map.get(asset_name)
+    if oc_key is not None:
+        oc_df = _load_macro_csv(f'onchain_{oc_key}.csv')
+        if oc_df is not None:
+            oc_feats = _compute_onchain_features(oc_df, prefix='oc_')
+            oc_feats['_merge_date'] = oc_feats.index.normalize()
+            df = df.merge(oc_feats, on='_merge_date', how='left')
+            new_cols = [c for c in oc_feats.columns if c != '_merge_date']
+            all_cols.extend(new_cols)
+            added += len(new_cols)
+
+    # GDELT geopolitical features — DISABLED (Grade 1: 0/33 models ever selected, 21 dead features)
+    # Kept as code for potential future use. Download still available in download_macro_data.py.
+    # if gdelt_df is not None: ...
+
+    df = df.drop(columns=['_merge_date', '_merge_hour'], errors='ignore')
     if '_merge_date' in all_cols:
         all_cols.remove('_merge_date')
+    if '_merge_hour' in all_cols:
+        all_cols.remove('_merge_hour')
     all_cols = list(dict.fromkeys(all_cols))
     all_cols = [c for c in all_cols if c in df.columns]
     macro_cols = [c for c in all_cols if c not in base_cols]
     if macro_cols:
         df[macro_cols] = df[macro_cols].ffill()
 
-    # Load funding rate for regime gate (not a feature — underscore prefix)
+    # Load funding rate — as BOTH regime gate (_funding_rate) AND feature (deriv_funding_rate)
     funding_series = load_funding_rate(asset_name)
     if funding_series is not None:
         fr_df = funding_series.to_frame('_funding_rate')
@@ -1000,13 +1227,511 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         df['_funding_rate'] = df['_funding_rate'].ffill()
         n_funding = df['_funding_rate'].notna().sum()
         if verbose and n_funding > 0:
-            print(f"    Funding rate: {n_funding} rows loaded (regime gate)")
+            print(f"    Funding rate: {n_funding} rows loaded (regime gate + feature)")
+        # Create feature versions (no underscore = enters feature matrix)
+        df['deriv_funding_rate'] = df['_funding_rate']
+        df['deriv_funding_chg1d'] = df['deriv_funding_rate'].diff(24) * 100  # 24h change
+        df['deriv_funding_zscore'] = (df['deriv_funding_rate'] - df['deriv_funding_rate'].rolling(168, min_periods=24).mean()) / \
+                                     (df['deriv_funding_rate'].rolling(168, min_periods=24).std() + 1e-10)
+        for col in ['deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_zscore']:
+            if col not in all_cols:
+                all_cols.append(col)
     else:
         df['_funding_rate'] = np.nan
 
+    # Load open interest from derivatives CSV
+    deriv_file = os.path.join(MACRO_DIR, f'derivatives_{asset_name.lower()}.csv')
+    if os.path.exists(deriv_file):
+        try:
+            deriv_df = pd.read_csv(deriv_file, parse_dates=['datetime'] if 'datetime' in pd.read_csv(deriv_file, nrows=0).columns else [0])
+            if deriv_df.columns[0] != 'datetime':
+                deriv_df = deriv_df.rename(columns={deriv_df.columns[0]: 'datetime'})
+            deriv_df['datetime'] = pd.to_datetime(deriv_df['datetime'])
+            if deriv_df['datetime'].dt.tz is not None:
+                deriv_df['datetime'] = deriv_df['datetime'].dt.tz_localize(None)
+            deriv_df['_merge_dt'] = deriv_df['datetime'].dt.floor('h')
+            df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+
+            oi_cols_added = 0
+            if 'open_interest_usd' in deriv_df.columns:
+                oi_merge = deriv_df[['_merge_dt', 'open_interest_usd']].drop_duplicates(subset='_merge_dt', keep='last')
+                df = df.merge(oi_merge, on='_merge_dt', how='left')
+                df['open_interest_usd'] = df['open_interest_usd'].ffill()
+                # Create feature derivatives
+                df['deriv_oi_chg1d'] = df['open_interest_usd'].pct_change(24) * 100
+                df['deriv_oi_chg3d'] = df['open_interest_usd'].pct_change(72) * 100
+                df['deriv_oi_zscore'] = (df['open_interest_usd'] - df['open_interest_usd'].rolling(168, min_periods=24).mean()) / \
+                                        (df['open_interest_usd'].rolling(168, min_periods=24).std() + 1e-10)
+                for col in ['deriv_oi_chg1d', 'deriv_oi_chg3d', 'deriv_oi_zscore']:
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        oi_cols_added += 1
+                df = df.drop(columns=['open_interest_usd'], errors='ignore')
+
+            # Perp-spot basis (2024 lit: crowded-leverage regime classifier — Schmeling et al. 2023
+            # style basis mean-reversion signal). Computed as (perp - spot) / spot, then change + zscore.
+            basis_cols_added = 0
+            if 'perp_close' in deriv_df.columns:
+                perp_merge = deriv_df[['_merge_dt', 'perp_close']].drop_duplicates(subset='_merge_dt', keep='last')
+                df = df.merge(perp_merge, on='_merge_dt', how='left')
+                df['perp_close'] = df['perp_close'].ffill()
+                df['deriv_basis'] = (df['perp_close'] - df['close']) / df['close']  # contango if >0, backwardation if <0
+                df['deriv_basis_chg1d'] = df['deriv_basis'].diff(24)
+                df['deriv_basis_zscore'] = (df['deriv_basis'] - df['deriv_basis'].rolling(168, min_periods=24).mean()) / \
+                                           (df['deriv_basis'].rolling(168, min_periods=24).std() + 1e-10)
+                for col in ['deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore']:
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        basis_cols_added += 1
+                df = df.drop(columns=['perp_close'], errors='ignore')
+
+            df = df.drop(columns=['_merge_dt'], errors='ignore')
+            if verbose and oi_cols_added > 0:
+                print(f"    Open interest: {oi_cols_added} features added")
+            if verbose and basis_cols_added > 0:
+                print(f"    Perp-spot basis: {basis_cols_added} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Open interest / basis: failed to load ({e})")
+
+    # Load stablecoin flows
+    stable_file = os.path.join(MACRO_DIR, 'stablecoin_flows.csv')
+    if os.path.exists(stable_file):
+        try:
+            stable_df = pd.read_csv(stable_file, parse_dates=[0], index_col=0)
+            if stable_df.index.tz is not None:
+                stable_df.index = stable_df.index.tz_localize(None)
+            stable_df['_merge_date'] = stable_df.index.normalize()
+            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+
+            stable_cols_added = 0
+            if 'total_stable_mcap' in stable_df.columns:
+                s = stable_df['total_stable_mcap']
+                stable_feats = pd.DataFrame(index=stable_df.index)
+                stable_feats['stable_mcap_chg1d'] = s.pct_change(1) * 100
+                stable_feats['stable_mcap_chg7d'] = s.pct_change(7) * 100
+                stable_feats['stable_mcap_zscore'] = (s - s.rolling(30, min_periods=7).mean()) / (s.rolling(30, min_periods=7).std() + 1e-10)
+                stable_feats['_merge_date'] = stable_feats.index.normalize()
+
+                for col in ['stable_mcap_chg1d', 'stable_mcap_chg7d', 'stable_mcap_zscore']:
+                    merge_df = stable_feats[['_merge_date', col]].dropna().drop_duplicates(subset='_merge_date', keep='last')
+                    df = df.merge(merge_df, on='_merge_date', how='left')
+                    df[col] = df[col].ffill()
+                    if col not in all_cols:
+                        all_cols.append(col)
+                        stable_cols_added += 1
+
+            df = df.drop(columns=['_merge_date'], errors='ignore')
+            if verbose and stable_cols_added > 0:
+                print(f"    Stablecoin flows: {stable_cols_added} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Stablecoin flows: failed to load ({e})")
+
+    # Load orderbook imbalance snapshots
+    ob_file = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
+    if os.path.exists(ob_file):
+        try:
+            ob_df = pd.read_csv(ob_file, parse_dates=['datetime'])
+            ob_asset = ob_df[ob_df['asset'] == asset_name].copy()
+            if len(ob_asset) > 10:
+                ob_asset['_merge_dt'] = pd.to_datetime(ob_asset['datetime']).dt.floor('h')
+                df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+                ob_cols_added = 0
+                for col in ['ob_imbalance', 'spread_bps']:
+                    if col in ob_asset.columns:
+                        merge_df = ob_asset[['_merge_dt', col]].drop_duplicates(subset='_merge_dt', keep='last')
+                        df = df.merge(merge_df, on='_merge_dt', how='left')
+                        df[col] = df[col].ffill()
+                        if col not in all_cols:
+                            all_cols.append(col)
+                            ob_cols_added += 1
+                df = df.drop(columns=['_merge_dt'], errors='ignore')
+                if verbose and ob_cols_added > 0:
+                    print(f"    Orderbook: {ob_cols_added} features added ({len(ob_asset)} snapshots)")
+        except Exception as e:
+            if verbose:
+                print(f"    Orderbook: failed to load ({e})")
+
+    # Load options IV skew snapshots
+    iv_file = os.path.join(MACRO_DIR, 'options_iv_snapshot.csv')
+    if os.path.exists(iv_file):
+        try:
+            iv_df = pd.read_csv(iv_file, parse_dates=['datetime'])
+            iv_asset = iv_df[iv_df['asset'] == asset_name].copy()
+            if len(iv_asset) > 10:
+                iv_asset['_merge_dt'] = pd.to_datetime(iv_asset['datetime']).dt.floor('h')
+                df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+                iv_cols_added = 0
+                for col in ['avg_iv', 'iv_skew']:
+                    if col in iv_asset.columns:
+                        merge_df = iv_asset[['_merge_dt', col]].drop_duplicates(subset='_merge_dt', keep='last')
+                        df = df.merge(merge_df, on='_merge_dt', how='left')
+                        df[col] = df[col].ffill()
+                        if col not in all_cols:
+                            all_cols.append(col)
+                            iv_cols_added += 1
+                df = df.drop(columns=['_merge_dt'], errors='ignore')
+                if verbose and iv_cols_added > 0:
+                    print(f"    Options IV: {iv_cols_added} features added ({len(iv_asset)} snapshots)")
+        except Exception as e:
+            if verbose:
+                print(f"    Options IV: failed to load ({e})")
+
+    # Exchange netflow shorter windows (1d, 3d) — from on-chain data
+    if 'oc_exchange_netflow' in df.columns:
+        df['oc_exchange_netflow_chg1d'] = df['oc_exchange_netflow'].pct_change(24) * 100
+        df['oc_exchange_netflow_chg3d'] = df['oc_exchange_netflow'].pct_change(72) * 100
+        for col in ['oc_exchange_netflow_chg1d', 'oc_exchange_netflow_chg3d']:
+            if col not in all_cols:
+                all_cols.append(col)
+
+    # Intraday cross-asset lead-lag features (2024 lit: BTC leads ETH 5-30min; ETH leads alts).
+    # At 1h resolution we capture the 1-3h lags. Each feature is the leader's 1h logret
+    # shifted forward by k hours, so at time t the value is the leader's return in [t-k-1, t-k].
+    leaders_for = {
+        'ETH':  ['BTC'],
+        'XRP':  ['BTC', 'ETH'],
+        'SOL':  ['BTC', 'ETH'],
+        'LINK': ['BTC', 'ETH'],
+        'BNB':  ['BTC', 'ETH'],
+    }
+    for leader in leaders_for.get(asset_name, []):
+        leader_file = ASSETS.get(leader, {}).get('file')
+        if not leader_file or not os.path.exists(leader_file):
+            continue
+        try:
+            led_df = pd.read_csv(leader_file)
+            led_df['datetime'] = pd.to_datetime(led_df['datetime'])
+            led_df = led_df.sort_values('datetime').reset_index(drop=True)
+            led_df['_merge_dt'] = led_df['datetime'].dt.floor('h')
+            led_df['_led_logret_1h'] = np.log(led_df['close'] / led_df['close'].shift(1))
+            merge_src = led_df[['_merge_dt', '_led_logret_1h']].drop_duplicates(subset='_merge_dt', keep='last')
+            df['_merge_dt'] = pd.to_datetime(df['datetime']).dt.floor('h')
+            df = df.merge(merge_src, on='_merge_dt', how='left')
+            df = df.drop(columns=['_merge_dt'], errors='ignore')
+
+            prefix = f'xa_{leader.lower()}_lag'
+            added_lead = 0
+            for k in [1, 2, 3]:
+                col = f'{prefix}{k}h'
+                df[col] = df['_led_logret_1h'].shift(k)
+                if col not in all_cols:
+                    all_cols.append(col)
+                    added_lead += 1
+            df = df.drop(columns=['_led_logret_1h'], errors='ignore')
+            if verbose and added_lead > 0:
+                print(f"    Cross-asset lead-lag ({leader}): {added_lead} features added")
+        except Exception as e:
+            if verbose:
+                print(f"    Cross-asset lead-lag ({leader}): failed to load ({e})")
+
+    # Apply optional feature deactivation config — keeps download pipeline intact
+    # but strips named features from the model's input matrix for speed/noise reduction.
+    all_cols, n_disabled = _apply_feature_disable(all_cols, verbose=verbose)
+
     if verbose:
-        print(f"    All features: {len(base_cols)} base + {added} macro/sentiment/cross-asset = {len(all_cols)} total")
+        disabled_str = f" ({n_disabled} disabled)" if n_disabled else ""
+        print(f"    All features: {len(base_cols)} base + {len(all_cols) - len(base_cols)} macro/deriv/sentiment/cross-asset = {len(all_cols)} total{disabled_str}")
     return df, all_cols
+
+
+_DISABLED_FEATURES_CACHE = None
+_DISABLED_FEATURES_MTIME = 0
+
+# Newborn features — added recently, need a fair HRST before being flagged dead by Mode F.
+# Prune from this set after 2-3 HRST cycles confirm them as dead (Grade 1 reconfirmed).
+NEWBORN_FEATURES = {
+    # 2026-04-19: derivatives-as-feature + stablecoin + orderbook + IV
+    'deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_zscore',
+    'deriv_oi_chg1d', 'deriv_oi_chg3d', 'deriv_oi_zscore',
+    'stable_mcap_chg1d', 'stable_mcap_chg7d', 'stable_mcap_zscore',
+    'ob_imbalance', 'spread_bps',
+    'avg_iv', 'iv_skew',
+    # 2026-04-20: perp-spot basis + BTC/ETH intraday lead-lag
+    'deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore',
+    'xa_btc_lag1h', 'xa_btc_lag2h', 'xa_btc_lag3h',
+    'xa_eth_lag1h', 'xa_eth_lag2h', 'xa_eth_lag3h',
+}
+
+_PYSR_BUILTINS = {
+    'tanh', 'sqrt', 'abs', 'Abs', 'log', 'sin', 'cos', 'exp', 'pow',
+    'max', 'min', 'floor', 'ceil', 'round', 'sign',
+    'PySRFunction', 'X', 'e', 'pi',
+}
+
+
+def run_mode_f(restore=False, include_newborns=False, asset='ETH'):
+    """Mode F — Feature trim: audit features across production models + PySR formulas,
+    then populate config/disabled_features.json with Grade 1 (zero-selection + zero-PySR)
+    features. Newborn features (recently added, haven't had a fair HRST) are spared by
+    default.
+
+    Flags:
+      --restore           Empty the disabled list (re-enable all features)
+      --include-newborns  Include newborn features in the disable list (aggressive)
+    """
+    import re
+    import glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    cfg_path = os.path.join(here, 'config', 'disabled_features.json')
+
+    # Load current config to preserve _note + enabled flag
+    existing_cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                existing_cfg = json.load(f)
+        except Exception:
+            existing_cfg = {}
+
+    if restore:
+        cfg = {
+            "_note": existing_cfg.get('_note', 'Features excluded from LGBM matrix + PySR inputs.'),
+            "enabled": True,
+            "disabled_prefixes": [],
+            "disabled_exact": [],
+        }
+        _atomic_write_json(cfg_path, cfg)
+        print("  ── MODE F: RESTORE ──")
+        print(f"  Emptied disabled list. All features re-enabled.")
+        print(f"  Wrote: {cfg_path}")
+        return
+
+    print("=" * 70)
+    print("  MODE F: FEATURE TRIM AUDIT")
+    print("=" * 70)
+
+    # 1) Production model selection frequency
+    if not os.path.exists(PRODUCTION_CSV):
+        print(f"  ERROR: {PRODUCTION_CSV} not found — cannot audit")
+        return
+    df_prod = pd.read_csv(PRODUCTION_CSV)
+    n_models = len(df_prod)
+    prod_features = set()
+    for _, r in df_prod.iterrows():
+        feats = [f.strip() for f in str(r.get('optimal_features', '')).split(',') if f.strip()]
+        prod_features.update(feats)
+
+    # 2) PySR formula references (union across all asset/horizon JSONs)
+    pysr_features = set()
+    pysr_count = 0
+    for pf in sorted(glob.glob(os.path.join(here, 'models', 'pysr_*.json'))):
+        try:
+            with open(pf) as f:
+                j = json.load(f)
+        except Exception:
+            continue
+        pysr_count += 1
+        for expr in j.get('expressions', []):
+            eq = expr.get('sympy_format') or expr.get('equation') or ''
+            for tok in re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', eq):
+                if tok not in _PYSR_BUILTINS:
+                    pysr_features.add(tok)
+
+    # 3) Current feature universe (audit against this asset's build)
+    print(f"  Building feature universe from asset: {asset}...")
+    raw = load_data(asset)
+    _, universe = build_all_features(raw, asset_name=asset, horizon=5, verbose=False)
+    universe_set = set(universe)
+
+    # 4) Grade 1 candidates: in universe + 0 prod + 0 pysr
+    grade1_raw = sorted(c for c in universe if c not in prod_features and c not in pysr_features)
+
+    if include_newborns:
+        grade1 = grade1_raw
+        newborns_in_grade1 = [c for c in grade1_raw if c in NEWBORN_FEATURES]
+    else:
+        grade1 = sorted(c for c in grade1_raw if c not in NEWBORN_FEATURES)
+        newborns_in_grade1 = [c for c in grade1_raw if c in NEWBORN_FEATURES]
+
+    # 5) Safety: no overlap with prod-selected features
+    conflict = set(grade1) & prod_features
+    if conflict:
+        print(f"  ERROR: grade-1 list overlaps selected features: {conflict}")
+        print(f"  Aborting — not writing config.")
+        return
+
+    # 6) Category breakdown of what we're disabling
+    def _cat(name):
+        if name.startswith('oc_'): return 'on-chain'
+        if name.startswith('m_'): return 'macro'
+        if name.startswith('xa_'): return 'cross-asset'
+        if name.startswith('deriv_'): return 'derivatives'
+        if name.startswith('fg_'): return 'sentiment'
+        if name.startswith('gp_'): return 'geopolitical'
+        if name.startswith('stable_'): return 'stablecoin'
+        if name.startswith('ob_') or name == 'spread_bps': return 'orderbook'
+        if name.startswith('avg_iv') or name.startswith('iv_skew'): return 'options'
+        if name.startswith('whale_'): return 'whale'
+        if name.startswith('pysr_'): return 'pysr'
+        return 'technical'
+    from collections import Counter
+    cats = Counter(_cat(f) for f in grade1)
+
+    print()
+    print(f"  Production models scanned: {n_models}")
+    print(f"  PySR JSONs scanned: {pysr_count}  (unique feature refs: {len(pysr_features)})")
+    print(f"  Universe ({asset}): {len(universe)} features")
+    print(f"  Grade 1 (0 prod + 0 pysr): {len(grade1_raw)}")
+    if newborns_in_grade1 and not include_newborns:
+        print(f"  Newborns spared (recent additions, need HRST first): {len(newborns_in_grade1)}")
+        for f in newborns_in_grade1:
+            print(f"    skip: {f}")
+    print(f"  → Disabling: {len(grade1)} features")
+    for cat, n in cats.most_common():
+        print(f"    {cat:<12}: {n}")
+
+    # 7) Write config (preserve note + enabled state)
+    cfg = {
+        "_note": existing_cfg.get('_note', 'Features excluded from LGBM matrix + PySR inputs. Download/data pipelines still run. Regenerate via Mode F or tools/audit_features.py.'),
+        "enabled": existing_cfg.get('enabled', True),
+        "disabled_prefixes": [],
+        "disabled_exact": grade1,
+    }
+    _atomic_write_json(cfg_path, cfg)
+    print()
+    print(f"  Wrote: {cfg_path}")
+    print(f"  Next build_all_features() call will use {len(universe) - len(grade1)} features (was {len(universe)}).")
+
+
+def _load_disabled_features():
+    """Read config/disabled_features.json. Returns (exact_set, prefix_list,
+    enabled_bool, always_exact_set). Cached; re-reads when file's mtime changes.
+
+    Two separate lists:
+    - disabled_exact / disabled_prefixes: Mode F Grade-1 list, toggled by
+      `enabled` flag (and --trim-override).
+    - always_disabled_exact: structurally-broken features (e.g. short history).
+      Applied REGARDLESS of enabled flag."""
+    global _DISABLED_FEATURES_CACHE, _DISABLED_FEATURES_MTIME
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'disabled_features.json')
+    if not os.path.exists(path):
+        return set(), [], False, set()
+    mtime = os.path.getmtime(path)
+    if _DISABLED_FEATURES_CACHE is not None and mtime == _DISABLED_FEATURES_MTIME:
+        return _DISABLED_FEATURES_CACHE
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+        enabled = bool(cfg.get('enabled', True))
+        # --trim-override takes precedence over the file's `enabled` flag so
+        # A/B matrix variants can flip trim on/off without modifying prod config.
+        if TRIM_ENABLED_OVERRIDE is not None:
+            enabled = bool(TRIM_ENABLED_OVERRIDE)
+        exact = set(cfg.get('disabled_exact') or [])
+        prefixes = list(cfg.get('disabled_prefixes') or [])
+        always = set(cfg.get('always_disabled_exact') or [])
+        result = (exact, prefixes, enabled, always)
+    except Exception as e:
+        print(f"  WARN: disabled_features.json unreadable ({e}) — ignoring")
+        result = (set(), [], False, set())
+    _DISABLED_FEATURES_CACHE = result
+    _DISABLED_FEATURES_MTIME = mtime
+    return result
+
+
+def _apply_feature_disable(all_cols, verbose=True):
+    """Filter all_cols against the disable config. Returns (filtered_cols, n_dropped).
+    Always applies `always_disabled_exact`; applies `disabled_exact/prefixes`
+    only when the `enabled` flag is True (honors --trim-override)."""
+    exact, prefixes, enabled, always = _load_disabled_features()
+    active_exact = set(always)
+    if enabled:
+        active_exact |= exact
+    if not active_exact and not (enabled and prefixes):
+        return all_cols, 0
+    def is_disabled(c):
+        if c in active_exact: return True
+        if enabled:
+            return any(c.startswith(p) for p in prefixes)
+        return False
+    kept = [c for c in all_cols if not is_disabled(c)]
+    n_dropped = len(all_cols) - len(kept)
+    if verbose and n_dropped > 0:
+        samples = [c for c in all_cols if is_disabled(c)][:5]
+        extra = f" ...+{n_dropped - len(samples)} more" if n_dropped > len(samples) else ""
+        always_n = sum(1 for c in all_cols if c in always)
+        trim_n = n_dropped - always_n
+        tag = f"{always_n} always-off + {trim_n} trim-off" if enabled else f"{always_n} always-off (trim off)"
+        print(f"    Disabled features: {n_dropped} dropped [{tag}] ({', '.join(samples)}{extra})")
+    return kept, n_dropped
+
+
+def _feature_floor_indices(ranked_features, n_feat,
+                           min_logret=FEATURE_FLOOR_MIN_LOGRET,
+                           min_pysr=FEATURE_FLOOR_MIN_PYSR,
+                           enabled=None):
+    """Return column indices (into ranked_features order) of the n_feat features
+    to use for training, guaranteeing at least `min_logret` logret_* and
+    `min_pysr` pysr_* features are included.
+
+    If the top-n_feat of ranked_features already satisfies the floors, returns
+    [0, 1, ..., n_feat-1] (default behavior).
+
+    Otherwise:
+    - Pulls the highest-ranked missing logret/pysr features from beyond position n_feat
+    - Evicts the lowest-ranked NON-essential features in the top-n_feat slice to make room
+    - Result is exactly n_feat features, still mostly in importance order, with
+      the promoted essentials appended.
+
+    If the overall ranked_features list has fewer essentials than min_logret/min_pysr,
+    uses whatever is available (does not overflow n_feat)."""
+    if enabled is None:
+        enabled = FEATURE_FLOOR_ENABLED
+    if n_feat >= len(ranked_features):
+        return list(range(len(ranked_features)))
+    if not enabled:
+        return list(range(n_feat))
+
+    is_lr = lambda f: f.startswith('logret_')
+    is_ps = lambda f: f.startswith('pysr_')
+
+    base_idx = list(range(n_feat))
+    lr_in = sum(1 for i in base_idx if is_lr(ranked_features[i]))
+    ps_in = sum(1 for i in base_idx if is_ps(ranked_features[i]))
+    need_lr = max(0, min_logret - lr_in)
+    need_ps = max(0, min_pysr - ps_in)
+    if need_lr == 0 and need_ps == 0:
+        return base_idx
+
+    # Find extra essentials from beyond n_feat (highest-ranked first)
+    extra_lr = [i for i in range(n_feat, len(ranked_features)) if is_lr(ranked_features[i])][:need_lr]
+    extra_ps = [i for i in range(n_feat, len(ranked_features)) if is_ps(ranked_features[i])][:need_ps]
+    extras = extra_lr + extra_ps
+    if not extras:
+        return base_idx  # nothing to promote — return what we had
+
+    # Evict lowest-ranked non-essentials from base to make room
+    n_to_remove = len(extras)
+    removable = [i for i in reversed(base_idx)
+                 if not is_lr(ranked_features[i]) and not is_ps(ranked_features[i])]
+    if len(removable) < n_to_remove:
+        n_to_remove = len(removable)
+        extras = extras[:n_to_remove]
+    to_remove = set(removable[:n_to_remove])
+
+    kept = [i for i in base_idx if i not in to_remove]
+    result = kept + extras
+    return result[:n_feat]
+
+
+def _filter_sparse_features(df, all_cols, threshold=SPARSE_NAN_THRESHOLD, verbose=True):
+    """Drop feature columns whose NaN fraction in `df` exceeds `threshold`.
+    Newer feeds (orderbook/IV) start sparse; keeping them would gate dropna()
+    on a near-empty set. Returns (df_trimmed, all_cols_trimmed, dropped_list)."""
+    if not all_cols:
+        return df, all_cols, []
+    nan_pct = df[all_cols].isna().mean()
+    dropped = nan_pct[nan_pct > threshold].index.tolist()
+    if dropped:
+        if verbose:
+            preview = ', '.join(f'{c}({nan_pct[c]*100:.0f}%)' for c in dropped[:8])
+            more = f' +{len(dropped)-8}' if len(dropped) > 8 else ''
+            print(f"  Auto-dropped {len(dropped)} sparse cols (>{threshold*100:.0f}% NaN): {preview}{more}")
+        all_cols = [c for c in all_cols if c not in dropped]
+        df = df.drop(columns=dropped)
+    return df, all_cols, dropped
 
 
 def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
@@ -1732,7 +2457,8 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
                     proba = model.predict_proba(X_test_s)[0]
                 votes.append(pred)
                 probas.append(proba[1])
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'generate_signals/{model_name}', e)
                 continue
 
         if not votes:
@@ -1783,6 +2509,77 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
                   f"| price=${row['close']:,.2f}")
 
     print(f"  Generated {len(signals)} hourly signals for {asset_name}")
+
+    # Optional meta-label filter (research A/B). Train walk-forward secondary,
+    # downgrade BUYs with meta_prob < threshold to HOLD. Enforces --no-persist.
+    if META_FILTER_THRESHOLD is not None:
+        signals = _apply_meta_filter_to_signals(
+            asset_name=asset_name,
+            signals=signals,
+            horizon=horizon,
+            primary_cfg={
+                'combo': '+'.join(model_names),
+                'window': window_size,
+                'gamma': gamma,
+                'features': feature_override if feature_override is not None else [],
+            },
+            threshold=META_FILTER_THRESHOLD,
+        )
+    return signals
+
+
+def _apply_meta_filter_to_signals(asset_name, signals, horizon, primary_cfg, threshold):
+    """Train walk-forward secondary LGBM on primary BUYs; downgrade BUYs with
+    meta_prob < threshold to HOLD. Returns modified signals list."""
+    try:
+        from crypto_trading_system_meta import build_meta_dataset, walk_forward_meta_train
+    except Exception as e:
+        print(f"  [meta-filter] import failed: {e} — skipping filter, signals unchanged")
+        return signals
+
+    meta_df, feat_cols = build_meta_dataset(
+        asset_name, horizon, replay_hours=0, primary_cfg=primary_cfg, signals=signals,
+    )
+    if len(meta_df) == 0:
+        print(f"  [meta-filter] empty meta dataset — no BUYs to filter")
+        return signals
+
+    preds = walk_forward_meta_train(
+        meta_df, feat_cols, horizon=horizon, min_train=40, step=10,
+    )
+    if len(preds) == 0:
+        print(f"  [meta-filter] no walk-forward predictions — no filter applied")
+        return signals
+
+    # Build datetime -> meta_prob lookup (naive UTC)
+    lookup = {}
+    for _, row in preds.iterrows():
+        dt = pd.Timestamp(row['datetime'])
+        if dt.tzinfo is not None:
+            dt = dt.tz_convert('UTC').tz_localize(None)
+        lookup[dt] = float(row['meta_prob'])
+
+    # Apply filter
+    kept = dropped = no_pred = 0
+    for s in signals:
+        if s.get('signal') != 'BUY':
+            continue
+        dt = pd.Timestamp(s['datetime'])
+        if dt.tzinfo is not None:
+            dt = dt.tz_convert('UTC').tz_localize(None)
+        p = lookup.get(dt, None)
+        if p is None:
+            no_pred += 1  # keep BUY when no meta prediction (pre-walkforward warmup)
+        elif p < threshold:
+            s['signal'] = 'HOLD'
+            s['meta_filtered'] = True
+            s['meta_prob'] = p
+            dropped += 1
+        else:
+            s['meta_prob'] = p
+            kept += 1
+    print(f"  [meta-filter p>={threshold:.2f}] kept={kept} dropped={dropped} "
+          f"no_pred={no_pred} (of {kept+dropped+no_pred} BUYs)")
     return signals
 
 
@@ -2056,7 +2853,8 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
                 model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'_quick_score/{model_name}', e)
                 continue
         if not votes:
             continue
@@ -2324,7 +3122,7 @@ def run_diagnostic_for_asset(asset_name, df_features, feature_cols, gamma=1.0, r
     # ========================================================
     if sorted_results:
         import csv
-        csv_path = f'{MODELS_DIR}/diagnostic_results_ed_v3_{asset_name}.csv'
+        csv_path = f'{MODELS_DIR}/diagnostic_results_ed_{asset_name}.csv'
         sorted_for_csv = sorted(sorted_results, key=lambda x: (-x[10], -x[4]))  # APF desc, then return desc
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -2945,19 +3743,26 @@ def _run_permutation_test(asset_name, df, feature_cols, best_config, n_perm=200,
 DEKU_DEFAULT_TRIALS = 150
 DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 
-# Doohan V1.6: Exhaustive grid search
+# Mode D: Exhaustive grid search
 # 6 combos × 4 windows × 6 feature counts × 5 gammas = 720 evals
 # LGBM dominates all combos it's in; XGB dominates RF/GB/LR.
 # 6 distinct signal groups identified from prior testing.
 GRID_COMBOS = [
-    'RF+LGBM',    # LGBM without XGB (best group — XGB hurts LGBM)
-    'XGB+LGBM',   # LGBM with XGB
-    'RF+XGB',     # XGB without LGBM
-    # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results across all V1.6/V1.7 tests)
+    'RF+LGBM',    # workhorse — 18/20 wins in last month's ABCDE matrix
+    'XGB+LGBM',   # XGB partner — 2/20 wins (kept as safety; some 7h cases prefer it)
+    # 'RF+XGB' dropped 2026-04-27: 0/20 wins across last month's ABCDE matrix.
+    # Was kept previously as third tree ensemble option but never picked. Re-add
+    # if a future regime favors it (no evidence in current ETH data).
+    # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results in V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [72, 100, 150, 200, 250, 300]  # 36/48 dropped (embargo eats too much), 250/300 added
-GRID_FEATURES = [10, 13, 17, 20, 25, 30]
-GRID_GAMMAS = [0.999, 0.997, 0.995]
+GRID_WINDOWS = [72, 100, 150]  # trimmed 2026-04-27 from [72,100,150,200,250,300].
+                                # 200/250/300 had 0/20 wins in last month — ETH 1h is
+                                # fast-moving, longer windows dilute recent signal.
+                                # Refine step extends ±20h, so can drift toward 170h.
+GRID_FEATURES = [10, 13, 17, 25]  # trimmed 2026-04-27 from [10,13,17,20,25,30].
+                                   # 20/30 had 0/20 wins. Sweet spot is 10-13 (60% of
+                                   # winners), 23-25 only when meta variants active.
+GRID_GAMMAS = [0.999, 0.997, 0.995]  # all 3 picked at meaningful rates — kept
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
 REFINE_TOP_N = 3                   # how many configs to refine from Mode V
@@ -3034,7 +3839,8 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                 model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
-            except Exception:
+            except Exception as e:
+                _log_fit_exception(f'_deku_eval_with_pruning/{model_name}', e)
                 continue
         if not votes:
             step_idx += 1
@@ -3130,9 +3936,9 @@ def _build_combo_list():
     return combo_options
 
 
-def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False):
+def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False, replay_hours=None):
     """
-    DOOHAN V1.6 Mode D: Exhaustive grid search.
+    Mode D: Exhaustive grid search.
 
     Pipeline:
     1. Download fresh data + LGBM importance ranking
@@ -3151,21 +3957,48 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
     print(f"  Scoring: {OPTUNA_METRIC}{metric_label}")
     print("=" * 70)
 
-    # Download fresh data
-    print("\n  Updating macro & sentiment data...")
-    t0 = time.time()
-    try:
-        import download_macro_data
-        download_macro_data.main()
-    except ImportError:
-        print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
-    except Exception as e:
-        print(f"  WARNING: Macro data update failed: {e}")
-    print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
+    # Download fresh data (skippable via --no-data-update for A/B matrix testing).
+    # Also skipped if a prior Mode D in the same session already downloaded — so
+    # HRST's 4-horizon loop doesn't redownload 4× and drift the tail timestamp
+    # across horizons (which would make Mode S compare signals across different
+    # data snapshots).
+    global _DATA_DOWNLOADED_THIS_SESSION
+    if NO_DATA_UPDATE:
+        print("\n  [--no-data-update] Skipping macro + OHLCV downloads (using on-disk snapshot).")
+    elif _DATA_DOWNLOADED_THIS_SESSION:
+        print("\n  [session cache] Data already downloaded earlier this run — skipping redownload.")
+    else:
+        # Track success of BOTH downloads — only cache the flag if both succeed,
+        # otherwise subsequent horizons retry. Previously the flag got set even
+        # when one download silently failed, causing stale-data cascades across
+        # horizons.
+        macro_ok = False
+        ohlcv_ok = False
+        print("\n  Updating macro & sentiment data...")
+        t0 = time.time()
+        try:
+            import download_macro_data
+            download_macro_data.main()
+            macro_ok = True
+        except ImportError:
+            print("  WARNING: download_macro_data.py not found -- macro features may be stale.")
+        except Exception as e:
+            print(f"  WARNING: Macro data update failed: {e}")
+        print(f"  [Macro update: {(time.time()-t0)/60:.1f} min]")
 
-    t0 = time.time()
-    update_all_data(assets_list)
-    print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+        t0 = time.time()
+        try:
+            update_all_data(assets_list)
+            ohlcv_ok = True
+        except Exception as e:
+            print(f"  WARNING: OHLCV data update failed: {e}")
+        print(f"  [Data update: {(time.time()-t0)/60:.1f} min]")
+
+        if macro_ok and ohlcv_ok:
+            _DATA_DOWNLOADED_THIS_SESSION = True
+        else:
+            print(f"  [session cache] NOT setting download-cache flag (macro_ok={macro_ok}, ohlcv_ok={ohlcv_ok}) "
+                  f"— next horizon will retry. Current horizon proceeds on whatever is on disk.")
 
     best_models = []
 
@@ -3173,16 +4006,17 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         t_asset = time.time()
 
         print(f"\n{'='*70}")
-        print(f"  DOOHAN OPTIMIZATION: {asset_name} ({horizon}h)")
+        print(f"  ED OPTIMIZATION: {asset_name} ({horizon}h)")
         print(f"{'='*70}")
 
         df_raw = load_data(asset_name)
         if df_raw is None:
             continue
 
-        # Step 1: Build ALL features, cap at 6 months
-        MAX_DIAG_HOURS = 6 * 30 * 24
-        print(f"\n  Building all features (horizon={horizon}h)...")
+        # Step 1: Build ALL features, cap at replay_hours or 2 months default
+        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24
+        period_label = f"{replay_hours}h" if replay_hours else "last 2mo"
+        print(f"\n  Building all features (horizon={horizon}h, period={period_label})...")
         t0 = time.time()
         df_full, all_cols = build_all_features(df_raw, asset_name=asset_name, horizon=horizon)
         n_pysr = _compute_pysr_features(df_full, all_cols, asset_name, horizon)
@@ -3203,10 +4037,34 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         total_rows = len(df_full)
         if total_rows > MAX_DIAG_HOURS:
             df_full = df_full.tail(MAX_DIAG_HOURS).reset_index(drop=True)
-            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows (last 6mo)")
+            print(f"  Capped: {total_rows:,} -> {len(df_full):,} rows ({period_label})")
 
+        df_full, all_cols, _ = _filter_sparse_features(df_full, all_cols)
         df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
-        print(f"  Clean data: {len(df_clean):,} rows, {len(all_cols)} features")
+        window_rows = len(df_full)
+        clean_rows = len(df_clean)
+        retained = clean_rows / max(window_rows, 1)
+        print(f"  Clean data: {clean_rows:,} rows, {len(all_cols)} features "
+              f"({retained*100:.0f}% of {window_rows}-row window retained)")
+
+        if retained < 0.80:
+            print()
+            print("  " + "!" * 76)
+            print(f"  ! DATA LOSS WARNING: dropna removed {window_rows - clean_rows} rows "
+                  f"({100 - retained*100:.0f}% of the window)")
+            print(f"  ! Clean rows ({clean_rows}) < 80% of expected ({window_rows}).")
+            # Identify the worst offenders for the report
+            per_col_nan = df_full[all_cols].isna().sum()
+            worst = per_col_nan.sort_values(ascending=False).head(8)
+            print(f"  ! Worst NaN offenders (keeping these dropna()s is cutting rows):")
+            for col, n in worst.items():
+                if n > 0:
+                    print(f"  !   {col:30s}  {int(n):4d} NaN  ({n/window_rows*100:.0f}%)")
+            print(f"  ! Fix: add offenders to config/disabled_features.json (disabled_exact)")
+            print(f"  !      — model results here are BIASED toward whatever regime spans "
+                  f"the {clean_rows} clean rows.")
+            print("  " + "!" * 76)
+            print()
 
         if len(df_clean) < 500:
             print(f"  Not enough data ({len(df_clean)} rows). Need 500+. Skipping.")
@@ -3221,6 +4079,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"  [Ranking: {(time.time()-t0)/60:.1f} min] — {len(ranked_features)} features ranked")
 
         # Prepare data for Optuna — columns in rank order
+        # (high-NaN cols already removed by _filter_sparse_features above)
         df_optuna = df_clean.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
         features_np_all = df_optuna[ranked_features].values.astype(np.float64)
         labels_np_all = df_optuna['label'].values.astype(np.int32)
@@ -3262,12 +4121,22 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         model_factories = _get_deku_diagnostic_models()
 
         n_grid = len(GRID_COMBOS) * len(GRID_WINDOWS) * len(GRID_FEATURES) * len(GRID_GAMMAS)
+        # Dynamic min-trades threshold for grid validation (BUG-B fix 2026-04-27).
+        # Old behavior was hardcoded `>= 8`, which on 2mo (n=1440) data with
+        # DIAG_STEP=36 = ~34 prediction points = ~24% fire rate required. Selective
+        # short-horizon (5h-7h) configs at high conf threshold typically produce
+        # 2-4 trades on this window, so all were filtered out, leaving Mode V to
+        # fall back to cached candidates. Now scales: ~1 trade per 15 days, with
+        # floor of 4. For n=1440: 4. For n=2880: 8 (unchanged from old behavior).
+        # For n=4320: 12 (slightly stricter, appropriate for longer history).
+        MIN_GRID_TRADES = max(4, n // 360)
         print(f"\n{'='*70}")
         print(f"  EXHAUSTIVE GRID: {asset_name} {horizon}h — {n_grid} evals")
         print(f"  Combos:   {GRID_COMBOS}")
         print(f"  Windows:  {GRID_WINDOWS}")
         print(f"  Features: {GRID_FEATURES}")
         print(f"  Gammas:   {GRID_GAMMAS}")
+        print(f"  Min trades for valid: {MIN_GRID_TRADES} (scaled to n={n})")
         print(f"{'='*70}")
 
         class _FakeTrial:
@@ -3297,7 +4166,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 for n_feat in GRID_FEATURES:
                     if n_feat > len(ranked_features):
                         continue
-                    feat_np = features_np[:, :n_feat]
+                    sel_idx = _feature_floor_indices(ranked_features, n_feat)
+                    feat_np = features_np[:, sel_idx]
 
                     for gamma in GRID_GAMMAS:
                         eval_count += 1
@@ -3331,10 +4201,10 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                             'apf': round(score, 4), 'return_pct': round(ret, 2),
                             'trades': trades, 'win_rate': round(win_rate, 2),
                             'accuracy': round(acc, 4), 'raw_pf': round(raw_pf, 4),
-                            'status': 'OK' if trades >= 8 else f'LOW_TR({trades})',
+                            'status': 'OK' if trades >= MIN_GRID_TRADES else f'LOW_TR({trades})',
                         })
 
-                        if trades >= 8:
+                        if trades >= MIN_GRID_TRADES:
                             all_candidates.append(_FakeTrial(
                                 {'combo': combo_name, 'window': window,
                                  'gamma': gamma, 'n_features': n_feat},
@@ -3342,7 +4212,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                             ))
 
                         marker = ""
-                        if score > best_apf and trades >= 8:
+                        if score > best_apf and trades >= MIN_GRID_TRADES:
                             best_apf = score
                             marker = " <-- BEST"
 
@@ -3379,7 +4249,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         print(f"\n  {'='*70}")
         print(f"  GRID RESULTS: {asset_name} {horizon}h ({grid_elapsed:.1f} min)")
         print(f"  {'='*70}")
-        print(f"  Total evals: {n_grid} | Valid (≥8 trades): {n_valid} | Low trades: {n_low_tr} | Failed: {n_failed}")
+        print(f"  Total evals: {n_grid} | Valid (>={MIN_GRID_TRADES} trades): {n_valid} | Low trades: {n_low_tr} | Failed: {n_failed}")
         print(f"  Unique candidates: {len(completed_trials)}")
         print(f"  Grid CSV: {grid_csv_path}")
 
@@ -3519,7 +4389,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             c_window = trial.params['window']
             c_gamma = trial.params['gamma']
             c_n_feat = trial.params['n_features']
-            c_features = ranked_features[:c_n_feat]
+            c_sel_idx = _feature_floor_indices(ranked_features, c_n_feat)
+            c_features = [ranked_features[i] for i in c_sel_idx]
 
             c_sampler = trial.user_attrs.get('sampler', '?')
             gen_icon = "✓" if ho_ret > 0 and ho_acc > 0.55 else "~" if ho_ret > 0 else "✗"
@@ -3642,7 +4513,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
     5. Show combined summary: D candidates vs refined
     6. Save best overall to production CSV
 
-    replay_hours: override MODE_G_REPLAY_HOURS (default 336h = 2 weeks).
+    replay_hours: override MODE_G_REPLAY_HOURS (default 1440h = 2 months).
     """
     if horizons is None:
         horizons = list(AVAILABLE_HORIZONS)
@@ -3697,6 +4568,11 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                         all_cols.remove(pc)
                         if pc in df_full.columns:
                             df_full.drop(columns=[pc], inplace=True)
+            # Window to replay period before sparsity filter — matches the scoring
+            # window, so pre-2022 ETH bars (no macro) don't inflate NaN% on current features.
+            if len(df_full) > _replay:
+                df_full = df_full.tail(_replay).reset_index(drop=True)
+            df_full, all_cols, _ = _filter_sparse_features(df_full, all_cols)
             df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
             importance_df = _test_lgbm_importance(df_clean, all_cols, gamma=1.0)
             ranked_features = importance_df['feature'].tolist()
@@ -3704,7 +4580,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
 
             configs = {}
 
-            # Doohan candidates from Mode D
+            # Candidates from Mode D grid
             asset_candidates = df_candidates[mask].sort_values(
                 'rank' if 'rank' in df_candidates.columns else 'combined_score',
                 ascending='rank' in df_candidates.columns)
@@ -3928,14 +4804,14 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                 df_existing = df_existing[~mask]
             df_prod = pd.concat([df_existing, df_prod], ignore_index=True)
 
-        df_prod.to_csv(PRODUCTION_CSV, index=False)
+        _atomic_write_csv(df_prod, PRODUCTION_CSV, index=False)
         print(f"\n  Production model saved: {PRODUCTION_CSV}")
         for prod_row, h, best_conf in production_models:
             print(f"    {prod_row['coin']} {h}h: {prod_row['best_combo']}  w={prod_row['best_window']}h  "
                   f"g={prod_row['gamma']}  f={prod_row['n_features']}  conf>={best_conf}%")
 
         # Write trading config (horizon + min_confidence per asset)
-        tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+        tcfg_path = REGIME_CONFIG_PATH
         try:
             with open(tcfg_path) as f:
                 trading_config = json.load(f)
@@ -3953,8 +4829,7 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
             trading_config[asset]['horizon'] = h
             trading_config[asset]['min_confidence'] = best_conf
 
-        with open(tcfg_path, 'w') as f:
-            json.dump(trading_config, f, indent=2)
+        _atomic_write_json(tcfg_path, trading_config)
         print(f"  Trading config updated: {tcfg_path}")
         for prod_row, h, best_conf in production_models:
             print(f"    {prod_row['coin']}: horizon={h}h, min_confidence={best_conf}%")
@@ -4024,6 +4899,8 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
     total_rows = len(df_full_r)
     if total_rows > MAX_DIAG_HOURS:
         df_full_r = df_full_r.tail(MAX_DIAG_HOURS).reset_index(drop=True)
+    df_full_r, all_cols_r, dropped_r = _filter_sparse_features(df_full_r, all_cols_r)
+    ranked_features = [c for c in ranked_features if c not in dropped_r]
     df_clean_r = df_full_r.dropna(subset=ranked_features + ['label']).reset_index(drop=True)
 
     # Prepare fold 1 data (same as Mode D)
@@ -4071,7 +4948,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 
         study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(seed=42),
+            sampler=optuna.samplers.TPESampler(seed=OPTUNA_SEED_OVERRIDE if OPTUNA_SEED_OVERRIDE is not None else 42),
             study_name=f'ed_v1_refine_{asset}_{horizon}h_{cfg_idx}',
         )
 
@@ -4088,7 +4965,8 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
             t_gamma = trial.suggest_float('gamma', _gamma_lo, _gamma_hi)
             t_feats = trial.suggest_int('n_features', _feat_lo, _feat_hi)
 
-            feat_np = features_np[:, :t_feats]
+            sel_idx = _feature_floor_indices(ranked_features, t_feats)
+            feat_np = features_np[:, sel_idx]
             result = _deku_eval_with_pruning(
                 feat_np, labels_np, closes_np, _combo, t_window, n,
                 DIAG_STEP, model_factories, gamma=t_gamma, trial=None,
@@ -4119,13 +4997,14 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
             best = max(completed, key=lambda t: t.value)
             print(f"    → Best: w={best.params['window']}h g={best.params['gamma']:.4f} "
                   f"f={best.params['n_features']} apf={best.value:.3f}")
+            best_sel_idx = _feature_floor_indices(ranked_features, best.params['n_features'])
             all_refined.append({
                 'combo': combo_name,
                 'window': best.params['window'],
                 'gamma': best.params['gamma'],
                 'n_features': best.params['n_features'],
                 'apf': best.value,
-                'features': ranked_features[:best.params['n_features']],
+                'features': [ranked_features[i] for i in best_sel_idx],
             })
 
     refine_elapsed = (time.time() - t_refine) / 60
@@ -4145,22 +5024,28 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
 # ============================================================
 def run_mode_s(assets_list, horizons, args=None):
     """
-    Ed V3 Mode S — FULL JOINT SWEEP including horizons.
-    Sweeps detector × bull_h × bear_h × bull_conf × bear_conf over 8 horizon pairs:
-        (6,6)(6,7)(6,8)(7,7)(7,8)(8,8)(7,6)(8,7)
-    = 5 detectors × 8 pairs × 49 conf combos = 1,960 evals per asset.
+    Ed Mode S — FULL JOINT SWEEP (V3 logic in production).
 
-    Writes winner to regime_config_ed_v3.json (NOT the live prod config).
+    Jointly sweeps detector × bull_h × bear_h × bull_conf × bear_conf.
+    Discovers the global optimum across the entire search space instead of
+    relying on Mode R's greedy sequential horizon selection.
+
+    When called after Mode R (RS/HRS/DVRS), Mode R's horizon picks are
+    informational only — Mode S re-discovers horizons as part of its sweep.
+
+    Flow:
+        1. Determine available horizons from production models (or CLI)
+        2. Generate signals for ALL unique horizons
+        3. Build regime indicators + detector dict (shared helper)
+        4. For each detector × horizon_pair × bull_conf × bear_conf, simulate
+        5. Pick best by return × win_rate scoring
+        6. Write winning detector + horizons + confidences to regime_config_ed.json
     """
-    replay = int(getattr(args, 'replay', 0)) or 2880
+    replay = int(getattr(args, 'replay', 0)) or 1440
     top_n = int(getattr(args, 'top', 0)) or 15
 
-    HORIZON_PAIRS = [(b,r) for b in (5,6,7,8) for r in (5,6,7,8)]  # 16 pairs, full 5-8 grid
-    HORIZON_SET = sorted(set(h for pair in HORIZON_PAIRS for h in pair))
-
-    # Read prod config for asset structure, write winner to v3 file (no prod impact)
-    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
-    out_path = f'{CONFIG_DIR}/regime_config_ed_v3.json'
+    # Load regime config
+    tcfg_path = REGIME_CONFIG_PATH
     try:
         with open(tcfg_path) as f:
             regime_config = json.load(f)
@@ -4170,30 +5055,40 @@ def run_mode_s(assets_list, horizons, args=None):
 
     CONF_LEVELS = [65, 70, 75, 80, 85, 90, 95]
 
-    print(f"\n{'='*80}")
-    print(f"  MODE S V3: FULL JOINT SWEEP (det × bull_h × bear_h × bull_conf × bear_conf)")
-    print(f"  Assets: {', '.join(assets_list)} | Replay: {replay}h")
-    print(f"  Horizon pairs ({len(HORIZON_PAIRS)}): {HORIZON_PAIRS}")
-    print(f"  Confidence sweep: {CONF_LEVELS}")
-    print(f"{'='*80}")
-
     df_models = pd.read_csv(PRODUCTION_CSV)
 
     for asset in assets_list:
-        acfg = regime_config.get(asset, {})
+        # Determine horizons: use CLI horizons if provided, else from production models
+        if horizons:
+            available_h = sorted([h for h in horizons
+                                  if len(df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]) > 0])
+        else:
+            available_h = sorted(df_models[df_models['coin'] == asset]['horizon'].unique())
+
+        if len(available_h) < 1:
+            print(f"\n  {asset}: no production models found — skipping")
+            continue
+
+        # Build all horizon pairs (including same-horizon pairs)
+        horizon_pairs = [(b, r) for b in available_h for r in available_h]
+        n_det = len(ENABLED_DETECTORS)  # trimmed 5→2 on 2026-04-30 (see ENABLED_DETECTORS)
+        n_combos = n_det * len(horizon_pairs) * len(CONF_LEVELS) * len(CONF_LEVELS)
 
         print(f"\n{'='*80}")
-        print(f"  {asset} — full joint sweep (horizons {HORIZON_SET})")
+        print(f"  MODE S: JOINT SWEEP (V3)")
+        print(f"  Asset: {asset} | Replay: {replay}h | Horizons: {available_h}")
+        print(f"  {n_det} detectors × {len(horizon_pairs)} h-pairs × "
+              f"{len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf = {n_combos:,} combos")
         print(f"{'='*80}")
 
-        # ── Generate signals for ALL horizons in HORIZON_SET ──
+        # ── Generate signals for ALL unique horizons ──
         signals_cache = {}
-        for h in HORIZON_SET:
-            if h in signals_cache:
-                continue
+        sig_error = False
+        for h in available_h:
             rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
             if len(rows) == 0:
                 print(f"  ERROR: No production model for {asset} {h}h")
+                sig_error = True
                 break
             row = rows.sort_values('combined_score', ascending=False).iloc[0]
             feats = row['optimal_features'].split(',') if pd.notna(row.get('optimal_features', '')) else None
@@ -4214,8 +5109,8 @@ def run_mode_s(assets_list, horizons, args=None):
             signals_cache[h] = result
             print(f"    {h}h: {len(result)} signals ({sum(1 for s in result.values() if s['signal']=='BUY')} BUY)")
 
-        if len(signals_cache) < len(HORIZON_SET):
-            print(f"  Skipping {asset} — missing signals for some horizons")
+        if sig_error or len(signals_cache) < len(available_h):
+            print(f"  Skipping {asset} — missing signals")
             continue
 
         all_dts = sorted(set().union(*[set(s.keys()) for s in signals_cache.values()]))
@@ -4224,11 +5119,9 @@ def run_mode_s(assets_list, horizons, args=None):
         print(f"\n  Building regime indicators...")
         ind, detectors = _build_regime_indicators_and_detectors(asset)
 
-        # ── Full joint sweep ──
-        n_combos = len(detectors) * len(HORIZON_PAIRS) * len(CONF_LEVELS) * len(CONF_LEVELS)
-        print(f"\n  Sweeping {len(detectors)} det × {len(HORIZON_PAIRS)} h-pairs × "
-              f"{len(CONF_LEVELS)}×{len(CONF_LEVELS)} conf = {n_combos} combos...")
+        print(f"\n  Sweeping {n_combos:,} combos...")
 
+        # ── Joint sweep: detector × horizon_pair × bull_conf × bear_conf ──
         def _sim(det_fn, bull_h, bear_h, bull_conf, bear_conf):
             cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
             trades, wins = 0, 0
@@ -4286,13 +5179,11 @@ def run_mode_s(assets_list, horizons, args=None):
             bh = ((last_price / first_price - 1) * 100) if first_price and last_price else 0
             return ret, trades, wr, bh, bull_trades, bear_trades
 
-        import time as _t
-        t0 = _t.time()
         results = []
         for det_name, det_fn in detectors.items():
             bull_count = sum(1 for dt in all_dts if det_fn(dt))
             bull_pct = bull_count / len(all_dts) * 100 if all_dts else 0
-            for (bull_h, bear_h) in HORIZON_PAIRS:
+            for (bull_h, bear_h) in horizon_pairs:
                 for bc in CONF_LEVELS:
                     for rc in CONF_LEVELS:
                         ret, tr, wr, bh, bt, rt = _sim(det_fn, bull_h, bear_h, bc, rc)
@@ -4306,33 +5197,37 @@ def run_mode_s(assets_list, horizons, args=None):
                             'bull_trades': bt, 'bear_trades': rt,
                             'bull_pct': bull_pct,
                         })
-        elapsed = _t.time() - t0
-        print(f"  Sweep done in {elapsed:.0f}s ({elapsed/60:.1f} min)")
 
         results.sort(key=lambda x: x['score'], reverse=True)
 
+        if not results:
+            print(f"  ERROR: No valid results for {asset} — skipping config update")
+            continue
+
         # ── Results ──
         print(f"\n  {'='*120}")
-        print(f"  TOP {top_n} JOINT COMBOS — {asset}")
+        print(f"  TOP {top_n} JOINT SWEEP — {asset}")
         print(f"  {'='*120}")
         print(f"  {'#':>3}  {'Detector':>16}  {'BullH':>5}  {'BearH':>5}  {'BullC':>6}  {'BearC':>6}  "
               f"{'Return':>8}  {'Trades':>7}  {'WR':>5}  {'Alpha':>7}  {'Score':>7}  {'Bull%':>6}")
-        print(f"  {'-'*3}  {'-'*16}  {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
+        print(f"  {'-'*3}  {'-'*16}  {'-'*5}  {'-'*5}  {'-'*6}  {'-'*6}  {'-'*8}  {'-'*7}  "
+              f"{'-'*5}  {'-'*7}  {'-'*7}  {'-'*6}")
+
         for i, r in enumerate(results[:top_n]):
-            print(f"  {i+1:>3}  {r['detector']:>16}  {r['bull_h']:>4}h  {r['bear_h']:>4}h  "
+            print(f"  {i+1:>3}  {r['detector']:>16}  {str(r['bull_h'])+'h':>5}  {str(r['bear_h'])+'h':>5}  "
                   f"{r['bull_conf']:>5}%  {r['bear_conf']:>5}%  "
                   f"{r['return']:>+7.2f}%  {r['trades']:>7}  {r['wr']:>4.0f}%  {r['alpha']:>+6.2f}%  "
                   f"{r['score']:>7.2f}  {r['bull_pct']:>5.0f}%")
 
         winner = results[0]
         print(f"\n  {'='*120}")
-        print(f"  WINNER: detector={winner['detector']}  "
-              f"bull={winner['bull_h']}h@{winner['bull_conf']}%  bear={winner['bear_h']}h@{winner['bear_conf']}%")
+        print(f"  WINNER: detector={winner['detector']}  bull={winner['bull_h']}h@{winner['bull_conf']}%  "
+              f"bear={winner['bear_h']}h@{winner['bear_conf']}%")
         print(f"  Return: {winner['return']:+.2f}%  Trades: {winner['trades']}  WR: {winner['wr']:.0f}%  "
-              f"Alpha: {winner['alpha']:+.2f}%  Score: {winner['score']:.2f}")
+              f"Alpha: {winner['alpha']:+.2f}%")
         print(f"  {'='*120}")
 
-        # ── Write winner to V3 config (NOT prod) ──
+        # ── Write winning detector + horizons + confidences to config ──
         if asset not in regime_config:
             regime_config[asset] = {'enabled': True, 'symbol': f'{asset}-USD',
                                     'bull': {}, 'bear': {}, 'use_maker_orders': True}
@@ -4342,10 +5237,8 @@ def run_mode_s(assets_list, horizons, args=None):
         regime_config[asset]['bear']['horizon'] = winner['bear_h']
         regime_config[asset]['bear']['min_confidence'] = winner['bear_conf']
 
-        with open(out_path, 'w') as f:
-            json.dump(regime_config, f, indent=2)
-        print(f"\n  V3 config written to {out_path}")
-        print(f"  {asset}: detector={winner['detector']} "
+        _atomic_write_json(tcfg_path, regime_config)
+        print(f"\n  Config updated: {asset} detector={winner['detector']} "
               f"bull={winner['bull_h']}h@{winner['bull_conf']}% / bear={winner['bear_h']}h@{winner['bear_conf']}%")
 
     print(f"\n{'='*80}")
@@ -4354,9 +5247,568 @@ def run_mode_s(assets_list, horizons, args=None):
 
 
 # ============================================================
+# MODE T: THRESHOLD SWEEP (hold-until-profitable optimization)
+# ============================================================
+def run_mode_t(assets_list, args=None):
+    """
+    Mode T — Sweep min_sell_pnl_pct × max_hold_hours × shield on/off per regime.
+
+    For each (threshold, failsafe) pair, tests all 4 shield on/off combos
+    (bull ON/OFF × bear ON/OFF) and picks the combo that maximises total
+    return across the bull and bear horizons.
+
+    Uses `BACKTEST_FEE_PER_LEG` (5 bps/leg realistic maker blend) and reads the
+    current regime config for production horizons + confidences.
+
+    Saves winner to regime_config_ed.json:
+      - min_sell_pnl_pct, max_hold_hours at asset level (shared thresholds)
+      - bull.hold_shield, bear.hold_shield per regime
+    """
+    replay = int(getattr(args, 'replay', 0)) or 1440
+
+    tcfg_path = REGIME_CONFIG_PATH
+    try:
+        with open(tcfg_path) as f:
+            regime_config = json.load(f)
+    except Exception as e:
+        print(f"  ERROR: Cannot read {tcfg_path}: {e}")
+        return
+
+    # Fixed defaults (2026-04-23): sweeping min_sell_pnl and max_hold every
+    # iteration was the main driver of Mode T non-convergence in the AB matrix
+    # (V2 oscillated between shield configs coupling through capital state;
+    # V3 stable config but max_hold jittered 8/10/12 → never hit convergence).
+    # Pinning both at empirical sweet spots (0.50%, 10h — winners in every
+    # converged prior HRST) collapses the per-iter search from 84 combos to
+    # just 4 (bull/bear shield on/off). Numeric jitter disappears;
+    # oscillation, if it happens, is now a REAL structural-instability signal.
+    THRESHOLDS = [0.5]
+    FAILSAFE_HOURS = [10]
+
+    df_models = pd.read_csv(PRODUCTION_CSV)
+
+    for asset in assets_list:
+        asset_cfg = regime_config.get(asset, {})
+        bull_h = asset_cfg.get('bull', {}).get('horizon')
+        bear_h = asset_cfg.get('bear', {}).get('horizon')
+        bull_conf = asset_cfg.get('bull', {}).get('min_confidence', 85)
+        bear_conf = asset_cfg.get('bear', {}).get('min_confidence', 65)
+
+        if not bull_h or not bear_h:
+            print(f"\n  {asset}: no regime config (run Mode S first) — skipping")
+            continue
+
+        test_horizons = sorted(set([bull_h, bear_h]))
+
+        print(f"\n{'='*80}")
+        print(f"  MODE T: THRESHOLD SWEEP (hold-until-profitable)")
+        print(f"  Asset: {asset} | Replay: {replay}h ({replay/720:.1f} months)")
+        print(f"  Production: bull={bull_h}h@{bull_conf}% | bear={bear_h}h@{bear_conf}%")
+        print(f"  Thresholds: {THRESHOLDS} | Failsafe: {FAILSAFE_HOURS}h")
+        print(f"  Fee: {BACKTEST_FEE_PER_LEG*1e4:.1f} bps/leg (realistic maker blend)")
+        print(f"{'='*80}")
+
+        # Generate signals for production horizons only
+        signals_cache = {}
+        for h in test_horizons:
+            rows = df_models[(df_models['coin'] == asset) & (df_models['horizon'] == h)]
+            if len(rows) == 0:
+                print(f"  ERROR: No production model for {asset} {h}h")
+                break
+            row = rows.sort_values('combined_score', ascending=False).iloc[0]
+            feats = row['optimal_features'].split(',') if pd.notna(row.get('optimal_features', '')) else None
+            gamma = float(row.get('gamma', 1.0)) if pd.notna(row.get('gamma', 1.0)) else 1.0
+
+            print(f"\n  Generating {h}h signals ({row['models']} w={int(row['best_window'])}h)...")
+            with _suppress_stderr():
+                sigs = generate_signals(asset, row['models'].split('+'),
+                                        int(row['best_window']), replay,
+                                        feature_override=feats, horizon=h, gamma=gamma)
+            signals_cache[h] = sigs
+            print(f"    {h}h: {len(sigs)} candles")
+
+        if len(signals_cache) < len(test_horizons):
+            print(f"  Skipping {asset} — missing signals")
+            continue
+
+        # Quick-release config for the shield (per-asset, optional). Defaults match
+        # the trader's defaults so the sim mirrors live behavior.
+        # Quick-release default OFF — opt-in only (see 2026-04-19 evaluation)
+        qr_cfg = asset_cfg.get('shield_quick_release', {})
+        QR_ENABLED = bool(qr_cfg.get('enabled', False))
+        QR_MIN_CONF = float(qr_cfg.get('min_sell_conf', 95))
+        QR_MAX_HOURS = float(qr_cfg.get('max_hours', 3))
+
+        # Simulate for each horizon at its production confidence.
+        # Optionally applies a rally-cooldown gate (rally_cfg), so the shield
+        # sweep can be conditioned on the gate from a prior iteration — closes
+        # the T↔G coupling for iterative convergence.
+        def _sim_horizon(sigs, conf, min_pnl, max_hold_h, rally_cfg=None):
+            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+            trades, trade_log, blocked, quick_rel = 0, [], 0, 0
+            hold_since_entry = 0
+            cd = 0
+            rs_arr = rl_arr = None
+            t_s = t_l = 0.0
+            cd_h = 0
+            if rally_cfg is not None:
+                h_s, h_l, t_s, t_l, cd_h = rally_cfg
+                closes = np.array([float(s['close']) for s in sigs])
+                def _rr(h):
+                    out = np.full(len(closes), np.nan)
+                    if h < len(closes):
+                        out[h:] = (closes[h:] / closes[:-h] - 1.0) * 100.0
+                    return out
+                rs_arr = _rr(h_s); rl_arr = _rr(h_l)
+
+            for i, s in enumerate(sigs):
+                price = s['close']
+                if in_pos:
+                    hold_since_entry += 1
+                # Rally-cooldown trigger check
+                if rally_cfg is not None and cd_h > 0:
+                    rs = rs_arr[i] if not np.isnan(rs_arr[i]) else 0
+                    rl = rl_arr[i] if not np.isnan(rl_arr[i]) else 0
+                    if rs >= t_s or rl >= t_l:
+                        cd = max(cd, cd_h)
+
+                if s['signal'] == 'BUY' and s['confidence'] >= conf and not in_pos:
+                    if cd > 0:
+                        pass  # gate blocks BUY
+                    else:
+                        held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
+                        cash = 0
+                        in_pos = True
+                        entry_px = price
+                        trades += 1
+                        hold_since_entry = 0
+                elif s['signal'] == 'SELL' and in_pos:
+                    cur_pnl = (price / entry_px - 1) * 100
+                    override_expired = hold_since_entry >= max_hold_h
+                    # Quick-release: strong SELL within N cycles of entry bypasses shield
+                    quick_release = (QR_ENABLED and min_pnl > 0
+                                     and hold_since_entry <= QR_MAX_HOURS
+                                     and float(s.get('confidence', 0)) >= QR_MIN_CONF)
+                    if (min_pnl <= 0 or cur_pnl >= min_pnl or override_expired
+                            or quick_release):
+                        cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
+                        trade_log.append(cur_pnl)
+                        held = 0
+                        in_pos = False
+                        trades += 1
+                        hold_since_entry = 0
+                        if quick_release:
+                            quick_rel += 1
+                    else:
+                        blocked += 1
+
+                if cd > 0:
+                    cd -= 1
+
+            final = cash if not in_pos else held * sigs[-1]['close']
+            if in_pos:
+                trade_log.append((sigs[-1]['close'] / entry_px - 1) * 100)
+            ret = (final / 1000.0 - 1) * 100
+            winners = sum(1 for t in trade_log if t > 0)
+            wr = (winners / len(trade_log) * 100) if trade_log else 0
+            return ret, len(trade_log), wr, blocked
+
+        def _sim_regime_switched(tagged, bull_min_pnl, bear_min_pnl, max_hold_h,
+                                  bull_rally_cfg, bear_rally_cfg):
+            """Single-pool regime-switched simulator — mirrors live trader.
+            ONE $1000 cash pool; each bar reads the active regime's signal,
+            confidence threshold, shield min_pnl, and rally-cooldown gate.
+            Compounds through regime flips. Contrast _sim_horizon: that one
+            trades a SINGLE horizon over ALL bars with its own pool; summing
+            two _sim_horizon returns double-counts capital and trades each
+            horizon on bars it would never actually see in production.
+            """
+            cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+            trade_log, blocked = [], 0
+            hold_since_entry = 0
+            bull_cd = bear_cd = 0
+
+            closes = np.array([float(s['close']) for s in tagged])
+            def _rr_arr(h):
+                out = np.full(len(closes), np.nan)
+                if h and h < len(closes):
+                    out[h:] = (closes[h:] / closes[:-h] - 1.0) * 100.0
+                return out
+            bh_s = bh_l = 0; bt_s = bt_l = 0.0; bcd_h = 0
+            bull_rs = bull_rl = None
+            if bull_rally_cfg is not None:
+                bh_s, bh_l, bt_s, bt_l, bcd_h = bull_rally_cfg
+                bull_rs = _rr_arr(bh_s); bull_rl = _rr_arr(bh_l)
+            rh_s = rh_l = 0; rt_s = rt_l = 0.0; rcd_h = 0
+            bear_rs = bear_rl = None
+            if bear_rally_cfg is not None:
+                rh_s, rh_l, rt_s, rt_l, rcd_h = bear_rally_cfg
+                bear_rs = _rr_arr(rh_s); bear_rl = _rr_arr(rh_l)
+
+            for i, s in enumerate(tagged):
+                price = s['close']
+                regime = s.get('regime', 'bull')
+                conf_thr = float(s.get('conf_threshold', 0))
+                min_pnl = bull_min_pnl if regime == 'bull' else bear_min_pnl
+                if in_pos:
+                    hold_since_entry += 1
+                # Both gates armed on every bar — trader does the same
+                if bcd_h > 0:
+                    rs = bull_rs[i] if not np.isnan(bull_rs[i]) else 0
+                    rl = bull_rl[i] if not np.isnan(bull_rl[i]) else 0
+                    if rs >= bt_s or rl >= bt_l:
+                        bull_cd = max(bull_cd, bcd_h)
+                if rcd_h > 0:
+                    rs = bear_rs[i] if not np.isnan(bear_rs[i]) else 0
+                    rl = bear_rl[i] if not np.isnan(bear_rl[i]) else 0
+                    if rs >= rt_s or rl >= rt_l:
+                        bear_cd = max(bear_cd, rcd_h)
+                active_cd = bull_cd if regime == 'bull' else bear_cd
+
+                if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
+                    if active_cd > 0:
+                        pass
+                    else:
+                        held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
+                        cash = 0
+                        in_pos = True
+                        entry_px = price
+                        hold_since_entry = 0
+                elif s['signal'] == 'SELL' and in_pos:
+                    cur_pnl = (price / entry_px - 1) * 100
+                    override_expired = hold_since_entry >= max_hold_h
+                    quick_release = (QR_ENABLED and min_pnl > 0
+                                     and hold_since_entry <= QR_MAX_HOURS
+                                     and float(s.get('confidence', 0)) >= QR_MIN_CONF)
+                    if (min_pnl <= 0 or cur_pnl >= min_pnl or override_expired
+                            or quick_release):
+                        cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
+                        trade_log.append(cur_pnl)
+                        held = 0
+                        in_pos = False
+                        hold_since_entry = 0
+                    else:
+                        blocked += 1
+
+                if bull_cd > 0: bull_cd -= 1
+                if bear_cd > 0: bear_cd -= 1
+
+            final = cash if not in_pos else held * tagged[-1]['close']
+            if in_pos:
+                trade_log.append((tagged[-1]['close'] / entry_px - 1) * 100)
+            ret = (final / 1000.0 - 1) * 100
+            winners = sum(1 for t in trade_log if t > 0)
+            wr = (winners / len(trade_log) * 100) if trade_log else 0
+            return ret, len(trade_log), wr, blocked
+
+        # Run sweep per horizon
+        horizon_results = {}
+        for h in test_horizons:
+            conf = bull_conf if h == bull_h else bear_conf
+            sigs = signals_cache[h]
+
+            base_ret, base_tr, base_wr, _ = _sim_horizon(sigs, conf, 0, 999)
+            print(f"\n  {asset} {h}h (conf>={conf}%) — Baseline: {base_ret:+.2f}% | {base_tr} trades | WR {base_wr:.0f}%")
+
+            print(f"\n  {'Threshold':<12} {'Failsafe':>8} {'Return':>9} {'vs Base':>8} {'Trades':>7} {'WinRate':>8} {'Blocked':>8}")
+            print(f"  {'─'*12} {'─'*8} {'─'*9} {'─'*8} {'─'*7} {'─'*8} {'─'*8}")
+
+            best_score = base_ret * (base_wr / 100) if base_ret > 0 else base_ret
+            best = None
+
+            for t in THRESHOLDS:
+                for fh in FAILSAFE_HOURS:
+                    ret, tr, wr, bl = _sim_horizon(sigs, conf, t, fh)
+                    delta = ret - base_ret
+                    score = ret * (wr / 100) if ret > 0 else ret
+                    marker = ' ★' if score > best_score else (' ✓' if delta > 0 else '')
+                    if score > best_score:
+                        best_score = score
+                        best = (t, fh, ret, tr, wr)
+                    print(f"  {t:.2f}%        {fh:>7}h {ret:>+8.2f}% {delta:>+7.2f}% {tr:>7} {wr:>7.0f}% {bl:>8}{marker}")
+
+            if best:
+                horizon_results[h] = best
+                print(f"\n  ★ {h}h BEST: threshold={best[0]:.2f}%, failsafe={best[1]}h → {best[2]:+.2f}%")
+            else:
+                print(f"\n  No improvement over baseline for {h}h")
+
+        # ---- Iterative joint sweep: (threshold, failsafe, bull_on, bear_on) x G ----
+        # Bull and bear share (t, fh); shield on/off is chosen independently per regime.
+        # Iterates T <-> G until config is stable (closes the coupling where T's
+        # shield sweep previously ignored the gate that G subsequently adds).
+        if bull_h == bear_h:
+            print(f"\n  NOTE: bull_h == bear_h == {bull_h}h — per-regime shield split has no effect.")
+
+        bull_sigs = signals_cache[bull_h]
+        bear_sigs = signals_cache[bear_h]
+
+        max_iter = int(getattr(args, 'max_iter', 0)) or 6
+
+        def _get_rally_tuple(cfg, regime=None):
+            """Rally-cooldown tuple for a specific regime, with asset-level fallback."""
+            def _tuple(rc):
+                if not rc or not rc.get('enabled'):
+                    return None
+                try:
+                    return (int(rc['h_short']), int(rc['h_long']),
+                            float(rc['t_short_pct']), float(rc['t_long_pct']),
+                            int(rc['cd_hours']))
+                except (KeyError, TypeError, ValueError):
+                    return None
+            if regime is not None:
+                block = cfg.get(regime)
+                if isinstance(block, dict):
+                    t = _tuple(block.get('rally_cooldown'))
+                    if t is not None:
+                        return t
+            return _tuple(cfg.get('rally_cooldown'))
+
+        def _config_fingerprint(cfg):
+            # Per-regime gate lives in bull.rally_cooldown / bear.rally_cooldown
+            # Legacy asset-level rally_cooldown kept as fallback in the fingerprint.
+            asset_rc = cfg.get('rally_cooldown') or {}
+            bull_rc = cfg.get('bull', {}).get('rally_cooldown') or {}
+            bear_rc = cfg.get('bear', {}).get('rally_cooldown') or {}
+            def _rc_tuple(rc):
+                return (rc.get('h_short'), rc.get('h_long'),
+                        rc.get('t_short_pct'), rc.get('t_long_pct'),
+                        rc.get('cd_hours'))
+            return (
+                cfg.get('min_sell_pnl_pct'),
+                cfg.get('max_hold_hours'),
+                cfg.get('bull', {}).get('hold_shield'),
+                cfg.get('bear', {}).get('hold_shield'),
+                _rc_tuple(asset_rc),
+                _rc_tuple(bull_rc),
+                _rc_tuple(bear_rc),
+            )
+
+        # Tolerances for "close enough" convergence on plateau configs.
+        # Designed so Mode T can declare convergence when consecutive iterations
+        # only differ in noise-level parameter jitter (e.g. min_sell_pnl 0.30→0.40,
+        # max_hold 8→10, gate windows shifting by 1-2h). Shields must still match
+        # exactly — those are structural (ON/OFF), not numeric plateau points.
+        TOL_PNL = 0.10   # min_sell_pnl_pct within ±0.10 pp
+        TOL_HOLD = 2     # max_hold_hours within ±2 h
+        TOL_GATE_H = 4   # h_short / h_long windows within ±4 h
+        TOL_GATE_T = 0.5 # t_short / t_long thresholds within ±0.5 pp
+        # cd_hours within ±2 h — tightened 2026-04-24 from ±6h.
+        # ±6h was too loose for short cooldowns (cd=10h vs cd=16h flagged as
+        # converged when they're structurally different behavior). ±2h matches
+        # TOL_HOLD semantics: small numeric jitter allowed, big jumps flagged.
+        TOL_GATE_CD = 2  # cd_hours within ±2 h
+
+        def _rc_close(rc_a, rc_b):
+            """True if two rally-cooldown tuples are within tolerance or both absent."""
+            if rc_a is None and rc_b is None:
+                return True
+            # If either side has None-filled tuple (gate absent), must match exactly.
+            def _is_null(rc):
+                return rc is None or all(v is None for v in rc)
+            if _is_null(rc_a) and _is_null(rc_b):
+                return True
+            if _is_null(rc_a) or _is_null(rc_b):
+                return False
+            try:
+                hs_a, hl_a, ts_a, tl_a, cd_a = rc_a
+                hs_b, hl_b, ts_b, tl_b, cd_b = rc_b
+                if abs(int(hs_a) - int(hs_b)) > TOL_GATE_H:  return False
+                if abs(int(hl_a) - int(hl_b)) > TOL_GATE_H:  return False
+                if abs(float(ts_a) - float(ts_b)) > TOL_GATE_T: return False
+                if abs(float(tl_a) - float(tl_b)) > TOL_GATE_T: return False
+                if abs(int(cd_a) - int(cd_b)) > TOL_GATE_CD: return False
+                return True
+            except (TypeError, ValueError):
+                return False
+
+        def _configs_close_enough(fp_now, fp_prev):
+            """Tolerant convergence: plateau-level noise doesn't count as divergence.
+            Shields must match exactly (structural). Everything else within tolerance."""
+            if fp_now is None or fp_prev is None:
+                return False
+            try:
+                pnl_n, hold_n, bs_n, bz_n, art_n, brt_n, zrt_n = fp_now
+                pnl_p, hold_p, bs_p, bz_p, art_p, brt_p, zrt_p = fp_prev
+            except (TypeError, ValueError):
+                return False
+            # Shield (bull + bear) must match exactly — structural toggle, not plateau point.
+            if bs_n != bs_p or bz_n != bz_p:
+                return False
+            # min_sell_pnl numeric within tol
+            try:
+                if (pnl_n is None) != (pnl_p is None):
+                    return False
+                if pnl_n is not None and abs(float(pnl_n) - float(pnl_p)) > TOL_PNL:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            # max_hold numeric within tol
+            try:
+                if (hold_n is None) != (hold_p is None):
+                    return False
+                if hold_n is not None and abs(int(hold_n) - int(hold_p)) > TOL_HOLD:
+                    return False
+            except (TypeError, ValueError):
+                return False
+            # Rally cooldown tuples (asset-level + per-regime) within tolerance
+            if not _rc_close(art_n, art_p): return False
+            if not _rc_close(brt_n, brt_p): return False
+            if not _rc_close(zrt_n, zrt_p): return False
+            return True
+
+        # Track fingerprints for strict convergence, tolerant convergence, and 2-cycle detection.
+        # We only need the last 2 fingerprints to detect cycles of length ≤ 2.
+        fp_history = []
+        converged = False
+        cycle_detected = False
+        for iteration in range(1, max_iter + 1):
+            print(f"\n{'#'*80}")
+            print(f"  T<->G ITERATION {iteration}/{max_iter} | {asset}")
+            print(f"{'#'*80}")
+
+            bull_rally_cfg = _get_rally_tuple(regime_config[asset], regime='bull')
+            bear_rally_cfg = _get_rally_tuple(regime_config[asset], regime='bear')
+            def _desc(cfg):
+                return (f"rr{cfg[0]}h>={cfg[2]}% OR rr{cfg[1]}h>={cfg[3]}%, cd={cfg[4]}h"
+                        if cfg else "none")
+            print(f"  Using per-regime gates: bull={_desc(bull_rally_cfg)} | "
+                  f"bear={_desc(bear_rally_cfg)}")
+
+            # Build single regime-tagged signal stream (one per bar).
+            # Mode T uses a SINGLE $1000 pool switching horizons per regime —
+            # matching the live trader. Prior implementation summed two
+            # standalone per-horizon sims (each with its own $1000 pool),
+            # which double-counted capital and traded each horizon on bars
+            # it would never see in production.
+            tagged = _merge_tagged_signals(asset, bull_sigs, bear_sigs, regime_config[asset])
+            n_bull = sum(1 for s in tagged if s['regime'] == 'bull')
+            n_bear = len(tagged) - n_bull
+            print(f"  Tagged stream: {len(tagged)} bars (bull={n_bull} bear={n_bear})")
+
+            # Diagnostic — standalone per-horizon returns (NOT used for selection)
+            diag_bull, _, _, _ = _sim_horizon(bull_sigs, bull_conf, 0, 999, bull_rally_cfg)
+            diag_bear, _, _, _ = _sim_horizon(bear_sigs, bear_conf, 0, 999, bear_rally_cfg)
+
+            # All-OFF baseline — regime-switched, one pool
+            base_total, base_tr, base_wr, _ = _sim_regime_switched(
+                tagged, 0, 0, 999, bull_rally_cfg, bear_rally_cfg)
+
+            best_total = None
+            best_quad = None
+            rows_print = []
+            for t in THRESHOLDS:
+                for fh in FAILSAFE_HOURS:
+                    for bull_on in (False, True):
+                        for bear_on in (False, True):
+                            bull_t = t if bull_on else 0
+                            bear_t = t if bear_on else 0
+                            total, tr, wr, bl = _sim_regime_switched(
+                                tagged, bull_t, bear_t, fh,
+                                bull_rally_cfg, bear_rally_cfg)
+                            rows_print.append((t, fh, bull_on, bear_on, total, tr, wr))
+                            if best_total is None or total > best_total:
+                                best_total = total
+                                best_quad = (t, fh, bull_on, bear_on)
+
+            rows_print.sort(key=lambda r: -r[4])
+            print(f"  Top 3 shield combos: "
+                  f"{' / '.join(f'thr={r[0]:.2f} fh={r[1]}h bull={r[2]} bear={r[3]} tot={r[4]:+.2f}% n={r[5]} wr={r[6]:.0f}%' for r in rows_print[:3])}")
+            print(f"  Baseline (all-OFF, gate applied): regime-switched={base_total:+.2f}% "
+                  f"[{base_tr} trades, WR {base_wr:.0f}%]")
+            print(f"  Diagnostic per-horizon (NOT used for selection): "
+                  f"bull={diag_bull:+.2f}% bear={diag_bear:+.2f}% "
+                  f"(sum={diag_bull+diag_bear:+.2f}% ← old bug: 2× capital, wrong bars)")
+
+            t_win, fh_win, bull_on, bear_on = best_quad
+            if best_total > base_total:
+                regime_config[asset]['min_sell_pnl_pct'] = t_win
+                regime_config[asset]['max_hold_hours'] = fh_win
+                regime_config[asset].setdefault('bull', {})['hold_shield'] = bool(bull_on)
+                regime_config[asset].setdefault('bear', {})['hold_shield'] = bool(bear_on)
+                regime_config[asset].pop('hold_shield', None)
+                print(f"  T winner: min_sell_pnl={t_win:.2f}% max_hold={fh_win}h "
+                      f"bull_shield={'ON' if bull_on else 'OFF'} bear_shield={'ON' if bear_on else 'OFF'} "
+                      f"(total {best_total:+.2f}% vs {base_total:+.2f}%, delta {best_total-base_total:+.2f}%)")
+            else:
+                regime_config[asset]['min_sell_pnl_pct'] = 0
+                regime_config[asset]['max_hold_hours'] = 10
+                regime_config[asset].setdefault('bull', {})['hold_shield'] = False
+                regime_config[asset].setdefault('bear', {})['hold_shield'] = False
+                regime_config[asset].pop('hold_shield', None)
+                print(f"  T: no shield improvement — disabling for this iteration")
+            _atomic_write_json(tcfg_path, regime_config)
+
+            # Chain G with the new shield — per-regime: sweep bull and bear gates
+            # independently. Each sweep fires the gate only on its regime's bars,
+            # simulating the other regime as gate-less. Winners written to
+            # cfg[asset].bull.rally_cooldown and cfg[asset].bear.rally_cooldown.
+            tagged = _merge_tagged_signals(asset, bull_sigs, bear_sigs, regime_config[asset])
+            print(f"  Per-regime G sweep on {len(tagged)} tagged bars "
+                  f"(bull={sum(1 for s in tagged if s['regime']=='bull')} "
+                  f"bear={sum(1 for s in tagged if s['regime']=='bear')})...")
+            # Clear any legacy asset-level rally_cooldown — regime blocks are now authoritative
+            regime_config[asset].pop('rally_cooldown', None)
+            _atomic_write_json(tcfg_path, regime_config)
+            for r_filter in ('bull', 'bear'):
+                print(f"  --- {r_filter.upper()} gate sweep ---")
+                _sweep_rally_cooldown(asset, tagged, regime_config[asset],
+                                      replay_h=replay, rank='recent',
+                                      write_config=True, regime_filter=r_filter)
+                with open(tcfg_path) as f:
+                    regime_config = json.load(f)
+
+            # Reload config after G's write (G uses atomic write and we've kept
+            # regime_config as the in-memory mirror via setdefault — re-read to be safe)
+            with open(tcfg_path) as f:
+                regime_config = json.load(f)
+
+            # Convergence check — strict match, tolerant-plateau, or 2-cycle detection.
+            fp = _config_fingerprint(regime_config[asset])
+            # 1. Exact match with previous → clean convergence
+            if fp_history and fp == fp_history[-1]:
+                converged = True
+                print(f"\n  >>> Converged at iteration {iteration} (config unchanged).")
+                break
+            # 2. Tolerant match with previous (plateau settled)
+            if fp_history and _configs_close_enough(fp, fp_history[-1]):
+                converged = True
+                print(f"\n  >>> Converged-in-tolerance at iteration {iteration} "
+                      f"(plateau: |min_sell_pnl|<={TOL_PNL}pp, |max_hold|<={TOL_HOLD}h, "
+                      f"gate h<={TOL_GATE_H}h, t<={TOL_GATE_T}pp, cd<={TOL_GATE_CD}h).")
+                break
+            # 3. 2-cycle: current fp close to fp from 2 iterations ago (and NOT close to
+            #    previous, or we'd have caught it above). Indicates A↔B oscillation —
+            #    NOT convergence. Flag it, stop early to save compute, but the result
+            #    is structurally unstable and should not pass the promotion gate.
+            if len(fp_history) >= 2 and _configs_close_enough(fp, fp_history[-2]):
+                cycle_detected = True
+                print(f"\n  >>> 2-CYCLE DETECTED at iteration {iteration}: "
+                      f"config oscillates between two states. This is NOT convergence.")
+                print(f"      Structural instability — shield+gate coupling bistable on this data.")
+                print(f"      Promotion gate #1 should REJECT this config. "
+                      f"Consider: (a) longer replay window, (b) fresh seed, (c) tie-breaker run.")
+                break
+            fp_history.append(fp)
+            # Keep only the last 2 fingerprints (all we need for 2-cycle detection).
+            if len(fp_history) > 2:
+                fp_history = fp_history[-2:]
+
+        if not converged and not cycle_detected:
+            print(f"\n  >>> Reached max_iter={max_iter} without convergence. "
+                  f"Final config written. Structural instability likely — "
+                  f"promotion gate #1 should REJECT.")
+
+    print(f"\n{'='*80}")
+    print(f"  MODE T COMPLETE")
+    print(f"{'='*80}")
+
+
+# ============================================================
 # MODE H: HORIZON SWEEP (D+G per horizon, compare, save best)
 # ============================================================
-def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False):
+def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False,
+               replay_hours=None, replay_v_hours=None):
     """
     Mode H: Horizon sweep — runs D+G for each specified horizon, then compares
     across horizons to find the best one per asset.
@@ -4364,11 +5816,23 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
     Usage:
         python crypto_trading_system_ed.py H BTC 4,5,6,7,8h          # full D+G per horizon
         python crypto_trading_system_ed.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
+        python crypto_trading_system_ed.py H ETH 5,6,7,8h --replay 2880 # 4-month window
+        python crypto_trading_system_ed.py H ETH 5,6,7,8h --replay 2880 --replay-v 1440
+            # train on 4mo, live-validate on 2mo (cuts Mode V cost ~2x)
 
     Flow per asset:
         1. For each horizon: run Mode D (grid, skipped with --skip if results exist) → run Mode V (backtest + refine)
         2. Compare best config from each horizon
         3. Save overall winner to production CSV + trading config
+
+    replay_hours: override the 1440h (2mo) default for Mode D's training window.
+                  Required for HRST/HRS chains to honor --replay; otherwise the
+                  H wrapper silently caps at 2 months (bug fixed 2026-04-27).
+    replay_v_hours: override Mode V's live-validation window. If None, falls back
+                    to replay_hours. Decouples Mode V (per-hour retrain backtest,
+                    expensive) from Mode D (grid search on training window). Lets
+                    you train on 4mo + validate on 2mo, cutting 4mo HRST runtime
+                    from ~12-15h to ~5-6h.
     """
     if n_trials is None:
         n_trials = DEKU_DEFAULT_TRIALS
@@ -4411,10 +5875,13 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False)
             if skip_this:
                 print(f"\n  Mode D results already exist for {asset} {h}h — skipping D (--skip)")
             else:
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume)
+                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=resume,
+                                  replay_hours=replay_hours)
 
-            # Step 2: Run Mode V for this horizon
-            g_results = run_mode_v([asset], [h])
+            # Step 2: Run Mode V for this horizon — uses replay_v_hours if set,
+            # else falls back to replay_hours (backward compat).
+            mode_v_replay = replay_v_hours if replay_v_hours else replay_hours
+            g_results = run_mode_v([asset], [h], replay_hours=mode_v_replay)
 
             # Extract best result from Mode V
             key = f"{asset}_{h}h"
@@ -4536,13 +6003,18 @@ def _build_regime_indicators_and_detectors(asset):
         except (KeyError, TypeError):
             return default
 
-    detectors = {
+    _all_detectors = {
         'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
         'sma168>sma480':  lambda dt: safe(dt, lambda r: r['sma168'] > r['sma480']),
         'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
         'vol_calm':       lambda dt: safe(dt, lambda r: r['vol_24h_deseason'] < r['vol_24h_deseason_q70']),
         'tsmom_672h':     lambda dt: safe(dt, lambda r: r['tsmom_672h'] > 0),
     }
+    # Filter to ENABLED_DETECTORS (trimmed 5→2 on 2026-04-30 for HRST consistency).
+    # Keep ALL lambda definitions above so live trader can still evaluate any
+    # named detector found in regime_config_ed.json (back-compat for legacy
+    # configs and quarterly rediscovery runs that override ENABLED_DETECTORS).
+    detectors = {k: v for k, v in _all_detectors.items() if k in ENABLED_DETECTORS}
     return ind, detectors
 
 
@@ -4552,7 +6024,7 @@ def _run_mode_r(assets, horizons, args):
     from itertools import permutations as _perms
 
     asset = assets[0] if assets else 'BTC'
-    replay = int(getattr(args, 'replay', 0)) or 2880  # default 4 months
+    replay = int(getattr(args, 'replay', 0)) or 1440  # default 2 months
     conf = int(getattr(args, 'conf', 0)) or 90
     top_n = int(getattr(args, 'top', 0)) or 200
 
@@ -4752,7 +6224,7 @@ def _apply_mode_r_to_config(r_results):
     """Write Mode R's winning horizons to regime_config_ed.json so Mode S picks them up."""
     if not r_results:
         return
-    tcfg_path = f'{CONFIG_DIR}/regime_config_ed.json'
+    tcfg_path = REGIME_CONFIG_PATH
     try:
         with open(tcfg_path) as f:
             regime_config = json.load(f)
@@ -4773,13 +6245,450 @@ def _apply_mode_r_to_config(r_results):
             regime_config[asset]['bear']['horizon'] = bear_h
             print(f"\n  Mode R → Config: {asset} horizons updated: bull={old_bull}h→{bull_h}h, bear={old_bear}h→{bear_h}h")
 
-    with open(tcfg_path, 'w') as f:
-        json.dump(regime_config, f, indent=2)
+    _atomic_write_json(tcfg_path, regime_config)
 
 
 # ============================================================
 # MAIN MENU
 # ============================================================
+
+# ============================================================
+# RALLY-COOLDOWN SWEEP — shared helper used by Mode G and Mode T
+# ============================================================
+
+def _build_detector_from_cfg(asset, asset_cfg):
+    """Return a detector callable(dt) → bool from asset_cfg. bull=True.
+    Also returns the shared indicator dict for convenience."""
+    ind, detectors = _build_regime_indicators_and_detectors(asset)
+    det_cfg = asset_cfg.get('regime_detector', {})
+    det_type = det_cfg.get('type', 'named')
+    params = det_cfg.get('params', {})
+    if det_type == 'named':
+        name = params.get('name', 'tsmom_672h')
+        det = detectors.get(name)
+        if det is None:
+            raise ValueError(f"Unknown named detector: {name}")
+        return det
+    elif det_type == 'sma_cross':
+        fast = int(params.get('fast', 24))
+        slow = int(params.get('slow', 100))
+        def _sma_det(dt, _ind=ind, _f=fast, _s=slow):
+            if dt not in _ind:
+                return True
+            try:
+                return _ind[dt][f'sma{_f}'] > _ind[dt][f'sma{_s}']
+            except (KeyError, TypeError):
+                return True
+        return _sma_det
+    raise ValueError(f"Unknown detector type: {det_type}")
+
+
+def _merge_tagged_signals(asset, bull_sig_list, bear_sig_list, asset_cfg):
+    """Merge bull+bear signal streams into one tagged list.
+    Each bar tagged with regime ('bull'|'bear') via the configured detector.
+
+    Important: detector lookup keys are NAIVE pandas Timestamps (matching how
+    _build_regime_indicators_and_detectors keys its `ind` dict). If we used
+    tz-aware keys every lookup would miss and default to bull.
+    """
+    detector = _build_detector_from_cfg(asset, asset_cfg)
+
+    def _to_naive(s_dt):
+        if isinstance(s_dt, str):
+            s_dt = datetime.strptime(s_dt, '%Y-%m-%d %H:%M')
+        ts = pd.Timestamp(s_dt)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert('UTC').tz_localize(None)
+        return ts
+
+    bull_map = {_to_naive(s['datetime']): s for s in bull_sig_list}
+    bear_map = {_to_naive(s['datetime']): s for s in bear_sig_list}
+    all_dts = sorted(set(bull_map.keys()) | set(bear_map.keys()))
+
+    bull_h = int(asset_cfg.get('bull', {}).get('horizon', 6))
+    bear_h = int(asset_cfg.get('bear', {}).get('horizon', 8))
+    bull_conf = float(asset_cfg.get('bull', {}).get('min_confidence', 85))
+    bear_conf = float(asset_cfg.get('bear', {}).get('min_confidence', 65))
+
+    merged = []
+    for dt in all_dts:
+        is_bull = bool(detector(dt))
+        regime = 'bull' if is_bull else 'bear'
+        src = bull_map.get(dt) if is_bull else bear_map.get(dt)
+        fallback = bear_map.get(dt) if is_bull else bull_map.get(dt)
+        chosen = src if src is not None else fallback
+        if chosen is None:
+            continue
+        merged.append({
+            'datetime': dt, 'close': float(chosen['close']),
+            'signal': chosen['signal'] if src is not None else 'HOLD',
+            'confidence': float(chosen['confidence']) if src is not None else 0.0,
+            'conf_threshold': bull_conf if is_bull else bear_conf,
+            'regime': regime, 'horizon': bull_h if is_bull else bear_h,
+        })
+    return merged
+
+
+def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
+                          write_config=True, regime_filter='all'):
+    """Core rally-cooldown gate sweep. Returns winner dict (or None if no STRICT).
+
+    Shared by Mode G (standalone, cache-fed) and Mode T (chain, fresh-signal-fed).
+    Writes winner to regime_config_ed.json if write_config=True:
+      - regime_filter='all': writes to asset_cfg['rally_cooldown'] (legacy, single gate)
+      - regime_filter='bull' or 'bear': writes to asset_cfg[regime_filter]['rally_cooldown']
+        AND the gate only fires on that regime's bars during the sim.
+    """
+    if replay_h < 720:
+        print(f"  Rally-cooldown sweep: --replay must be >= 720h (30d). Got {replay_h}")
+        return None
+    days = replay_h / 24.0
+    half_days = days / 2.0
+    rank_col = 'score_recent' if rank == 'recent' else 'score_dd_aware'
+
+    HORIZONS = [8, 10, 12, 14, 16, 18, 20, 24, 30, 36]
+    def thr_for(h):
+        if h in (8, 10, 12):       return [round(2.0 + 0.5*i, 2) for i in range(9)]
+        if h in (14, 16, 18, 20):  return [round(3.0 + 0.5*i, 2) for i in range(9)]
+        if h in (24, 30, 36):      return [round(4.0 + 0.5*i, 2) for i in range(11)]
+        raise ValueError(f"no thr grid for {h}")
+    CD_GRID = [6, 8, 10, 12, 14, 16, 18, 20, 24, 30, 36, 48]
+    FEE = BACKTEST_FEE_PER_LEG
+    PLATEAU_THR = 0.7
+
+    print("=" * 80)
+    print(f"  RALLY-COOLDOWN SWEEP | {asset} | window={days:.0f}d "
+          f"(halves {half_days:.0f}+{half_days:.0f}d) | rank={rank}")
+    print("=" * 80)
+
+    # Log policy
+    _bull_sh = bool(asset_cfg.get('bull', {}).get('hold_shield', True))
+    _bear_sh = bool(asset_cfg.get('bear', {}).get('hold_shield', True))
+    _bull_c = asset_cfg.get('bull', {}).get('min_confidence', '?')
+    _bear_c = asset_cfg.get('bear', {}).get('min_confidence', '?')
+    _msp = asset_cfg.get('min_sell_pnl_pct', '?')
+    _mh = asset_cfg.get('max_hold_hours', '?')
+    print(f"  {asset} | policy: bull@{_bull_c}% shield={_bull_sh} | "
+          f"bear@{_bear_c}% shield={_bear_sh} | shield_thr={_msp}% / {_mh}h")
+    _tagged = sum(1 for s in signals if 'regime' in s)
+    if _tagged < len(signals):
+        print(f"  {asset} | WARNING: {len(signals)-_tagged}/{len(signals)} signals "
+              f"missing 'regime' tag — will default to 'bull'.")
+
+    def simulate(sigs, rr_dict, h_s, h_l, t_s, t_l, cd_h, asset_cfg):
+        """Simulate rally-cooldown gate against a signal stream.
+
+        Reads per-regime policy from asset_cfg (set by Mode T):
+          - bull/bear.hold_shield: whether to defer SELL on unrealized loss
+          - bull/bear.min_confidence: BUY confidence threshold for that regime
+          - min_sell_pnl_pct: shared shield profit threshold (percent)
+          - max_hold_hours: shared shield failsafe
+          - shield_quick_release: {enabled, min_sell_conf, max_hours}
+            Bypass shield on strong SELL signals shortly after entry.
+
+        Each signal bar carries s['regime'] = 'bull' | 'bear' (tagged at cache
+        build time). Policy is looked up at the current bar's regime."""
+        bull_shield = bool(asset_cfg.get('bull', {}).get('hold_shield', True))
+        bear_shield = bool(asset_cfg.get('bear', {}).get('hold_shield', True))
+        bull_conf = float(asset_cfg.get('bull', {}).get('min_confidence', 75.0))
+        bear_conf = float(asset_cfg.get('bear', {}).get('min_confidence', 65.0))
+        min_sell_pnl = float(asset_cfg.get('min_sell_pnl_pct', 0.5))  # already percent
+        max_hold = int(asset_cfg.get('max_hold_hours', 10))
+        # Quick-release default OFF — opt-in only (see 2026-04-19 evaluation)
+        qr_cfg = asset_cfg.get('shield_quick_release', {})
+        qr_enabled = bool(qr_cfg.get('enabled', False))
+        qr_min_conf = float(qr_cfg.get('min_sell_conf', 95))
+        qr_max_hours = float(qr_cfg.get('max_hours', 3))
+
+        # Other-regime existing gate (only used during per-regime sweeps so
+        # the sweep sees the currently-deployed gate on the bars it isn't
+        # directly sweeping — prevents the bear sweep from choosing a gate
+        # that assumes no bull gate exists, which was causing T<->G oscillation).
+        other_regime = 'bear' if regime_filter == 'bull' else ('bull' if regime_filter == 'bear' else None)
+        o_hs = o_hl = 0
+        o_ts = o_tl = 0.0
+        o_cd_h = 0
+        o_rs_arr = o_rl_arr = None
+        if other_regime is not None:
+            o_gate = asset_cfg.get(other_regime, {}).get('rally_cooldown') or {}
+            if o_gate.get('enabled'):
+                try:
+                    o_hs = int(o_gate['h_short']); o_hl = int(o_gate['h_long'])
+                    o_ts = float(o_gate['t_short_pct']); o_tl = float(o_gate['t_long_pct'])
+                    o_cd_h = int(o_gate['cd_hours'])
+                    o_rs_arr = rr_dict.get(o_hs); o_rl_arr = rr_dict.get(o_hl)
+                except (KeyError, TypeError, ValueError):
+                    o_cd_h = 0
+
+        cash = 1000.0; qty = 0.0; in_pos = False; entry = 0.0
+        hold = 0; trades = 0; skipped = 0; cd = 0; other_cd = 0
+        ec = [1000.0]
+        n = len(sigs)
+        rs_arr = rr_dict.get(h_s); rl_arr = rr_dict.get(h_l)
+        for i in range(n):
+            s = sigs[i]; price = s['close']
+            regime = s.get('regime', 'bull')
+            conf_thr = bull_conf if regime == 'bull' else bear_conf
+            # Sweep-candidate gate trigger: only on bars matching the filter
+            # (or every bar for filter='all').
+            if cd_h > 0 and rs_arr is not None and rl_arr is not None:
+                if regime_filter == 'all' or regime_filter == regime:
+                    rs = rs_arr[i]; rl = rl_arr[i]
+                    if (rs == rs and rs >= t_s) or (rl == rl and rl >= t_l):
+                        cd = max(cd, cd_h)
+            # Other-regime's existing gate: only on other regime's bars
+            if o_cd_h > 0 and o_rs_arr is not None and regime == other_regime:
+                rs = o_rs_arr[i]; rl = o_rl_arr[i]
+                if (rs == rs and rs >= o_ts) or (rl == rl and rl >= o_tl):
+                    other_cd = max(other_cd, o_cd_h)
+            ec.append(cash + qty * price if in_pos else cash)
+            # Fill price at CURRENT bar close — matches _sim_horizon,
+            # _sim_regime_switched, and live maker-order semantics (fill within
+            # ~3 min at bid+0.01, i.e. ~current-bar close). Prior next-bar-close
+            # convention added an unmodeled hour of price drift per trade.
+            if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
+                # BUY blocked by whichever cooldown is active on THIS bar's regime
+                active_cd = cd if (regime_filter == 'all' or regime == regime_filter) else other_cd
+                if active_cd > 0:
+                    skipped += 1
+                else:
+                    qty = cash * (1 - FEE) / price
+                    cash = 0.0; in_pos = True; entry = price; hold = 0
+            elif s['signal'] == 'SELL' and in_pos:
+                cur = (price / entry - 1.0) * 100.0
+                shield_on = bull_shield if regime == 'bull' else bear_shield
+                shield_min = min_sell_pnl if shield_on else 0.0
+                quick_release = (qr_enabled and shield_on
+                                 and hold <= qr_max_hours
+                                 and float(s.get('confidence', 0)) >= qr_min_conf)
+                if cur >= shield_min or hold >= max_hold or quick_release:
+                    cash = qty * price * (1 - FEE)
+                    trades += 1; in_pos = False; qty = 0.0; entry = 0.0; hold = 0
+            if in_pos: hold += 1
+            if cd > 0: cd -= 1
+            if other_cd > 0: other_cd -= 1
+        if in_pos:
+            cash = qty * sigs[-1]['close'] * (1 - FEE); trades += 1
+        pnl = (cash / 1000.0 - 1.0) * 100.0
+        arr = np.array(ec); peak = np.maximum.accumulate(arr); dd = (arr - peak) / peak
+        mdd = float(dd.min()) * 100.0 if len(dd) else 0.0
+        return dict(pnl_pct=pnl, dd_pct=mdd, trades=trades, skipped=skipped)
+
+    # Normalize signal datetimes to UTC
+    for s in signals:
+        t = pd.Timestamp(s['datetime'])
+        s['datetime'] = t.tz_localize('UTC') if t.tzinfo is None else t.tz_convert('UTC')
+
+    end_t = signals[-1]['datetime']
+    t_h1_lo = end_t - pd.Timedelta(days=half_days)
+    t_h2_lo = end_t - pd.Timedelta(days=days)
+    sigs_h1 = [s for s in signals if s['datetime'] >= t_h1_lo]
+    sigs_h2 = [s for s in signals if t_h2_lo <= s['datetime'] < t_h1_lo]
+    sigs_ref = [s for s in signals if s['datetime'] >= t_h2_lo]
+
+    if len(sigs_h2) < 100:
+        print(f"  {asset}: signal stream too short — H2 has only {len(sigs_h2)} signals. SKIPPING.")
+        return None
+
+    def build_rr(ws):
+        df = pd.DataFrame([{'datetime': s['datetime'], 'close': s['close']} for s in ws])
+        df = df.sort_values('datetime').reset_index(drop=True)
+        return {h: ((df['close'] / df['close'].shift(h) - 1.0) * 100.0).values for h in HORIZONS}
+    rr_h1 = build_rr(sigs_h1); rr_h2 = build_rr(sigs_h2); rr_ref = build_rr(sigs_ref)
+
+    b_h1 = simulate(sigs_h1, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    b_h2 = simulate(sigs_h2, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    b_ref = simulate(sigs_ref, {}, 8, 36, 9999, 9999, 0, asset_cfg)
+    print(f"  {asset} | sigs h1={len(sigs_h1)} h2={len(sigs_h2)} ref={len(sigs_ref)}")
+    print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
+          f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
+
+    pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
+    total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
+    print(f"  {asset} | sweeping {total:,} configs ...")
+
+    rows = []
+    t0 = time.time()
+    for h_s, h_l in pairs:
+        for t_s in thr_for(h_s):
+            for t_l in thr_for(h_l):
+                for cd in CD_GRID:
+                    r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd, asset_cfg)
+                    rows.append(dict(
+                        h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
+                        pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
+                        dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
+                        tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
+                        sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
+                    ))
+    print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
+
+    df = pd.DataFrame(rows)
+    df['beats_H1']  = df['pnl_H1']  > b_h1['pnl_pct']
+    df['beats_H2']  = df['pnl_H2']  > b_h2['pnl_pct']
+    df['beats_REF'] = df['pnl_REF'] > b_ref['pnl_pct']
+    df['beats_3of3'] = df['beats_H1'] & df['beats_H2'] & df['beats_REF']
+    df['avg_pnl_halves'] = (df['pnl_H1'] + df['pnl_H2']) / 2.0
+    df['worst_dd'] = np.maximum(df['dd_H1'].abs(), df['dd_H2'].abs())
+    df['score_dd_aware'] = df['avg_pnl_halves'] - 0.5 * df['worst_dd']
+    df['score_recent'] = df['pnl_H1'] - 0.5 * df['dd_H1'].abs()
+
+    h_idx = {h: i for i, h in enumerate(HORIZONS)}
+    cd_idx = {c: i for i, c in enumerate(CD_GRID)}
+    key_to_idx = {(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                   float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
+    beats3 = df['beats_3of3'].values
+
+    def nb_idx(hs, hl, ts, tl, cd, dim, step):
+        if dim == 'hs':
+            i = h_idx[hs] + step
+            if not (0 <= i < len(HORIZONS)): return None
+            new = HORIZONS[i]
+            if new >= hl: return None
+            key = (new, hl, ts, tl, cd)
+        elif dim == 'hl':
+            i = h_idx[hl] + step
+            if not (0 <= i < len(HORIZONS)): return None
+            new = HORIZONS[i]
+            if new <= hs or tl not in thr_for(new): return None
+            key = (hs, new, ts, tl, cd)
+        elif dim == 'ts':
+            new = round(ts + 0.5 * step, 2)
+            if new not in thr_for(hs): return None
+            key = (hs, hl, new, tl, cd)
+        elif dim == 'tl':
+            new = round(tl + 0.5 * step, 2)
+            if new not in thr_for(hl): return None
+            key = (hs, hl, ts, new, cd)
+        elif dim == 'cd':
+            i = cd_idx[cd] + step
+            if not (0 <= i < len(CD_GRID)): return None
+            key = (hs, hl, ts, tl, CD_GRID[i])
+        return key_to_idx.get(key)
+
+    plateau = np.zeros(len(df))
+    for i, r in df.iterrows():
+        nbrs = []
+        for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
+            for step in (-1, 1):
+                j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
+                           float(r['t_long']), int(r['cd']), dim, step)
+                if j is not None: nbrs.append(j)
+        plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
+    df['plateau_score'] = plateau
+
+    os.makedirs('output', exist_ok=True)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = f'output/rally_cd_{asset}_{ts}.csv'
+    df.to_csv(out_path, index=False)
+    print(f"  {asset} | wrote {out_path}")
+
+    strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
+    strict = strict.sort_values(rank_col, ascending=False)
+    print(f"  {asset} | beats_3of3={int(df['beats_3of3'].sum())}  "
+          f"STRICT (3of3 + plateau>={PLATEAU_THR})={len(strict)}")
+    if len(strict) == 0:
+        print(f"  {asset} | NO STRICT WINNER — config not modified.")
+        return None
+
+    cols = ['h_short','h_long','t_short','t_long','cd',
+            'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_recent','score_dd_aware','plateau_score']
+    print(f"  {asset} | top 5 STRICT:")
+    print(strict[cols].head(5).to_string(index=False,
+          formatters={c: '{:+.2f}'.format for c in cols
+                      if c.startswith(('pnl_','score_','plateau','worst'))}))
+
+    win = strict.iloc[0]
+    print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
+          f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
+
+    winner_dict = {
+        'enabled': True,
+        'h_short': int(win['h_short']),
+        'h_long': int(win['h_long']),
+        't_short_pct': float(win['t_short']),
+        't_long_pct': float(win['t_long']),
+        'cd_hours': int(win['cd']),
+    }
+
+    if write_config:
+        cfg = {}
+        if os.path.exists(REGIME_CONFIG_PATH):
+            with open(REGIME_CONFIG_PATH) as f:
+                cfg = json.load(f)
+        if asset not in cfg:
+            cfg[asset] = {'enabled': False, 'symbol': f'{asset}-USD'}
+        # Route the winner to the right spot based on regime_filter
+        if regime_filter in ('bull', 'bear'):
+            cfg[asset].setdefault(regime_filter, {})['rally_cooldown'] = winner_dict
+            write_loc = f"{asset}.{regime_filter}.rally_cooldown"
+        else:
+            cfg[asset]['rally_cooldown'] = winner_dict
+            write_loc = f"{asset}.rally_cooldown"
+        _atomic_write_json(REGIME_CONFIG_PATH, cfg)
+        print(f"  {asset} | wrote {write_loc} to {REGIME_CONFIG_PATH}")
+
+    return winner_dict
+
+
+# ============================================================
+# MODE G — RALLY-COOLDOWN OR-GATE SWEEP (cache-fed standalone)
+# ============================================================
+def run_mode_g(assets_list, args):
+    """Standalone Mode G: load cached tagged signals (pre-built by extend_caches_90d.py),
+    call _sweep_rally_cooldown. Useful when models haven't changed and you want fast iteration.
+    For fresh signals, prefer Mode T which auto-chains rally-cooldown after its own sweep."""
+    replay_h = int(getattr(args, 'replay', 0)) or 1440
+    rank = getattr(args, 'rank', 'recent')
+
+    try:
+        with open(REGIME_CONFIG_PATH) as f:
+            regime_cfg_all = json.load(f)
+    except Exception as e:
+        print(f"  Mode G: cannot read {REGIME_CONFIG_PATH}: {e}")
+        return
+
+    for asset in assets_list:
+        cache_path = None
+        for n in (90, 60, 30):
+            p = os.path.join('data', f'{asset.lower()}_sl_signals_{n}d.pkl')
+            if os.path.exists(p):
+                cache_path = p; break
+        if cache_path is None:
+            print(f"  {asset}: no signal cache (data/{asset.lower()}_sl_signals_*.pkl). "
+                  f"Run extend_caches_90d.py for {asset}, or use Mode T for fresh signals. SKIPPING.")
+            continue
+
+        # Cache-freshness guard: standalone G is useful only when models haven't changed.
+        # If the production CSV is newer than the cache, the signals are stale.
+        try:
+            cache_mtime = os.path.getmtime(cache_path)
+            prod_mtime = os.path.getmtime(PRODUCTION_CSV)
+            if prod_mtime > cache_mtime:
+                age_min = (prod_mtime - cache_mtime) / 60.0
+                print("=" * 80)
+                print(f"  {asset}: STALE CACHE WARNING")
+                print(f"  Signal cache: {cache_path} ({datetime.fromtimestamp(cache_mtime)})")
+                print(f"  Production CSV: {PRODUCTION_CSV} ({datetime.fromtimestamp(prod_mtime)})")
+                print(f"  Production is {age_min:.0f} minutes NEWER than the cache.")
+                print(f"  The signals in the cache were generated by older models.")
+                print("  Options:")
+                print("    - Prefer Mode T (regenerates signals fresh, chains G automatically)")
+                print("    - Or rebuild: python extend_caches_90d.py")
+                print(f"  SKIPPING {asset} to avoid writing bad config.")
+                print("=" * 80)
+                continue
+        except OSError:
+            pass
+
+        with open(cache_path, 'rb') as f:
+            signals = pickle.load(f)
+
+        asset_cfg = regime_cfg_all.get(asset, {})
+        _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank=rank, write_config=True)
+
 
 def main():
 
@@ -4796,7 +6705,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'R', 'RS'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T', 'G', 'F'}
 
     # Parse flags first
     flag_resume = '--resume' in sys.argv
@@ -4820,6 +6729,19 @@ def main():
             except ValueError:
                 pass
 
+    # Parse --replay-v N (Mode V live-validation window, decoupled from Mode D
+    # training window. Added 2026-04-27: lets you train on 4mo (--replay 2880)
+    # but live-validate on 2mo (--replay-v 1440), cutting Mode V cost ~2× since
+    # Mode V's hour-by-hour walk-forward retrains the model on every step.
+    # If unspecified, falls back to --replay value (backward compat).
+    flag_replay_v = 0
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--replay-v' and i < len(sys.argv) - 1:
+            try:
+                flag_replay_v = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
     # Parse --conf N (Mode R: confidence threshold, default 90)
     flag_conf = 0
     for i, a in enumerate(sys.argv[1:], 1):
@@ -4838,6 +6760,192 @@ def main():
             except ValueError:
                 pass
 
+    # Parse --rank recent|balanced (Mode G tiebreak), default 'recent'
+    flag_rank = 'recent'
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--rank' and i < len(sys.argv) - 1:
+            v = sys.argv[i + 1].lower()
+            if v in ('recent', 'balanced'):
+                flag_rank = v
+            else:
+                print(f"  Unknown --rank value '{v}'. Valid: recent, balanced")
+                return
+
+    # Parse --no-feature-floor (disable Mode D's feature-family floor for A/B testing).
+    # Default: floor ON (>=2 logret + >=1 pysr). Flag turns it OFF to compare.
+    if '--no-feature-floor' in sys.argv:
+        global FEATURE_FLOOR_ENABLED
+        FEATURE_FLOOR_ENABLED = False
+        print()
+        print(f"  [--no-feature-floor] Mode D feature-family floor DISABLED "
+              f"(old behavior: Optuna picks top-N from ranking with no family constraints).")
+        print()
+
+    # Parse --no-data-update (skip macro + asset downloads at HRST start).
+    # Used by the A/B matrix runner so all variants see the same data snapshot.
+    global NO_DATA_UPDATE
+    NO_DATA_UPDATE = '--no-data-update' in sys.argv
+    if NO_DATA_UPDATE:
+        print()
+        print(f"  [--no-data-update] Skipping macro + OHLCV downloads. "
+              f"Using whatever is currently on disk.")
+        print()
+
+    # Parse --trim-override on|off — override disabled_features.json's `enabled`
+    # flag without writing to disk. Lets A/B matrix variants flip trim state
+    # without touching the prod config the live trader hot-reloads.
+    global TRIM_ENABLED_OVERRIDE
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--trim-override' and i < len(sys.argv) - 1:
+            v = sys.argv[i + 1].lower().strip()
+            if v in ('on', 'true', '1', 'yes'):
+                TRIM_ENABLED_OVERRIDE = True
+            elif v in ('off', 'false', '0', 'no'):
+                TRIM_ENABLED_OVERRIDE = False
+            else:
+                print(f"  --trim-override must be on|off (got {v!r}). Ignoring.")
+                return
+            print()
+            print(f"  [--trim-override {v}] Feature-trim enabled={TRIM_ENABLED_OVERRIDE} "
+                  f"(in-memory only — config/disabled_features.json NOT modified).")
+            print()
+
+    # Parse --optuna-seed N — override TPESampler seed (default 42).
+    # Tests whether matrix effects (floor/trim) replicate across noise realizations.
+    global OPTUNA_SEED_OVERRIDE
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--optuna-seed' and i < len(sys.argv) - 1:
+            try:
+                OPTUNA_SEED_OVERRIDE = int(sys.argv[i + 1])
+                print()
+                print(f"  [--optuna-seed {OPTUNA_SEED_OVERRIDE}] TPESampler seed override "
+                      f"(default 42). Different search path, different noise realization.")
+                print()
+            except ValueError:
+                print(f"  --optuna-seed must be an integer (got {sys.argv[i+1]!r}). Ignoring.")
+                return
+
+    # Parse --max-iter N (Mode T: T<->G convergence iterations, default 4)
+    flag_max_iter = 0
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--max-iter' and i < len(sys.argv) - 1:
+            try:
+                flag_max_iter = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
+    # Research flag globals (consolidated up front to satisfy Python's global-decl rules
+    # since both --no-persist and --label-threshold mutate module-level paths).
+    global PRODUCTION_CSV, REGIME_CONFIG_PATH, LABEL_THRESHOLD_PCT
+
+    # Parse Mode F flags
+    flag_restore = '--restore' in sys.argv
+    flag_include_newborns = '--include-newborns' in sys.argv
+
+    # Fix #10 (2026-04-24): Parse --data-dir BEFORE anything reads files.
+    # Matrix / research runners pass their own isolated data directory so the
+    # live trader's data/ is never touched. Alternative: set ED_DATA_DIR env var.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--data-dir' and i < len(sys.argv) - 1:
+            new_dir = sys.argv[i + 1]
+            set_data_dir(new_dir)
+            print(f"  [data-dir] active: {DATA_DIR} (macro: {MACRO_DIR})")
+            break
+
+    # Parse --no-persist (research: do NOT touch production CSV or regime_config_ed.json)
+    # Redirects both writes to *_noprod.* files seeded with current contents.
+    # Safe to run alongside live trader.
+    #
+    # --no-persist-keep (companion flag): don't reseed _noprod.* from live prod.
+    # Use this when the caller has pre-staged _noprod.* with specific variant
+    # contents (e.g. tools/ab_matrix_retune_t.py swaps variant tagged files in).
+    # Without this, --no-persist would OVERWRITE the pre-staged variant data.
+    if '--no-persist' in sys.argv:
+        import shutil
+        keep_existing = '--no-persist-keep' in sys.argv
+        np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
+        np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
+        if not keep_existing:
+            if os.path.exists(PRODUCTION_CSV):
+                shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
+            if os.path.exists(REGIME_CONFIG_PATH):
+                shutil.copyfile(REGIME_CONFIG_PATH, np_config)
+        PRODUCTION_CSV = np_prod_csv
+        REGIME_CONFIG_PATH = np_config
+        print()
+        print("  " + "*" * 76)
+        if keep_existing:
+            print("  * --no-persist-keep ACTIVE: using pre-staged _noprod files AS-IS")
+        else:
+            print("  * --no-persist ACTIVE: production files are NOT modified")
+        print(f"  * All writes redirected to:")
+        print(f"  *    {PRODUCTION_CSV}")
+        print(f"  *    {REGIME_CONFIG_PATH}")
+        print("  * Safe to run alongside live trader.")
+        print("  " + "*" * 76)
+        print()
+
+    # Parse --meta-filter P (research A/B: train secondary LGBM, filter BUYs).
+    # Enforces --no-persist: never writes meta-filtered results to real production.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--meta-filter' and i < len(sys.argv) - 1:
+            try:
+                mp = float(sys.argv[i + 1])
+                if mp < 0.0 or mp > 1.0:
+                    print(f"  --meta-filter value '{mp}' out of [0, 1]. Example: 0.45.")
+                    return
+                global META_FILTER_THRESHOLD
+                META_FILTER_THRESHOLD = mp
+                # Enforce --no-persist: redirect PRODUCTION_CSV and REGIME_CONFIG_PATH
+                # to _noprod variants if not already redirected.
+                if not PRODUCTION_CSV.endswith('_noprod.csv'):
+                    np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
+                    np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
+                    if os.path.exists(PRODUCTION_CSV) and not os.path.exists(np_prod_csv):
+                        shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
+                    if os.path.exists(REGIME_CONFIG_PATH) and not os.path.exists(np_config):
+                        shutil.copyfile(REGIME_CONFIG_PATH, np_config)
+                    PRODUCTION_CSV = np_prod_csv
+                    REGIME_CONFIG_PATH = np_config
+                print()
+                print("  " + "#" * 76)
+                print(f"  # META-FILTER ACTIVE: p >= {mp:.2f}")
+                print(f"  # Every BUY signal audited by walk-forward secondary LGBM.")
+                print(f"  # BUYs with meta_prob < {mp:.2f} downgraded to HOLD.")
+                print(f"  # --no-persist enforced — writes go to:")
+                print(f"  #    {PRODUCTION_CSV}")
+                print(f"  #    {REGIME_CONFIG_PATH}")
+                print("  " + "#" * 76)
+                print()
+            except ValueError:
+                print(f"  --meta-filter must be a float in [0, 1] (e.g. 0.45)")
+                return
+
+    # Parse --label-threshold X.XX (research one-off: retrain with label=1 iff ret > X)
+    # When active: overrides the 2×fee default and redirects output to a tagged CSV so prod is untouched.
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--label-threshold' and i < len(sys.argv) - 1:
+            try:
+                lt = float(sys.argv[i + 1])
+                if lt <= 0 or lt > 0.5:
+                    print(f"  --label-threshold value '{lt}' out of plausible range (0, 0.5]. Example: 0.01 = 1%.")
+                    return
+                LABEL_THRESHOLD_PCT = lt
+                pct = int(round(lt * 10000)) / 100  # e.g. 1.0 for 0.01
+                # Redirect output so prod stays untouched
+                PRODUCTION_CSV = f"models/crypto_ed_production_lt{pct:g}.csv"
+                print()
+                print("  " + "!" * 76)
+                print(f"  ! LABEL THRESHOLD OVERRIDE ACTIVE: label=1 iff future_return > {lt:.4f} ({pct:g}%)")
+                print(f"  ! Default 2×fee ({2*TRADING_FEE:.4f}) is BYPASSED.")
+                print(f"  ! Output redirected to: {PRODUCTION_CSV}")
+                print(f"  ! Production CSV is NOT modified.")
+                print("  " + "!" * 76)
+                print()
+            except ValueError:
+                print(f"  --label-threshold must be a float (e.g. 0.01 for 1%)")
+                return
+
     # --help
     if '--help' in sys.argv or '-h' in sys.argv:
         print("""
@@ -4853,9 +6961,19 @@ Modes:
   S       Regime confidence optimization (sweep bull/bear confidence → write config)
   RS      R then S (find best regime pair → optimize confidence)
   H       Horizon sweep (D+V per horizon — produces models, no winner picking)
+  T       Threshold sweep (hold-until-profitable: min_sell_pnl × max_hold_hours)
   HRS     Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)
+  HRST    Full Ed pipeline + threshold: H → R → S → T
   DVRS    Same as HRS for specified horizons
   R       Regime backtest (bull/bear horizon switching with regime detectors)
+  G       Rally-cooldown gate sweep — cache-fed standalone (fast iteration)
+          NOTE: Mode T chains this sweep automatically against fresh signals, so
+          HRST is the canonical way to get shield + gate together. G standalone
+          is kept for fast re-runs when models haven't changed.
+  F       Feature trim — audit production models + PySR formulas, populate
+          config/disabled_features.json with Grade 1 features (0 selection + 0
+          PySR). Download/data pipelines untouched. Use --restore to re-enable
+          all, --include-newborns to include recent additions.
 
 Assets:
   BTC,ETH,LINK,...   Comma-separated asset names (default: all)
@@ -4868,9 +6986,33 @@ Options:
   --metric NAME       Scoring metric: apf, rawpf, calmar, return, rpf_sqrt, all
   --skip              Mode H only: skip Mode D for horizons that already have results
   --resume            Resume interrupted Optuna study
-  --replay N          Mode R only: replay hours (default: 2880 = 4 months)
+  --replay N          Mode D/V/R/S/T: data window in hours (default: 1440=2mo)
+  --replay-v N        Mode V only: live-validation window (decoupled from --replay).
+                      Lets you train on 4mo (--replay 2880) but live-validate on 2mo
+                      (--replay-v 1440), cutting 4mo HRST runtime ~12-15h → ~5-6h.
+                      If unspecified, falls back to --replay value.
   --conf N            Mode R only: confidence threshold (default: 90)
   --top N             Mode R only: show top N results (default: 15)
+  --rank MODE         Mode G tiebreak: recent (H1-focused, default) | balanced (H1+H2 avg)
+  --max-iter N        Mode T: T<->G convergence iterations (default 6; 1=single-pass legacy;
+                      tolerant-convergence active — accepts plateau-level noise)
+  --label-threshold X Research: retrain with label=1 iff future_return > X (e.g., 0.01 = 1%).
+                      Default = 2×fee (0.0022). Output redirected to models/crypto_ed_production_lt<pct>.csv.
+  --meta-filter P     Research A/B: train walk-forward secondary LGBM per horizon; BUY
+                      signals with meta_prob < P are downgraded to HOLD. Enforces --no-persist.
+                      Example: --meta-filter 0.45. Compare _noprod.* outputs vs a baseline run.
+  --no-feature-floor  Research A/B: disable Mode D's feature-family floor (>=2 logret +
+                      >=1 pysr in every selected subset). Old behavior — use with --no-persist
+                      to A/B test floor ON vs OFF.
+  --no-data-update    Research A/B: skip macro + OHLCV downloads at HRST start. Used by
+                      tools/ab_matrix_runner.py so all variants see the same data snapshot.
+  --trim-override X   Research A/B: force disabled_features.json enabled flag (on|off)
+                      without modifying the file. Safe during live trading.
+  --optuna-seed N     Research A/B: override Optuna TPESampler seed (default 42). Tests
+                      whether findings replicate across noise realizations.
+  --no-persist        Research: do NOT modify production files. Redirects writes to
+                      *_noprod.* files (seeded from current production state). Safe to run
+                      alongside live trader. Use for --replay 2880 validation, etc.
   --help, -h          Show this help
 
 Examples:
@@ -4909,7 +7051,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter', '--trim-override', '--optuna-seed') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 
@@ -4945,9 +7087,9 @@ Examples:
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'DVRS', 'H', 'HRS') else ""
         skip_str = " | --skip" if flag_skip and mode in ('H', 'HRS', 'DVRS') else ""
-        h_str = ','.join(str(h)+'h' for h in horizons)
+        h_str = '' if mode == 'G' else ' | ' + ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
-        print(f"  ED: Mode {mode} | {','.join(assets_list)} | {h_str}{trials_str}{skip_str}")
+        print(f"  ED: Mode {mode} | {','.join(assets_list)}{h_str}{trials_str}{skip_str}")
         print("=" * 60)
 
     else:
@@ -4971,7 +7113,8 @@ Examples:
         print("  HRS. Full Ed pipeline: H → R → S (all horizons → regime pair → confidence)")
         print("  R.  REGIME BACKTEST (bull/bear horizon switching with regime detectors)")
         print("  DVRS. Same as HRS for specified horizons")
-        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/R/DVRS: ").strip().upper()
+        print("  G.  RALLY-COOLDOWN gate sweep — cache-fed standalone (T chains G automatically)")
+        mode = input("\nEnter P/D/DV/DVS/S/RS/V/H/HRS/HRST/R/DVRS/G/T: ").strip().upper()
 
 
         if mode not in VALID_MODES:
@@ -4980,13 +7123,13 @@ Examples:
 
         print("\nWhich assets?")
         print("  1. All (crypto + indices)")
-        print("  2. Crypto only (BTC, ETH, XRP, DOGE)")
+        print("  2. Crypto only (BTC, ETH, XRP, SOL, LINK, BNB)")
         print("  3. Indices only (SMI, DAX, CAC40)")
         print("  4. Choose specific")
         choice = input("Enter choice (1-4): ").strip()
 
         if choice == '2':
-            assets_list = ['BTC', 'ETH', 'XRP', 'DOGE']
+            assets_list = ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']
         elif choice == '3':
             assets_list = ['SMI', 'DAX', 'CAC40']
         elif choice == '4':
@@ -5012,7 +7155,7 @@ Examples:
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS'):
+        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS', 'HRST'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -5127,16 +7270,39 @@ Examples:
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
-    elif mode in ('HRS', 'DVRS'):
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+    elif mode in ('HRS', 'DVRS', 'HRST'):
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip,
+                   replay_hours=flag_replay or None,
+                   replay_v_hours=flag_replay_v or None)
         class _Args: pass
         _r_args = _Args()
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
+        _r_args.max_iter = flag_max_iter
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
+        if mode == 'HRST':
+            run_mode_t(assets_list, _r_args)
+    elif mode == 'G':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.rank = flag_rank
+        run_mode_g(assets_list, _r_args)
+    elif mode == 'T':
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.max_iter = flag_max_iter
+        run_mode_t(assets_list, _r_args)
+    elif mode == 'F':
+        run_mode_f(
+            restore=flag_restore,
+            include_newborns=flag_include_newborns,
+            asset=(assets_list[0] if assets_list else 'ETH'),
+        )
     elif mode == 'P':
         run_mode_p(assets_list, horizons)
     elif mode in ('D', 'DV', 'DVS'):
@@ -5149,9 +7315,10 @@ Examples:
                     print(f"\n{'#'*60}")
                     print(f"  RUNNING {h}h HORIZON")
                     print(f"{'#'*60}")
-                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume)
+                run_mode_d_optuna([asset], horizon=h, n_trials=n_trials, resume=flag_resume, replay_hours=flag_replay or None)
             if mode in ('DVS', 'DV'):
-                run_mode_v([asset], horizons, replay_hours=flag_replay or None)
+                # Mode V uses --replay-v if set, else falls back to --replay (decoupled 2026-04-27)
+                run_mode_v([asset], horizons, replay_hours=flag_replay_v or flag_replay or None)
                 if mode == 'DVS':
                     class _Args: pass
                     _r_args = _Args()
@@ -5159,9 +7326,12 @@ Examples:
                     _r_args.top = flag_top
                     run_mode_s([asset], horizons, _r_args)
     elif mode == 'V':
-        run_mode_v(assets_list, horizons, replay_hours=flag_replay or None)
+        # Mode V uses --replay-v if set, else falls back to --replay (decoupled 2026-04-27)
+        run_mode_v(assets_list, horizons, replay_hours=flag_replay_v or flag_replay or None)
     elif mode == 'H':
-        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip)
+        run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip,
+                   replay_hours=flag_replay or None,
+                   replay_v_hours=flag_replay_v or None)
 
     print("\nDone!")
 

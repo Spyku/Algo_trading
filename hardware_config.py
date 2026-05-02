@@ -28,6 +28,20 @@ else:
     N_JOBS_PARALLEL = 14
     LGBM_DEVICE = 'gpu'
 
+# --- Parallel HRST wrapper config ---
+# Workers for Mode V/S/T concurrent backtests + parallel signal-cache build.
+# LGBM forced to CPU inside parallel sections: 6 concurrent GPU LGBMs would
+# queue on the single GPU and lose most of the speedup.
+if MACHINE == 'DESKTOP':
+    PARALLEL_BACKTESTS = 6
+    PARALLEL_LGBM_DEVICE = 'cpu'
+elif MACHINE == 'YOGA':
+    PARALLEL_BACKTESTS = 6
+    PARALLEL_LGBM_DEVICE = 'cpu'
+else:  # LAPTOP
+    PARALLEL_BACKTESTS = 6
+    PARALLEL_LGBM_DEVICE = 'cpu'
+
 # --- Model Definitions ---
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression

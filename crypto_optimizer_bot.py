@@ -55,7 +55,7 @@ PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
 TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
 
-ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP']  # dropped DOGE/ADA/AVAX/DOT 2026-04-19 — weak priors, no diversification
+ASSETS = ['BTC', 'ETH', 'SOL', 'LINK', 'XRP', 'BNB']
 HORIZONS = [5, 6, 7, 8, 10, 12, 14]
 MODES = {
     'P':    'PySR Discovery',
@@ -75,7 +75,9 @@ MODES = {
 }
 
 # Time estimates per (asset, horizon) in minutes
-MODE_TIME_EST = {'P': 60, 'D': 25, 'V': 30, 'DV': 55, 'H': 55, 'R': 30, 'S': 60, 'T': 10, 'G': 2, 'RS': 90, 'HRS': 150, 'HRST': 160, 'DVRS': 150, 'F': 1}
+# Updated 2026-04-27 after engine grid trim (324 -> 72 evals = -78% Mode D time).
+# Per-horizon Mode D dropped ~25min -> ~6min based on empirical evidence.
+MODE_TIME_EST = {'P': 60, 'D': 6, 'V': 30, 'DV': 35, 'H': 35, 'R': 30, 'S': 60, 'T': 10, 'G': 2, 'RS': 90, 'HRS': 100, 'HRST': 110, 'DVRS': 100, 'F': 1}
 
 # ── Telegram config ──────────────────────────────────────────────────
 TELEGRAM_CONFIG = {'token': '', 'chat_id': ''}
@@ -701,7 +703,9 @@ def _run_job(job):
     # State for progress parsing
     phase = 'starting'
     grid_current = 0
-    grid_total = 324
+    # Initial fallback; auto-updates from log parser at line ~759. Updated
+    # 2026-04-27 from 324 to 72 to match new Mode D grid size.
+    grid_total = 72
     best_apf = 0
     best_ret = ''
     current_asset = job.assets[0] if job.assets else ''
@@ -751,7 +755,7 @@ def _run_job(job):
             job.output_lines = job.output_lines[-300:]
 
         # Parse progress patterns
-        # Grid eval: [120/324] RF+LGBM w=200 ... | apf=1.23 ret=+2.1%
+        # Grid eval: [60/72] RF+LGBM w=100 ... | apf=1.23 ret=+2.1%
         m = re.search(r'\[\s*(\d+)/(\d+)\].*apf=([\d.]+).*ret=([+-][\d.]+)%', line)
         if m:
             phase = 'grid'
@@ -762,7 +766,7 @@ def _run_job(job):
                 best_apf = apf
                 best_ret = m.group(4) + '%'
 
-        # Batch summary: [108/324] 33% | ... | best APF=1.52 | ETA 6m
+        # Batch summary: [24/72] 33% | ... | best APF=1.52 | ETA 6m
         m = re.search(r'\[\s*(\d+)/(\d+)\]\s+(\d+)%.*best APF=([\d.]+).*ETA\s+([\d.]+)', line)
         if m:
             phase = 'grid'

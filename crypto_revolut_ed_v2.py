@@ -58,7 +58,7 @@ CYCLE_METRICS_COLUMNS = [
     'timestamp',           # cycle start ISO
     'asset',
     'regime',              # bull / bear / error
-    'signal',              # BUY / SELL / HOLD
+    'signal',              # BUY / SELL / HOLD / SKIPPED
     'confidence',          # 0-100, 2 decimals
     'horizon',             # active horizon (e.g. 5)
     'position_state',      # cash / invested
@@ -76,15 +76,34 @@ CYCLE_METRICS_COLUMNS = [
     'feature_build_sec',
     'model_fit_sec',
     'total_cycle_sec',
+    # N-15 (2026-04-26): skip telemetry for early-return cycles. Empty on
+    # normal rows; populated when process_asset bails out before model fit
+    # (e.g. load_data_failed, regime_error, no_models_loaded).
+    'skip_reason',
 ]
 
 
 def _append_cycle_metrics(row_dict):
     """Append a per-cycle per-asset row to cycle_metrics.csv. Never raises.
-    Keys missing from row_dict become empty cells."""
+    Keys missing from row_dict become empty cells.
+    N-15 (2026-04-26): if the existing file's header doesn't match the current
+    CYCLE_METRICS_COLUMNS (e.g. after adding skip_reason), rotate it to
+    cycle_metrics.v1.csv and start fresh. Telemetry-only loss is acceptable."""
     import csv
     try:
         os.makedirs(os.path.dirname(CYCLE_METRICS_CSV), exist_ok=True)
+        if os.path.exists(CYCLE_METRICS_CSV):
+            try:
+                with open(CYCLE_METRICS_CSV, 'r', encoding='utf-8') as _rf:
+                    first_line = _rf.readline().rstrip('\r\n')
+                if first_line != ','.join(CYCLE_METRICS_COLUMNS):
+                    rotated = CYCLE_METRICS_CSV.rsplit('.', 1)[0] + '.v1.csv'
+                    if not os.path.exists(rotated):
+                        os.rename(CYCLE_METRICS_CSV, rotated)
+                    else:
+                        os.remove(CYCLE_METRICS_CSV)
+            except Exception:
+                pass
         file_exists = os.path.exists(CYCLE_METRICS_CSV)
         with open(CYCLE_METRICS_CSV, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=CYCLE_METRICS_COLUMNS, extrasaction='ignore')
@@ -93,6 +112,23 @@ def _append_cycle_metrics(row_dict):
             writer.writerow({c: row_dict.get(c, '') for c in CYCLE_METRICS_COLUMNS})
     except Exception as _e:
         print(f"  [!] cycle_metrics write failed: {_e}")
+
+
+def _emit_skip_cycle_row(cycle_metrics, asset, skip_reason, regime_label='', position_state=''):
+    """N-15 (2026-04-26): record one row when process_asset early-returns.
+    Without this, cycle_metrics.csv silently misses cycles that refused due to
+    upstream failures (load_data, regime detector error, no models loaded).
+    P1/P2/total_cycle_sec are filled in at flush time by the caller."""
+    if cycle_metrics is None:
+        return
+    cycle_metrics.setdefault('rows', []).append({
+        'timestamp': cycle_metrics.get('timestamp', ''),
+        'asset': asset,
+        'regime': regime_label,
+        'signal': 'SKIPPED',
+        'position_state': position_state,
+        'skip_reason': skip_reason,
+    })
 
 
 # ============================================================
@@ -1410,6 +1446,8 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
             f'load_data_{asset}',
             f'🚨 {asset}: load_data returned None — CSV missing or unreadable. Check P1 download logs.',
         )
+        _emit_skip_cycle_row(cycle_metrics, asset, 'load_data_failed',
+                             position_state=position.get('state', ''))
         return None
 
     # Detect regime — determines horizon, confidence, and max_position
@@ -1420,6 +1458,9 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
     regime_label, regime_cfg = detect_regime(asset, df_raw)
     if regime_label == 'error':
         print(f"  [!!] {asset}: regime detector returned ERROR — skipping cycle")
+        _emit_skip_cycle_row(cycle_metrics, asset, 'regime_error',
+                             regime_label='error',
+                             position_state=position.get('state', ''))
         return None
     regime_horizon = regime_cfg.get('horizon')
     regime_min_conf = regime_cfg.get('min_confidence')
@@ -1440,6 +1481,9 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 sigs_by_horizon[h] = cfg
 
     if not sigs_by_horizon:
+        _emit_skip_cycle_row(cycle_metrics, asset, 'no_models_loaded',
+                             regime_label=regime_label,
+                             position_state=position.get('state', ''))
         return None
     # Generate live signals for each available horizon
     # Fix #9: pass metrics_out dict to capture feature-health + timings
@@ -2138,6 +2182,42 @@ def format_multi_asset_telegram(results, dry_run=False, balances=None, trading_c
 # ============================================================
 _last_update_id = 0
 
+# Two-tap confirmation for /buy and /sell to prevent button-misclick orders.
+# /buy and /sell now send an inline-button prompt; the actual order only fires
+# when the user taps ✅ Confirm. Tokens auto-expire after _CONFIRM_TTL_SECS.
+_pending_confirms = {}
+_pending_confirms_lock = threading.Lock()
+_CONFIRM_TTL_SECS = 30
+_CONFIRM_COUNTER = [0]
+
+def _purge_expired_confirms():
+    now = time.time()
+    with _pending_confirms_lock:
+        stale = [t for t, e in _pending_confirms.items() if now - e['created'] > _CONFIRM_TTL_SECS]
+        for t in stale:
+            _pending_confirms.pop(t, None)
+
+def _create_confirm(action, asset, amount_usd, orig_msg):
+    _purge_expired_confirms()
+    with _pending_confirms_lock:
+        _CONFIRM_COUNTER[0] += 1
+        token = f"{action[0]}{asset}{int(time.time()) % 100000}{_CONFIRM_COUNTER[0]}"
+        _pending_confirms[token] = {
+            'action': action, 'asset': asset, 'amount_usd': amount_usd,
+            'orig_msg': orig_msg, 'created': time.time(),
+        }
+    return token
+
+def _peek_confirm(token):
+    _purge_expired_confirms()
+    with _pending_confirms_lock:
+        return _pending_confirms.get(token)
+
+def _pop_confirm(token):
+    _purge_expired_confirms()
+    with _pending_confirms_lock:
+        return _pending_confirms.pop(token, None)
+
 def _answer_callback_query(callback_query_id):
     """Acknowledge inline button press (removes loading spinner)."""
     token = TELEGRAM_CONFIG.get('token', '')
@@ -2290,6 +2370,24 @@ def _handle_status_command(with_charts=False):
             if actual_held > 0 and actual_usd > 5:
                 lines.append(f"  ⚠️ Exchange: {actual_held:.6f} {asset} (≈${actual_usd:,.2f})")
 
+        # Risk-management config (shields + gates) — added 2026-04-27 so user
+        # can verify hot-reloaded config (e.g., MIX gate) is actually live.
+        bull_shield = _shield_on_for_regime(cfg, 'bull')
+        bear_shield = _shield_on_for_regime(cfg, 'bear')
+        lines.append(f"  🛡 Shields: bull={'ON' if bull_shield else 'OFF'} bear={'ON' if bear_shield else 'OFF'}")
+        for r_lbl, r_short in (('bull', 'Bull G8'), ('bear', 'Bear G8')):
+            rc = _rally_cfg_for_regime(cfg, r_lbl)
+            on = _gate_on_for_regime(cfg, r_lbl)
+            if rc and on:
+                hs = rc.get('h_short', '?'); hl = rc.get('h_long', '?')
+                ts = rc.get('t_short_pct', '?'); tl = rc.get('t_long_pct', '?')
+                cd = rc.get('cd_hours', '?')
+                lines.append(f"  🚦 {r_short}: rr{hs}h≥{ts}% OR rr{hl}h≥{tl}% cd={cd}h ON")
+            elif rc:
+                lines.append(f"  🚦 {r_short}: configured but DISABLED")
+            else:
+                lines.append(f"  🚦 {r_short}: none")
+
         # Trade history summary
         sells = [t for t in pos.get('trades', []) if t.get('action') == 'SELL']
         if sells:
@@ -2332,6 +2430,7 @@ def _handle_help_command():
     send_telegram_with_buttons(
         "📱 <b>Commands</b>\n\n"
         "/status — Positions, P&L, balance, regime\n"
+        "/reload — Force-refresh all data feeds (bypass freshness)\n"
         "/chart [ASSET] [HORIZON] — e.g. /chart ETH 7d\n"
         "/setup — View & edit config\n"
         "/sync — Force-sync positions\n"
@@ -2343,21 +2442,159 @@ def _handle_help_command():
     )
 
 
-def _handle_manual_buy_command(msg, trading_cfg):
-    """Manual maker buy via Telegram. Fetches fresh price, executes maker order, updates position.
-    /buy           → first enabled asset, full max_position_usd
-    /buy ETH       → buy ETH with its max_position_usd
-    /buy ETH 500   → buy ETH with $500
+def _handle_reload_command(trading_cfg):
+    """Force-refresh every data source, bypassing freshness windows.
+    Triggered by the 🔄 Reload Telegram button — used to recover when a stale
+    feed (Drive sync glitch, missed download) is blocking signals or hot-reload
+    preflight. Runs on the Telegram thread; does NOT trigger a signal cycle —
+    the next scheduled cycle (or hot-reload) will pick up the fresh data.
     """
-    print(f"\n  [/buy] command received: {msg!r}", flush=True)
+    send_telegram("🔄 <b>Reloading all data sources…</b>")
+    print("\n  [/reload] forcing refresh of all data sources (Telegram-triggered)")
+
+    enabled_assets = [a for a, c in (trading_cfg or {}).items() if c.get('enabled')]
+    if not enabled_assets:
+        enabled_assets = ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']
+
+    ok, failed = [], []
+
+    def _try(label, fn):
+        try:
+            fn()
+            ok.append(label)
+            print(f"    ✓ {label}")
+        except Exception as e:
+            failed.append(f"{label}: {e}")
+            print(f"    ✗ {label}: {e}")
+
     try:
-        _manual_buy_impl(msg, trading_cfg)
+        from crypto_live_trader_ed import download_asset as _dl_asset
+        for a in ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'):
+            _try(f'ohlcv_{a.lower()}', lambda _a=a: _dl_asset(_a, update_only=True))
+    except Exception as e:
+        failed.append(f'ohlcv (import): {e}')
+        print(f"    ✗ ohlcv import: {e}")
+
+    try:
+        from download_macro_data import (
+            download_yfinance_data, download_fear_greed, download_cross_asset,
+            download_derivatives_data, download_onchain_data, download_stablecoin_flows,
+            download_orderbook_snapshot, download_options_iv_skew,
+        )
+    except Exception as e:
+        failed.append(f'macro (import): {e}')
+        send_telegram(f"⚠️ <b>Reload partial</b>\n✓ {len(ok)} OK\n✗ macro module import failed: {e}")
+        return
+
+    for a in ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'):
+        _try(f'derivatives_{a.lower()}', lambda _a=a: download_derivatives_data(assets=[_a]))
+
+    _try('macro_daily',      download_yfinance_data)
+    _try('fear_greed',       download_fear_greed)
+    _try('cross_asset',      download_cross_asset)
+    _try('stablecoin_flows', download_stablecoin_flows)
+
+    for oc in ('btc', 'eth', 'xrp', 'link'):
+        _try(f'onchain_{oc}', lambda _o=oc: download_onchain_data(asset=_o))
+
+    _try('orderbook_snapshot', lambda: download_orderbook_snapshot(assets=enabled_assets))
+    _try('options_iv',         download_options_iv_skew)
+
+    summary = f"🔄 <b>Reload done</b>\n✓ {len(ok)} OK"
+    if failed:
+        head = "\n".join(failed[:5])
+        more = f"\n…+{len(failed) - 5} more" if len(failed) > 5 else ""
+        summary += f"\n✗ {len(failed)} failed:\n{head}{more}"
+    send_telegram_with_buttons(summary, _main_buttons(trading_cfg))
+    print(f"  [/reload] done: {len(ok)} OK, {len(failed)} failed")
+
+
+def _handle_manual_buy_command(msg, trading_cfg):
+    """Confirm-first manual buy. Sends an inline ✅ Confirm / ❌ Cancel prompt;
+    the actual order only fires when the user taps Confirm. Prevents button-
+    misclick orders. Token expires after _CONFIRM_TTL_SECS.
+    /buy           → first enabled asset, full bull.max_position_usd
+    /buy ETH       → ETH at its max_position_usd
+    /buy ETH 500   → ETH with $500
+    """
+    print(f"\n  [/buy] confirm-prompt: {msg!r}", flush=True)
+    try:
+        parts = msg.split()
+        enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+        if not enabled:
+            send_telegram("❌ No enabled asset")
+            return
+        asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+        amount_usd = None
+        if len(parts) >= 3:
+            try:
+                amount_usd = float(parts[2])
+            except ValueError:
+                send_telegram(f"❌ Bad amount: {parts[2]}")
+                return
+        if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+            send_telegram(f"❌ {asset} not enabled")
+            return
+        # Fail-fast checks before reserving a confirm slot.
+        pos = load_position(asset)
+        if pos.get('state') == 'invested':
+            send_telegram(f"⚠️ {asset} already invested — /sell first")
+            return
+
+        cfg = trading_cfg[asset]
+        max_usd = cfg.get('bull', {}).get('max_position_usd', 0) or cfg.get('max_position_usd', 0)
+        amount_label = f"${amount_usd:,.2f}" if amount_usd else f"max ${max_usd:,.0f}"
+
+        token = _create_confirm('buy', asset, amount_usd, msg)
+        send_telegram_with_buttons(
+            f"🔵 <b>Confirm BUY {asset}</b>\n"
+            f"Amount: {amount_label}\n"
+            f"Tap ✅ to execute, ❌ to cancel.\n"
+            f"<i>Expires in {_CONFIRM_TTL_SECS}s</i>",
+            [[(f'✅ Confirm BUY {asset}', f'cb:confirm:{token}'),
+              ('❌ Cancel', f'cb:cancel:{token}')]],
+        )
     except Exception as e:
         import traceback
-        print(f"  [/buy] ERROR: {e}", flush=True)
+        print(f"  [/buy] confirm-prompt ERROR: {e}", flush=True)
         traceback.print_exc()
         try:
             send_telegram(f"❌ /buy crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+
+
+def _execute_confirmed_buy(token):
+    """Run the actual maker buy after user confirms via inline button."""
+    entry = _pop_confirm(token)
+    if not entry:
+        send_telegram("⚠️ Confirm expired or already used — re-tap /buy")
+        return
+    if entry.get('action') != 'buy':
+        send_telegram("⚠️ Token mismatch")
+        return
+    trading_cfg = load_trading_config()
+    asset = entry['asset']
+    if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+        send_telegram(f"❌ {asset} not enabled")
+        return
+    _asset_lock = _get_asset_trade_lock(asset)
+    if not _asset_lock.acquire(blocking=False):
+        send_telegram(f"⏳ {asset}: auto-cycle trade in progress — retry in ~30s")
+        return
+    try:
+        _manual_buy_impl_locked(entry['orig_msg'], trading_cfg, asset, entry['amount_usd'])
+    except Exception as e:
+        import traceback
+        print(f"  [/buy] confirmed exec ERROR: {e}", flush=True)
+        traceback.print_exc()
+        try:
+            send_telegram(f"❌ BUY crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+    finally:
+        try:
+            _asset_lock.release()
         except Exception:
             pass
 
@@ -2482,21 +2719,121 @@ def _manual_buy_impl_locked(msg, trading_cfg, asset, amount_usd):
 
 
 def _handle_manual_sell_command(msg, trading_cfg):
-    """Manual maker sell via Telegram. Sells ALL available holdings via maker order.
+    """Confirm-first manual sell. Sells ALL holdings on confirm. Inline ✅/❌
+    prompt — actual order only fires on tap. Token expires in _CONFIRM_TTL_SECS.
     /sell          → first enabled asset
-    /sell ETH      → sell ETH
+    /sell ETH      → ETH
     """
-    print(f"\n  [/sell] command received: {msg!r}", flush=True)
+    print(f"\n  [/sell] confirm-prompt: {msg!r}", flush=True)
     try:
-        _manual_sell_impl(msg, trading_cfg)
+        parts = msg.split()
+        enabled = [a for a, c in trading_cfg.items() if c.get('enabled')]
+        if not enabled:
+            send_telegram("❌ No enabled asset")
+            return
+        asset = parts[1].upper() if len(parts) >= 2 else enabled[0]
+        if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+            send_telegram(f"❌ {asset} not enabled")
+            return
+
+        # Show estimated proceeds for context (cheap reads, no order placed)
+        cfg = trading_cfg[asset]
+        symbol = cfg.get('symbol', f'{asset}-USD')
+        balances = get_balances() or {}
+        held = float(balances.get(asset, {}).get('total', 0))
+        if held <= 0:
+            send_telegram(f"❌ {asset} balance = 0 — nothing to sell")
+            return
+        try:
+            bid, _ask = get_best_bid_ask(symbol)
+        except Exception:
+            bid = 0
+        est = held * bid if bid > 0 else 0
+        pos = load_position(asset)
+        entry_price = pos.get('entry_price', 0) if pos.get('state') == 'invested' else 0
+        pnl_line = ""
+        if entry_price > 0 and bid > 0:
+            est_pnl = (bid - entry_price) / entry_price * 100
+            pnl_line = f"\nEntry ${entry_price:,.2f} | est PnL {est_pnl:+.2f}%"
+        est_line = f" (~${est:,.2f} @ bid)" if est else ""
+
+        token = _create_confirm('sell', asset, None, msg)
+        send_telegram_with_buttons(
+            f"🔴 <b>Confirm SELL {asset}</b>\n"
+            f"Size: {held:.6f} {asset}{est_line}{pnl_line}\n"
+            f"Tap ✅ to execute, ❌ to cancel.\n"
+            f"<i>Expires in {_CONFIRM_TTL_SECS}s</i>",
+            [[(f'✅ Confirm SELL {asset}', f'cb:confirm:{token}'),
+              ('❌ Cancel', f'cb:cancel:{token}')]],
+        )
     except Exception as e:
         import traceback
-        print(f"  [/sell] ERROR: {e}", flush=True)
+        print(f"  [/sell] confirm-prompt ERROR: {e}", flush=True)
         traceback.print_exc()
         try:
             send_telegram(f"❌ /sell crashed: {type(e).__name__}: {e}")
         except Exception:
             pass
+
+
+def _execute_confirmed_sell(token):
+    """Run the actual maker sell after user confirms via inline button."""
+    entry = _pop_confirm(token)
+    if not entry:
+        send_telegram("⚠️ Confirm expired or already used — re-tap /sell")
+        return
+    if entry.get('action') != 'sell':
+        send_telegram("⚠️ Token mismatch")
+        return
+    trading_cfg = load_trading_config()
+    asset = entry['asset']
+    if asset not in trading_cfg or not trading_cfg[asset].get('enabled'):
+        send_telegram(f"❌ {asset} not enabled")
+        return
+    _asset_lock = _get_asset_trade_lock(asset)
+    if not _asset_lock.acquire(blocking=False):
+        send_telegram(f"⏳ {asset}: auto-cycle trade in progress — retry in ~30s")
+        return
+    try:
+        _manual_sell_impl_locked(entry['orig_msg'], trading_cfg, asset)
+    except Exception as e:
+        import traceback
+        print(f"  [/sell] confirmed exec ERROR: {e}", flush=True)
+        traceback.print_exc()
+        try:
+            send_telegram(f"❌ SELL crashed: {type(e).__name__}: {e}")
+        except Exception:
+            pass
+    finally:
+        try:
+            _asset_lock.release()
+        except Exception:
+            pass
+
+
+def _handle_confirm_callback(token):
+    """Inline-button confirm: dispatch to buy or sell based on token entry."""
+    entry = _peek_confirm(token)
+    if not entry:
+        send_telegram("⚠️ Confirm expired or already used — re-tap /buy or /sell")
+        return
+    action = entry.get('action')
+    if action == 'buy':
+        _execute_confirmed_buy(token)
+    elif action == 'sell':
+        _execute_confirmed_sell(token)
+    else:
+        _pop_confirm(token)
+        send_telegram(f"⚠️ Unknown action: {action}")
+
+
+def _handle_cancel_callback(token):
+    """Inline-button cancel: drop the pending confirm without firing."""
+    entry = _pop_confirm(token)
+    if entry:
+        send_telegram(f"❎ {entry['action'].upper()} {entry['asset']} cancelled")
+    else:
+        send_telegram("⚠️ Nothing to cancel (already expired or used)")
 
 
 def _manual_sell_impl(msg, trading_cfg):
@@ -2871,9 +3208,12 @@ def _main_buttons(trading_cfg=None):
         cfg = trading_cfg if trading_cfg is not None else load_trading_config()
         for a, c in cfg.items():
             if c.get('enabled'):
-                has_threshold = c.get('min_sell_pnl_pct', 0) > 0
-                shield_bull = _shield_on_for_regime(c, 'bull') and has_threshold
-                shield_bear = _shield_on_for_regime(c, 'bear') and has_threshold
+                # Label reflects the configured hold_shield flag honestly.
+                # Whether the shield actually fires depends on min_sell_pnl_pct > 0,
+                # but conflating those two states made the button silently flip the
+                # flag on every click without any visible feedback.
+                shield_bull = _shield_on_for_regime(c, 'bull')
+                shield_bear = _shield_on_for_regime(c, 'bear')
                 gate_bull = _gate_on_for_regime(c, 'bull')
                 gate_bear = _gate_on_for_regime(c, 'bear')
                 active_asset = a
@@ -2888,7 +3228,7 @@ def _main_buttons(trading_cfg=None):
     gate_bull_cmd = f"/gate {active_asset} bull {'off' if gate_bull else 'on'}" if active_asset else "/gate"
     gate_bear_cmd = f"/gate {active_asset} bear {'off' if gate_bear else 'on'}" if active_asset else "/gate"
     return [
-        [('📊 Status', '/status'), ('📈 Charts', '/chart')],
+        [('📊 Status', '/status'), ('🔄 Reload', '/reload')],
         [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
         [(shield_bull_label, '/hold bull'), (shield_bear_label, '/hold bear')],
         [(gate_bull_label, gate_bull_cmd), (gate_bear_label, gate_bear_cmd)],
@@ -2898,7 +3238,7 @@ def _main_buttons(trading_cfg=None):
 
 # Legacy static fallback (kept for code paths that import it)
 MAIN_BUTTONS = [
-    [('📊 Status', '/status'), ('📈 Charts', '/chart')],
+    [('📊 Status', '/status'), ('🔄 Reload', '/reload')],
     [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
     [('🛡 Shield', '/hold'), ('⚙️ Setup', '/setup')],
 ]
@@ -3580,6 +3920,14 @@ def _dispatch_telegram_message(msg, trading_cfg):
     every message instead of just the last one in a poll batch."""
     if not msg:
         return
+    # Inline-button confirm/cancel callbacks must always work, even during /setup,
+    # and the token is case-sensitive — handle BEFORE lower() / setup-state guard.
+    if msg.startswith('cb:confirm:'):
+        _handle_confirm_callback(msg[len('cb:confirm:'):])
+        return
+    if msg.startswith('cb:cancel:'):
+        _handle_cancel_callback(msg[len('cb:cancel:'):])
+        return
     if _setup_state.get('active'):
         if msg.lower() == '/stop':
             _setup_state['active'] = False
@@ -3609,6 +3957,8 @@ def _dispatch_telegram_message(msg, trading_cfg):
     elif cmd == '/sync':
         sync_positions(trading_cfg, notify=True)
         send_telegram("🔄 <b>Synced</b>")
+    elif cmd == '/reload':
+        _handle_reload_command(trading_cfg)
     elif cmd == '/buy' or cmd.startswith('/buy '):
         _handle_manual_buy_command(msg, trading_cfg)
     elif cmd == '/sell' or cmd.startswith('/sell '):
@@ -3690,11 +4040,16 @@ def _validate_config_or_revert(trading_cfg, snapshot):
     except Exception as _e:
         print(f"  [preflight-hotreload] manifest regen failed: {_e}")
 
-    # Run preflight
+    # Run preflight. skip_freshness=True: hot-reload validates the config
+    # (features available, model trained on these features, NaN-tail) but
+    # NOT data freshness. Per-cycle staleness gate in generate_live_signal
+    # already refuses to predict on stale data — reverting config because
+    # of upstream lag (yfinance Mon-morning, Binance hiccups) was a false
+    # positive class that produced churn without protecting trades.
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tools'))
         from trader_preflight import preflight as _preflight
-        report = _preflight(verbose=False)
+        report = _preflight(verbose=False, skip_freshness=True)
     except Exception as _e:
         print(f"  [preflight-hotreload] could not run ({_e}) — accepting hot-reload defensively.")
         return True
@@ -3821,7 +4176,7 @@ def run_all_once(trading_cfg, dry_run=False):
     import time as _time
     import json as _json
 
-    _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK')
+    _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB')
 
     def _file_is_fresh(relpath, max_age_sec):
         """Fix #7 (2026-04-24): content-aware freshness using last-row datetime.
@@ -4099,7 +4454,7 @@ def run_loop(trading_cfg, dry_run=False):
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str} | {pos['state'].upper()}")
-    print(f"  Telegram: /help /status /chart /setup /sync /pause /resume /stop (+ buy/sell/hold via buttons)")
+    print(f"  Telegram: /help /status /reload /chart /setup /sync /pause /resume /stop (+ buy/sell/hold via buttons)")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 
@@ -4310,7 +4665,7 @@ def main():
                     print(f"    Trades: {len(sells)} | PnL: ${total:+,.2f}")
             return
         elif arg == '--reset':
-            for a in ['BTC', 'ETH', 'XRP', 'DOGE']:
+            for a in ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']:
                 p = _position_file(a)
                 if os.path.exists(p): os.remove(p)
             if os.path.exists(REGIME_CONFIG_FILE): os.remove(REGIME_CONFIG_FILE)
