@@ -429,11 +429,47 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 ---
 
-## ⚡ ACTIVE TODO — 2026-05-02 evening (CURRENT)
+## ⚡ ACTIVE TODO — 2026-05-03 morning (CURRENT)
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🔴 #1 PRIORITY (TOMORROW, 2026-05-03) — LIVE-TEST the M-29 partial-fill fix
+### 🟢 PROMOTED 2026-05-03 09:49 CEST — ETH live config switched to overnight HRST winner
+
+**Old live**: `tsmom_672h bull=6h@85% shield=OFF / bear=5h@65% shield=ON, bear gate rr30≥9% OR rr36≥9% cd=48h`
+**New live**: `sma24>sma100 bull=6h@65% shield=ON / bear=5h@75% shield=ON, bear gate UNCHANGED (rr30≥9% OR rr36≥9% cd=48h)`
+
+**Source**: ETH HRST 5,6,7,8h --replay 1440 ([logs/ed_v1_20260502_201318.log](logs/ed_v1_20260502_201318.log), completed 2026-05-03 03:07). Mode S WINNER: `sma24>sma100 6h@65%/5h@75% → +77.06% / 70 trades / 84% WR / alpha +60.37%`. TOP 15 plateau: top 7 entries unanimous on `sma24>sma100 bull=6h / bear=5h` — rock-solid plateau. Mode T converged iter 2: `bull_shield=ON, bear_shield=ON → +86.19%` (+9.14pp shield gain). Mode G found no STRICT-passing rally-cooldown winner, so existing live bear gate was preserved. Per-horizon Mode V: 6h winner (+67.14% / 75% WR) and 5h winner (+52.77% / 66% WR) both refreshed in production CSV.
+
+**Backups for rollback**:
+- `config/regime_config_ed_pre_sma24sma100_20260503.json`
+- `models/crypto_ed_production_pre_sma24sma100_20260503.csv`
+
+**Rollback (one command)**:
+```bash
+copy config\regime_config_ed_pre_sma24sma100_20260503.json config\regime_config_ed.json
+copy models\crypto_ed_production_pre_sma24sma100_20260503.csv models\crypto_ed_production.csv
+```
+
+**State at promotion**: ETH position = `cash` (no open trade to disrupt). Live trader hot-reloads `regime_config_ed.json` every 5 min, no restart required. New config will take effect on next regime-triggered BUY signal or hourly cycle.
+
+**Material policy changes (vs prior live)**:
+1. **Detector**: `tsmom_672h` (28-day TS-momentum) → `sma24>sma100` (1d > ~4d SMA crossover). More responsive to short-term regime shifts.
+2. **Bull conf**: 85% → **65%** (much lower) — accepts more BUY signals; expect ~2× the BUY frequency.
+3. **Bull shield**: OFF → **ON** — bull regime now also uses `min_sell_pnl=0.5% / max_hold=10h` shield (previously only bear had it).
+4. **Bear conf**: 65% → 75% (slightly higher) — slightly more selective bear-rally entries.
+5. **Bear gate unchanged** — `rr30h≥9% OR rr36h≥9% cd=48h` preserved (Mode G found no STRICT replacement that beat baseline).
+6. **Bull gate stays disabled** (no change).
+
+**Monitoring criteria** (1-2 weeks):
+- Realized alpha vs sim baseline +86.19% over first 10 trades. If >15pp underperformance, rollback per CLAUDE.md R4.
+- Max drawdown vs prior live's historical -10.02% on 60d. If exceeded, investigate.
+- BUY frequency: expect ~2× more BUYs than prior live due to bull_conf 85→65. If trade count explodes >3× sim baseline, gate is too loose.
+
+**Per-asset non-impact**: BTC/SOL/LINK/XRP/BNB blocks left untouched. BNB HRST also completed overnight (`tsmom_672h 5h@90%/6h@90% → Mode T +20.58%, +2.92pp gate gain`, alpha ~24% of ETH per-$ — below 50% threshold → SHELVED, no enablement).
+
+---
+
+### 🔴 #1 PRIORITY (TODAY, 2026-05-03) — LIVE-TEST the M-29 partial-fill fix
 
 **Status**: code shipped 2026-05-02 evening (commit `d568a30`, pushed to `origin/main`). Trader picks it up automatically on next restart via `start_ed_v2.bat`. **Cannot be unit-tested any further — needs a real `/buy` event against Revolut's actual API to validate end-to-end.**
 
