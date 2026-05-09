@@ -169,7 +169,7 @@ pip install -r "G:\Autres ordinateurs\My laptop\engine\requirements.txt"
 # Run --help for full usage.
 
 # === Ed (production) — regime-switching, dynamic bull/bear horizon selection ===
-python crypto_trading_system_ed.py P BTC 6h                    # Mode P — PySR feature discovery (~30-120 min)
+python crypto_trading_system_ed.py P BTC 6h                    # Mode P — PySR feature discovery (single horizon ~40 min sequential, ~15 min parallel-P; see Runtime Reference)
 python crypto_trading_system_ed.py H BTC 5,6,7,8h              # Mode H — horizon sweep
 python crypto_trading_system_ed.py DV BTC 6h                   # Mode DV — grid + validate
 python crypto_trading_system_ed.py D BTC 6h                    # Mode D — grid optimization only
@@ -213,6 +213,73 @@ python tools/backtest_regime_master.py --asset ETH             # test other asse
 **Telegram commands (Ed V2 trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/regime` (show current bull/bear state per asset) `/gate [ASSET on\|off\|clear]` (V7 rally-cooldown gate)
 
 **Telegram commands (Optimizer bot):** `/optimize` (interactive menu) `/queue` `/cancel` `/status` `/results` `/help` `/stop`
+
+---
+
+## Runtime Reference (measured, not estimated — 2026-05-06 audit)
+
+All numbers below come from actual log timestamps on Desktop (post-2026-05-02 parallel-merged engine). When quoting an ETA in a TODO entry, **cross-reference this table** instead of guessing. If a phase isn't in this table, say "not measured" rather than estimating.
+
+### Top-level chains (ETH, --replay 1440)
+
+| Workload | Sample N | Range | Median |
+|---|---|---|---|
+| **HRST (4 horizons + R+S+T+G)** Desktop | 3 runs | **5h 45min – 9h 07min** | **~7h** |
+| **HRST 4mo (--replay 2880)** Desktop | 1 run (run #1) | 7h 07min | n/a (single sample) |
+| **Mode H only (4 horizons, --replay 1440)** | 3 runs | **258 – 428 min** | ~316 min |
+| **R + S + T + G (after Mode H)** | 3 runs | **82 – 114 min** | ~93 min |
+
+### Per-horizon (inside Mode H, --replay 1440)
+
+| Phase | Sample N | Range | Median |
+|---|---|---|---|
+| **Mode D grid (72 evals, serial outer + threaded LGBM)** | ~18 | **6.9 – 13.2 min** | ~11 min |
+| **Mode V refine (hybrid GPU+CPU)** | ~20 | **10.3 – 21.0 min** | ~14 min |
+| Mode V Step 1 (6 D-candidates, parallel) | embedded | not separately exposed | — |
+| Mode V Step 3 (3 refined, parallel) | embedded | not separately exposed | — |
+| **Mode V total per horizon (D→Step1→refine→Step3→summary)** | inferred | **~50 – 95 min** | ~70 min |
+
+### After Mode H
+
+| Phase | Sample N | Range |
+|---|---|---|
+| Mode R regime backtest | implicit | ~30 min |
+| **Mode S signal cache** (4 horizons parallel, 4 workers) | 3 | **22.6 – 33.8 min** |
+| Mode S joint sweep (3920 combos) | 3 | ~3-5 min after cache |
+| **Mode T signal cache** (2 horizons parallel, 2 workers) | 3 | **15.2 – 21.5 min** |
+| Mode T↔G iterations | 5 runs | typically **2 iterations**, sometimes 3 |
+| Rally-cooldown sweep (49,716 configs) | per sweep | **42 – 116 sec** |
+
+### Mode P (PySR feature discovery)
+
+| Workload | Sample N | Wall time |
+|---|---|---|
+| Mode P single-asset 5 horizons, sequential (Apr 25) | 1 | **3h 22min** (BTC, 202 min) |
+| Mode P single-asset 5 horizons, parallel-P 3 workers (Laptop) | 1 | **~1h 30min** (BNB, per CLAUDE.md May 2) |
+| Mode P single-asset, single horizon | not measured | (estimate ~40 min sequential, ~15 min parallel-P) |
+
+### 14-ideas harness (single idea, ETH 5,6,7,8h --replay 1440)
+
+| Sample | Wall time |
+|---|---|
+| har_rv (single-run, May 3) | 31 min |
+| per_regime_features (chained) | 32 min |
+| stability_strict (chained) | 31 min |
+| har_rv (chained, May 4) | 30 min |
+| hurst_feature (chained) | 30 min |
+| shap_ranking (single-run) | 33 min |
+| **Range** | **30 – 33 min** (very tight on Desktop) |
+
+### Variance drivers
+
+1. **Optuna refine convergence** dominates per-horizon variance (10–21 min per refine block).
+2. **Mode T↔G iteration count** — 2 vs 3 iterations adds ~30 min to Mode T total.
+3. **Modern Standby on Laptop** can pause work without crashing (logs go silent); Desktop unaffected (`SetThreadExecutionState(ES_AWAYMODE_REQUIRED)` keeps it awake).
+4. **Concurrent /reload or other downloads** can compete for disk I/O during Mode S signal-cache build.
+
+### What this table replaces
+
+Estimates I previously quoted as "~6h", "~3.5h", "~30 min Mode D × 4", "~30-120 min Mode P single-horizon" — those were guesses. Use the measured ranges above. If an estimate isn't in the table, label it **"not measured"** rather than fabricate.
 
 ---
 
@@ -309,6 +376,7 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 |------|--------|-------|
 | `crypto_trading_system_ed.py` | **Production** | Single-file Ed V1.0 engine. **Merged 2026-05-02**: previously split into entry-point + `_engine.py` + `_parallel_p.py` (parallelism wrapper) + `_wrapper`; all merged back into one file. Modes P/D/V/H/S/R/HRS/HRST/T/G/F. Embargo-fixed grid (2×3×4×3=72 evals after trim), 50-trial Optuna refine, PySR symbolic features. Built-in parallel paths for Modes V/S/T (loky workers, LGBM cpu inside parallel sections, hybrid GPU+CPU refine dispatcher). Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. Pre-merge snapshots in `archive/crypto_trading_system_ed_engine_pre_merge_20260502.py` + `_parallel_p_pre_merge_20260502.py` + `_wrapper_pre_merge_20260502.py`. |
 | `crypto_trading_system_ed_noprod.py` | Active wrapper | Safety wrapper for research runs. Sets `MODELS_CSV_OVERRIDE` env var before importing the engine, monkey-patches `PRODUCTION_CSV` + `REGIME_CONFIG_PATH` to `*_noprod.*` paths, seeds the noprod files from prod on first run. Equivalent to engine's built-in `--no-persist` flag; kept as the file-based alternative. |
+| `crypto_trading_system_ed_cdar.py` | **Research fork** (added 2026-05-03) | Literal copy of `crypto_trading_system_ed.py` with CDaR-aware scoring integrated (Idea #6 from 20-ideas roadmap). Five edits vs source: (1) `PRODUCTION_CSV → crypto_ed_production_cdar.csv` and `REGIME_CONFIG_PATH → regime_config_ed_cdar.json` so live trader is unaffected; (2) added `CDAR_LAMBDA = 1.0` constant; (3) added `'cdar'` branch in `_compute_optuna_score` returning `cum_return - λ × max_dd_pct` (Mode D scoring); (4) `OPTUNA_METRIC` default flipped from `'apf'` to `'cdar'`; (5) `_simulate_with_threshold` now tracks per-bar drawdown and returns `max_dd_pct` (Mode V's per-hour live backtest); (6) all 4 Mode V/HRST winner-selection scoring sites (lines 4962, 4976, 6194, 7986, 7999) changed from `score = ret * wr if ret > 0 else ret` to `score = (ret * wr if ret > 0 else ret) - CDAR_LAMBDA * max_dd_pct`. Run identically to the source: `python crypto_trading_system_ed_cdar.py HRST ETH 5,6,7,8h --replay 1440`. Production CSV/config seeded from live on 2026-05-03 19:45. **Validation pending**: full HRST run + comparison of Mode T REF to current production HRST (+86.19% from May 3 morning) — promote if ≥+5pp. |
 | `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy/sell at `bid+0.01`. `post_only` ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. Reads `regime_config_ed.json`. |
 | `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. Reports current market price (not label-shifted). |
 | `crypto_trading_system_meta.py` | Research | Standalone meta-labeling research tool. Imported lazily by `crypto_trading_system_ed.py` when `--meta-filter P` flag is used. R3 RESOLVED: AB matrix variants D+E showed meta hurts on strong baselines (E vs A −2.12pp). Kept available for SOL/BTC/XRP retests. |
@@ -421,6 +489,12 @@ Initial Ed regime-switching backtests from the system's first week. These number
     - **Re-run on a common window** — slow (3-9h on parallel engine) but definitive. Use only when (a) and (b) disagree or when the question is critical enough to warrant the wait.
     Past mistake (2026-05-02): I claimed Apr 30 `vol_calm +148.06%` was "the biggest result of the week" without checking that it ran on `--replay 2880` (4mo) vs the other ETH HRSTs on `--replay 1440` (2mo). The Apr 30 log prints `H1=+34.71% H2=+65.37% REF=+125.87%` baseline and the top STRICT gate winner had `pnl_H1=+42.62 pnl_H2=+65.34 pnl_REF=+144.60`. So vol_calm's H2 (= last 2mo, comparable to the 2mo runs) was ~+65% baseline with ~0pp gate gain — actually one of the WORSE 2mo results that week, not the best. The full-REF +20.5pp gate gain was driven entirely by months 1-2 of the window which the other runs never saw.
 
+18. **DEFAULT TO BARE `python tools/<script>.py [args]` FOR USER-FACING PYTHON COMMANDS.** The user runs in PowerShell 5.1 with the venv already activated (prompt shows `(venv) PS C:\...>`). Always emit the simplest form:
+    ```
+    python tools/<script>.py [args]
+    ```
+    Do NOT emit the absolute venv path (`"C:/algo_trading/venv/Scripts/python.exe" ...`) by default — the venv is activated, so `python` resolves to the venv's interpreter. Quoted paths cause PowerShell parse errors (PowerShell needs the `&` call operator before a quoted path, which adds friction the user has explicitly rejected). Only emit a venv-explicit path if the user requests it or if the venv is provably not active. Internal `Bash` tool calls I make for myself can use any form they need; this rule is about what I tell the user to type. **User explicitly requested this default 2026-05-03 — do not revert.**
+
 ---
 
 ## Pending Work
@@ -429,14 +503,916 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 ---
 
-## ⚡ ACTIVE TODO — 2026-05-03 morning (CURRENT)
+## ⚡ ACTIVE TODO — 2026-05-08 (CURRENT)
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🟢 PROMOTED 2026-05-03 09:49 CEST — ETH live config switched to overnight HRST winner
+### ✅ Closed 2026-05-08 (overnight C50 HRST + trader fixes)
 
-**Old live**: `tsmom_672h bull=6h@85% shield=OFF / bear=5h@65% shield=ON, bear gate rr30≥9% OR rr36≥9% cd=48h`
-**New live**: `sma24>sma100 bull=6h@65% shield=ON / bear=5h@75% shield=ON, bear gate UNCHANGED (rr30≥9% OR rr36≥9% cd=48h)`
+- **C50 PF objective HRST → DEAD.** Mode T total +70.92% (shield off+ON, n=57 trades, WR 84%) vs May 6 production HRST Mode T +76.77% (n=91, WR 79%) = **−5.85pp**, just past the kill threshold. Notable nuance: rawpf scoring DID pick better raw per-horizon configs (V0 baseline +75.17% vs prod +53.66%, +21.5pp), but Mode G found 0 STRICT gate winners on either bull or bear sweep — no shield/gate alpha could be added on top. Same family/fate as C13 CDaR. Log: [logs/c50_hrst_20260507_092632.log](logs/c50_hrst_20260507_092632.log) (~24h elapsed wall-clock due to laptop Modern Standby; actual compute ~7h). **Pattern confirmed**: scoring-change ideas show local Mode D wins but lose globally at HRST level. Canonical scoreboard: C50 moves to DEAD section.
+
+### ✅ Shipped 2026-05-08 (trader correctness + plumbing)
+
+1. **M-29b cold-path fix** ([crypto_revolut_ed_v2.py:876-895](crypto_revolut_ed_v2.py#L876)). Found via the **$1.87 BUY at 11:30:12 UTC** — first cold-path firing since M-29 fix shipped 2026-05-02. Bug: in `_execute_maker_order`, the "remaining cash < MIN_TRADE_USD, target unmet → market for residual" branch fired without checking whether real progress was made. When `usd_avail` was transient-low (cancel-release race or locked funds) and `spent_so_far == 0`, the trader market-bought $1.87 of ETH on a $14000 target. Fix: added `spent_so_far >= original_size * 0.5` progress guard. Without progress, returns `refused_low_cash_no_progress` and lets the maker loop retry next iteration. New log marker: `refusing dust-buy (likely cancel-release race or locked funds)`. **Status of M-29 entry**: 🟡 → **🚨** (cold path fired in production; fix shipped; needs another partial-fill BUY to confirm fix in cold path).
+
+2. **SLA fix — eliminates P1 spam loop** ([crypto_revolut_ed_v2.py:4341+](crypto_revolut_ed_v2.py#L4341)). The trader's `_SOURCE_REGISTRY` had 6h SLAs on daily-cadence sources (`macro_daily, fear_greed, cross_asset, onchain_*`). Combined with content-aware `_file_is_fresh()` (checks last-row datetime, ~T-1 for daily data ≈ always >24h old), SLA always failed → re-download every cycle → wasted ~30s/cycle in P1 BLOCKING phase. Aligned to `feature_sources.json` proper SLAs:
+   - `macro_daily`: 6h → **96h** (Mon-holiday-Fri-close gap)
+   - `fear_greed`: 6h → **36h** (daily ~midnight UTC)
+   - `cross_asset`: 6h → **48h** (daily yfinance)
+   - `stablecoin_flows`: 12h → **48h** (daily CoinGecko)
+   - `onchain_*` (BTC/ETH/XRP/LINK): 6h → **60h** (CoinMetrics T-1 + catch-up)
+   - `ohlcv_*` and `derivatives_*`: kept at 2h (correct for hourly data)
+
+   Verified post-restart: P1 duration alternates between 0.11s (no refresh) and ~33s (legitimate 2h hourly refresh) instead of 32s every cycle. **~50% fewer downloads, much shorter average P1 BLOCKING phase.**
+
+3. **`/reload` double-fire fix — M-16b dedup** ([crypto_revolut_ed_v2.py:_telegram_command_loop](crypto_revolut_ed_v2.py#L4077)). Symptom: clicking the 🔄 Reload Telegram button ran the full reload cycle TWICE. Root cause: when an inline button tap arrives as both `callback_query` AND `message.text` in the same Telegram poll batch (client/network quirk), the same command was dispatched twice. Fix: per-command 5-second dedup window. Repeat of the same command within 5s logs `[telegram] dedup: dropped repeat` and is dropped. `/buy` and `/sell` bypass dedup (they have their own ✅ Confirm inline flow). New log marker to grep for: `[telegram] dedup: dropped repeat`.
+
+4. **Orphan cleanup**: `create_hourly_macro()` function and `data/macro_data/macro_hourly.csv` removed from `download_macro_data.py` and AB matrix snapshot lists. The hourly proxy was originally a DAX system feature; zero consumers in current codebase (verified via grep across engine + cfd/). The file had been silently 48h stale for at least the past few days because `download_yfinance_data()` only refreshed `macro_daily.csv` when stale, and `create_hourly_macro` was gated on that.
+
+### ✅ Shipped 2026-05-09 morning (M-30 spread-aware BUY-slide v4)
+
+- **M-30 v4 spread-aware BUY-side slide** ([crypto_revolut_ed_v2.py:678](crypto_revolut_ed_v2.py#L678)). Trigger: 2026-05-09 01:00 UTC ETH BUY incident. Target $13,999.99, only **26.2% filled in maker** ($3,674.80) across attempts #1-#5, then **22 consecutive `post_only` rejections** (#6-#27) silently ignored by the bot, then 73.8% MARKET fallback at $2,311.34, **$9.29 in taker fees**.
+
+  **Root cause**: Option A slide (2026-04-26) interpolates linearly from `bid+0.01` to `ask-0.01` over 30 attempts. On a 16bps / $3.75-spread book, attempt #6 was already at `bid+$0.92` (progress=0.26) — far enough up the book that normal latency between get_quote and POST arrival made the venue ask drop to that price. `post_only` correctly rejected. The bot's placement loop catches `post_only` errors and retries with a fresh quote (line ~742) but doesn't break or count rejects, so it kept reposting blindly.
+
+  **Fix**: `SLIDE_SPREAD_THRESHOLD_BPS = 5.0`. If `spread_bps > 5.0` (typical Revolut X case for ETH/BTC, 10-20 bps), stay flat at `bid+0.01` for the whole window. If spread ≤ 5 bps (low-liquidity hour with tight book — original Option A motivation), use original slide. Worst case = unchanged: timeout at maker_window → MARKET. No regression possible.
+
+  **Simulation prediction**: Central case ($19/s fill rate at bid+0.01) → 55% maker, 45% MARKET, $5.67 fees, $2,309.84 avg. **Both better than actual outcome** ($9.29 fees, $2,311.34 avg). Pessimistic case ($9.5/s) ≈ break-even on fees, slightly better avg price. Trade-off: sacrifices half-spread upside on rare taker-SELL flow during wide-spread periods.
+
+  **What the v4 patch deliberately does NOT include**: reject counter, Telegram alert, market bail-out. v4 prevents the rejection storm at source — if rejects still happen despite v4, the hypothesis is wrong and we need re-debug, not mask with a faster bail-out (which pushes toward taker, the very thing we're avoiding).
+
+  **Monitoring**: first wide-spread BUY after deploy → tail log, confirm posted price stays at `bid+0.01` for full window. After 1-2 episodes, compute observed fill rate at bid+0.01, compare to simulation. If consistently below pessimistic ($9.5/s), consider re-introducing a delayed slide (start at attempt 10 instead of 1).
+
+  Pre-restart audit: `tools/test_c04_to_c08_runner.py` now also references CPU LGBM forcing (M-29-related); these don't conflict with M-30. Trader restart required to pick up M-30.
+
+### ✅ Closed 2026-05-09 morning (overnight + early-morning sweep)
+
+- **C05/C06 CVaR/Sortino rerank → 🎯 STRONG PASS DIRECTION** but **contaminated baseline grid**. CVaR_lam1 / Sortino reranks pick materially better candidates than APF on every horizon: 5h +92pp ret (apf_rank=13), 6h +30pp (apf_rank=9), 7h +21pp (apf_rank=9), 8h +85pp ret AND −20pp DD (apf_rank=8). HOWEVER the baseline grid CSVs were last refreshed by C50 HRST (`OPTUNA_METRIC='rawpf'`), so the "top APF among rawpf-optimized configs" is not directly transferable to production. **MOST PROMISING RESEARCH FINDING IN WEEKS** — needs clean APF-grid refresh + re-run to confirm before HRST validation. Output: `output/c05_c06_rerank_20260508_223911.csv` + `output/c05_c06_per_trade_20260508_223911.csv`.
+
+- **C07 CUSUM sampling smoke test → MARGINAL/DEAD**. Best CUSUM (h=1.0%) +2.4pp accuracy and ~+35pp simPnL vs hourly baseline, but both are catastrophic losses (best CUSUM = −65%, hourly = −100%). Below +5pp accuracy ship threshold. Architectural rewrite of trader polling loop NOT justified. Move to DEAD.
+
+- **C01 vol-scaled horizons 4mo → SHELVED/NULL**. Original 2mo "winner" `vol_2band low→8h high→6h @90%` (+5.02pp on 2mo) FAILED to replicate at 4mo: +30.98% vs current baseline `tsmom_672h bull=6h bear=8h @90% +38.49%` = **−7.51pp**. Different best variant on 4mo (`vol_median below→8h above→6h @90%` +41.48%) only beats baseline by +2.99pp — below +5pp ship. Window-shopping, won't generalize. Vol-scaled horizons family closed.
+
+- **C32-C40 batch (7 active + C36 STUB) → ZERO PASS, 1 FAIL, 6 MARGINAL**:
+  - C32 liquidation_cascade: **FAIL** Δ−5.36 (catastrophic 7h:−11.6, 8h:−15.5 — adding noisy features hurts long horizons)
+  - C33 spread_compression: MARGINAL Δ−1.93
+  - C34 eth_btc_cointegration: MARGINAL Δ−3.96 (catastrophic 7h:−12.0, 8h:−9.7)
+  - C36 news_sentiment: SKIPPED (CryptoPanic/Santiment APIs need keys)
+  - C37 stablecoin_velocity: MARGINAL Δ−0.10 (best of batch — essentially noise-neutral)
+  - C38 korea_premium: MARGINAL Δ−1.03
+  - C39 long_short_ratio: MARGINAL Δ−0.78
+  - C40 skew_kurt: MARGINAL Δ−1.82 (with 7h Mode D ERROR, others mild loss)
+
+  Summary: [logs/c32_to_c40_summary_20260509_000845.txt](logs/c32_to_c40_summary_20260509_000845.txt). **Pattern confirmed: feature-add family is exhausted. Net 0 PASS over 11 ideas tested in last 24h** (C50 + C32-C40 batch + C07 + C01 + C05/C06).
+
+### 🚀 Most actionable next step (post 2026-05-09 morning) — C05/C06 path
+
+User running the sequence on Desktop (2026-05-09 evening). Three sequential steps with explicit decision points:
+
+**Step 1 (~30-50 min) — Refresh contaminated baseline grid:**
+```
+python crypto_trading_system_ed.py D ETH 5,6,7,8h --replay 1440 --no-persist --no-data-update
+```
+Overwrites `models/crypto_ed_grid_ETH_<h>h.csv` with proper APF-Optuna-hill-climbed candidates (was overwritten by C50 HRST 2026-05-07 with rawpf-optimized candidates).
+
+**Step 2 (~90 min) — Re-run C05/C06 on clean grid:**
+```
+python tools/test_c05_c06_only.py
+```
+Output: `output/c05_c06_rerank_<ts>.csv`. Compare to 2026-05-08 result. **Decision point**:
+- Reranks STILL pick materially different + better candidates (5pp+ delta on multiple horizons) → CONFIRMED PASS DIRECTION → proceed to Step 3.
+- Reranks pick same candidates as APF → 2026-05-08 result was contamination artifact → C05/C06 family closed.
+- Reranks differ but with smaller deltas → real but weaker effect → judgment call on whether Step 3 is worth ~7-8h.
+
+**Step 3 (~7-8h overnight, CONDITIONAL on Step 2 PASS):**
+1. Build engine fork `crypto_trading_system_ed_cvar.py` mirroring `_cdar.py` pattern (~30-60 min coding):
+   - Output paths: `crypto_ed_production_cvar.csv` + `regime_config_ed_cvar.json` (no prod overwrite)
+   - Add `'cvar'` branch in `_compute_optuna_score`: `score = return - λ × |CVaR_5%|` (start λ=1.0)
+   - Default `OPTUNA_METRIC = 'cvar'`
+   - Patch 4 Mode V winner-selection sites (lines 4962, 4976, 6194, 7986, 7999 per existing `_cdar.py` precedent) to use CVaR-aware variant
+   - Port per-trade-return tracking from C05/C06 work into `_simulate_with_threshold`
+2. Run full HRST:
+   ```
+   python crypto_trading_system_ed_cvar.py HRST ETH 5,6,7,8h --replay 1440 --no-persist
+   ```
+3. Compare Mode T REF to current production (May 6 promotion +76.77%). **Decision**:
+   - **≥ +81.77% (≥+5pp)** → SHIP. 1-line scoring change goes to live engine.
+   - **±5pp** → null. Mark CVaR/Sortino MARGINAL.
+   - **< +71.77% (<-5pp)** → DEAD. Same fate as C13 CDaR (-15pp HRST) and C50 PF (-5.85pp HRST).
+
+**Pattern context**: same-sub-family ideas C13 + C50 both showed Mode D wins but lost at HRST. C05/C06 differs notably — its smoke test showed massively better DRAWDOWNS (8h: 47% → 27%), not just better returns. Lower-DD configs survive Mode T better because shield/gate has less work to do. Prior estimate: 30-40% HRST PASS, 60-70% null/fail. Worth doing because asymmetry is good (massive upside if ships, modest cost if doesn't).
+
+This is the only research path with positive prior left. If steps 1-3 produce a real ship, it's ETH's first scoring-overlay win. If they produce a null on clean grid, scoring-overlay family conclusively closed — pivot to **execution-gap research (~17pp untouched alpha)**.
+
+### 🟡 Queued for manual launch (2026-05-08 evening) — STATUS UPDATE
+
+C01 + C07 + C32-C40 batch all completed by 2026-05-09 ~03:42. See verdicts above. Original "queued" table superseded by the closed entries above.
+
+| Script | Machine | ETA | Family / Decision rule |
+|---|---|---|---|
+| `python tools/test_c01_vol_scaled_4mo.py` | Laptop | ~30-45 min | C01 — vol-scaled horizons 4mo confirmation. 2mo was +5.02pp over `tsmom_672h`. Decision: best vol-scaled variant ≥+5pp over current live baseline AND WR ≥ 60% → ship as detector. Otherwise null. Wraps `test_vol_scaled_horizon.py` with `REPLAY=2880`. |
+| `python tools/test_c07_cusum_sampling.py` | Laptop | ~5-10 min | C07 — CUSUM event-based sampling (López de Prado AFML Ch 2) feasibility check. 4 thresholds (0.5/1.0/1.5/2.0%) on 2yr ETH hourly. Decision: best CUSUM beats hourly baseline by ≥+5pp accuracy AND ≥+10pp simulated PnL → architectural rewrite worth the days of work. Within ±5pp/±10pp → null. Worse → DEAD. Self-contained (no engine import). |
+| `python tools/test_c32_to_c40_batch.py` | Desktop overnight | ~5-7h | **C32-C40 batch** (8 ideas, 7 active + C36 STUB). Sequential Mode D ETH 5,6,7,8h --replay 1440 --no-persist for each: C32 liquidation cascade proxy (no Coinglass needed — derives from existing OI/return/vol), C33 spread compression z-score, C34 ETH-BTC cointegration residual, **C36 STUB** (CryptoPanic + Santiment need API keys), C37 stablecoin issuance velocity, C38 Korea/Coinbase premium spread (pre-fetches Bithumb + Coinbase + yfinance KRW=X), C39 Binance long/short ratio (pre-fetches futures endpoint), C40 skew + kurt features. Per-idea verdict: avg APF Δ ≥+5pp PASS / ±5pp MARGINAL / ≤−5pp FAIL. Output: `logs/c32_to_c40_summary_<ts>.txt`. **Pattern caveat**: this week's harness pattern shows 0 PASS in 7 retests. Expected hit rate: 0 PASS, 1-2 MARGINAL, rest FAIL — worth running to definitively close C30s + C40s. |
+
+C05/C06 currently running on laptop (background task, started 2026-05-08 22:39 via `tools/test_c05_c06_only.py`). ETA ~01:00 local. Tracks: 39/60 candidates done at 23:44, no errors; M-29 OSError(22) was GPU contention with concurrent C50 HRST and is now resolved by forcing CPU LGBM in `_backtest_with_per_trade_capture`.
+
+### ✅ Closed 2026-05-06 evening (C04→C08 runner partial outcome)
+
+| CID | Verdict | Evidence |
+|---|---|---|
+| **C04** Variance Ratio (q=12,24,48) | **DEAD** Δ−1.21 avg APF (FAIL) | [logs/c04_to_c08_summary_20260506_213526.txt](logs/c04_to_c08_summary_20260506_213526.txt) |
+| **C56** HMM 2-state regime | **DEAD** Δ−0.93 avg APF (marginal FAIL, fixed-harness-validated) | [logs/c56_only_summary_20260506_195258.txt](logs/c56_only_summary_20260506_195258.txt) |
+| **C08** Single-horizon CDaR | **DEAD** 5h −20.48pp / 6h −14.05pp vs APF prod (7h crashed, 8h killed by user 2026-05-07 to free machine) | [logs/c08_cdar_V_5h_20260506_213526.log](logs/c08_cdar_V_5h_20260506_213526.log), [c08_cdar_V_6h_20260506_213526.log](logs/c08_cdar_V_6h_20260506_213526.log) |
+| **C07** CUSUM | **SKIPPED** (architectural, not a smoke test) | — |
+| C05 / C06 | runner crashed `KeyError('models')` — bug fixed 2026-05-07; bundled into tonight's overnight | — |
+
+### ✅ Shipped 2026-05-06 → 2026-05-07 (production engine + trader)
+
+- **HRST ETH 5,6,7,8h --replay 1440 promoted to live** ([commit-equivalent: surgical ETH-only edit in `regime_config_ed.json` + 4 model-CSV rows; backup files `*.backup_20260506_pre_HRST_promote.*`])
+  - detector `sma24>sma100` → `tsmom_672h`
+  - bull 6h@65% shield-ON → 6h@75% shield-OFF + rally rr18≥5% OR rr30≥7.5% cd=36h
+  - bear 5h@75% shield-ON → 8h@65% shield-OFF + rally rr24≥4% OR rr30≥6% cd=14h
+  - 2-month replay return: +76.77% (Mode T final), +70.75% (Mode S baseline)
+- **SELL maker pricing rewrite** ([crypto_revolut_ed_v2.py:698-708](crypto_revolut_ed_v2.py#L698)) — sit at `bid + max($0.02, 5%×spread)` instead of slide from `ask-0.01`. Empirically every recent SELL filled at attempts #17-19 of the old slide at near-floor prices anyway, while the bid drifted away during the wait.
+- **Layer 5 OI pagination boundary fix** ([download_macro_data.py:834-859](download_macro_data.py#L834)) — Layer 1 (`fetch_with_fallback`) was working; the recurring HTTP-400-endTime spam was actually pagination running past Binance's ~30d 1h-OI history limit and killing the entire fetch. Now `retries=1` + try/except for the expected `HTTP 400 endTime` → graceful break, fresh ~30d OI preserved. Validated 2026-05-07 07:13 trader restart: cycle 1 shows "Open interest: 3 features added", no retry storm.
+- Trader restart 2026-05-07 07:13 confirmed to load all three changes.
+
+### 🟡 Tonight's overnight (Desktop, ~7-8h hands-off)
+
+```
+python tools/test_desktop_5ideas_runner.py
+```
+
+Renamed in spirit to "suspects runner". Removed C56/C04 (already retested, both DEAD). Added C05/C06 post-hoc rerank (runner bug fixed). Order:
+1. C35 wavelet (~30 min)
+2. C50 PF-as-objective (~28 min)
+3. C47 vol-adjusted label (~28 min)
+4. C44 quantile-regression feature (~32 min)
+5. C57 Markov-switching AR (~50 min)
+6. C42 CatBoost ensemble (~80 min)
+7. C43 Stacking meta-learner (~150-240 min, heaviest last)
+8. **C05 CVaR + C06 Sortino joint rerank** (~90 min, post-hoc on existing baseline grid)
+
+Outputs:
+- `logs/desktop_5ideas_summary_<ts>.txt` — patcher-loop verdicts (PASS/MARGINAL/FAIL per idea)
+- `output/c05_c06_rerank_<ts>.csv` + `c05_c06_per_trade_<ts>.csv` — manual review (does CVaR/Sortino pick a different top-3 with lower tail-risk?)
+
+After tonight, the canonical-scoreboard "SUSPECT" pool drops from 13 → 6 (C03 SHAP, C12 stability thr=50, C23 per-regime, C29 HAR-RV, C31 funding momentum still untested on fixed harness — Tier C, low priors).
+
+### 🟦 Untested actionable (post-tonight)
+
+1. **C01 vol-scaled 4mo** — `python tools/test_vol_scaled_horizon.py --replay 2880`, ~30 min. **Caveat**: 2mo +5.02pp gain was vs the now-defunct `tsmom_672h` baseline used pre-HRST-promote. With live now ON `tsmom_672h` + shield-off + new gates, the baseline has shifted; rerun is needed.
+2. **C16 narrow** — disaster brake at −5%, ~30 min.
+3. Tier C suspect retests (C03, C12, C23, C29, C31) — only if budget available; low priors.
+
+### Out-of-band
+
+- **M-29 partial-fill live test** — fires whenever next live BUY happens; no scheduling. Trader currently in cash; 6h conf 46.50% well below 75% threshold.
+- **Validate new HRST config in live trading** — 2026-05-07 07:13 restart confirmed: detector tsmom_672h active, bull 6h@75% shield-OFF, bear 8h@65% shield-OFF, rally gates rr18/rr30 firing correctly. Watch for first BUY/SELL signal after restart.
+
+---
+
+### 🚨 CRITICAL HARNESS BUG DISCOVERED — 2026-05-05 morning
+
+**Symptom**: overnight 9-idea Desktop runner (C56, C35, C04, C50, C47, C44, C57, C42, C43) finished 23:24 → 03:59 with all 9 reporting FAIL ~−5pp avg APF and **eerily identical per-horizon delta patterns** (5h ~−14, 6h ~−7-9, 7h ~−2.6 to −4.5, 8h ~+4.5-5).
+
+**Root cause**: [tools/test_14_ideas.py](tools/test_14_ideas.py) `run_mode_d` line ~125:
+```python
+py_init += "import runpy; runpy.run_module('crypto_trading_system_ed', run_name='__main__')"
+```
+`runpy.run_module(name, run_name='__main__')` **re-executes the engine module from scratch in a new namespace**, discarding any monkey-patches the patcher applied to `sys.modules['crypto_trading_system_ed']`. The fresh re-execution defines `build_all_features` anew, and Mode D calls find that fresh definition, not the patched one.
+
+**Confirmation**: every idea's patcher prints its "import-time" banner (`[CXX] build_all_features patched`) once per log, but the runtime markers (e.g. `[C56] HMM regime features added`, `[C04] VR features added`) appear **0 times** across all 36 horizon runs. The engine ran with stock features for all 9 ideas.
+
+**Verdicts now SUSPECT (need retest with fixed harness)**:
+1. **C03 SHAP** — was marked DEAD (Δ−4.78), retest needed
+2. **C23 per_regime_features** — was marked DEAD (Δ−1.18), retest needed
+3. **C12 stability_strict** — was marked DEAD (Δ−0.75), retest needed
+4. **C29 HAR-RV + Hurst** — was marked DEAD (Δ−2.99 / −3.09), retest needed
+5. **C31 funding momentum** — was marked DEAD (Δ−5.25 yesterday), retest needed
+6. **C56 HMM regime** — overnight FAIL (Δ−5.34), retest needed [Tier S prior]
+7. **C35 wavelet** — overnight FAIL (Δ−5.37), retest needed [Tier S prior]
+8. **C04 Variance Ratio** — overnight FAIL (Δ−5.44), retest needed
+9. **C50 PF objective** — overnight FAIL (Δ−4.95), retest needed
+10. **C47 vol-adjusted label** — overnight FAIL (Δ−5.00), retest needed
+11. **C44 quantile regression** — overnight FAIL (Δ−5.02), retest needed
+12. **C57 MS-AR** — overnight FAIL (Δ−5.01), retest needed
+13. **C42 CatBoost** — overnight FAIL (Δ−5.20), retest needed
+14. **C43 Stacking** — overnight FAIL (Δ−5.24), retest needed
+
+**Verdicts STILL RELIABLE** (didn't use the harness — standalone overlay sims or full HRST):
+- C09, C10 (DEAD via [tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py))
+- C02 (DEAD via [tools/test_c02_multi_horizon_exit.py](tools/test_c02_multi_horizon_exit.py))
+- C13 CDaR (DEAD via two full HRST runs of cdar engine fork)
+- All historical DEAD/SHELVED verdicts predating the harness (C17, C18, C19, C20, C21, C22, C24, C25, C26, C27, C28 — all confirmed via standalone scripts or full engine runs in March-April)
+
+**Fix shipped 2026-05-05 morning** ([tools/test_14_ideas.py:125](tools/test_14_ideas.py#L125)):
+- Replaced `runpy.run_module('crypto_trading_system_ed', run_name='__main__')` with `import crypto_trading_system_ed; crypto_trading_system_ed.main()`. Direct call preserves the patcher's monkey-patches because the module remains the same `sys.modules` entry.
+- **Verified**: smoke-test ran C35 wavelet on ETH 5h → log now shows `[C35] wavelet features added: +4 columns` (3× per Mode D run vs 0× pre-fix). Engine ran with 184 features (baseline 180 + 4 wavelet) instead of dropping the patch.
+- Sanity-checked patcher persistence: after patcher import, `eng.build_all_features.__name__ == '_patched_build'` (was `'build_all_features'` original pre-fix).
+
+**Smoke-test result**: ETH 5h C35 wavelet, fixed harness, Δ = **−15.56pp** vs baseline. Patches now genuinely active; C35 at 5h is genuinely negative on this baseline. (Caveat below.)
+
+**Caveat about untagged baselines**: the baseline grids `models/crypto_ed_grid_ETH_<h>h.csv` (mtime 2026-05-04 03:02-06:08) were written by the Desktop CDaR HRST run, which used **CDaR scoring** as Optuna metric. Those baselines happen to have unusually high APF (5h apf=30.4, 6h=23.7) because Optuna hill-climbed under CDaR scoring rather than APF. Comparing fresh APF-Optuna-selected configs against those baselines produces a consistent ~−5pp drift that has NOTHING to do with the patcher. Before re-running the 14 SUSPECT verdicts, **refresh untagged baselines first**:
+```
+python crypto_trading_system_ed.py D ETH 5,6,7,8h --replay 1440 --no-persist --no-data-update
+```
+**~30-50 min on Desktop** (Mode D × 4 horizons, sequential outer loop; per Runtime Reference: 7-13 min/horizon median 11). Overwrites the 4 untagged grid CSVs with clean APF-Optuna baselines.
+
+**Re-run plan** (post-baseline-refresh, **~4-5h on Desktop** = 9 ideas × 30 min each per Runtime Reference, with 2x harness parallelism):
+- Re-run the 9 overnight ideas on the fixed harness via `python tools/test_desktop_5ideas_runner.py`. Now patches will actually fire AND the comparison baseline will be apples-to-apples.
+- 5 prior-day SUSPECT verdicts (C03, C12, C23, C29, C31) can be re-validated cheaply by re-running their original test scripts (~20-30 min each). C12 thr=30 was a STANDALONE run (not via this harness) so it stays valid; only C12 thr=50 was via the broken harness.
+
+---
+
+### 🔴 CDaR HRST RESOLVED ON BOTH MACHINES — DO NOT PROMOTE — 2026-05-04 morning
+
+**Status**: BOTH laptop AND desktop ran CDaR HRST overnight in parallel. Both completed independently. Both produced Mode T totals 14-16pp UNDER current live's +86.19%. Cross-machine variance was only ~1.5pp — confirming the gap is signal, not run-to-run noise. **SHELVED with high confidence. Live config UNTOUCHED.**
+
+**Cross-machine comparison (2 independent runs)**:
+
+| Metric | Laptop ([log](logs/ed_v1_20260503_200545.log), 9h, finished 05:13) | Desktop ([log](logs/ed_v1_20260504_025746.log), 6h, finished 08:43) | Live (May 3) |
+|---|---|---|---|
+| Mode S detector | `sma24>sma100` | `sma24>sma100` | `sma24>sma100` ✅ all match |
+| Mode S bull | 5h@75% | 5h@75% | 6h@65% |
+| Mode S bear | 8h@65% | 8h@80% | 5h@75% |
+| Mode S return | +66.25% | +65.70% | +77.06% |
+| Mode S alpha | +59.27pp | +56.65pp | +60.37pp |
+| Mode T total | **+71.22%** | **+69.70%** | **+86.19%** |
+| Bull shield | ON | ON | ON ✅ |
+| Bear shield | ON | OFF | ON |
+| Iters to converge | 2 | 2 | 2 |
+| STRICT gate winners | 0 | 0 | 0 |
+| Per-horizon picks (8h) | Refined #1 APF=22.0 ret +67.03% | Refined #3 APF=25.3 | — |
+
+**Cross-machine consistency**:
+- Detector: identical (`sma24>sma100`)
+- Bull horizon + conf: identical (5h@75%)
+- Bear horizon: identical (8h)
+- Mode T total spread: 1.52pp (well within run-to-run noise)
+- Both pick bull shield ON; bear shield differs (laptop ON, desktop OFF) — but Mode T total nearly identical regardless
+
+**Gap to live: laptop −14.97pp, desktop −16.49pp**. Both far past the +5pp promotion bar AND past the −5pp "noise band" threshold. With two independent runs producing the same direction and similar magnitude, the −15pp gap is robust to seed/machine noise.
+
+**Per-horizon Mode V winners (CDaR scoring) — not in dispute**:
+
+| H | Source | Combo | W | g | f | Return | WR | Trades |
+|---|---|---|---|---|---|---|---|---|
+| 5h | D #3 (APF=−0.6) | RF+LGBM | 72h | 0.999 | 10 | +28.27% | 87% | 30 |
+| 6h | Refined #1 (APF=36.7) | XGB+LGBM | 95h | 1.000 | 11 | +50.88% | 76% | 76 |
+| 7h | D #6 (APF=0.1) | RF+LGBM | 100h | 0.995 | 17 | +33.71% | 86% | 28 |
+| 8h | Refined #1 (APF=22.0) | RF+LGBM | 158h | 0.999 | 8 | **+67.03%** | 72% | 64 |
+
+**Why CDaR failed at the HRST level despite winning Mode D smoke test**:
+1. Mode D smoke-test wins (5-8h all dominated APF) DID translate cleanly to per-horizon Mode V winners.
+2. Mode S joint sweep picked `sma24>sma100 5h/8h` — **NOT** a regime that exploits the 8h Refined #1 +67% winner. The sweep prefers shorter bull (5h) over CDaR-favored long-horizon configs.
+3. Result: the strongest CDaR-favored single-horizon result (8h +67.03%) gets diluted in the Mode S regime split.
+4. Compounding: Mode R verdict said "Baseline WINS by +1.66%" at conf>=90% — different from current live config which lives on a regime split.
+
+**Open question (NOT resolved yet)**: does CDaR scoring help at the SINGLE-HORIZON level even if Mode S/T washes out? The 8h Refined #1 +67.03% is the strongest CDaR-only result. **Possible follow-up**: keep current production engine but use CDaR scoring for individual-horizon model selection only. Not a priority unless other paths exhaust.
+
+**Action**: SHELVE CDaR engine fork. Do NOT promote. Live config / production CSV untouched. The CDaR fork (`crypto_trading_system_ed_cdar.py` + `_cdar.csv` + `_cdar.json`) can stay on disk for the single-horizon-only follow-up, or be deleted.
+
+---
+
+### 📅 TODAY (2026-05-04) — END-OF-DAY STATE + REMAINING PLAN
+
+**The canonical scoreboard is at section "📋 CANONICAL IDEAS SCOREBOARD" below — that's the single source of truth for which ideas are tested/dead/untested. This section just summarizes today's work and sets the next-action queue.**
+
+**Today's work log (chronological)**:
+
+| Time | Job | Machine | Status | Outcome |
+|---|---|---|---|---|
+| 05:13 | CDaR HRST ETH 5,6,7,8h --replay 1440 | Laptop | ✅ Done | **C13 SHELVED** — Mode T +71.22% vs live +86.19% (−14.97pp) |
+| 08:43 | CDaR HRST ETH 5,6,7,8h --replay 1440 (parallel) | Desktop | ✅ Done | **C13 SHELVE CONFIRMED** — Mode T +69.70% (−16.49pp); cross-machine variance 1.52pp |
+| (overnight) | test_14 batches 1-2 (IDEA 1,5,6,7,10 + 2,12,13,14) | Desktop | mixed | C23/C12-revisit/C29×2 FAIL; C03 needs `pip install shap`; C09/C10 ERROR (harness bug); C02/C04 STUB |
+| 20:39 | C09+C10 harness bug fix + audit rerun | Laptop | ✅ Done | Bug fixed (cache is list, not dict); STUBs now produce skip counts |
+| 21:30 | **C09+C10 full PnL overlay** ([tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py)) | Laptop | ✅ Done | **Both DEAD.** C09: best variant −1.22pp; C10: best −7.79pp. All 35 variants LOSE vs baseline +147.59% |
+
+**Net result of today's work**: 6 ideas closed (C13 shelved, C09/C10/C23/C29-pair newly DEAD, C12-revisit confirmed-DEAD-with-stricter-thresholds). 0 wins. Live config UNTOUCHED.
+
+**Tomorrow's priority queue** (numbered by canonical CID — see scoreboard for full context):
+
+1. ⭐ **C01 vol_scaled_4mo** — ~30 min, only remaining promising candidate. 2-month proved +5.02pp; 4-month is the only blocker:
+   ```
+   python tools/test_vol_scaled_horizon.py --replay 2880
+   ```
+   Decision rule: ≥+5pp Mode T REF over `tsmom_672h` → config-only ship + instant rollback.
+
+2. **C03 shap_ranking** — ~30 min, just needs install:
+   ```
+   pip install shap
+   python tools/test_14_ideas.py --idea 10
+   ```
+
+3. **C02 multi_horizon_exit** — 1-2h, build the overlay-PnL sim (template = today's [tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py), reuse `simulate()` function). Harness STUB shows 33% co-incidence — high prior this is too frequent and will fail like C09/C10, but cheap to verify.
+
+4. **C04 variance_ratio_detector** — 2-3h, register `vr_12` as named detector in `_build_regime_indicators_and_detectors`, run Mode S, compare vs `tsmom_672h`.
+
+5. **C08 single-horizon CDaR variant** — 2h, open follow-up after C13 HRST fail. The 8h Refined #1 +67.03% was the strongest CDaR result; needs new infra to run scoring per-horizon without Mode S regime split.
+
+6. **C05/C06 CVaR + Sortino objectives** — 3-5h each, blocked on extending grid CSV writer to include per-trade-return list.
+
+7. **C07 CUSUM event-based sampling** — days, architectural rewrite of trader polling loop.
+
+**Out-of-band priorities**:
+- **M-29 partial-fill live test** (#2 priority below) — fires whenever the next live BUY happens; no scheduling.
+- **Re-validate harness FAIL verdicts** — optional but informative. The `--grid-tag` patch (2026-05-03 evening) shipped; need to confirm IDEA-tagged baselines were measured against CLEAN untagged baselines, not contaminated ones. If contaminated, C23/C12-revisit/C29 FAIL verdicts could flip.
+
+**Standing recommendation**: after running #1-2 (~1h total), if both fail, the 20-ideas roadmap is essentially exhausted. Pivot to **execution-gap work on the live trader** — ~17pp unaccounted alpha gap between sim and live is the biggest lever left. TCA logging, slippage audit, manual-vs-auto PnL decomposition.
+
+---
+
+### 📅 ORIGINAL TOMORROW (2026-05-04) — TEST PLAN (now SUPERSEDED — overnight results above)
+
+Concrete schedule to run in the morning. Cross-machine parallelism assumed (Desktop + Laptop both available).
+
+**🌅 Morning (08:00-09:00) — kick off the long jobs first**
+
+**Desktop (heavy GPU/CPU run, ~6-9h unattended, avg 7h — see Runtime Reference):**
+```bash
+python crypto_trading_system_ed_cdar.py HRST ETH 5,6,7,8h --replay 1440 --no-persist
+```
+This is the CDaR validation HRST. Already #2 priority below this block. Launch FIRST, runs in background until ~15:00 (worst case 17:00). This is the make-or-break test for whether CDaR scoring becomes the new production engine.
+
+**Laptop (light parallel runs, ~15 min total):**
+```bash
+python tools/test_14_ideas.py --idea 2,12,13
+```
+Runs the 3 cheapest audit STUBs (`multi_horizon_exit`, `vol_entry_filter`, `btc_momentum_gate`) in sequence. Each ~5 min, no Mode D needed — they audit existing 90d signal cache. Outputs partial-result CSVs you can inspect over coffee.
+
+**🌞 Mid-morning (09:00-10:30) — Tier 1 fully-wired smoke tests on Laptop**
+
+```bash
+python tools/test_14_ideas.py --idea 1,6
+```
+- **#1 per_regime_features** (~30 min) — never tested; bias bull horizons toward technical features, bear toward macro
+- **#6 har_rv** (~20 min) — Corsi 2009 HAR-RV realized variance feature
+
+These run via Mode D + monkey-patch on Laptop while Desktop is busy with CDaR HRST. Each writes to `_TAGGED` paths; production untouched.
+
+**🌤 Late morning (10:30-11:00) — Tier 1 highest-EV test on Laptop**
+
+```bash
+python tools/test_vol_scaled_horizon.py --replay 2880
+```
+**This is the single most important test of the day** — `vol_scaled_4mo` already proved +5.02pp on 2-month window. 4-month confirmation is all that blocks promotion. ~30 min on Laptop. If this passes (Mode T REF beats `tsmom_672h` baseline by ≥+5pp on 4mo), it replaces the current detector via config-only change with instant rollback.
+
+**🍽 Lunch break (12:00-13:00) — let things finish, no commands**
+
+**🌥 Early afternoon (13:00-14:00) — REVIEW**
+
+Check status of all 6 jobs. Order of inspection:
+
+1. **CDaR HRST result** (Desktop): grep for Mode T REF in latest `logs/ed_v1_*.log`. Compare to current production HRST (+86.19% from May 3 morning).
+   - If Mode T REF ≥ +91pp (>+5pp over current) → **PROMOTE CDaR ENGINE TO LIVE** (see promotion procedure in #2 priority below)
+   - If within ±5pp → keep current scoring, document inconclusive
+   - If worse by >5pp → CDaR scoring hurt at HRST level despite winning at Mode D level. Investigate.
+
+2. **vol_scaled_4mo result**: read top of `tools/test_vol_scaled_horizon.py` output for the Mode T REF of best variant vs `tsmom_672h` baseline. ≥+5pp → promote (config-only, see Tier 1 instructions above).
+
+3. **Tier 1 harness results**: read `logs/test_14_summary_<ts>.txt` for #1 + #6 verdicts. Look for PASS, MARGINAL, or FAIL. PASS → escalate to full HRST validation; MARGINAL → document; FAIL → close out as DEAD in scoreboard.
+
+4. **Tier 2 STUB outputs**: skim `output/idea_02_*.csv`, `output/idea_12_*.csv`, `output/idea_13_*.csv`. For each, look at the skip-rate / overlap stat. If the rate is in 5-15% range → worth spending the time to flesh out a full simulation. Outside that range → kill or shelve.
+
+**🌆 Late afternoon (14:00+) — DECISIONS**
+
+Based on the morning's results, exactly one of these branches:
+
+- **CDaR PROMOTED**: do the promotion (see #2 priority below for backup + copy commands), restart trader, monitor first 10 trades. Stop further Tier-1 testing today.
+- **vol_scaled_4mo PROMOTED**: config-only change, no engine swap. Do simultaneously with CDaR if both win.
+- **#1 per_regime_features PASS**: launch full HRST with monkey-patch in place to confirm — Desktop free now since CDaR is done.
+- **All FAIL/MARGINAL**: proceed to Tier 3 (#5, #7, #10) or revisit STUB blockers for Tier 2.
+
+**🌙 Evening — record + plan day after**
+
+Update CLAUDE.md scoreboard for whatever was tested. Each idea moves to PASS / FAIL / SHELVED with one-line summary + delta. Pick next-day test based on what's left.
+
+**Time budget**: ~8h elapsed (08:00-16:00) but only ~2h hands-on (the rest is jobs running unattended). All tests are parallel-safe across the two machines.
+
+**M-29 partial-fill live test** (separate, opportunistic — see priority #3 below): runs whenever the next live BUY happens. No scheduling needed.
+
+---
+
+### 📜 14-IDEAS HARNESS RESULTS LOG — historical, see canonical scoreboard for current status
+
+**Run results 2026-05-03 → 2026-05-04** (kept here as audit trail; canonical CIDs are the single source of truth):
+
+| H14# | CID | Idea | Verdict | Notes |
+|---|---|---|---|---|
+| 1 | C23 | per_regime_features | ❌ FAIL Δ−1.18 | DEAD. Bias bull→tech / bear→macro hurts. |
+| 2 | C02 | multi_horizon_exit | 🟦 STUB 33% co-incident | UNTESTED (full PnL sim pending). Probably DEAD given high co-incidence. |
+| 3 | C01 | vol_scaled_4mo | 🟡 not run via harness | UNTESTED at 4mo (2mo +5.02pp known). HIGHEST EV remaining. |
+| 4 | C11 | vpin_5min variant | ⚪ not yet attempted | Base C11 SHELVED (best +3.83pp); 5-min variant is the revisit path. |
+| 5 | C12 (revisit) | stability_strict (thr=50) | ❌ FAIL Δ−0.75 | Confirms C12 stability filter is structurally bad on this engine. |
+| 6 | C29 | har_rv | ❌ FAIL Δ−2.99 | DEAD (standalone +2.37 was a fluke). |
+| 7 | C29 | hurst_feature | ❌ FAIL Δ−3.09 | DEAD. |
+| 8 | C05 | cvar_objective | 🟦 STUB blocked | Needs per-trade-return list in grid CSV. |
+| 9 | C06 | sortino_objective | 🟦 STUB blocked | Same blocker as C05. |
+| 10 | C03 | shap_ranking | 🟦 STUB | Just needs `pip install shap`. |
+| 11 | C07 | cusum_sampling | 🟦 architectural | Trader polling loop rewrite. |
+| 12 | C09 | vol_entry_filter | ❌ DEAD 2026-05-04 | All 10 variants LOSE; best −1.22pp. Verified via [tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py). |
+| 13 | C10 | btc_momentum_gate | ❌ DEAD 2026-05-04 | All 25 variants LOSE; best −7.79pp. Same script. |
+| 14 | C04 | variance_ratio_detector | 🟦 STUB 30.6% bull | UNTESTED at full Mode S level. |
+
+**Caveat**: harness batch ran after the engine `--grid-tag` fix (2026-05-03 evening). It's still worth confirming the IDEA-tagged grids were compared against CLEAN untagged baselines, not contaminated ones from the 2026-05-03 failed run. If contaminated, C23/C12-revisit/C29 FAIL verdicts could in principle flip. Verification command: `D ETH 5,6,7,8h --replay 1440 --no-persist --no-data-update` to refresh untagged baselines, then rerun.
+
+Full harness reference (commands, idea list, decision rules) preserved below for re-running any single idea:
+
+**Run any idea**:
+```bash
+python tools/test_14_ideas.py --list                       # show all 14
+python tools/test_14_ideas.py --idea 1                     # by number
+python tools/test_14_ideas.py --idea har_rv                # by name
+python tools/test_14_ideas.py --idea 1,5,6,7               # subset
+python tools/test_14_ideas.py --all                        # all sequentially (~5-7h)
+python tools/test_14_ideas.py --idea 6 --quick             # --replay 720 for faster smoke
+```
+
+**The 14 ideas** (5 fully wired, 9 STUB with explicit blockers):
+
+| # | Name | Category | Status | What it tests |
+|---|---|---|---|---|
+| 1 | per_regime_features | feature-set | **FULL** | Bias bull horizons toward technical features, bear toward macro |
+| 2 | multi_horizon_exit | filter-overlay | STUB | Force exit when 5h AND 8h both flip SELL within 1h (#14 of original 20) |
+| 3 | vol_scaled_4mo | detector | STUB | 4mo confirmation of `vol_2band` horizon picker (#12 of original 20) |
+| 4 | vpin_5min | filter-overlay | STUB | Revive #3 VPIN filter at 5-min cadence (original was hourly) |
+| 5 | stability_strict | feature-set | **FULL** | Revive #5 stability filter with threshold 50 instead of 30 |
+| 6 | har_rv | feature-set | **FULL** | HAR-RV realized variance feature (Corsi 2009) |
+| 7 | hurst_feature | feature-set | **FULL** | Rolling Hurst exponent as feature (Hurst 1951) |
+| 8 | cvar_objective | scoring-change | STUB | CVaR_5% on returns (Rockafellar & Uryasev 2000) — sibling of #6 CDaR |
+| 9 | sortino_objective | scoring-change | STUB | Sortino ratio scoring (downside-only vol) |
+| 10 | shap_ranking | feature-set | **FULL** | SHAP value ranking instead of LGBM split-count importance |
+| 11 | cusum_sampling | architectural | STUB | Event-based sampling (LdP AFML Ch 2) — needs trader rewrite |
+| 12 | vol_entry_filter | filter-overlay | STUB | Skip BUYs at high realized vol (>p90 vs 30d) |
+| 13 | btc_momentum_gate | filter-overlay | STUB | Allow ETH BUY only when BTC 24h momentum > 0 |
+| 14 | variance_ratio_detector | detector | STUB | VR(q) regime detector (Lo & MacKinlay 1988) |
+
+**Outputs**:
+- `output/test_14_<idea>_<ts>.csv` — per-idea result CSV
+- `logs/test_14_<idea>_<ts>.log` — per-idea console log
+- `logs/test_14_summary_<ts>.txt` — aggregated verdict table
+
+**Recommended execution order** (after CDaR HRST validates or fails):
+1. Run the 5 FULL ideas first (~1.5-2h total): `python tools/test_14_ideas.py --idea 1,5,6,7,10`
+2. Run the cheap audit STUBs (~5 min each): `python tools/test_14_ideas.py --idea 2,12,13,14` — these print what's missing + write partial-result CSVs you can inspect.
+3. Decide whether to flesh out STUBs based on partial-result hints.
+
+**🎯 MOST IMPORTANT IDEAS to test (ranked by expected value × testability)**:
+
+**Tier 1 — Run these first (high prior probability of working, fully testable today)**:
+
+1. **#3 vol_scaled_4mo** ⭐ HIGHEST EXPECTED VALUE — already proved +5.02pp on 2-month window in 2026-04-19 test. Promotion-blocked ONLY by missing 4-month confirmation. If 4mo confirms, this replaces `tsmom_672h` detector immediately.
+   ```bash
+   python tools/test_vol_scaled_horizon.py --replay 2880
+   ```
+   ETA ~30 min. Decision: if 4mo top variant beats `tsmom` baseline by ≥+5pp on Mode T REF → promote (config-only change, instant rollback).
+
+2. **#1 per_regime_features** — never tested, low effort, real chance of helping. Bias bull horizons (5h/6h) toward technical features, bear horizons (7h/8h) toward macro features. Asymmetry already happens organically; question is whether forcing it beats organic.
+   ```bash
+   python tools/test_14_ideas.py --idea 1
+   ```
+   ETA ~30 min. Decision: smoke-test win ≥+5pp avg APF delta across horizons → run validation HRST.
+
+3. **#6 har_rv** — better realized-variance estimator (Corsi 2009 HAR-RV). Vol features (`volatility_48h`, `gk_volatility_48h`) are already Grade 4 winners; a better vol estimator could lift them.
+   ```bash
+   python tools/test_14_ideas.py --idea 6
+   ```
+   ETA ~20 min. Decision: same +5pp threshold.
+
+**Tier 2 — Cheap audit STUBs (run while Tier 1 is going on a different machine)**:
+
+4. **#13 btc_momentum_gate** — skip ETH BUYs when BTC 24h momentum < 0. Cross-sectional confirmation. ~5 min audit using existing 90d cache.
+   ```bash
+   python tools/test_14_ideas.py --idea 13
+   ```
+   Output: `output/idea_13_btc_momentum_gate_<ts>.csv`. If many BUYs would be skipped during clear bear-leading periods → flesh out simulation.
+
+5. **#12 vol_entry_filter** — skip BUYs when realized vol > 30d p90. ~5 min audit.
+   ```bash
+   python tools/test_14_ideas.py --idea 12
+   ```
+   Output: `output/idea_12_vol_filter_<ts>.csv`. Inspect skip count vs total BUYs; if many → simulate strategy delta.
+
+6. **#2 multi_horizon_exit** — force exit when 5h AND 8h both flip SELL within 1h. Audit-only (cache exists).
+   ```bash
+   python tools/test_14_ideas.py --idea 2
+   ```
+   Output: `output/idea_02_multi_horizon_exit_<ts>.csv`. Check overlap rate; if 5-15% of bars → worth simulating, if <2% or >30% → not actionable.
+
+**Tier 3 — Lower priority (run only if Tier 1 + 2 are exhausted or look promising)**:
+- **#5 stability_strict**, **#7 hurst_feature**, **#10 shap_ranking**: feature-set tweaks; testable end-to-end via the harness.
+- **#14 variance_ratio_detector**: writes regime label CSV; needs detector registration + Mode S to fully test.
+
+**Tier 4 — Don't bother until something else works** (architectural / require new plumbing):
+- #4 vpin_5min, #8 cvar_objective, #9 sortino_objective, #11 cusum_sampling
+
+**Decision rule across all tiers**: Mode D smoke test win ≥+5pp average APF delta vs untagged baseline → promote to full HRST validation. Anything below +5pp is HRST run-to-run noise (5-10pp).
+
+**Cross-machine parallelism opportunity**: Tier 1 #1 and #3 can run simultaneously (Tier 1 #3 on Desktop while Tier 1 #1 on Laptop, or vice versa) — both are independent monkey-patches writing to differently-tagged outputs. Don't run two harness invocations on the same machine concurrently — Mode D's parallel workers would oversubscribe the GPU/CPU.
+
+**STUB blockers** (for follow-up work if any STUB looks promising):
+- #2 multi_horizon_exit: needs `data/eth_per_horizon_signals_90d.pkl`
+- #3 vol_scaled_4mo: shells out to existing `tools/test_vol_scaled_horizon.py --replay 2880`
+- #4 vpin_5min: needs 1m OHLCV cache (run `tools/download_1m_data.py` first)
+- #8/#9 cvar/sortino: need per-trade-return list in grid CSV (engine writes summary stats only — extend grid CSV writer)
+- #11 cusum_sampling: architectural rewrite of trader polling loop, not a smoke test
+- #12 vol_entry_filter: needs `data/eth_sl_signals_90d.pkl` (already exists)
+- #13 btc_momentum_gate: same cache + `data/btc_hourly_data.csv`
+- #14 variance_ratio_detector: writes regime label CSV; full test requires registering as named detector and running Mode S
+
+---
+
+### 🐛 HARNESS BUG FOUND + ENGINE FIX SHIPPED (2026-05-03 22:13 CEST)
+
+**First harness run** — `python tools/test_14_ideas.py --idea 1` — completed Mode D for ETH 5,6,7,8h cleanly (31.4 min total, all 4 horizons produced grid winners), but the harness reported `status=ERROR / No grid winners found` because the harness expected per-idea-tagged grid CSVs (`crypto_ed_grid_ETH_5h_IDEA01.csv`) and the engine wrote untagged paths (`crypto_ed_grid_ETH_5h.csv`).
+
+**Root cause**: harness passed `--grid-tag IDEA01` to the engine via `subprocess.run`, but the engine had **zero references** to `grid-tag` / `grid_tag` / `GRID_TAG`. Flag was silently ignored, untagged path was used, harness's `load_grid_csv(asset, h, 'IDEA01')` couldn't find the file.
+
+**Compounding**: the patched (per_regime_features-monkey-patched) Mode D run **overwrote** the untagged baseline grids that `load_baseline_grid()` reads for comparison. Untagged grids on disk are now contaminated.
+
+**Engine fix shipped** (`crypto_trading_system_ed.py`):
+- Line 401: added `GRID_TAG_SUFFIX = None` module global
+- Line 4462-4465: write path now uses `_{GRID_TAG_SUFFIX}` suffix when set
+- Line 7091+: added `--grid-tag NAME` parser (alphanumeric/underscore validation)
+- Line 7309: added `--grid-tag` to `skip_next` set so positional-arg parser ignores its value
+
+Verified flag end-to-end: `[--grid-tag IDEA01] Mode D grid CSV will be written to crypto_ed_grid_<asset>_<h>h_IDEA01.csv` + module global propagates to write site.
+
+**Recovery plan** (do these in order, ~60 min total):
+
+1. **Refresh untagged baselines** (~25-30 min):
+   ```
+   python crypto_trading_system_ed.py D ETH 5,6,7,8h --replay 1440 --no-persist --no-data-update
+   ```
+   Overwrites contaminated `crypto_ed_grid_ETH_<h>h.csv` files with clean (un-patched) data.
+
+2. **Re-run idea #1 with the fix** (~30 min):
+   ```
+   python tools/test_14_ideas.py --idea 1
+   ```
+   Now writes to `_IDEA01.csv` (tagged), compares against clean untagged baselines from step 1.
+
+**Lessons for future ideas tested via this harness**:
+- Always run a clean `D ETH ...h --replay 1440 --no-persist --no-data-update` first to refresh untagged baselines, especially after any patcher run that touched `_test_lgbm_importance` or `generate_signals`.
+- Harness writes IDEA-tagged CSVs that are independent of the untagged baseline. So baseline contamination is per-asset/per-horizon — only the touched (asset, horizon, replay) combos need refreshing.
+- All 5 FULL ideas in the harness (#1, #5, #6, #7, #10) use the same `compare_grid_winners(test_df, base_df)` pattern → same fix benefits all of them.
+
+---
+
+### 📋 CANONICAL IDEAS SCOREBOARD (built 2026-05-04 — single source of truth)
+
+**Why this exists**: previously two parallel numberings — the "20-ideas roadmap" (built 2026-05-03) and the "14-ideas harness" (built 2026-05-03 evening) — created repeated confusion ("which idea is #6? CDaR or har_rv?"). This canonical list deduplicates, renumbers, and orders by status: **Untested → Partial → Error → Shelved → Dead**. The 20-roadmap and 14-harness numberings are kept as columns for backward reference; **always cite canonical CID# going forward**, with optional `(R20=#x H14=#y)` annotation when needed.
+
+**Total**: 29 unique ideas across both lists. The 20-roadmap is preserved verbatim as a separate section below for historical context; this canonical list supersedes it for status-tracking.
+
+#### 🟦 UNTESTED (8) — no result yet, ranked by expected value
+
+| CID | Idea | R20 | H14 | Effort | Notes |
+|---|---|---|---|---|---|
+| **C01** | Vol-scaled horizons 4-month validation | #12 | #3 | ~30 min | 2mo +5.02pp was over now-defunct `tsmom_672h` baseline AND within HRST run-to-run noise band. Real test is fresh 4mo on current live's `sma24>sma100`. `python tools/test_vol_scaled_horizon.py --replay 2880` |
+| ~~C02~~ | ~~Multi-horizon emergency-exit ensemble~~ | #14 | #2 | — | **MOVED TO DEAD 2026-05-04 late evening** — all 16 variants LOSE, best −3.30pp. See DEAD section. |
+| ~~C03~~ | ~~SHAP ranking~~ | — | #10 | — | **MOVED TO DEAD 2026-05-04 evening** — Δ−4.78 avg, see DEAD section. |
+| ~~C04~~ | ~~Variance Ratio detector~~ | — | #14 | — | **MOVED TO DEAD 2026-05-06 evening** — Δ−1.21 avg APF on fixed harness. |
+| **C05** | CVaR_5% objective scoring | — | #8 | tonight | Bug fixed 2026-05-07, bundled into tonight's `test_desktop_5ideas_runner.py` overnight. |
+| **C06** | Sortino objective scoring | — | #9 | tonight | Same backtest as C05 (zero marginal cost). Joint rerank csv for manual review. |
+| **C07** | CUSUM event-based sampling (LdP AFML Ch 2) | — | #11 | days | Architectural rewrite of trader polling loop. Not a smoke test. |
+| ~~C08~~ | ~~Single-horizon-only CDaR variant~~ | — | — | — | **MOVED TO DEAD 2026-05-06 evening** — 5h −20.48pp / 6h −14.05pp vs APF prod. Same shape as C13 HRST fail (May-4); per-horizon variant doesn't escape the gap. |
+
+#### 🟡 PARTIAL (1) — tested in limited scope, validation pending
+
+| CID | Idea | R20 | H14 | What's done | What's missing |
+|---|---|---|---|---|---|
+| (already C01 above) | (vol-scaled 4mo subsumes the partial entry — listed once in UNTESTED for the 4mo run) | | | | |
+
+(The original partial-list slot for #12 is folded into C01 above; running `--replay 2880` resolves both the "untested 4mo" and "partial 2mo→4mo" framings simultaneously.)
+
+#### 🐛 ERROR / BLOCKED ON BUG — RESOLVED 2026-05-04
+
+Both C09 and C10 unblocked. Harness bug fixed (the cache is a list-of-dicts, not a dict; `cache.get('signals', cache)` was failing on a list). Full PnL overlay then run via [tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py). **Both DEAD.** See moved entries in DEAD section below (CIDs preserved, status flipped).
+
+#### ⚪ SHELVED (6) — tested + lost, but explicit revisit-with-conditions path exists
+
+| CID | Idea | R20 | H14 | Result | Revisit condition |
+|---|---|---|---|---|---|
+| **C11** | VPIN entry filter | #3 | #4 | Best +3.83pp 60d (below +5pp ship) | 5-min sub-loop OR 90d/6mo with stress events OR combine with vol filter |
+| **C12** | Feature stability filter (Carhart-style) | #5 | #5 | ⚠️ **SUSPECT (harness bug 2026-05-05)**. Original thr=30 was a standalone test (May 3) and may be valid; thr=50 (May 4) ran via the broken harness — needs retest. | Threshold>50 AND 180d training window |
+| **C13** | CDaR objective scoring | #6 | — | Smoke-test win 2026-05-03; HRST fail 2026-05-04 on BOTH machines (laptop −14.97pp, desktop −16.49pp vs live) | Single-horizon-only variant = C08; OR lambda sweep on Desktop's HRST |
+| **C14** | Triple-barrier method as exit overlay | #7 | — | Best `up=6σ lo=2σ vert=24h conf=90`: 30d +6.77pp / 60d +10.48pp / 90d +1.24pp — 60d gain didn't survive | Different vol regime |
+| **C15** | Meta-labeling secondary classifier | #9 | — | Lost on strong primary (E vs A −2.12pp); helped on weak primary but still lost overall | Retest on SOL/BTC/XRP primaries (those assets currently shelved) |
+| **C16** | SL/TP/trailing-stop variants | #16 | — | Baseline (no SL) won every dimension; one variant viable: −5 to −7% disaster brake (fires 0 times in 60d, dormant) | User keeps disaster brake disabled; revisit only on new vol regime |
+
+#### 🔴 DEAD (13) — tested + closed, no revisit path
+
+| CID | Idea | R20 | H14 | Why dead |
+|---|---|---|---|---|
+| **C17** | Fractional differentiation features | #1 | — | LGBM didn't pick any `fd_*` into top tier; ETH hourly may have low long-memory; literature was for daily/weekly equity |
+| **C18** | Probability calibration (Platt + isotonic) | #2 | — | Architectural mismatch with binary all-in/all-out engine; Mode S empirically tunes threshold so calibration is cosmetic relabeling |
+| **C19** | Turbulence Index kill-switch | #4 | — | Directional sign WRONG on ETH bull regime; high-turb days were FOLLOWED by good ETH outcomes (opposite of Kritzman & Li) |
+| **C20** | Triple-barrier as TRAINING LABEL | #8 | — | BTC same-week head-to-head: lost on return (−28pp / −51pp), WR (−9pp / −10pp), accuracy (−16pp / −13pp) |
+| **C21** | Asymmetric loss / class weights | #10 | — | All weights produced identical ~3 trades at 95%/85% conf threshold; high-conf threshold already filters aggressively |
+| **C22** | Kelly criterion position sizing | #11 | — | Architectural mismatch; engine has no position-size gradient to exploit (all-in at 85-95% conf) |
+| **C23** | Per-regime feature set | #13 | #1 | ⚠️ **SUSPECT (harness bug 2026-05-05)** — original Δ−1.18 reading is meaningless. Needs retest. |
+| **C24** | 5-min emergency-exit price-action overlay | #15 | — | No clean combo (max precision 12.5% — 42 false positives per real crash in 60d); false alarms eat alpha |
+| **C25** | Multi-timeframe fusion / TabPFN / CPCV | #17 | — | All variants dominated by single-timeframe LGBM; CPCV incompatible with temporal decay (gamma weighting) |
+| **C26** | LSTM as ensemble partner | #18 | — | LSTM solo failed; LSTM+LGBM ≡ RF+LGBM (LSTM votes randomly). LGBM dominance confirmed |
+| **C27** | PySR for regime labels | #19 | — | Best regime accuracy 58% — too weak. Hand-crafted detectors win the joint sweep. (PySR alive as FEATURE synthesis — pysr_1..5 Grade 4) |
+| **C28** | GDELT geopolitical features | #20 | — | iran_vol_zscore ranked #9 once but selected into 0/33 production models. VIX + 1d equity changes capture macro fear faster |
+| **C29** | HAR-RV + Hurst feature additions | — | #6, #7 | ⚠️ **SUSPECT (harness bug 2026-05-05)** — original Δ−2.99 / Δ−3.09 readings are meaningless. Both need retest. |
+| **C09** | Vol entry filter (skip BUYs at high realized vol) | — | #12 | **Tested 2026-05-04 evening** ([tools/test_c09_c10_overlay.py](tools/test_c09_c10_overlay.py)). All 10 variants LOSE vs baseline +147.59%. Best (p95 / 720h, 1 skip): −1.22pp. Worst (p70 / 168h, 73 skips): −62.7pp. Model's BUY signal is good even at high realized vol — shield+max_hold already handle drawdown. Filtering BUYs by vol percentile costs alpha on every variant. |
+| **C10** | BTC momentum gate (allow ETH BUY only when BTC 24h mom > 0) | — | #13 | **Tested 2026-05-04 evening** (same script). All 25 variants LOSE vs baseline. Best (6h / −0.5% threshold, 61 skips): −7.79pp. Audit-suggested 24h / 0.0% threshold: **−85.84pp catastrophic**. Confirms hypothesis: ETH BUYs during BTC negative momentum ARE the good entries (mean-reversion setups). Cross-sectional gating destroys the alpha. |
+| **C03** | SHAP feature ranking | — | #10 | ⚠️ **SUSPECT (harness bug 2026-05-05)** — patcher import-time print fired but runtime patches never reached Mode D's `_test_lgbm_importance`. Δ−4.78 reading is meaningless. Needs retest with fixed harness. |
+| **C31** | Funding rate momentum / acceleration features (chg6h, chg72h, accel) | — | — | ⚠️ **SUSPECT (harness bug 2026-05-05)** — same `runpy.run_module` issue. Δ−5.25 reading is meaningless. Needs retest. (Note: this script `test_c31_funding_momentum.py` reuses the harness's `run_mode_d` helper — same bug.) |
+| **C02** | Multi-horizon emergency-exit ensemble (h5+h8 both SELL → force exit) | #14 | #2 | **Tested 2026-05-04 late evening** ([tools/test_c02_multi_horizon_exit.py](tools/test_c02_multi_horizon_exit.py)). All 16 variants LOSE vs aligned-window baseline +137.50%. Best (W=0h thr≥90, 2 fires): −3.30pp. Worst (W=2h thr=0, 86 fires): −68.71pp. Same family as C09/C10/C24 (rejected 5-min): the model's existing exit timing is already good — emergency exits sell winners 1-3h early during natural drawdowns. Shield + max_hold already handle crashes. |
+
+#### Status summary (updated 2026-05-07 morning — post C04/C56/C08 retests)
+
+- **Untested actionable** (from C01-C29): 3 (C01, C05, C06) — C04 closed DEAD, C07 architectural-skip, C08 closed DEAD
+- **Bug-blocked**: 0
+- **Shelved (revisit-conditional)**: 6 (C11-C16)
+- **🟡 SUSPECT** (harness ran but patches didn't fire — needs retest): **11** (was 14)
+  - Validated DEAD on fixed harness 2026-05-06: C56, C04
+  - Tonight (overnight 2026-05-07 → 2026-05-08): C35, C57, C50, C47, C44, C42, C43 + C05/C06 rerank → expected to drop SUSPECT pool to 5 (C03, C12, C23, C29, C31 — Tier C low priors)
+- **Dead (genuinely closed, reliable)**: C02, C04, C08, C09, C10, C13, C17, C18, C19, C20, C21, C22, C24, C25, C26, C27, C28, C56 = **18 ideas**
+- **C60-C82 archive-recovered**: 23 candidates (all UNTESTED — clean)
+- **Total canonical IDs catalogued**: 82
+
+#### Pattern observed this week — REVISED with harness bug awareness
+
+The "every feature-addition fails" claim is now WEAKER — at least 9 of those failures (C03, C23, C12, C29, C31, plus 4 overnight) had a broken harness. **The pattern may not hold once the harness is fixed.** The reliable failures (C09 vol-entry, C10 BTC momentum, C24 5-min PA exit, C02 multi-horizon exit) were ALL exit/entry filters tested via standalone overlay sims — those still genuinely failed because they correctly tested the filter logic against the full live trader policy stack.
+
+**Revised top priorities post-fix**:
+1. Fix the harness (~15 min)
+2. Verify fix with C56 HMM (~35 min) — Tier S empirical positive prior
+3. Re-run remaining 13 SUSPECT verdicts on fixed harness if C56 retest produces a different result than overnight
+
+#### Working priority order (top untested) — REVISED 2026-05-05 morning
+
+**STEP 0 — BLOCKING**: Fix harness bug in [tools/test_14_ideas.py](tools/test_14_ideas.py) — replace `runpy.run_module(...)` with direct `main()` call (~15 min). Without this, every harness-driven test produces meaningless deltas.
+
+**STEP 1 — Validate fix** (~35 min): Re-run C56 HMM (single idea). Confirm `[C56] HMM regime features added` appears in log during build_all_features. Compare delta to overnight FAIL (-5.34) — if materially different, fix is working.
+
+**STEP 2 — Re-run SUSPECT verdicts** (~6-8h on Desktop, only if C56 retest changes verdict):
+- ⭐ Tier S retests: C56 HMM, C35 wavelets (positive prior on prior engine)
+- Tier A retests: C42 CatBoost, C43 Stacking, C04 VR, C57 MS-AR, C50 PF, C44 Quantile, C47 vol-adj label
+- Tier C retests (probably stay FAIL): C03 SHAP, C23 per-regime, C12 stability, C29 HAR-RV+Hurst, C31 funding momentum
+
+**STEP 3 — Untested ideas with no harness dependency** (run anytime in parallel):
+1. **C01** Vol-scaled 4mo — 30 min, config-only ship if pass — **never actually launched yet**
+2. **C08** Single-horizon CDaR variant — 2h, open follow-up after C13 HRST fail
+3. **C16 narrow** Disaster brake at −5% retest — 30 min, current max DD 5.29% so brake fires now
+
+#### How to cite ideas going forward
+
+✅ "C01 (vol-scaled 4mo)" — preferred, unambiguous
+✅ "C13 (CDaR — R20#6 / no harness entry)" — when you need the legacy mapping
+❌ "Idea #6" alone — ambiguous between R20 (CDaR) and H14 (har_rv)
+❌ "the new ideas" / "the harness ideas" — drift-prone
+
+---
+
+### 📋 PROPOSED IDEAS C30-C59 (added 2026-05-04 evening)
+
+30 new candidate ideas, vetted as applicable to the engine and not previously tested. Pattern caveat: every feature-addition idea this week failed; **structural-change ideas are the highest-prior candidates** (marked ⭐ below).
+
+#### Feature engineering (C30-C41) — ⚠️ near-100% prior-FAIL given week's pattern
+
+| CID | Idea | Status | Notes |
+|---|---|---|---|
+| ~~C30~~ | Order Flow Imbalance (delta volume) | rejected by user 2026-05-04 | Not applicable per user (binary all-in/all-out) |
+| ~~C31~~ | Funding rate momentum / acceleration | **DEAD** | Tested 2026-05-04; Δ−5.25 avg APF |
+| C32 | Liquidation cascade event features | proposed | Binance liquidation feed; not currently downloaded |
+| C33 | Bid-ask spread compression z-score | proposed | Distinct from quarantined raw spread_bps |
+| C34 | ETH-BTC cointegration residual | proposed | Engle-Granger residual, distinct from lead-lag |
+| C35 | Wavelet multi-scale decomposition | proposed | `pywavelets`, 3-4 scale coefficients |
+| C36 | News/social sentiment polarity (CryptoPanic + Santiment) | proposed | Polarity, not event volume (different from C28 GDELT) |
+| C37 | Stablecoin issuance velocity | proposed | First difference of mcap (level was C28-class dead) |
+| C38 | Korea / Coinbase premium spread | proposed | Bithumb public API |
+| C39 | Long/short ratio (Binance traders) | proposed | Binance Futures API |
+| C40 | Rolling skewness / kurtosis features | proposed | 3rd/4th moments, currently absent |
+| C41 | Yield curve features (US10Y−US2Y, US10Y−US3M) | proposed | FRED data; current macro has only level series |
+
+#### Model architecture (C42-C46) — ⭐ structural changes, higher prior
+
+| CID | Idea | Status | Notes |
+|---|---|---|---|
+| ⭐ **C42** | CatBoost as 4th ensemble model | proposed | Different regularization than XGB; native categorical handling |
+| ⭐ **C43** | Stacking meta-learner (LR over RF+LGBM+XGB) | proposed | Different from C15 meta-labeling (C43 changes primary signal) |
+| **C44** | Quantile regression target | proposed | LGBM `objective='quantile', alpha=0.7` — tail-aware loss |
+| **C45** | Conformal prediction calibrated intervals | proposed | Distinct from C18 Platt (intervals not probability mapping) |
+| **C46** | Bayesian hyperparameter optimization (BoTorch GP) | proposed | Replace Optuna TPE sampler |
+
+#### Label / objective (C47-C51)
+
+| CID | Idea | Status | Notes |
+|---|---|---|---|
+| **C47** | Vol-adjusted label (`ret_h / σ_h > threshold`) | proposed | Distinct from C20 triple-barrier label |
+| **C48** | Sharpe-aware label | proposed | `ret > thr AND vol_pre_entry < pX` |
+| **C49** | Multi-class label (5 classes) | proposed (~1 day) | Strong/weak buy/sell + hold |
+| **C50** | Profit factor as primary Mode V scoring | proposed | Replace `combined_score = ret × WR` |
+| **C51** | Maximum Adverse Excursion (MAE) penalty | proposed (blocked) | Same blocker as C05/C06 (per-trade-return list in grid CSV) |
+
+#### Exit / execution (C52-C55)
+
+| CID | Idea | Status | Notes |
+|---|---|---|---|
+| C52 | ATR-based vol-adapted trailing stop | proposed | Distinct from C14 (static σ) and C16 (HWM-x%) |
+| C53 | Volume-spike exit trigger | proposed | sell when vol_5m > 3 × 30d avg AND in profit |
+| C54 | Time-decay sell threshold | proposed | min_sell_pnl decreases as hold_h grows |
+| C55 | Liquidity-aware entry timing | proposed | delay BUY if last 5m vol < 30d p20 |
+
+#### Regime detection (C56-C59) — ⭐ structural, higher prior
+
+| CID | Idea | Status | Notes |
+|---|---|---|---|
+| ⭐ **C56** | HMM 2-state Gaussian regime detector | proposed | `hmmlearn`; unsupervised state-space model |
+| ⭐ **C57** | Markov-switching AR detector | proposed | `statsmodels`; regime-dependent AR coefficients |
+| **C58** | Yield-curve macro regime detector | proposed | depends on C41 features first |
+| **C59** | Cluster-based regime (K-means on macro+vol) | proposed | unsupervised, multi-dimensional |
+
+---
+
+### 📋 ARCHIVE-RECOVERED IDEAS C60-C82 (added 2026-05-04 late evening)
+
+Cross-checked against `archive/literature_v3_ideas.md` + `archive/testing_literature*.csv`. These were either:
+- **KEPT** in the V3 lit (approved 2026-03 era for testing) but never executed; OR
+- **PENDING** in the V3 lit (lower priority, never reviewed/executed); OR
+- on the V3 list with prior tested-MIXED result on BTC + prior engine (different from current ETH + post-embargo-fix engine).
+
+**Note on archive-tested ideas already in C01-C59**: 2 cross-list overlaps were tested in `archive/testing_literature_v2.csv` with MIXED results on BTC prior engine — these stay at their existing CIDs but flagged as "deserve current-engine retest":
+- **C35 wavelets** — BTC 8h beat baseline 92%/52% (+40pp) but 4h crashed; on prior engine
+- **C56 HMM regime** — BTC 8h beat baseline 98%/52% (+46pp) but 4h crashed; on prior engine
+
+Old ideas already tested + DEAD on prior engine, NO retest needed: C17 fracdiff, C20 triple-label, C18 calibration (all already DEAD on current engine too).
+
+#### KEPT in V3 lit, never executed — 9 ideas (C60-C68) — prior approval = mid-priority
+
+| CID | Idea | V3 # | Effort | Notes |
+|---|---|---|---|---|
+| **C60** | US Market Hours Flag (binary NYSE 14:30-21:00 UTC) | #3 | ~1h | Calendar feature; handle DST |
+| **C61** | Volatility of Volatility (std of vol_12h over 24h+48h) | #5 | ~1h | 2 features added |
+| **C62** | DXY Acceleration (2nd derivative of DXY) | #6 | ~30 min | Uses existing m_dxy data |
+| **C63** | KAMA Slope (Kaufman Adaptive MA) | #7 | ~1.5h | Must beat existing SMA features (sma20_to_sma50h Grade 4); else doesn't add value |
+| **C64** | Ehlers Fisher Transform | #8 | ~1.5h | Must beat existing rsi_14h/stoch_k_14h/bb_position_20h |
+| **C65** | Approximate Entropy (ApEn) | #9 | ~2h | Predictability via `nolds`; windows 48h+120h |
+| **C66** | BTC Dominance ROC (CoinGecko) | #10 | ~2h | New macro feature; rate-of-change of BTC mcap dominance |
+| **C67** | Connors RSI (RSI(3) + streak + percentile composite) | #12 | ~1h | Composite oscillator |
+| **C68** | Anchored Expanding Window (methodology) | #13 | ~3-4h | Conflicts with rolling-window design — architectural |
+
+#### PENDING in V3 lit, never executed — 14 ideas (C69-C82) — lower priority
+
+| CID | Idea | V3 # | Effort | Notes |
+|---|---|---|---|---|
+| C69 | Chaikin Money Flow | #23 | ~1h | Volume-weighted accumulation/distribution |
+| C70 | Lempel-Ziv Complexity | #24 | ~2h | Compression-based complexity of direction sequence |
+| C71 | Fractal Dimension (Higuchi) | #25 | ~2h | Price path complexity |
+| C72 | Temporal Cross-Validation (non-overlapping folds) | #28 | ~3h | Methodology; conflicts with current 3-fold rolling holdout |
+| C73 | Dispersion Ratio (cross-sectional vol / avg vol) | #29 | ~1.5h | Cross-asset only meaningful with universe enabled |
+| C74 | Equity Put/Call Ratio (CBOE) | #30 | ~2h | Contrarian sentiment from options market |
+| C75 | Stablecoin Supply Ratio (BTC mcap / stable supply) | #34 | ~1h | Different angle from C37 (issuance velocity) |
+| C76 | Active Address Momentum (30d/365d ratio) | #35 | ~2h | On-chain; CoinMetrics |
+| C77 | Google Trends Momentum (ROC of "Bitcoin" search) | #36 | ~3h | New macro feature; trends API |
+| C78 | Transfer Entropy (BTC→altcoin) | #37 | days | Computationally heavy; directional info flow |
+| C79 | Multifractal Spectrum (MFDFA) | #38 | ~3h | Singularity spectrum width as regime indicator |
+| C80 | Mutual Information Decay | #39 | ~2h | MI between returns at increasing lags |
+| C81 | DCCA Detrended Cross-Correlation | #40 | ~3h | Scale-dependent correlation between assets |
+| C82 | Hilbert Transform Dominant Cycle | #42 | ~3h | Adaptive oscillator parameter extraction |
+
+#### Recommended priority order (FULL — combining C01-C82 untested + proposed)
+
+1. **C01** vol_scaled_4mo — running on user's terminal
+2. ⭐ **C56** HMM detector — different regime mechanism, ~3h. **Prior**: BTC 8h beat baseline +46pp on prior engine; deserves current-engine retest.
+3. ⭐ **C35** wavelet decomposition — feature-add, ~1.5h. **Prior**: BTC 8h beat baseline +40pp on prior engine.
+4. ⭐ **C42** CatBoost — different model family, ~5h
+5. ⭐ **C43** Stacking meta-learner — different ensemble strategy, ~6h
+6. **C50** PF objective — different scoring metric, ~4h
+7. **C04** Variance Ratio detector — already on untested list, ~2-3h
+8. **C61** Volatility of Volatility — KEPT on V3 lit, never executed, ~1h
+9. **C66** BTC Dominance ROC — KEPT on V3 lit, never executed, ~2h
+10. **C47** Vol-adjusted label — KEPT on V3 lit (#2), never executed, ~4h
+11. **C40** Skewness/Kurtosis — KEPT on V3 lit (#11), never executed, ~1h
+12. **C44** Quantile regression target — tail-aware loss, ~4.5h
+13. **C57** Markov-switching AR — different from C56 HMM, ~7h
+14. **C60** US Market Hours Flag — cheap calendar feature, ~1h
+15. **C63** KAMA Slope — must beat existing SMA features, ~1.5h
+
+Items 8-11 reflect the "prior approval" boost from the V3 lit. They're not just untested — they were specifically approved-for-testing in the V3 era and never got run.
+
+---
+
+### 📊 20-IDEAS ROADMAP SCOREBOARD (built 2026-05-03 — superseded by canonical list above; kept for reference)
+
+CFA-grade research roadmap. 20 academic-literature ideas applicable to this engine's architecture (binary all-in/all-out, hourly cycle, regime-switching ETH-only, no model persistence, LGBM-dominant). Ranked by impact at scoreboard-build time.
+
+**Test methodology** (for ideas tested in this session): cheap monkey-patched Mode D smoke test, `--no-persist --no-data-update --replay 1440`, write to `_TAGGED` paths. Promote to full HRST validation only if smoke wins by ≥+5pp.
+
+**Status as of 2026-05-03 19:50 CEST:**
+- **Tested in THIS session (today, 2026-05-03):** ideas #1, #2, #3, #4, #5, #6 (six ideas)
+- **Tested HISTORICALLY (pre-session, per CLAUDE.md audit trail):** ideas #7, #11
+- **UNTESTED:** ideas #8, #9, #10, #12, #13, #14, #15, #16, #17, #18, #19, #20 (twelve ideas)
+
+| # | Idea (impact-ranked) | Citation | What it does (mechanism) | Test status | Result / Verdict |
+|---|---|---|---|---|---|
+| **1** | **Fractional differentiation features** | López de Prado *AFML* Ch 5; Hosking 1981 *Biometrika* | Memory-preserving differencing. Computes `fd_*` features at fractional `d ∈ {0.3, 0.4, 0.5}` on log-close + log-vol. Integer differencing (`logret`) makes series stationary but kills long-memory; frac-diff retains memory while passing ADF stationarity tests. Hypothesis: top-3 selection-frequency features (`price_to_sma100h`, `logret_120h`, `sma20_to_sma50h`) would benefit. | **TESTED today** ([tools/test_fracdiff_mode_d.py](tools/test_fracdiff_mode_d.py), Mode D smoke 5,6,7,8h, 14:15-15:30 CEST) | **DEAD on ETH hourly.** All 5 `fd_*` features computed cleanly (88-100% coverage). LGBM importance did NOT pick any frac-diff feature into top tier on any horizon; grid winners did NOT include them. Original hypothesis disproved. Possible reasons: ETH hourly already has low long-memory in 60d window (Hurst<0.5); `price_to_sma100h` ratio partially preserves memory; literature documents frac-diff for DAILY/WEEKLY equity series, not hourly crypto. **Do not retry on ETH hourly without changing d-range or window.** |
+| **2** | **Probability calibration** (Platt + isotonic) | Platt 1999 *Adv.Large Margin Classifiers*; Niculescu-Mizil & Caruana 2005 *ICML* | Re-maps raw LGBM scores to calibrated probabilities. Two-step test: Step A audited Brier score on 20 walk-forward cycles (raw 0.2774 → Platt 0.2285 = 17.6% improvement, model overconfident at high scores). Step B injected calibrator into Mode D's `generate_signals` to test impact on returns. | **TESTED today** ([tools/test_calibration_audit.py](tools/test_calibration_audit.py) + [tools/test_calibration_mode_d.py](tools/test_calibration_mode_d.py), 14:44-16:45 CEST) | **DEAD architecturally.** Step B catastrophic: returns +22-25% (4 horizons) vs prod baselines +46-67%, deltas −23 to −44pp. Trade counts collapsed 30-70 → 3-6. **Root cause**: in binary all-in/all-out engine where Mode S empirically tunes the confidence threshold, calibration is COSMETIC RELABELING — same trades fire whether threshold is 65% on raw or 50% on calibrated. AND Platt on imbalanced data (30% positives) squeezes probs toward base rate, killing trade frequency. Same family as Kelly (#11). Revisit only if tiered position sizing or EV-gated entries are added. |
+| **3** | **VPIN entry filter** (Volume-synchronized PIN) | Easley, López de Prado, O'Hara 2012 *RFS* | Estimates informed-trading toxicity in flow via volume buckets. Higher VPIN = more adverse selection. Test: skip BUYs when `VPIN > threshold`. Sweep over `lookback ∈ {30m, 1h, 2h, 4h}` × `threshold ∈ {0.3, 0.4, 0.5, 0.55}`. | **TESTED today** ([tools/test_vpin_filter.py](tools/test_vpin_filter.py), 15:47 CEST) | **SHELVED.** Best variant `lb=30m thr=0.5`: +83.22% vs baseline +79.39% = **+3.83pp** (15 BUYs skipped). Below +5pp ship threshold; within HRST run-to-run nondeterminism (5-10pp). Aggressive thresholds (0.3-0.4) skipped 130-160 BUYs and lost 20-70pp. VPIN distribution: p50=0.40-0.41, p90=0.50-0.55 — no fat right tail of toxic days in 60d window. Revisit with: (a) 5-min sub-loop at native cadence (literature uses 1-min), (b) 90d/6mo window with known stress events, (c) combine with realized-vol filter. |
+| **4** | **Turbulence Index kill-switch** | Kritzman & Li 2010 *FAJ* | Mahalanobis distance over multi-asset cross-section (BTC+VIX+DXY+SP500+GOLD+US10Y, 6-dim). 252d rolling cov + 252d z-score. Halt trading when turb_z > threshold. | **TESTED today** ([tools/test_turbulence_killswitch.py](tools/test_turbulence_killswitch.py), 15:49 CEST) | **DEAD on ETH bull regime.** All firing variants HURT: `z≥1.0` → −9.96pp (skipped 17 BUYs), `z≥1.5` → −5.83pp (skipped 9). Higher thresholds didn't fire (only 1 BUY day in 60d had `turb_z ≥ 2.0`). **Killer finding**: high-turb days in 60d were FOLLOWED by GOOD ETH outcomes — opposite of Kritzman & Li's premise. Mechanism: in crypto bull regimes, cross-asset stress spikes (VIX up, equities down) coincide with crypto dip-buying setups; model BUYs during turbulence were RIGHT, not WRONG. **Directional sign is wrong.** May still be useful as a FEATURE (not kill-switch) in different macro phase. |
+| **5** | **Feature stability filter** (Carhart-style robustness) | Carhart 1997 *J.Finance* (4-factor stability principle, applied here to feature ranking) | Pre-filter time-unstable features before LGBM uses them. Compute LGBM ranking on 3 overlapping sub-windows (oldest 50%, middle 50%, newest 50%); drop features where `max_rank − min_rank > 30` positions; return ranking on full data using only stable features. Hypothesis: HRST 5-10pp run-to-run variance comes from LGBM making feature choices on noise. | **TESTED today** ([tools/test_stability_filter_mode_d.py](tools/test_stability_filter_mode_d.py), 16:03 CEST) | **DEAD.** Mode D ETH 5,6,7,8h vs un-filtered baseline: APF deltas mixed (3/4 horizons slightly worse, 1 better, all within ±2). Return deltas mostly negative or noise (5h −5.6pp, 6h −0.9pp, 7h −4.9pp, 8h −0.2pp). Winning configs use SAME or MORE features (f=13-25 unchanged). **Why it died**: (a) LGBM bagging already does this internally via tree splits, (b) sub-window ranking itself is noisy at 50% data, (c) regime-dependent importance is REAL signal — feature important in bull-not-bear is regime-specific info, not noise. Revisit only with stricter threshold (>50) + longer window (180d). |
+| **6** | **CDaR objective scoring** | Chekhlov, Uryasev, Zabarankin 2005 *Mathematical Finance* | Replace `combined_score = ret × WR` with `score = (ret × WR) − λ × max_dd_pct`. CDaR_α = expected drawdown given DD is in worst α%. Aligns Mode V scoring with R4 rollback rule's max-DD threshold (rollback fires on >10pp DD). Default `λ=1.0`. | **TESTED 2026-05-03 smoke + 2026-05-04 HRST** ([tools/test_cdar_audit_only.py](tools/test_cdar_audit_only.py) + [crypto_trading_system_ed_cdar.py](crypto_trading_system_ed_cdar.py)) | **SHELVED at HRST level.** Smoke test 2026-05-03: CDaR top-1 STRICTLY DOMINATED APF top-1 on every horizon (5h: ret +35 vs +12, 6h: ret +45 vs +31, 7h: ret +49 vs +21, 8h: ret +20 vs 0). Engine fork shipped 2026-05-03 evening. **HRST validation 2026-05-04 (laptop ~9h)**: Mode T total **+71.22% vs current live +86.19% = −14.97pp UNDER threshold.** Mode S WINNER `sma24>sma100 5h@75%/8h@65%` does not exploit CDaR's strongest single-horizon win (8h Refined #1 +67.03%); regime sweep prefers shorter bull (5h) over CDaR-favored long-horizon configs. Smoke test win didn't translate to HRST. **DO NOT PROMOTE.** Open follow-up: single-horizon-only CDaR scoring (no regime split) untested. |
+| **7** | **Triple-barrier method as exit overlay** | López de Prado *AFML* Ch 3 | Vol-adaptive barriers (upper σ × lower σ × vertical horizon h) replace model SELL + shield + max_hold. Exit on whichever barrier is hit first. | **TESTED HISTORICALLY** (2026-04-26, [tools/test_t6_triple_barrier.py](tools/test_t6_triple_barrier.py)) — NOT a session test | **SHELVED.** Best config (`up=6σ lo=2σ vert=24h conf=90`): 30d +6.77pp, 60d +10.48pp, 90d +1.24pp, 47 trades. 60d gain didn't survive to 90d. Not promotable, but not catastrophically wrong. |
+| **8** | **Triple-barrier method as TRAINING LABEL** | López de Prado *AFML* Ch 3 | Replace `label = (ret > 2×fee)` with triple-barrier label (1 if upper barrier hit first, 0 otherwise). Aligns label with risk-adjusted realized outcome rather than raw return threshold. | **TESTED HISTORICALLY** (2026-03-14 BTC, archived in `archive/testing_literature.csv`) — NOT a session test | **DEAD.** BTC same-day baseline head-to-head: baseline 4h +57.22% / 8h +74.03% vs triple_barrier_label 4h +29.22% / 8h +22.53%. Lost on return (−28pp / −51pp), WR (−9pp / −10pp), accuracy (−16pp / −13pp). Lower-return label collapses signal. Earlier "+29% standalone" framing was misleading — same-day baseline beat it by 30-50pp. |
+| **9** | **Meta-labeling secondary classifier** | López de Prado *AFML* Ch 3 | Train second LGBM on whether to ACT on primary BUY signals. Primary picks direction, meta picks size/skip. Hypothesis: filter false BUYs without retraining primary. | **TESTED HISTORICALLY** (AB matrix variants D + E, 2026-04-26/27) — NOT a session test | **SHELVED — door open.** R3 RESOLVED: E (meta on STRONG base) lost −2.12pp vs A. D (meta on WEAK base) gained +6.26pp but lost overall to A by −15.14pp. Conclusion: meta only helps when primary is broken. Door open for SOL/BTC/XRP retests (those assets shelved themselves for other reasons). |
+| **10** | **Asymmetric loss / class weights** (`scale_pos_weight`) | Standard ML | Penalize false BUYs more than false SELLs via training-time class weighting. Sweep weights ∈ {0.3, 0.5, 0.7, 1.0, 1.3, 1.5}. | **TESTED HISTORICALLY** (2026-04-19 ETH 6h+8h, [tools/test_asymmetric_loss.py](tools/test_asymmetric_loss.py)) — NOT a session test | **DEAD at high conf thresholds.** All weights produced identical 3 trades (100% WR) on 6h. On 8h: weight=0.7 gained +0.27pp over baseline — noise. The 95%/85% confidence threshold already filters aggressively, so penalizing FPs at training time changes nothing. |
+| **11** | **Kelly criterion position sizing** | Kelly 1956 *BSTJ*; Thorp *Beat the Dealer* | Size positions by `f* = (p×b − q) / b` where `p` = win prob, `b` = win/loss ratio. Replaces fixed all-in. | **EVALUATED HISTORICALLY** (2026-04-19, no backtest run) — NOT a session test | **DEAD architecturally.** Same family as #2 calibration. Architectural mismatch: Kelly sizes by confidence GRADIENT (95%=big, 65%=small), but engine only enters at 85-95% conf with NO position-size gradient to exploit. Would only matter if confidence thresholds were lowered. |
+| **12** | **Volatility-scaled horizons** | Standard regime adaptation literature | Pick horizon based on 24h realized vol percentile vs 30d window. High vol → shorter 6h horizon (faster signal); low vol → longer 8h horizon (more confirmation). | **TESTED HISTORICALLY on 2-month, 4-month UNTESTED** (2026-04-19, [tools/test_vol_scaled_horizon.py](tools/test_vol_scaled_horizon.py)) — NOT a session test | **🟡 PROMISING.** 2-month: `vol_2band low→8h high→6h @90%` = +33.82% / 46 trades / 65% WR — beats current tsmom regime by +5.02pp and beats every single-horizon baseline. **4-month validation pending**: `python tools/test_vol_scaled_horizon.py --replay 2880` (~30 min). |
+| **13** | **Per-regime feature set** | Open question (no specific citation) | Bull regime uses more technical features, bear uses more macro. Asymmetry already happens organically (6h has 7 features mostly PySR+technical; 8h has 32 features kitchen-sink) but never as deliberate design. | **TESTED 2026-05-04** (overnight harness, [tools/test_14_ideas.py](tools/test_14_ideas.py) idea #1) | **DEAD.** Mode D smoke ETH 5,6,7,8h: avg APF Δ−1.18 vs untagged baseline. Per horizon: 5h Δ+2.21, 6h Δ−1.82, 7h Δ−5.11, 8h Δ+0.00. The 7h horizon (which the May 1 8h HRST liked as bull) regressed hardest. **Hypothesis disproved** — forcing the bull→tech / bear→macro split costs alpha vs letting LGBM importance-rank the kitchen sink. |
+| **14** | **Multi-horizon emergency-exit ensemble** | New idea (no formal citation) | Force exit when 5h AND 8h both flip SELL within 1h. Per-horizon signal cache `data/eth_per_horizon_signals_90d.pkl` already exists. Distinct from rejected 5-min price-action triggers. | **UNTESTED in current form** (T1b entry-side ensemble was tested + shelved 2026-04-27, but exit-side variant untested) | **UNTESTED.** Effort: 1-2h. Cache already exists. |
+| **15** | **5-minute emergency-exit price-action overlay** | New idea (no formal citation) | Skip out fast on 5m crash signature (e.g., `ret_5m ≤ -0.7%` AND `d2_5m ≤ -0.3`). Goal: catch crashes before hourly cycle triggers. | **TESTED HISTORICALLY** (35 variants 2026-04-27, [tools/forensic_today_crash.py](tools/forensic_today_crash.py)) — NOT a session test | **DEAD on ETH bull regime.** Best `armed_at_pnl≥X% + thr=-2.0` fired 0 times in 60d. `-1.0%` threshold lost −23.66pp on 60d. Forensic of Apr 27 ETH crash: NO clean combo (max precision 12.5% — 42 false positives per real crash in 60d). False alarms eat alpha; hourly shield+max_hold+model SELL already handle 90% of crashes. |
+| **16** | **Stop-loss / take-profit / trailing-stop variants** | Standard risk management | Various: fixed -2%, -5%, -7% disaster brake, +1% TP, trailing-stop at HWM-x%, profit-lock at +0.3%. | **TESTED HISTORICALLY** (8+ variants, 2026-04-14, [tools/test_t5_batch.py](tools/test_t5_batch.py) and earlier) — NOT a session test | **DEAD overall, ONE viable.** Baseline (no SL) won every dimension: +1.11% PnL / −8.71% DD vs all variants. Profit-lock variants (D/E/F): −11% to −20% PnL (chops fat tail). Trailing HWM variants (G/H): catastrophic. **Only viable**: −5% to −7% disaster brake as free insurance (fires 0 times in 60d, dormant). User keeps disabled. |
+| **17** | **Multi-timeframe fusion / TabPFN / CPCV** | Multiple | Stack hourly + 4h + daily timeframe predictions / use tabular transformers / use Combinatorial Purged CV (López de Prado AFML Ch 12). | **TESTED HISTORICALLY** (multiple tests 2025-2026) — NOT a session test | **DEAD.** All variants dominated by single-timeframe LGBM. CPCV incompatible with temporal decay (gamma weighting). 4h overfits (PBO=1.0). |
+| **18** | **LSTM as ensemble partner** | Standard DL | Add LSTM votes alongside RF+LGBM. Hypothesis: sequence model catches patterns trees miss. | **TESTED HISTORICALLY** (2026-03-26 V1.8 test) — NOT a session test | **DEAD.** LSTM solo: 0 valid results (all failed). LSTM+LGBM ≡ RF+LGBM (LSTM votes randomly, partner carries all signal). LGBM dominance confirmed. |
+| **19** | **PySR for regime labels** | Cranmer 2023 *PySR* | Use symbolic regression to discover bull/bear regime detector formula instead of hand-crafted (sma24>sma100 etc). | **TESTED HISTORICALLY** (2026-03-29 Mode P regime label test) — NOT a session test | **DEAD as label, ALIVE as feature.** Best PySR regime accuracy 58% — too weak. Hand-crafted detectors (sma24>sma100, tsmom_672h, vol_calm) win the joint sweep. Keep PySR for FEATURE synthesis (where pysr_1..5 are Grade 4, used in 21-42% of production models). |
+| **20** | **GDELT geopolitical features** | GDELT DOC 2.0 API + custom features | 21 features (iran_vol, geopolitical_tone, geopolitical_chg24h, iran_zscore, etc.). 5-10 min download per Mode D run. | **TESTED HISTORICALLY** (2026-04-10 added, 2026-04-19 disabled) — NOT a session test | **DEAD.** iran_vol_zscore ranked #9 once (LGBM importance) but selected into 0/33 production models across ETH/BTC/SOL/LINK/XRP. VIX + equity 1d changes capture macro fear faster (market-priced). Disabled both download and pipeline 2026-04-19. Code kept commented for future use. |
+
+### Scoreboard summary
+
+**This session (2026-05-03):**
+- 6 ideas tested: #1, #2, #3, #4, #5, #6
+- Wins: 1 (#6 CDaR — promoted to engine fork, validation HRST pending)
+- Dead: 3 (#1 fracdiff, #2 calibration, #4 turbulence)
+- Shelved: 2 (#3 VPIN, #5 stability filter)
+- Hit rate today: **1/6** for ideas that produced a real ship-worthy signal
+
+**Overnight harness session (2026-05-03 → 2026-05-04):**
+- 5 fully-wired harness ideas tested: harness #1 (=scoreboard #13 per_regime_features), harness #5 (stability_strict, sibling of scoreboard #5), harness #6 (har_rv), harness #7 (hurst_feature), harness #10 (shap_ranking)
+- 4 STUBs ran: harness #2 (multi_horizon_exit = scoreboard #14), #12 (vol_entry_filter), #13 (btc_momentum_gate), #14 (variance_ratio_detector)
+- 1 HRST ran: scoreboard #6 CDaR validation
+- Results: ALL 4 fully-wired ideas FAILED (Δ−0.75 to −3.09 vs baseline). #10 needs `pip install shap`. CDaR HRST FAILED (Mode T −15pp under live). #12+#13 ERROR'd on harness bug.
+- Newly DEAD this morning: scoreboard #6 CDaR (HRST failed despite Mode D smoke win), scoreboard #13 per_regime_features (harness #1 FAIL)
+- Net: 0 wins out of 6 attempted today.
+
+**Lifetime status across all 20 (updated 2026-05-04 morning):**
+- ✅ Ship-worthy: 0 (CDaR was the candidate; HRST validation FAILED; SHELVED)
+- 🟡 Promising: 1 (#12 vol-scaled horizons — 4mo validation still untested, highest EV remaining)
+- 🟦 Open / never tested: 1 (#14 multi-horizon emergency-exit ensemble — cache exists, 1-2h work)
+- ⚪ Shelved (boundary or contextually conditional): 5 (#3 VPIN, #5 stability filter, #6 CDaR, #7 triple-barrier exit, #9 meta-labeling)
+- 🔴 Dead (catastrophic or architectural mismatch): 13 (#1 fracdiff, #2 calibration, #4 turbulence, #8 triple-barrier label, #10 asymmetric loss, #11 Kelly, #13 per-regime features ← NEW, #15 5-min emergency-exit, #16 SL/TP variants, #17 multi-tf/TabPFN/CPCV, #18 LSTM, #19 PySR-as-regime-label, #20 GDELT)
+
+**Next candidates to run**:
+- **#12** Vol-scaled horizons 4mo confirmation — only remaining promising test. ~30 min.
+- **#14** Multi-horizon emergency-exit ensemble — never tested, cache exists, 1-2h.
+- Then: pivot to live-trader execution-gap work (~17pp unaccounted alpha) or Tier 4 architectural ideas (CUSUM sampling).
+
+---
+
+### 🟢 PROMOTED 2026-05-06 ~15:48 CEST — ETH live config flipped (today's HRST winner)
+
+**Source**: ETH HRST 5,6,7,8h --replay 1440 --no-persist ([logs/ed_v1_20260506_085146.log](logs/ed_v1_20260506_085146.log), started 08:51 → finished 14:24, 5.5h on Desktop). Mode T converged iter 3 with both bull+bear gates active.
+
+**Pre-promotion (May 3 winner)** → **Post-promotion (today's winner)**:
+| Field | May 3 (was live until 2026-05-06 15:48) | 2026-05-06 (LIVE NOW) |
+|---|---|---|
+| Detector | `sma24>sma100` | **`tsmom_672h`** ← reverted |
+| Bull | 6h@65% shield ON | **6h@75% shield OFF** |
+| Bear | 5h@75% shield ON | **8h@65% shield OFF** |
+| Bull gate | disabled | **rr18h≥5.0% OR rr30h≥7.5% cd=36h** ← now active |
+| Bear gate | rr30h≥9% OR rr36h≥9% cd=48h | **rr24h≥4.0% OR rr30h≥6.0% cd=14h** |
+| Max position USD | $14k | $14k (unchanged) |
+| Mode T REF (sim 60d) | +86.19% | (read from log around iter 3) |
+
+**Backup for rollback** (created automatically before promotion):
+- [config/regime_config_ed.backup_20260506_pre_HRST_promote.json](config/regime_config_ed.backup_20260506_pre_HRST_promote.json)
+
+**Rollback (one command)** — restores pre-2026-05-06 (= May 3 winner) config:
+```
+copy config\regime_config_ed.backup_20260506_pre_HRST_promote.json config\regime_config_ed.json
+```
+
+**Material policy deltas vs prior live (May 3)**:
+1. **Detector flipped back to `tsmom_672h`** (28-day TS-momentum) from `sma24>sma100`. The `tsmom` detector won this HRST's Mode S joint sweep — different from the `sma24>sma100` plateau that won May 3.
+2. **Both shields turned OFF** (was: bull ON, bear ON). Mode T's shield+gate joint sweep landed on no-shield + active-gate combo.
+3. **Both gates now active**. Previous live had bull gate disabled and bear gate at long cooldown; now both gates contribute.
+4. **Bull conf 65% → 75%**, **bear conf 75% → 65%** — confidence asymmetry inverted (high bull, low bear) — opposite of May 3.
+5. **Bear horizon 5h → 8h** — material change (5h was rejected in plateau analysis on multiple recent HRSTs).
+
+**Monitoring criteria** (1-2 weeks):
+- Realized alpha vs sim Mode T REF over first 10 trades. If ≥15pp underperformance, rollback per CLAUDE.md R4.
+- Max drawdown vs prior live's historical −10.02% on 60d.
+- Both shields OFF means crashes hit the model-SELL exit timing only (no min_sell_pnl floor, no max_hold cap). Watch for premature loss-cutting OR runaway-loss scenarios that the shield previously caught.
+- Both gates active means BUY frequency may drop materially during recent-rally periods. If trade count collapses below sim Mode T trade count, gates are over-blocking.
+
+---
+
+#### Audit-trail entry — superseded May 3 promotion (kept for context)
+
+**May 3 → May 6 live config** was: `sma24>sma100 bull=6h@65% shield=ON / bear=5h@75% shield=ON, bear gate rr30≥9% OR rr36≥9% cd=48h`. Source: ETH HRST 5,6,7,8h --replay 1440 ([logs/ed_v1_20260502_201318.log](logs/ed_v1_20260502_201318.log), completed 2026-05-03 03:07). Mode S WINNER `sma24>sma100 6h@65%/5h@75% → +77.06% / 70 trades / 84% WR / alpha +60.37%`. Mode T REF +86.19%. Live for 3 days (2026-05-03 09:49 → 2026-05-06 15:48). Rollback to this config: `copy config\regime_config_ed_pre_sma24sma100_20260503.json config\regime_config_ed.json` (backup retained).
+
+---
+
+### (Original 2026-05-03 promotion notes — historical, kept for reference)
+
+**Old live (pre-May-3)**: `tsmom_672h bull=6h@85% shield=OFF / bear=5h@65% shield=ON, bear gate rr30≥9% OR rr36≥9% cd=48h`
+**New live (May 3 → May 6)**: `sma24>sma100 bull=6h@65% shield=ON / bear=5h@75% shield=ON, bear gate UNCHANGED (rr30≥9% OR rr36≥9% cd=48h)`
 
 **Source**: ETH HRST 5,6,7,8h --replay 1440 ([logs/ed_v1_20260502_201318.log](logs/ed_v1_20260502_201318.log), completed 2026-05-03 03:07). Mode S WINNER: `sma24>sma100 6h@65%/5h@75% → +77.06% / 70 trades / 84% WR / alpha +60.37%`. TOP 15 plateau: top 7 entries unanimous on `sma24>sma100 bull=6h / bear=5h` — rock-solid plateau. Mode T converged iter 2: `bull_shield=ON, bear_shield=ON → +86.19%` (+9.14pp shield gain). Mode G found no STRICT-passing rally-cooldown winner, so existing live bear gate was preserved. Per-horizon Mode V: 6h winner (+67.14% / 75% WR) and 5h winner (+52.77% / 66% WR) both refreshed in production CSV.
 
@@ -469,9 +1445,133 @@ copy models\crypto_ed_production_pre_sma24sma100_20260503.csv models\crypto_ed_p
 
 ---
 
-### 🔴 #1 PRIORITY (TODAY, 2026-05-03) — LIVE-TEST the M-29 partial-fill fix
+### 🔴 #1 PRIORITY — CDaR VALIDATION COMPLETE — SHELVED 2026-05-04 morning
 
-**Status**: code shipped 2026-05-02 evening (commit `d568a30`, pushed to `origin/main`). Trader picks it up automatically on next restart via `start_ed_v2.bat`. **Cannot be unit-tested any further — needs a real `/buy` event against Revolut's actual API to validate end-to-end.**
+**Status**: HRST validation completed on laptop overnight (started 2026-05-03 20:05, finished 05:13). **Mode T total +71.22% vs current live +86.19% = −14.97pp BELOW promotion threshold.** Per the decision rule below, this falls in the "Worse by >5pp = CDaR scoring hurts at the full HRST level" branch. **DO NOT PROMOTE.** See "CDaR HRST RESOLVED" section at top for full breakdown.
+
+**Why it failed at HRST level despite winning Mode D smoke test**: smoke-test wins translated to per-horizon Mode V winners cleanly (8h Refined #1 +67.03% was the standout), but Mode S joint sweep picked `sma24>sma100 5h/8h` — NOT a regime that exploits the CDaR-favored long-horizon configs. The strongest CDaR result (8h) gets diluted in Mode S's preference for shorter bull horizons.
+
+**Original smoke-test signal (kept for audit)**:
+- 5h: ret +35.16% vs +12.12% (Δ +23.04pp)
+- 6h: ret +45.46% vs +31.26% (Δ +14.20pp)
+- 7h: ret +49.25% vs +21.22% (Δ +28.03pp), max_dd −7.45pp
+- 8h: ret +19.78% vs −0.05% (Δ +19.83pp), max_dd −5.37pp
+
+**Open follow-up (NOT a current priority)**: does CDaR scoring help at the SINGLE-HORIZON level even if Mode S/T washes out? 8h Refined #1 +67.03% suggests yes for the 8h-only path, but no infrastructure currently exposes single-horizon CDaR scoring without going through Mode S.
+
+**Cleanup options**:
+- Keep `crypto_trading_system_ed_cdar.py` + `_cdar.csv` + `_cdar.json` on disk for the single-horizon-only follow-up (recommended — the work is done)
+- Or delete entirely: `rm crypto_trading_system_ed_cdar.py models/crypto_ed_production_cdar.csv config/regime_config_ed_cdar.json`
+
+**Live trader impact**: ZERO. The CDaR engine wrote only to `_cdar`-tagged paths throughout. Production CSV + regime config untouched.
+
+---
+
+### 📋 PREVIOUS #1 PRIORITY — Stability Filter + CDaR (smoke tests done; CDaR moved to fork above)
+
+#### 🟦 Idea #5 — Feature Stability Filter — SHELVED (see "2026-05-03 shelved" below)
+
+#### 🟨 Idea #6 — CDaR — PROMOTED to engine fork (see #1 above)
+
+(kept here only as audit trail; primary action is the validation HRST above)
+
+**What**: Ideas #5 (Feature stability filter) + #6 (CDaR objective) from the 20-ideas roadmap. Both target a different layer than the 4 dead ideas (frac-diff features, calibration, VPIN filter, turbulence kill-switch):
+- **#5 attacks Mode D's feature selection** — pre-filter time-unstable features before LGBM uses them
+- **#6 attacks Mode V's scoring** — pick configs that better match the R4 rollback rule's max-DD criterion
+
+#### 🟦 Idea #5 — Feature Stability Filter (Carhart-style robustness)
+
+**Hypothesis**: HRST run-to-run nondeterminism (5-10pp variance) is partly driven by individual features whose LGBM importance ranking moves dramatically across sub-periods of training data. If a feature ranks #3 in days 1-30 but #45 in days 30-60, LGBM is making feature-selection decisions on noise.
+
+**Mechanism**: monkey-patch `_test_lgbm_importance` to compute ranking on 3 overlapping sub-windows (oldest 50%, middle 50%, newest 50%) and DROP features whose `max_rank − min_rank > THRESHOLD` (default 30 positions). Then return the standard ranking computed on full data using ONLY the stable features.
+
+**Run on Desktop**:
+```
+python tools/test_stability_filter_mode_d.py
+```
+
+Optional override: `set STABILITY_RANK_THRESHOLD=20 && python tools/test_stability_filter_mode_d.py` (lower = stricter)
+
+**ETA**: ~10-20 min (4 horizons × ~5 min Mode D, 2 concurrent).
+
+**Outputs**:
+- `models/crypto_ed_grid_ETH_<5,6,7,8>h_STABILITY.csv`
+- `logs/stability_smoke_<h>h_<ts>.log`
+- `logs/stability_smoke_summary_<ts>.txt`
+
+#### 🟨 Idea #6 — CDaR Optuna Scoring (Chekhlov, Uryasev, Zabarankin 2005, *Math Finance*)
+
+**Hypothesis**: Mode V's current scoring `combined_score = return × WR` (Critical Rule 7) doesn't penalize deep drawdowns. CLAUDE.md R4 rollback rule explicitly judges live performance on max-DD (>10pp threshold). There's an alignment gap — Mode V picks for return×WR, R4 judges on DD. CDaR_5% = expected DD given DD is in worst 5%. Adding it as a penalty in scoring closes the gap.
+
+**Mechanism**: run Mode D with a thin monkey-patch (eval-function wrapper for diagnostic), then refit the top-15 grid candidates per horizon and compute drawdown series + CDaR_5% per candidate. Rerank under multiple λ values {0.5, 1.0, 2.0, 5.0} where `cdar_score = return_pct − λ × max_dd_pct`. Compare top-3 under each scheme to the current top-3.
+
+**Run on Desktop**:
+```
+python tools/test_cdar_rescore.py
+```
+
+**ETA**: ~30-40 min (Mode D ~10-15 min + refit-top-15-per-horizon ~10-15 min for the audit pass).
+
+**Outputs**:
+- `models/crypto_ed_grid_ETH_<5,6,7,8>h_CDAR.csv` (Mode D outputs, tagged)
+- `output/cdar_audit_ETH_<h>h_<ts>.csv` (per-config rerank under each λ)
+- `logs/cdar_smoke_<h>h_<ts>.log`
+- `logs/cdar_smoke_summary_<ts>.txt`
+
+#### Decision rules
+
+| Test | Win → next step | Marginal | Lose |
+|---|---|---|---|
+| #5 Stability | ≥2 horizons get higher APF AND fewer features in winning config | Same winners as no-filter baseline | APF significantly lower → filter dropped legit features |
+| #6 CDaR | At least one λ value picks a different top-3 with similar returns AND materially lower max-DD | Top-3 identical across all λ → return + max-DD highly correlated | All λ pick configs with much lower returns → λ too aggressive at all settings |
+
+#### Invariants
+- All writes are `_STABILITY` / `_CDAR`-tagged in `models/`, or written to `output/` / `logs/` — production untouched
+- `--no-persist` + `--no-data-update` prevent any state leakage
+- Patchers self-clean on exit (try/finally)
+
+#### Run order recommendation
+- **#5 first** (~10-20 min, faster, simpler audit). If it doesn't help, run #6 (~30-40 min, more involved audit but pure-rescore so the value is clearer to interpret).
+- **OR run both in parallel on different machines** — no file collision since outputs are differently-tagged.
+
+**Citations**: Chekhlov, A., Uryasev, S., Zabarankin, M. (2005) "Drawdown Measure in Portfolio Optimization", *Mathematical Finance* 15(3). Carhart, M. (1997) "On Persistence in Mutual Fund Performance", *J. Finance* — 4-factor stability principle applied here to feature ranking.
+
+---
+
+### 🟡 #2 PRIORITY — M-29 partial-fill fix — HOT-PATH-CLEAN, COLD-PATH UNTESTED IN PROD (audit 2026-05-06)
+
+**Status as of 2026-05-06**: code shipped 2026-05-02 evening (commit `d568a30`, pushed to `origin/main`). Trader running with fix since restart. **6 post-fix BUYs audited, 0 partial-fills observed → cold path (the recalc/cap logic) hasn't been exercised against real exchange behavior yet.**
+
+**Audited BUYs since fix shipped (2026-05-02 → 2026-05-06)**:
+
+| # | Time (UTC) | Target | Recorded `usd_invested` | Maker attempts | Partial-fill? |
+|---|---|---|---|---|---|
+| 1 | 2026-05-03 20:02:11 | $12,000 | $12,000.00 | 4 single-leg | No |
+| 2 | 2026-05-04 22:01:07 | $12,700 | $12,700.00 | 1 single-leg | No |
+| 3 | 2026-05-05 15:01:12 | $14,000 | $13,999.99 | 3 single-leg | No |
+| 4 | 2026-05-05 23:37:30 | $14,000 | $14,000.00 | 4 single-leg | No |
+| 5 | 2026-05-06 03:01:07 | $14,000 | $14,000.00 | 3 single-leg | No |
+| 6 | 2026-05-06 15:00:33 | $14,000 | $13,999.99 | 1 single-leg | No |
+
+All 6 hot-path-clean (recorded basis = target ± $0.01 safety margin, never over-target). No `[M-29 recalc]` / `[M-29 cross-check]` / `Target reached` markers fired in any post-fix log → recalc path silent.
+
+**Pre-fix base rate of bug** (for context — 3/3 BUY partial-fills exhibited the bug):
+
+| Date | Recorded usd_invested | Bug evidence |
+|---|---|---|
+| 2026-04-25T12:09:16Z | $5,148.47 (synced) | Cascading 2-stage partial: wallet drained $12,423 → $0.01; sync-recovery |
+| 2026-04-28T08:02:00Z | $12,521.74 | **Over-target by $521.74** |
+| 2026-05-02T14:03:57Z | $12,609.53 | **Over-target by $609.53** (canonical bug event) |
+
+**Verdict**: fix appears to be working but cold path is statistically unconfirmed. Per the original protocol "If it works correctly across 3-5 BUYs (at least 1 with a partial fill): this entry moves to Closed." — we have 6 BUYs but **zero partial-fills since fix**. Three options:
+
+1. **Accept hot-path correctness as sufficient** (9 unit tests in [tools/test_m29_partial_fill_bug.py](tools/test_m29_partial_fill_bug.py) cover the cold path including the May-2 exact scenario) → close M-29 as resolved.
+2. **Keep priority open + wait** — partial-fills happen every 5-7 days in volatile periods historically, so cold-path observation is likely within 1-2 weeks of normal trading.
+3. **Force the cold path** with a deliberately oversized `/buy` to provoke a partial fill — risky, real money against real exchange, NOT recommended.
+
+**Recommendation**: option 2 (passive wait). When the next partial-fill BUY happens, audit the log for the `[M-29 recalc]` markers + verify recorded basis ≤ target.
+
+Original test protocol preserved below for re-application when a partial-fill BUY happens:
 
 **Test protocol for tomorrow's first BUY (manual `/buy` OR auto regime BUY — both exercise the same code path)**:
 
@@ -545,8 +1645,11 @@ For SELL side ([crypto_revolut_ed_v2.py:830-836](crypto_revolut_ed_v2.py#L830)):
 ---
 
 ### Currently running
-- **HRST ETH 5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 18:00 ([logs/ed_v1_20260502_180022.log](logs/ed_v1_20260502_180022.log)). Validates today's parallel-wrapper bug fixes (A: `UnboundLocalError` at `_generate_signals_cached`; B: `BrokenProcessPool` in hybrid refine config #3). Compare winner to 8h HRST result (`bull=7h@85% / bear=16h@75% +68.81%`).
-- **HRST BNB 4,5,6,7,8h --replay 1440 --no-persist** — started 2026-05-02 20:28 ([logs/ed_v1_20260502_202819.log](logs/ed_v1_20260502_202819.log)). First full pipeline for BNB. Mode P was completed earlier today (~1.5h, all 5 PySR JSONs written cleanly with `discovery_method = "historical"`). HRST will produce single-horizon Mode V winners, Mode S joint regime sweep, and Mode T shield+gate sweep. ETA ~3-4h on laptop. Output: `models/crypto_ed_production_noprod.csv` BNB rows + `config/regime_config_ed_noprod.json` BNB block.
+- **C04→C08 runner** ([tools/test_c04_to_c08_runner.py](tools/test_c04_to_c08_runner.py)) — launched on Desktop 2026-05-06 evening. ~5h ETA. See "🎯 MOST IMPORTANT" section at top of ACTIVE TODO for full method/decision rules per CID.
+
+**Stale (was running 2026-05-02, since superseded — preserved for audit)**:
+- HRST ETH 5,6,7,8h --replay 1440 --no-persist — started 2026-05-02 18:00 ([logs/ed_v1_20260502_180022.log](logs/ed_v1_20260502_180022.log)). Validated parallel-wrapper bug fixes A+B. Result fed into 2026-05-03 promotion (since superseded by today's 2026-05-06 15:48 promotion).
+- HRST BNB 4,5,6,7,8h --replay 1440 --no-persist — started 2026-05-02 20:28. Done; result not promoted (BNB stays disabled).
 
 ### Next big work — IN ORDER
 
@@ -634,6 +1737,27 @@ All ETH HRSTs from the past 7 days, normalized to "last 2 months" via Mode T's H
 ### Today's shelved (added 2026-05-02)
 - **XRP enable** — user judged HRST results bad despite +25.69pp alpha. HRST winner `bull=4h@80% / bear=7h@65%` written to live config but `enabled: false` stays.
 - **BTC re-enable** — results not good enough; no urgency. The BTC HRST work (after parallel bug fix verification) is purely engineering, not a promotion candidate.
+
+### 2026-05-03 shelved
+- **Idea #1 (Fractional differentiation features, López de Prado AFML Ch 5; Hosking 1981)** — SHELVED. Mode D smoke test on ETH 5,6,7,8h with `--replay 1440 --no-persist --no-data-update` ran via [tools/test_fracdiff_mode_d.py](tools/test_fracdiff_mode_d.py). Verdict: NOISE. Five `fd_*` features added (`fd_logclose_d03/d04/d05`, `fd_logvol_d04/d05`) at d ∈ {0.3, 0.4, 0.5}. Coverage 88-100% per d value, all features computed cleanly (smoke-test of patcher mechanism passed pre-run). LGBM importance ranking did NOT pick fracdiff features into the top tier; grid winners did NOT include them. Original hypothesis (top-3 selection-frequency features `price_to_sma100h`, `logret_120h`, `sma20_to_sma50h` would be the use case for memory-preserving frac-diff) DISPROVED on ETH at this window. Patcher + smoke-test scripts in [tools/test_fracdiff_mode_d.py](tools/test_fracdiff_mode_d.py) kept for future revival (different d values, different assets, different windows). Possible reasons it died on this data: (a) ETH log-prices may already have low long-memory in the current 60d window (Hurst < 0.5 = mean-reverting); (b) `price_to_sma100h` ratio already partially preserves memory; (c) different d values needed (try d ∈ {0.1, 0.2, 0.6, 0.7, 0.8} next time); (d) frac-diff payoff is documented for daily/weekly equity series — may not transfer to hourly crypto. **Do not retry on ETH hourly without changing one of those four levers.**
+
+- **Idea #5 (Feature Stability Filter, Carhart-style)** — SHELVED. Mode D smoke test on ETH 5,6,7,8h with `--replay 1440 --no-persist --no-data-update` ran via [tools/test_stability_filter_mode_d.py](tools/test_stability_filter_mode_d.py). Patched `_test_lgbm_importance` to compute ranking on 3 overlapping sub-windows (oldest 50%, middle 50%, newest 50%) and drop features where `max_rank − min_rank > 30`. Results vs un-filtered baseline (this morning's calibration-run grid CSVs, which are valid since calibration patcher only patched `generate_signals` and Mode D's grid doesn't call it):
+  - **5h**: APF 14.609 vs 14.885 (Δ −0.28), ret +17.21% vs +22.80% (Δ −5.6pp)
+  - **6h**: APF 14.885 vs 15.146 (Δ −0.26), ret +21.67% vs +22.60% (Δ −0.9pp)
+  - **7h**: APF 13.173 vs 14.895 (Δ −1.72), ret +18.25% vs +23.14% (Δ −4.9pp)
+  - **8h**: APF 15.155 vs 14.186 (Δ +0.97), ret +25.22% vs +25.43% (Δ −0.2pp)
+  - APF deltas mixed (3/4 horizons slightly worse, 1 better). Return deltas mostly negative or noise. Winning configs use SAME or MORE features than baseline (f=13-25 unchanged) — filter didn't simplify selection.
+  - **Why it died**: (a) LGBM is already robust to noisy features via bagging + tree splits; the filter does work LGBM already does internally. (b) Sub-window ranking is itself noisy at 50% data — "rank movement >30" can come from sampling noise, not true instability. (c) Regime-dependent importance is REAL signal — a feature important in bull but not bear is regime-specific information, not noise; filtering drops legitimate information. **Conditions to revisit**: stricter threshold (rank movement >50), longer training window (180d not 60d) to give more stable sub-windows, or ensemble across multiple THRESHOLD values.
+
+- **Idea #3 (VPIN entry filter, Easley/López de Prado/O'Hara 2012, RFS)** — SHELVED. Smoke test ran via [tools/test_vpin_filter.py](tools/test_vpin_filter.py). Best variant: `vpin_lb=30m_thr=0.5` → +83.22% vs baseline +79.39% = **+3.83pp** (15 BUYs skipped). Below +5pp ship threshold; within HRST run-to-run nondeterminism (5-10pp). Aggressive thresholds (0.3-0.4) skipped 130-160 BUYs and lost 20-70pp — discrimination is too weak. VPIN distribution at BUY signal times: p50=0.40-0.41, p90=0.50-0.55 — no fat right tail of toxic-flow days in 60d window. Either (a) ETH was unusually orderly during this window, (b) hourly aggregation washes out the 5-min toxicity spikes the literature describes (original Easley-LdP-O'Hara worked at 1-min cadence), or (c) crypto markets too efficient at hourly scale to leave informed-flow info unpriced. **Conditions to revisit**: (1) add 5-min cadence sub-loop in trader to check VPIN at native frequency; (2) test on 90d/6mo window with known stress events; (3) combine with realized-vol filter (VPIN may only inform during vol spikes). Tagged outputs in `output/vpin_filter_*.csv`.
+
+- **Idea #4 (Turbulence Index kill-switch, Kritzman & Li 2010, FAJ)** — SHELVED. Smoke test ran via [tools/test_turbulence_killswitch.py](tools/test_turbulence_killswitch.py). All firing variants HURT returns: z≥1.0 → −9.96pp (skipped 17 BUYs), z≥1.5 → −5.83pp (skipped 9). Higher thresholds didn't fire (z≥2: skipped=0; only 1 BUY day in 60d had turb_z ≥ 2.0). **Killer finding**: in the 60d window, days when cross-asset turbulence was high were FOLLOWED by good ETH outcomes — opposite of Kritzman & Li's premise. Mechanism: in crypto bull regimes, spikes in cross-asset stress (VIX up, equities down) often coincide with crypto dip-buying setups; the model's BUYs during turbulence were RIGHT, not WRONG. Even if you wanted to retry on a longer/different window, the directional sign is wrong for ETH in bull regime. Risk vector tested: BTC + VIX + DXY + SP500 + GOLD + US10Y (6-dim), 252d rolling cov + 252d z-score. **Do not retry on ETH bull-regime data. May still be useful as a FEATURE (not kill-switch) in a different macro phase.** Tagged outputs in `output/turbulence_killswitch_*.csv`.
+
+- **Idea #2 (Probability calibration of LGBM scores, Platt 1999; Niculescu-Mizil & Caruana 2005)** — SHELVED. Two-step test ran via [tools/test_calibration_audit.py](tools/test_calibration_audit.py) (Step A) and [tools/test_calibration_mode_d.py](tools/test_calibration_mode_d.py) (Step B).
+  - **Step A audit (20 walk-forward cycles, ETH 6h prod model)**: Brier score improved 17.6% (raw 0.2774 → Platt 0.2285; isotonic 0.2666). Per-bucket gaps noisy at N=20 (max 80.9pp on a single-sample bucket; meaningful buckets with N≥4 showed model overconfident at high scores: predicted 70%, actual 30-50%). Verdict: directionally consistent with miscalibration literature; small-sample but informative.
+  - **Step B Mode D smoke test (ETH 5,6,7,8h, --replay 1440, calibration injected via monkey-patch of generate_signals)**: CATASTROPHIC return loss vs prod baseline. Calibrated returns were +22.60% to +25.43% (4 horizons) vs prod baselines +46.30% to +67.14% — deltas of −23.16pp to −44.54pp. Trade counts collapsed to 3-6 per horizon vs prod's typical 30-70. Calibration HURT.
+  - **Root cause** (deeper than test design): in a binary all-in/all-out engine where Mode S empirically tunes the confidence threshold, calibration is a **pure cosmetic relabeling**. The same trades fire whether threshold is 65% on raw scores or 50% on calibrated scores — Mode S would just rediscover the optimal threshold. AND Platt scaling on imbalanced data (30% positives) squeezes probabilities toward the base rate, so most predictions get pushed into 30-50% range and never cross the BUY threshold → trade frequency collapse → exposure collapse → return collapse. **Same architectural family as Kelly sizing (rejected): binary all-in/all-out doesn't benefit from accurate probability gradient.**
+  - **Conditions to revisit**: (a) tiered position sizing (breaks binary), (b) EV-gated entries, (c) weighted ensembling across asset models. Any of those make calibration useful. Patcher kept in [tools/test_calibration_mode_d.py](tools/test_calibration_mode_d.py).
 
 ---
 

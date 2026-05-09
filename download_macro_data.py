@@ -90,6 +90,199 @@ def _alert_partial_download(key, msg, severity='warn'):
         print(f"  [{severity.upper()}] {key}: {msg}")
 
 
+# ────────────────────────────────────────────────────────────────────────
+# Source-health circuit breaker (2026-05-06)
+#
+# Recurring pain pattern: an upstream provider (Binance, yfinance, Deribit,
+# CoinMetrics) silently changes a URL/param/schema. Every cycle until manual
+# patch, the trader logs HTTP 400 retry storms. User finds out hours later.
+#
+# Three-layer defense:
+#   (1) fetch_with_fallback() tries a list of URL-variants — if Binance
+#       tightens param validation, we already pre-cached alternative forms
+#       and the next variant succeeds without code change.
+#   (2) Circuit breaker tracks per-source consecutive failures. After
+#       _CB_FAIL_THRESHOLD failures the source is MUTED for _CB_MUTE_SEC,
+#       so subsequent cycles skip the call entirely (no log noise, no
+#       per-cycle retry storm).
+#   (3) On state transitions (OK→MUTED, MUTED→OK), send ONE Telegram
+#       alert each. Eliminates per-cycle alert spam during outages and
+#       gives a clear "recovered" signal when the upstream comes back.
+#
+# State persists in data/source_health.json so trader restarts don't lose
+# tracking. Atomic write via tmp+rename to survive partial writes.
+# ────────────────────────────────────────────────────────────────────────
+
+_SOURCE_HEALTH_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'data', 'source_health.json'
+)
+_CB_FAIL_THRESHOLD = 3       # N consecutive failures → MUTE
+_CB_MUTE_SEC = 60 * 60       # 1 hour mute on circuit-break
+
+
+class SourceMuted(Exception):
+    """Raised when a source is in the MUTED circuit state.
+    Caller should skip the fetch silently for this cycle."""
+    pass
+
+
+def _load_source_health():
+    try:
+        with open(_SOURCE_HEALTH_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_source_health(state):
+    """Atomic write so a crash mid-write can't leave a corrupt JSON file."""
+    try:
+        os.makedirs(os.path.dirname(_SOURCE_HEALTH_FILE), exist_ok=True)
+        tmp = _SOURCE_HEALTH_FILE + f'.tmp.{os.getpid()}'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp, _SOURCE_HEALTH_FILE)
+    except Exception:
+        pass  # best-effort; never let health-tracking failure break the fetch
+
+
+def _is_circuit_muted(name):
+    """Returns True if the source is currently MUTED. Auto-clears expired mutes."""
+    state = _load_source_health()
+    s = state.get(name, {})
+    if s.get('circuit_state') != 'MUTED':
+        return False
+    if time.time() < s.get('mute_until', 0):
+        return True
+    # Mute window expired — clear it so the next call re-tries the source.
+    s['circuit_state'] = 'OK'
+    s.pop('mute_until', None)
+    state[name] = s
+    _save_source_health(state)
+    return False
+
+
+def _record_source_success(name, used_url=None):
+    """Record success. If source was previously MUTED, send a recovery alert."""
+    state = _load_source_health()
+    s = state.get(name, {})
+    was_muted = s.get('circuit_state') == 'MUTED'
+    had_failures = s.get('consecutive_failures', 0) > 0
+    s.update({
+        'last_success': time.time(),
+        'last_success_iso': datetime.now().isoformat(timespec='seconds'),
+        'consecutive_failures': 0,
+        'circuit_state': 'OK',
+    })
+    s.pop('mute_until', None)
+    s.pop('last_error', None)
+    if used_url:
+        s['last_used_url'] = used_url
+    state[name] = s
+    _save_source_health(state)
+    if was_muted:
+        _alert_partial_download(
+            f'source_recovery_{name}',
+            f'✅ Data source RECOVERED: <b>{name}</b>',
+            severity='info',
+        )
+    elif had_failures:
+        # Silent recovery from <threshold failures — no alert, just log
+        print(f"    [{name}] recovered after transient failure(s)")
+
+
+def _record_source_failure(name, err):
+    """Record failure. At threshold, MUTE the source and send ONE alert."""
+    state = _load_source_health()
+    s = state.get(name, {})
+    s['consecutive_failures'] = s.get('consecutive_failures', 0) + 1
+    s['last_error'] = str(err)[:300]
+    s['last_failure'] = time.time()
+    s['last_failure_iso'] = datetime.now().isoformat(timespec='seconds')
+    n_fails = s['consecutive_failures']
+    just_muted = (n_fails >= _CB_FAIL_THRESHOLD
+                  and s.get('circuit_state') != 'MUTED')
+    if just_muted:
+        s['circuit_state'] = 'MUTED'
+        s['mute_until'] = time.time() + _CB_MUTE_SEC
+    state[name] = s
+    _save_source_health(state)
+    if just_muted:
+        mute_min = _CB_MUTE_SEC // 60
+        _alert_partial_download(
+            f'source_muted_{name}',
+            f'🔇 Data source MUTED: <b>{name}</b>\n'
+            f'Failures: {n_fails} consecutive\n'
+            f'Last error: <code>{s["last_error"][:200]}</code>\n'
+            f'Will auto-retry in {mute_min} min',
+            severity='warning',
+        )
+
+
+def fetch_with_fallback(name, url_fns, ctx, retries_per_url=2, verbose=False):
+    """Robust data fetch with multi-URL fallback + circuit breaker.
+
+    Args:
+      name: stable source identifier (e.g. 'oi_ETHUSDT'). Used as the
+            circuit-breaker key and Telegram alert key.
+      url_fns: ordered list of (callable returning URL string) OR plain URL
+            strings. The first that returns data wins. Callables let the
+            caller capture fresh timestamps per invocation.
+      ctx: ssl context passed to _binance_get.
+      retries_per_url: per-URL retries (lower than _binance_get default
+            because the outer loop tries multiple URLs anyway).
+
+    Returns:
+      (parsed_data, url_used) tuple. parsed_data is the JSON-decoded body.
+
+    Raises:
+      SourceMuted: if the source is in MUTED state. Caller should skip.
+      RuntimeError: if all URL variants failed (after which the source's
+            failure counter is incremented and may transition to MUTED).
+    """
+    if _is_circuit_muted(name):
+        raise SourceMuted(name)
+    last_err = None
+    for i, fn_or_url in enumerate(url_fns):
+        try:
+            url = fn_or_url() if callable(fn_or_url) else fn_or_url
+            data = _binance_get(url, ctx, retries=retries_per_url,
+                                verbose=verbose and i == 0)
+            _record_source_success(name, used_url=url)
+            if i > 0 and verbose:
+                print(f"    [{name}] succeeded on fallback variant {i+1}/{len(url_fns)}")
+            return data, url
+        except Exception as e:
+            last_err = e
+            if verbose:
+                print(f"    [{name}] variant {i+1}/{len(url_fns)} failed: {str(e)[:120]}")
+            continue
+    # All variants failed — record + propagate
+    _record_source_failure(name, last_err)
+    raise RuntimeError(f'{name}: all {len(url_fns)} URL variants failed; '
+                       f'last error: {last_err}') from last_err
+
+
+def get_source_health_summary():
+    """Return per-source health for /reload Telegram command + manual inspection."""
+    state = _load_source_health()
+    out = []
+    now = time.time()
+    for name, s in sorted(state.items()):
+        circuit = s.get('circuit_state', 'OK')
+        n_fails = s.get('consecutive_failures', 0)
+        if circuit == 'MUTED':
+            mute_left = max(0, int((s.get('mute_until', 0) - now) / 60))
+            status = f'🔇 MUTED ({mute_left}min left, {n_fails} fails)'
+        elif n_fails > 0:
+            status = f'⚠️ {n_fails} recent fail(s)'
+        else:
+            status = '✅ OK'
+        last_ok = s.get('last_success_iso', 'never')
+        out.append(f'{name:<28} {status:<32} last_ok={last_ok}')
+    return '\n'.join(out) if out else '(no sources tracked yet)'
+
+
 def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
     """Return True if file's LAST-ROW datetime is within max_age_seconds.
     Fix #7 (2026-04-24): content-aware, not mtime-aware. Catches partial
@@ -294,34 +487,6 @@ def download_fear_greed():
 
 
 # ============================================================
-# 3. HOURLY MACRO PROXY (for DAX hourly system)
-# ============================================================
-def create_hourly_macro(macro_df):
-    """
-    Create hourly-frequency macro data by forward-filling daily data.
-    This gives the DAX hourly system access to daily macro indicators
-    (the latest known value at each hour).
-    """
-    if macro_df is None:
-        return
-
-    print(f"\n  Creating hourly macro proxy (forward-fill daily into hourly)...")
-
-    # Create hourly index spanning the full date range
-    start = macro_df.index[0]
-    end = macro_df.index[-1] + timedelta(days=1)
-    hourly_idx = pd.date_range(start=start, end=end, freq='h')
-
-    # Reindex daily data to hourly and forward-fill
-    hourly_df = macro_df.reindex(hourly_idx, method='ffill')
-    hourly_df.index.name = 'datetime'
-
-    outfile = os.path.join(MACRO_DIR, 'macro_hourly.csv')
-    hourly_df.to_csv(outfile)
-    print(f"  Saved: {outfile} ({len(hourly_df)} rows)")
-
-
-# ============================================================
 # 4. CROSS-ASSET PAIRS (for correlation features)
 # ============================================================
 def download_cross_asset():
@@ -417,6 +582,7 @@ def download_onchain_data(asset='btc'):
     Saves to data/macro_data/onchain_{asset}.csv (daily frequency).
     """
     import urllib.request
+    import urllib.error
     import ssl
     import time
 
@@ -479,6 +645,14 @@ def download_onchain_data(asset='btc'):
             print(f"{len(cm_df)} days, {len(cm_df.columns)} columns")
         else:
             print("NO DATA")
+    except urllib.error.HTTPError as e:
+        # SOL/BNB and other non-BTC/ETH assets return 403 from the community
+        # API (free tier covers BTC + ETH only). Log as SKIPPED so it stops
+        # showing up as a hard failure on every macro download cycle.
+        if e.code == 403:
+            print(f"SKIPPED (free-tier 403 — {asset.upper()} not in CoinMetrics community plan)")
+        else:
+            print(f"ERROR: HTTP {e.code} {e.reason}")
     except Exception as e:
         print(f"ERROR: {e}")
 
@@ -605,12 +779,38 @@ def download_derivatives_data(assets=None):
         print(f"    Open interest (hourly)...", end=' ')
         all_oi = []
         try:
-            url = (f"https://fapi.binance.com/futures/data/openInterestHist"
-                   f"?symbol={symbol}&period=1h&limit=500")
-            data = _binance_get(url, ctx, verbose=True)
+            # 2026-05-06: fetch_with_fallback tries 3 URL variants in order.
+            # If Binance tightens param validation again, we already know
+            # which variants used to work. Circuit breaker mutes the source
+            # for 1h after 3 consecutive failures across all variants — no
+            # more per-cycle log spam during outages, and one Telegram
+            # alert on circuit-break (not one per cycle).
+            def _oi_url_v1():  # explicit endTime (current Binance preference)
+                now_ms = int(time.time() * 1000) - 60_000
+                return (f"https://fapi.binance.com/futures/data/openInterestHist"
+                        f"?symbol={symbol}&period=1h&endTime={now_ms}&limit=500")
+            def _oi_url_v2():  # no endTime (worked pre-2026-05-03)
+                return (f"https://fapi.binance.com/futures/data/openInterestHist"
+                        f"?symbol={symbol}&period=1h&limit=500")
+            def _oi_url_v3():  # smaller limit (in case 500 trips a new cap)
+                now_ms = int(time.time() * 1000) - 60_000
+                return (f"https://fapi.binance.com/futures/data/openInterestHist"
+                        f"?symbol={symbol}&period=1h&endTime={now_ms}&limit=200")
+            data, _ = fetch_with_fallback(
+                f'oi_{symbol}', [_oi_url_v1, _oi_url_v2, _oi_url_v3],
+                ctx, retries_per_url=2, verbose=True,
+            )
             if data:
                 all_oi.extend(data)
 
+            # Pagination: backfill older OI rows. Binance's 1h OI history
+            # is bounded (~30d); requesting endTime older than that returns
+            # HTTP 400 "endTime is invalid" (not an empty array), which used
+            # to bubble up and kill the entire fetch — losing the fresh data
+            # we already got from the initial fetch_with_fallback.
+            # Catch HTTP 400 here, treat as "end of available history",
+            # break gracefully. retries=1 keeps the log quiet on the
+            # expected boundary failure.
             while data and len(data) > 1:
                 earliest_ts = data[0]['timestamp']
                 if earliest_ts <= start_ms:
@@ -618,7 +818,16 @@ def download_derivatives_data(assets=None):
                 end_ms = earliest_ts - 1
                 url = (f"https://fapi.binance.com/futures/data/openInterestHist"
                        f"?symbol={symbol}&period=1h&endTime={end_ms}&limit=500")
-                data = _binance_get(url, ctx, verbose=True)
+                try:
+                    data = _binance_get(url, ctx, retries=1, verbose=False)
+                except RuntimeError as pe:
+                    msg = str(pe)
+                    if 'HTTP 400' in msg and 'endTime' in msg:
+                        # Past Binance's 1h OI retention window — stop cleanly
+                        break
+                    # Other errors (5xx, network) — log once and stop
+                    print(f"      [pagination stopped: {msg[:120]}]")
+                    break
                 if data:
                     all_oi.extend(data)
                 time.sleep(0.2)
@@ -735,6 +944,48 @@ def download_derivatives_data(assets=None):
         deriv_df = deriv_df.ffill()
 
         outfile = os.path.join(MACRO_DIR, f'derivatives_{asset.lower()}.csv')
+
+        # ─────────────────────────────────────────────────────────────────
+        # 2026-05-06 fix: when a sub-source fails THIS cycle, splice in
+        # the columns from the previous CSV so the file always has the full
+        # column set. Otherwise we'd serve the live trader a column-shape
+        # mismatch (model trained on N features, sees N-3 features at
+        # inference) — that's the real cause of "trader was disabled":
+        # silent inference degradation, not log noise.
+        #
+        # Stale OI is much better than missing OI:
+        #   - The model's `optimal_features` may or may not reference OI
+        #     columns; when it does, missing column = NaN imputation = bad
+        #     predictions until /reload manually heals the file.
+        #   - Stale OI just gets ffill'd from last-known-good values, which
+        #     is what the existing ffill already does within a single CSV.
+        # ─────────────────────────────────────────────────────────────────
+        spliced_from_lkg = []
+        if missing and os.path.exists(outfile):
+            try:
+                lkg_df = pd.read_csv(outfile, parse_dates=[0], index_col=0)
+                if lkg_df.index.tz is not None:
+                    lkg_df.index = lkg_df.index.tz_localize(None)
+                # Identify columns from missing sub-sources that exist in
+                # the LKG file but not in the new deriv_df.
+                missing_cols_by_sub = {
+                    'funding_rate': ['funding_rate'],
+                    'open_interest': ['open_interest', 'open_interest_usd'],
+                    'perp_klines': ['perp_open', 'perp_high', 'perp_low', 'perp_close'],
+                }
+                for sub in missing:
+                    for col in missing_cols_by_sub.get(sub, []):
+                        if col in lkg_df.columns and col not in deriv_df.columns:
+                            # Reindex LKG col to new index, ffill stale values
+                            deriv_df[col] = lkg_df[col].reindex(deriv_df.index).ffill()
+                            spliced_from_lkg.append(col)
+                if spliced_from_lkg:
+                    print(f"  [LKG] Spliced {len(spliced_from_lkg)} stale column(s) "
+                          f"from previous {os.path.basename(outfile)}: {spliced_from_lkg}")
+            except Exception as _e:
+                print(f"  [LKG] Could not splice from previous CSV ({_e}); "
+                      f"writing partial CSV — model may see column shape mismatch.")
+
         deriv_df.to_csv(outfile)
         print(f"  Saved: {outfile} ({len(deriv_df)} rows, {len(deriv_df.columns)} columns)")
         print(f"  Date range: {deriv_df.index[0]} to {deriv_df.index[-1]}")
@@ -1184,10 +1435,6 @@ def main():
         print("  Fear & Greed: fresh — skipping")
     else:
         fg_df = download_fear_greed()
-
-    # 3. Hourly proxy for DAX system
-    if macro_df is not None:
-        create_hourly_macro(macro_df)
 
     # 4. Cross-asset pairs
     if _is_fresh(os.path.join(MACRO_DIR, 'cross_asset.csv')):

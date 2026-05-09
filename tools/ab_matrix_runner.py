@@ -59,7 +59,6 @@ SNAPSHOT_FILES = [
     'data/xrp_hourly_data.csv',
     'data/sol_hourly_data.csv',
     'data/link_hourly_data.csv',
-    'data/macro_data/macro_hourly.csv',
     'data/macro_data/macro_daily.csv',
     'data/macro_data/cross_asset.csv',
     'data/macro_data/fear_greed.csv',

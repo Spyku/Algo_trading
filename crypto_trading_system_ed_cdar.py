@@ -398,11 +398,6 @@ TRIM_ENABLED_OVERRIDE = None
 # Override for Optuna TPESampler seed. None = use default seed=42.
 # Set via --optuna-seed N for seed-robustness A/B testing.
 OPTUNA_SEED_OVERRIDE = None
-# Suffix appended to Mode D's grid CSV filename (e.g. 'IDEA01' →
-# crypto_ed_grid_ETH_5h_IDEA01.csv). Set via --grid-tag NAME. None = no
-# suffix (default behavior). Used by tools/test_14_ideas.py and similar
-# smoke-test harnesses to keep tagged grids separate from baseline.
-GRID_TAG_SUFFIX = None
 # Auto-drop features with >SPARSE_NAN_THRESHOLD fraction NaN in the training window.
 # Newer feeds (orderbook/IV) that haven't accumulated data yet would otherwise
 # collapse the training set via dropna(). 70% keeps useful-but-partial features
@@ -443,9 +438,11 @@ DOOHAN_FEAT_MAX = 40
 # 3-fold rolling holdout — train on ~60%, validate on ~20%, across 3 temporal folds
 N_HOLDOUT_FOLDS = 3
 
-# Optuna scoring metric — set via --metric flag (default: apf)
-OPTUNA_METRIC = 'apf'
-VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
+# Optuna scoring metric — set via --metric flag (default: cdar in this CDaR-variant engine)
+# This is the CDaR-integrated copy of crypto_trading_system_ed.py.
+# 'cdar' = cum_return - CDAR_LAMBDA * max_dd_pct
+OPTUNA_METRIC = 'cdar'
+VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt', 'cdar'}
 
 # Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
 LABEL_MODE = 'fee_aware'
@@ -462,8 +459,25 @@ META_FILTER_THRESHOLD = None
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_ed_production.csv'
-REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
+PRODUCTION_CSV = 'models/crypto_ed_production_cdar.csv'
+REGIME_CONFIG_PATH = 'config/regime_config_ed_cdar.json'
+
+# ============================================================
+# CDaR INTEGRATION (Idea #6 from 20-ideas roadmap)
+# Chekhlov, Uryasev, Zabarankin (2005) "Drawdown Measure in
+# Portfolio Optimization", Mathematical Finance 15(3).
+#
+# Replaces the (return × WR) scoring family with a drawdown-
+# penalized variant: combined_score = return × WR - λ × max_dd_pct
+# Aligns Mode V's winner selection with the R4 rollback rule
+# (which judges live performance on max-DD).
+#
+# Smoke-test evidence (2026-05-03, tools/test_cdar_audit_only.py):
+# CDaR top-1 dominated APF top-1 on all 4 horizons (5h/6h/7h/8h)
+# with HIGHER return AND lower max_dd within the same Mode D
+# top-15 candidate pool.
+# ============================================================
+CDAR_LAMBDA = 1.0  # weight on max_dd penalty (sweep {0.5, 1.0, 2.0} for tuning)
 
 
 def _ensure_parent_dir(path):
@@ -542,6 +556,10 @@ def _compute_optuna_score(result):
     elif OPTUNA_METRIC == 'rpf_sqrt':
         import math
         return raw_pf * math.sqrt(trades) if trades > 0 else 0.0
+    elif OPTUNA_METRIC == 'cdar':
+        # CDaR-aware scoring (Chekhlov-Uryasev-Zabarankin 2005):
+        # cum_return is in %, max_dd is in %. Direct subtraction with lambda weight.
+        return cum_return - CDAR_LAMBDA * max_dd
     else:
         return adjusted_pf
 
@@ -4463,11 +4481,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         grid_elapsed = (time.time() - t_grid) / 60
 
-        # Save full grid to CSV. GRID_TAG_SUFFIX is set by the --grid-tag CLI
-        # flag (used by tools/test_14_ideas.py to keep idea-tagged grid CSVs
-        # separate from the untagged baseline that Mode V/H read on next run).
-        _tag = f"_{GRID_TAG_SUFFIX}" if GRID_TAG_SUFFIX else ""
-        grid_csv_path = os.path.join('models', f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')
+        # Save full grid to CSV
+        grid_csv_path = os.path.join('models', f'crypto_ed_grid_{asset_name}_{horizon}h.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         df_grid.to_csv(grid_csv_path, index=False)
@@ -4700,19 +4715,32 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 # ============================================================
 
 def _simulate_with_threshold(signals, conf_threshold):
-    """Simulate trades with a confidence threshold filter."""
+    """Simulate trades with a confidence threshold filter.
+    CDaR-variant: also tracks max drawdown of portfolio value."""
     cash = 1000.0
     qty = 0
     position = 'cash'
     trades = 0
     trade_log = []
     entry_price = 0
+    # CDaR addition: per-bar drawdown tracking
+    peak = 1000.0
+    max_dd_pct = 0.0
 
     for sig in signals:
         price = sig['close']
         conf = sig['confidence']
 
         if conf < conf_threshold:
+            # Even when not trading on this signal, the open position's mark-to-market
+            # value should still update the drawdown series.
+            if position == 'invested':
+                current = qty * price
+                if current > peak:
+                    peak = current
+                dd = (peak - current) / peak * 100
+                if dd > max_dd_pct:
+                    max_dd_pct = dd
             continue
 
         if sig['signal'] == 'BUY' and position == 'cash':
@@ -4729,6 +4757,14 @@ def _simulate_with_threshold(signals, conf_threshold):
             position = 'cash'
             trades += 1
 
+        # CDaR addition: update peak + max_dd after every state change
+        current = cash if position == 'cash' else qty * price
+        if current > peak:
+            peak = current
+        dd = (peak - current) / peak * 100
+        if dd > max_dd_pct:
+            max_dd_pct = dd
+
     final = cash if position == 'cash' else qty * signals[-1]['close']
     ret = (final / 1000 - 1) * 100
     winners = sum(1 for t in trade_log if t > 0)
@@ -4742,6 +4778,7 @@ def _simulate_with_threshold(signals, conf_threshold):
         'win_rate': win_rate,
         'trade_returns': trade_log,
         'still_invested': position == 'invested',
+        'max_dd_pct': max_dd_pct,  # CDaR addition
     }
 
 
@@ -4922,7 +4959,12 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                             continue
                         ret = sim['return_pct']
                         wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
+                        # CDaR-aware scoring: subtract lambda * max_dd to penalize
+                        # configs with deep drawdowns. max_dd_pct is in % (same units
+                        # as ret), so direct subtraction with weighted lambda.
+                        max_dd = sim.get('max_dd_pct', 0.0)
+                        base = ret * wr if ret > 0 else ret
+                        score = base - CDAR_LAMBDA * max_dd
                         if score > best_score:
                             best_score = score
                             best_label = lbl
@@ -4936,7 +4978,9 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                             sim = r[f'conf_{MODE_G_PRIMARY_CONF}']
                             ret = sim['return_pct']
                             wr = sim['win_rate'] / 100.0
-                            score = ret * wr if ret > 0 else ret
+                            max_dd = sim.get('max_dd_pct', 0.0)
+                            base = ret * wr if ret > 0 else ret
+                            score = base - CDAR_LAMBDA * max_dd
                             if score > best_score:
                                 best_score = score
                                 best_label = lbl
@@ -6147,7 +6191,9 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False,
                             continue
                         ret = sim['return_pct']
                         wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
+                        max_dd = sim.get('max_dd_pct', 0.0)
+                        base = ret * wr if ret > 0 else ret
+                        score = base - CDAR_LAMBDA * max_dd
                         if score > best_score:
                             best_score = score
                             best_label = lbl
@@ -7088,22 +7134,6 @@ def main():
                 print(f"  --optuna-seed must be an integer (got {sys.argv[i+1]!r}). Ignoring.")
                 return
 
-    # Parse --grid-tag NAME — append suffix to Mode D's grid CSV filename so
-    # smoke-test harnesses (tools/test_14_ideas.py etc.) don't overwrite the
-    # untagged baseline that Mode V/H read on next run.
-    global GRID_TAG_SUFFIX
-    for i, a in enumerate(sys.argv[1:], 1):
-        if a == '--grid-tag' and i < len(sys.argv) - 1:
-            tag = sys.argv[i + 1].strip()
-            if not tag or not all(c.isalnum() or c == '_' for c in tag):
-                print(f"  --grid-tag must be alphanumeric/underscore (got {tag!r}). Ignoring.")
-                return
-            GRID_TAG_SUFFIX = tag
-            print()
-            print(f"  [--grid-tag {GRID_TAG_SUFFIX}] Mode D grid CSV will be written to "
-                  f"crypto_ed_grid_<asset>_<h>h_{GRID_TAG_SUFFIX}.csv")
-            print()
-
     # Parse --max-iter N (Mode T: T<->G convergence iterations, default 4)
     flag_max_iter = 0
     for i, a in enumerate(sys.argv[1:], 1):
@@ -7330,7 +7360,7 @@ Examples:
     # Remove values that follow --trials, --metric, --replay, --conf, --top
     skip_next = set()
     for i, a in enumerate(sys.argv[1:], 1):
-        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter', '--trim-override', '--optuna-seed', '--grid-tag') and i < len(sys.argv) - 1:
+        if a in ('--trials', '--metric', '--replay', '--conf', '--top', '--rank', '--max-iter', '--label-threshold', '--meta-filter', '--trim-override', '--optuna-seed') and i < len(sys.argv) - 1:
             skip_next.add(sys.argv[i + 1])
     cli_args = [a for a in cli_args if a not in skip_next]
 
@@ -7953,7 +7983,9 @@ def run_mode_v_parallel(assets_list, horizons=None, replay_hours=None):
                             continue
                         ret = sim['return_pct']
                         wr = sim['win_rate'] / 100.0
-                        score = ret * wr if ret > 0 else ret
+                        max_dd = sim.get('max_dd_pct', 0.0)
+                        base = ret * wr if ret > 0 else ret
+                        score = base - CDAR_LAMBDA * max_dd
                         if score > best_score:
                             best_score = score
                             best_label = lbl
@@ -7966,7 +7998,9 @@ def run_mode_v_parallel(assets_list, horizons=None, replay_hours=None):
                             sim = r[f'conf_{MODE_G_PRIMARY_CONF}']
                             ret = sim['return_pct']
                             wr = sim['win_rate'] / 100.0
-                            score = ret * wr if ret > 0 else ret
+                            max_dd = sim.get('max_dd_pct', 0.0)
+                            base = ret * wr if ret > 0 else ret
+                            score = base - CDAR_LAMBDA * max_dd
                             if score > best_score:
                                 best_score = score
                                 best_label = lbl

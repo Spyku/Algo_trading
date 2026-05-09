@@ -696,19 +696,18 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
             if limit_price < bid + 0.01:
                 limit_price = bid  # fall back to bid level if rounded below
         else:
-            # BUG 2 fix: SELL post_only requires price STRICTLY above best bid.
-            # Slide from ask-0.01 down to bid+0.02 (2 cents above bid for tick-race safety).
-            top = ask - 0.01
-            bottom = bid + 0.02
-            if top < bottom:
-                top = bottom
-            if top <= bid:
+            # 2026-05-06: SELL sits at floor = bid + max($0.02, 5%×spread) every cycle
+            # (re-quote tracks bid moves). Replaced the old ask-0.01 → bid+0.02 slide
+            # because empirically every recent SELL filled at attempts #17-19 at near-floor
+            # prices anyway — the passive start gave the bid time to drift down before
+            # fill without ever capturing the half-spread it was waiting for.
+            # Post-only safety: limit_price must be strictly above bid.
+            limit_price = round(bid + max(0.02, 0.05 * (ask - bid)), 2)
+            if limit_price >= ask:
+                limit_price = round(ask - 0.01, 2)
+            if limit_price <= bid:
                 print(f"    Maker {side_label}: spread too tight ({spread_bps:.1f}bps), going market")
                 return place_market(symbol, size)
-            progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
-            limit_price = round(top - progress * (top - bottom), 2)
-            if limit_price <= bid:
-                limit_price = round(bid + 0.02, 2)
 
         print(f"    Maker {side_label} #{attempt}: {symbol} at ${limit_price:,.2f} bid=${bid:,.2f} ask=${ask:,.2f} spread={spread_bps:.1f}bps [{elapsed}s/{maker_window}s]")
 
@@ -804,13 +803,10 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
                 print(f"    Partially filled: {pct:.0f}% — waiting...")
                 # Adaptive patience: partial fill means the order is working,
                 # extend the total window once to give the residual more time.
-                # IMPORTANT: do NOT recompute max_attempts. The SELL price slide
-                # uses progress = (attempt - 1) / (max_attempts - 1); growing
-                # the denominator mid-slide would shrink progress and re-quote
-                # UPWARD (closer to ask), the opposite of what the boost intends.
-                # Keep the original slide trajectory; the boost simply lets the
-                # final aggressive-price step (bid + $0.02) sit longer before
-                # the market fallback fires.
+                # SELL now sits at floor every cycle (no slide), so the boost just
+                # gives the same aggressive price more time before market fallback.
+                # BUY still slides from bid+0.01 to ask-0.01; same rule applies —
+                # extending maker_window adds attempts at the aggressive end.
                 if not boost_applied and partial_boost > 0:
                     maker_window += partial_boost
                     boost_applied = True
@@ -878,10 +874,23 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
                 remaining_target = max(0.0, original_size - spent_so_far)
 
                 # Bottom-out check: any remaining trade < MIN_TRADE_USD or no cash
+                # M-29b fix (2026-05-08): the "market for residual" branch was
+                # designed to mop up sub-min dust AFTER real partial-fill
+                # progress. Without a progress guard it fired during transient
+                # low-cash reads (e.g. cancel-release race where exchange still
+                # holds USD locked from the just-cancelled order). Result:
+                # $1.87 market BUY on a $14000 target. Now require ≥50% of
+                # original_size actually spent before mopping residual.
                 if usd_avail < MIN_TRADE_USD:
-                    if remaining_target >= MIN_TRADE_USD:
+                    if remaining_target >= MIN_TRADE_USD and spent_so_far >= original_size * 0.5:
                         print(f"    Remaining cash ${usd_avail:,.2f} < ${MIN_TRADE_USD} min, target unmet — going market for residual ${usd_avail:,.2f}")
                         return place_market(symbol, usd_avail)
+                    if remaining_target >= MIN_TRADE_USD:
+                        # M-29b: low cash without real progress = transient state, not a residual.
+                        # Refuse to dust-buy; loop will retry next iteration when cancel
+                        # releases locked funds.
+                        print(f"    Cash ${usd_avail:,.2f} < ${MIN_TRADE_USD} min but only ${spent_so_far:,.2f}/${original_size:,.2f} actually spent — refusing dust-buy (likely cancel-release race or locked funds).")
+                        return 200, {'status': 'refused_low_cash_no_progress', 'spent_usd': spent_so_far}
                     print(f"    Remaining target ${remaining_target:,.2f} below trade minimum — stopping (target ${original_size:,.2f} reached within ${original_size - spent_so_far:,.2f})")
                     return 200, {'status': 'filled_target_reached', 'spent_usd': spent_so_far}
                 if remaining_target < MIN_TRADE_USD:
@@ -2508,15 +2517,23 @@ def _handle_help_command():
     """Send list of available commands."""
     send_telegram_with_buttons(
         "📱 <b>Commands</b>\n\n"
-        "/status — Positions, P&L, balance, regime\n"
+        "<b>Status</b>\n"
+        "/status — Positions, P&amp;L, balance, regime\n"
+        "/chart [ASSET] [HORIZON] — e.g. /chart ETH 7d\n\n"
+        "<b>Trade actions</b>\n"
+        "/buy [ASSET] [USD] — Maker BUY (default ETH, max_position_usd)\n"
+        "/sell [ASSET] — Maker SELL full position\n"
+        "/hold [bull|bear] [on|off] — Toggle hold-shield (per regime or asset-wide)\n\n"
+        "<b>Config</b>\n"
+        "/setup — Open config menu (toggles, conf, max_position, TP, maker)\n"
+        "/cfg_[ASSET]_… — Direct config sub-commands (used by setup buttons)\n"
+        "/gate [ASSET] [bull|bear] [on|off|clear] — Rally-cooldown gate\n\n"
+        "<b>Operations</b>\n"
+        "/sync — Force-sync positions from exchange\n"
         "/reload — Force-refresh all data feeds (bypass freshness)\n"
-        "/chart [ASSET] [HORIZON] — e.g. /chart ETH 7d\n"
-        "/setup — View & edit config\n"
-        "/sync — Force-sync positions\n"
-        "/gate [ASSET on|off|clear] — V7 rally-cooldown gate\n"
         "/pause /resume — Pause or resume signals\n"
         "/stop — Stop the trader\n\n"
-        "💡 Buy/Sell/Shield via main buttons. Typed form accepts [ASSET] [USD] args.",
+        "💡 Buy/Sell/Shield also available via main buttons.",
         _main_buttons()
     )
 
@@ -4057,16 +4074,33 @@ def _dispatch_telegram_message(msg, trading_cfg):
         _handle_help_command()
 
 
+_telegram_recent_cmds = {}  # cmd_str -> last_dispatch_ts (M-16b dedup)
+
 def _telegram_command_loop(trading_cfg):
     """Background thread: polls Telegram commands every 5 seconds.
     M-16 fix (2026-04-25): processes EVERY message in the poll batch in
     arrival order. Old code only acted on the last message and silently
-    dropped earlier ones (including a /sell racing with a button press)."""
+    dropped earlier ones (including a /sell racing with a button press).
+    M-16b fix (2026-05-08): dedup window — when a button tap arrives as both
+    callback_query AND message.text in the same poll batch (Telegram client
+    quirk), the same command was dispatched twice (e.g., /reload running its
+    full download cycle 2×). Now skip a repeat of the same command within 5s.
+    Per-trade commands (/buy, /sell) bypass dedup since user double-confirm
+    intent uses the inline ✅ Confirm flow, not raw command repeat."""
+    DEDUP_WINDOW_SEC = 5.0
+    DEDUP_BYPASS = ('/buy', '/sell', '/buy ', '/sell ')
     while not _stop_event.is_set():
         try:
             for msg in check_telegram_commands():
                 if _stop_event.is_set():
                     break
+                bypass = any(msg == c or msg.startswith(c) for c in DEDUP_BYPASS)
+                if not bypass:
+                    last_ts = _telegram_recent_cmds.get(msg, 0)
+                    if time.time() - last_ts < DEDUP_WINDOW_SEC:
+                        print(f"  [telegram] dedup: dropped repeat {msg!r} (within {DEDUP_WINDOW_SEC}s)")
+                        continue
+                    _telegram_recent_cmds[msg] = time.time()
                 try:
                     _dispatch_telegram_message(msg, trading_cfg)
                 except Exception as exc:
@@ -4313,17 +4347,27 @@ def run_all_once(trading_cfg, dry_run=False):
                 'max_age_sec': 2 * 3600,
                 'fn': (lambda _aa=_a: download_derivatives_data(assets=[_aa])),
             }
+        # SLAs aligned to config/feature_sources.json (2026-05-08 fix). Previous
+        # 6h SLA on daily sources caused infinite re-download loop: _file_is_fresh()
+        # uses last-row datetime (~T-1 for daily data = always >24h old), so 6h SLA
+        # always failed → re-download every cycle → wasted ~30s/cycle in P1 BLOCKING
+        # phase. New SLAs match the daily publish cadence + tolerance per
+        # feature_sources.json: macro 96h (Mon-holiday-Fri-close handle),
+        # onchain 60h (CoinMetrics T-1 + catch-up), fear_greed 36h, cross_asset 48h.
         _SOURCE_REGISTRY.update({
-            'macro_daily':      {'file': 'data/macro_data/macro_daily.csv',      'max_age_sec':  6 * 3600, 'fn': download_yfinance_data},
-            'fear_greed':       {'file': 'data/macro_data/fear_greed.csv',       'max_age_sec':  6 * 3600, 'fn': download_fear_greed},
-            'cross_asset':      {'file': 'data/macro_data/cross_asset.csv',      'max_age_sec':  6 * 3600, 'fn': download_cross_asset},
-            'stablecoin_flows': {'file': 'data/macro_data/stablecoin_flows.csv', 'max_age_sec': 12 * 3600, 'fn': download_stablecoin_flows},
+            'macro_daily':      {'file': 'data/macro_data/macro_daily.csv',      'max_age_sec': 96 * 3600, 'fn': download_yfinance_data},
+            'fear_greed':       {'file': 'data/macro_data/fear_greed.csv',       'max_age_sec': 36 * 3600, 'fn': download_fear_greed},
+            'cross_asset':      {'file': 'data/macro_data/cross_asset.csv',      'max_age_sec': 48 * 3600, 'fn': download_cross_asset},
+            'stablecoin_flows': {'file': 'data/macro_data/stablecoin_flows.csv', 'max_age_sec': 48 * 3600, 'fn': download_stablecoin_flows},
         })
-        # On-chain per-asset (CoinMetrics daily; SOL skipped — 403 on free tier)
+        # On-chain per-asset (CoinMetrics daily; SOL skipped — 403 on free tier).
+        # SLA 60h to match feature_sources.json (M-24 fix 2026-04-25 absorbs
+        # CoinMetrics T-1 publish + catch-up gap). Previous 6h SLA caused
+        # re-download every cycle.
         for _oc in ('btc', 'eth', 'xrp', 'link'):
             _SOURCE_REGISTRY[f'onchain_{_oc}'] = {
                 'file': f'data/macro_data/onchain_{_oc}.csv',
-                'max_age_sec': 6 * 3600,
+                'max_age_sec': 60 * 3600,
                 'fn': (lambda _o=_oc: download_onchain_data(asset=_o)),
             }
 
