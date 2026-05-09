@@ -4059,6 +4059,14 @@ def _dispatch_telegram_message(msg, trading_cfg):
         return
     if _setup_state.get('active'):
         if msg.lower() == '/stop':
+            # M-31 (2026-05-09): /stop must be idempotent. M-16b dedup is
+            # 5s — if /stop arrives in two poll batches >5s apart (Telegram
+            # retry, double-tap with delay, etc.), the dedup misses and the
+            # second dispatch fires "Trader Stopped" again. Guard at handler
+            # level: once _stop_event is set, swallow the duplicate /stop
+            # silently. Same protection applied to the normal-dispatch branch.
+            if _stop_event.is_set():
+                return
             _setup_state['active'] = False
             print("\n  STOP via Telegram")
             send_telegram("🛑 <b>Trader Stopped</b>")
@@ -4068,6 +4076,9 @@ def _dispatch_telegram_message(msg, trading_cfg):
         return
     cmd = msg.lower()
     if cmd == '/stop':
+        # M-31 (2026-05-09) — see setup-active branch above.
+        if _stop_event.is_set():
+            return
         print("\n  STOP via Telegram")
         send_telegram("🛑 <b>Trader Stopped</b>")
         _stop_event.set()
