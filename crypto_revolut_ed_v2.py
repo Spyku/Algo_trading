@@ -676,20 +676,53 @@ def _execute_maker_order(symbol, size, side, maker_window=None, check_interval=N
 
         spread_bps = (ask - bid) / bid * 10000
         if is_buy:
-            # Option A fix (2026-04-26): BUY-side slide, mirror of SELL.
-            # Old behavior: stuck at bid+0.01 for the entire window. In low-
-            # liquidity hours (e.g. 03:06 CEST Saturday) the bid sat there
-            # for 300s with zero fills, then market fallback at ask = TAKER.
-            # New: start at bid+0.01 (passive, full spread captured), slide
-            # linearly UP to ask-0.01 across `max_attempts`. Final attempts
-            # are at ask-0.01 — almost crossing — which catches incoming
-            # taker-SELL flow that the old fixed bid+0.01 missed.
+            # M-30 / 2026-05-09 fix v4: spread-aware slide.
+            # Original slide (Option A, 2026-04-26) interpolates linearly from
+            # bid+0.01 to ask-0.01 across max_attempts. Idea: capture incoming
+            # taker-SELL flow that the old fixed bid+0.01 missed in low-liquidity
+            # hours.
+            #
+            # Problem observed 2026-05-09 01:00 UTC ETH BUY (spread=16bps,
+            # absolute spread $3.75): the slide pushed posted price to bid+$0.92
+            # at attempt #6 (progress=0.26), which was far enough up the book
+            # that any normal latency between get_quote and POST arrival made
+            # post_only reject. From #6 to #27 we got zero fills — only 26%
+            # of the order filled in maker (during the gentle phase #1-#5),
+            # 74% had to fall through to MARKET taker. Bot did NOT detect the
+            # rejections — kept reposting blindly because the post_only retry
+            # path at line ~742 doesn't break or count rejects.
+            #
+            # v4 logic: slide only makes sense when the spread is narrow enough
+            # that crossing risk stays low. With spread > 5bps (typical on
+            # Revolut X for ETH/BTC), we stay flat at bid+0.01 for the full
+            # window. We sacrifice the half-spread upside on rare taker-SELL
+            # flow but we eliminate the post_only rejection storm and stay
+            # at top-of-book where maker fills happen.
+            #
+            # Worst case = same as current behavior: timeout at maker_window →
+            # MARKET. No regression possible. If wide-spread BUYs still don't
+            # fill at bid+0.01, that's a separate problem (insufficient bid-side
+            # taker flow) that no slide variant would have solved.
+            #
+            # Backtest 2026-05-09 (output/v4_rejection_backtest_20260509.md):
+            # 17/17 matched BUY rejections (Apr 30 - May 8) were in wide-spread
+            # regime. v4 would have prevented 100% of them.
+            SLIDE_SPREAD_THRESHOLD_BPS = 5.0
             bottom = bid + 0.01
             top = ask - 0.01
             if top < bottom:
-                top = bottom  # spread too tight to slide; stay at bid+0.01
-            progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
-            limit_price = round(bottom + progress * (top - bottom), 2)
+                top = bottom  # spread too tight to slide
+            if spread_bps <= SLIDE_SPREAD_THRESHOLD_BPS:
+                # Narrow spread (e.g. low-liquidity hour with tight book):
+                # original slide behavior — gives the engine a chance to catch
+                # passing taker flow at progressively more aggressive prices.
+                progress = min((attempt - 1) / max(max_attempts - 1, 1), 1.0)
+                limit_price = round(bottom + progress * (top - bottom), 2)
+            else:
+                # Wide spread: STAY at bid+0.01 for the whole window. Sliding
+                # toward ask in a wide-spread book is asking for post_only
+                # rejects without enough taker-flow benefit to compensate.
+                limit_price = bottom
             if limit_price >= ask:
                 # Defensive: never cross. post_only would reject anyway.
                 limit_price = round(ask - 0.01, 2)
