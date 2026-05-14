@@ -416,10 +416,20 @@ def build_report(results: list[dict]):
             baseline_sigma = stab.get('sigma_pp', float('nan'))
         rows.append(row)
 
-    # Compute deltas vs baseline
+    # Compute deltas vs baseline.
+    # IMPORTANT: comparison metric is `return_pct` (realized backtest return),
+    # NOT `combined_score`. Variant E uses OPTUNA_METRIC='rpf_sqrt' which puts
+    # its combined_score on a different scale (raw_pf*sqrt(trades) ~ 10-30
+    # vs APF ~ 1-50). return_pct is scale-invariant and is the actual outcome
+    # we care about. combined_score is kept in the row for context only.
     if baseline_winner is not None:
+        b_ret = baseline_winner['return_pct']
         b_cs = baseline_winner['combined_score']
         for row in rows:
+            if not pd.isna(row['winner_ret']):
+                row['ret_d_vs_A'] = row['winner_ret'] - b_ret
+            else:
+                row['ret_d_vs_A'] = float('nan')
             if not pd.isna(row['winner_cs']):
                 row['cs_d_vs_A'] = row['winner_cs'] - b_cs
             else:
@@ -441,38 +451,40 @@ def build_report(results: list[dict]):
     lines.append(f'  Stability test replay: {STABILITY_REPLAY}h  trials: {STABILITY_TRIALS}')
     lines.append('=' * 110)
     lines.append('')
-    hdr = f'  {"variant":<26}  {"cs":>8}  {"Δcs":>7}  {"ret":>7}  {"feat":>4}  {"gamma":>6}  {"σpp":>5}  {"Δσ":>6}  {"verdict":>9}  {"dv min":>6}  {"stab min":>8}'
+    hdr = f'  {"variant":<26}  {"ret%":>7}  {"Δret":>7}  {"feat":>4}  {"gamma":>6}  {"σpp":>5}  {"Δσ":>6}  {"cs(opt)":>8}  {"verdict":>9}  {"dv min":>6}  {"stab min":>8}'
     lines.append(hdr)
     lines.append('-' * len(hdr))
     for row in rows:
-        cs = f'{row["winner_cs"]:+8.3f}' if not pd.isna(row['winner_cs']) else '   n/a  '
-        d_cs = f'{row.get("cs_d_vs_A", float("nan")):+7.2f}' if not pd.isna(row.get('cs_d_vs_A', float('nan'))) else '  n/a  '
         ret = f'{row["winner_ret"]:+7.2f}' if not pd.isna(row['winner_ret']) else '  n/a  '
+        d_ret = f'{row.get("ret_d_vs_A", float("nan")):+7.2f}' if not pd.isna(row.get('ret_d_vs_A', float('nan'))) else '  n/a  '
         feat = f'{row["winner_n_feat"]:4d}' if row['winner_n_feat'] else '   ?'
         g = f'{row["winner_gamma"]:.4f}' if row['winner_gamma'] else ' n/a '
         s = f'{row["sigma_pp"]:5.2f}' if not pd.isna(row['sigma_pp']) else ' n/a '
         d_s = f'{row.get("sigma_d_vs_A", float("nan")):+6.2f}' if not pd.isna(row.get('sigma_d_vs_A', float('nan'))) else ' n/a  '
+        cs = f'{row["winner_cs"]:+8.3f}' if not pd.isna(row['winner_cs']) else '   n/a  '
         v = row['stab_verdict'] or '?'
-        lines.append(f'  {row["variant"]:<26}  {cs}  {d_cs}  {ret}  {feat}  {g}  {s}  {d_s}  {v:>9}  {row["elapsed_dv_min"]:>6.1f}  {row["elapsed_stab_min"]:>8.1f}')
+        lines.append(f'  {row["variant"]:<26}  {ret}  {d_ret}  {feat}  {g}  {s}  {d_s}  {cs}  {v:>9}  {row["elapsed_dv_min"]:>6.1f}  {row["elapsed_stab_min"]:>8.1f}')
 
     lines.append('')
     lines.append('Verdict reading')
     lines.append('---------------')
     if baseline_sigma is not None and not pd.isna(baseline_sigma):
         # Check if any variant beat baseline + strict win
+        # Comparison metric is `return_pct` (scale-invariant across Optuna
+        # objectives). cs_d_vs_A is misleading for Variant E (rpf_sqrt scale).
         winners = []
         for row in rows:
             if row['variant'] == 'A_baseline':
                 continue
-            if pd.isna(row['sigma_pp']) or pd.isna(row.get('cs_d_vs_A', float('nan'))):
+            if pd.isna(row['sigma_pp']) or pd.isna(row.get('ret_d_vs_A', float('nan'))):
                 continue
-            if row['sigma_pp'] < 2.0 and row['cs_d_vs_A'] > 3 * baseline_sigma:
-                winners.append((row['variant'], row['cs_d_vs_A'], row['sigma_pp']))
+            if row['sigma_pp'] < 2.0 and row['ret_d_vs_A'] > 3 * baseline_sigma:
+                winners.append((row['variant'], row['ret_d_vs_A'], row['sigma_pp']))
 
         if winners:
-            lines.append(f'  CLEAR WINNER: {len(winners)} variant(s) drop σ < 2pp AND beat baseline by ≥ 3·σ_A ({3*baseline_sigma:.1f}pp):')
-            for name, d_cs, s in winners:
-                lines.append(f'    {name}  Δcs={d_cs:+.2f}  σ={s:.2f}pp')
+            lines.append(f'  CLEAR WINNER: {len(winners)} variant(s) drop σ < 2pp AND beat baseline return by ≥ 3·σ_A ({3*baseline_sigma:.1f}pp):')
+            for name, d_ret, s in winners:
+                lines.append(f'    {name}  Δret={d_ret:+.2f}pp  σ={s:.2f}pp')
             lines.append('  Action: promote winning variant\'s patchers to a production engine fork')
             lines.append('         then run Phase 2 (expand to 5,6,7h) and Phase 3 (full HRST).')
         else:
