@@ -503,11 +503,113 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 ---
 
-## ⚡ ACTIVE TODO — 2026-05-10 (CURRENT)
+## ⚡ ACTIVE TODO — 2026-05-14 (CURRENT)
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🟡 P0 — RUNNING ON DESKTOP — Engine mode comparison test V2 (launched 2026-05-14)
+### 🟢 P0 — RUNNING ON DESKTOP — 5-variant reliability test (launched 2026-05-14 20:47:36, fix shipped 22:00 mid-flight)
+
+**What it tests**: three root causes that make crypto Mode D/V results unreliable, identified 2026-05-14:
+1. **Measurement noise dominates signal** — `tools/feature_stability_test.py` (shipped 2026-05-14 ~15:30) measured σ=5.82pp on label-noise alone for prod ETH 8h. Baseline is ~2σ BELOW the noise mean — production is on the unlucky side of its own noise distribution.
+2. **n_features hard cap traps the optimizer** — V2's 5 completed modes ALL produced bit-identical Mode V winners at 5h/6h/7h. Only 8h showed variation. Adversarial mode beat baseline by +5.18pp avg, right AT the σ noise floor.
+3. **Scoring rule rewards luck** — `return × WR` is jumpy at typical N=30-80 trade counts; no Deflated-Sharpe / PBO multiple-testing correction.
+
+**5 variants × Mode DV ETH 8h + per-variant stability test (--replay 336)**:
+| Tag | Patchers | Tests |
+|---|---|---|
+| `A_baseline` | (none) | reference |
+| `B_multi_seed` | reliability_multi_seed (K=5 median scoring) | root cause #1 |
+| `C_no_feature_cap` | reliability_no_feature_cap (GRID_FEATURES→[10,17,25,40,60,80], N_FEATURES_RANGE upper→150) | root cause #2 |
+| `D_multi_seed_plus_cap` | B + C | #1+#2 stack |
+| `E_full_fix` | B + C + reliability_dsr_scoring (OPTUNA_METRIC='rpf_sqrt') | full stack |
+
+Phase 1 scope is **8h-only** because V2 proved 5/6/7h are bump-locked across all importance methods — testing them would burn 4× compute for known-noise results.
+
+**Launch command** (resumable, V2-style snapshot isolation, trader stays active):
+```
+python tools/run_reliability_test.py
+```
+
+**Files (commit f2ca15a + fix 77e78cb)**:
+- [tools/run_reliability_test.py](tools/run_reliability_test.py) — orchestrator (5 variants, snapshot, resumable state)
+- [_idea_patchers/reliability_multi_seed.py](_idea_patchers/reliability_multi_seed.py) — K=5 median wrapper for `_deku_eval_with_pruning`
+- [_idea_patchers/reliability_no_feature_cap.py](_idea_patchers/reliability_no_feature_cap.py) — drops n_features ceiling
+- [_idea_patchers/reliability_dsr_scoring.py](_idea_patchers/reliability_dsr_scoring.py) — flips OPTUNA_METRIC to `rpf_sqrt`
+- [crypto_trading_system_ed_robust.py](crypto_trading_system_ed_robust.py) — first-pass K=5 fork (audit-trail, superseded by harness)
+- [tools/feature_stability_test.py](tools/feature_stability_test.py) — updated: `--csv/--asset/--horizon` args + `STAB_REPLAY` env
+
+#### 🚨 ETH-parse bug discovered LIVE 2026-05-14 ~22:00 CEST
+
+**Symptom**: 1h 15min into the Desktop run, BTC grid CSV `crypto_ed_grid_BTC_8h_REL_A_BASELINE.csv` was found alongside the expected ETH one. The harness was running ALL 9 ASSETS per variant (BTC, ETH, XRP, SOL, LINK, BNB, SMI, DAX, CAC40), not ETH-only.
+
+**Root cause**: same engine CLI parser bug at [crypto_trading_system_ed.py:7347](crypto_trading_system_ed.py#L7347) that bit the laptop's `crypto_trading_system_ed_robust.py` test earlier — `'ETH'.lower().endswith('h')` is True, so the engine's positional-arg parser treats `'ETH'` as a horizon, fails the isdigit body, consumes the elif WITHOUT setting horizons or assets, and `assets_list` defaults to `list(ASSETS.keys())` = all 9. The robust wrapper had a workaround for this; the harness did NOT (my mistake — should have been ported during the harness build, smoke-tested with `--status` doesn't exercise subprocess argv construction).
+
+**Impact prevented**: Variant A alone would have taken **3-5h** instead of ~1.5h. Full Phase 1 would have ballooned to **~50h** vs the planned ~9h — over the 40h budget.
+
+**Fix (commit 77e78cb)**: in `run_mode_dv()`, append a trailing comma to `ASSET` when it ends in `'h'`. The engine parser then splits on comma, filters by ASSETS membership, and correctly identifies `['ETH']`.
+
+**Required user action after the fix lands on the Desktop**:
+1. Ctrl+C the running orchestrator (PID 18388 holds the lock at 22:00 CEST)
+2. `cd` to desktop engine dir, `git pull` (picks up commit 77e78cb)
+3. `del models\crypto_ed_grid_*_REL_A_BASELINE.csv` — optional, removes buggy partial artifacts
+4. `python tools/run_reliability_test.py` — restart; state.json `completed: {}` so auto-resume kicks in cleanly from variant A
+
+**Sanity check after restart**: first grid CSV written should be `crypto_ed_grid_ETH_8h_REL_A_BASELINE.csv` (ETH only). If `crypto_ed_grid_BTC_8h_REL_A_BASELINE.csv` appears, the fix didn't propagate — re-pull and try again.
+
+#### Architecture (V2-style)
+- Snapshot at `data/_reliability_snapshot_<CID>/` — pd.read_csv redirected via [_idea_patchers/v2_data_snapshot.py](_idea_patchers/v2_data_snapshot.py). Trader stays active.
+- All writes to `*_reliability_<variant>.csv` or `*_noprod.csv` — production CSV/regime config never touched.
+- Resumable: PID lock + state.json. Failed (rc!=0) variants NOT marked complete; re-run picks up where it left off.
+
+#### Useful commands during the run
+```
+python tools/run_reliability_test.py --status        # show DV ✓ / STAB ✓ per variant
+python tools/run_reliability_test.py --report-only   # rebuild verdict from existing snapshots
+python tools/run_reliability_test.py --variants A_baseline,B_multi_seed  # subset
+python tools/run_reliability_test.py --skip-stability  # Mode DV only (no σ measurement)
+python tools/run_reliability_test.py --reset         # wipe state + snapshot + per-variant CSVs
+```
+
+Quick state probe (no Python needed):
+```
+cat output/run_reliability_test_state.json | findstr completed
+```
+
+#### Expected runtime on Desktop (post-fix, ETH-only)
+
+Based on observed timing of Variant A's ETH 8h Mode D taking ~44 min on desktop (vs my ~30 min estimate):
+
+| Variant | Mode DV | Stability | Per-variant | Cumulative ETA from 22:30 restart |
+|---|---|---|---|---|
+| A_baseline | ~75 min | ~25 min | ~100 min | **~00:10 CET** |
+| B_multi_seed (K=5 ×~4.5 multiplier on Mode V refine) | ~250 min | ~25 min | ~275 min | **~04:45 CET** |
+| C_no_feature_cap (no K=5, ~50% more grid evals) | ~110 min | ~25 min | ~135 min | **~07:00 CET** |
+| D_multi_seed_plus_cap | ~300 min | ~25 min | ~325 min | **~12:25 CET tomorrow** |
+| E_full_fix | ~300 min | ~25 min | ~325 min | **~17:50 CET tomorrow** |
+
+Within 40h budget. The single most informative datapoint is **Variant B at ~04:45 CET** (does K=5 median actually drop σ?). Variants C/D/E refine the answer.
+
+#### Verdict logic (set in advance, not post-hoc)
+- **CLEAR WINNER**: ≥1 variant drops σ < 2pp AND beats baseline by ≥3·σ_A → promote winner's patchers to a production engine fork → Phase 2 (expand to 5,6,7h) → Phase 3 (full HRST validation).
+- **σ DROPPED BUT NO STRICT WIN**: root cause #1 fix is real but combined effect doesn't beat baseline → ship denoised engine anyway (retain current alpha + lower variance), pivot to execution-gap research (~17pp gap to live).
+- **σ DID NOT DROP**: root cause #1 hypothesis was wrong → pivot to execution-gap OR re-examine patcher implementations.
+
+#### Today's research timeline (chronological, 2026-05-14)
+1. **00:19** — V2 launched on desktop (different test — see CRASHED entry below)
+2. **11:35** — V2 crashed during resume attempt (joblib KeyboardInterrupt). 5/7 modes complete. Adversarial = +5.18pp avg, right at σ noise floor → motivated the σ measurement work.
+3. **~15:30** — User shipped [tools/feature_stability_test.py](tools/feature_stability_test.py) (commit `55cc9b6`). Ran on laptop → **σ=5.82pp UNSTABLE verdict** on prod ETH 8h. Baseline +23.40% is ~2σ BELOW the +34.32% mean of all 11 perturbations.
+4. **~17:00** — Built [crypto_trading_system_ed_robust.py](crypto_trading_system_ed_robust.py), a first-pass K=5 median fork. Mode D ETH 8h --replay 1440 on laptop (42 min). Winner: RF+LGBM w=150 g=0.997 f=13 (4 fewer features than prod; dropped `hour_cos` which permute-test flagged as a noise-bump feature, kept `pysr_1`/`pysr_2` which were load-bearing).
+5. **~19:50** — Started stability test against the robust winner; killed at 17 min (projected 3h on full --replay 1440 — too slow as a per-variant check inside a 5-variant harness).
+6. **~20:00** — Designed the 5-variant harness with --replay 336 stability test (~25 min instead of ~3h). Built `tools/run_reliability_test.py` + 3 reliability patchers. Commit `f2ca15a` push.
+7. **20:47:36** — User launched harness on Desktop.
+8. **~22:00** — ETH-parse bug discovered live (BTC grid CSV appeared under variant A). Fix shipped as commit `77e78cb`. User Ctrl+C + git pull + restart pending.
+
+#### V2 status
+Superseded — see CRASHED entry directly below.
+
+---
+
+### 🔴 P0 — CRASHED + SUPERSEDED — Engine mode comparison test V2 (launched 2026-05-14 00:19, crashed 11:35)
 
 **Status**: launched on Desktop with snapshot isolation (trader-coexistence mode). ETA ~37h, finishes ~Friday afternoon. Resumable.
 
