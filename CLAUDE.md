@@ -503,9 +503,240 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 ---
 
-## ⚡ ACTIVE TODO — 2026-05-08 (CURRENT)
+## ⚡ ACTIVE TODO — 2026-05-10 (CURRENT)
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
+
+### 🟡 P0 — RUNNING ON DESKTOP — Engine mode comparison test V2 (launched 2026-05-14)
+
+**Status**: launched on Desktop with snapshot isolation (trader-coexistence mode). ETA ~37h, finishes ~Friday afternoon. Resumable.
+
+**Launch / resume command (same)**:
+```
+python tools/test_engine_modes_v2.py
+```
+
+**What it does**: full Mode DV pipeline across 7 literature-grounded importance/regularization modes. Compares Mode V's `combined_score` per horizon (production selection metric). Trader stays active — V2 reads from a private data snapshot, completely isolated from live data writes.
+
+**V2 modes tested**:
+1. `baseline` — reference (current production engine)
+2. `interventional_shap` — Janzing, Minorics, Bloebaum (2020) arXiv 1910.13413 — causally-correct TreeSHAP with background
+3. `loco_importance` — Hooker, Mentch, Zhou (2019) arXiv 1905.03151 — drop-column importance on top-40 (2-stage tractability)
+4. `purged_cv_split_count` — López de Prado AFML Ch 7 — 5-fold purged CV avg via Borda rank
+5. `lasso_prefilter` — Tibshirani (1996) — L1 logistic pre-filter → LGBM (true feature pruning)
+6. `leaf_weight_l1_reg` — LightGBM `reg_alpha=1.0` — leaf-weight L1 (NOT feature pruning — properly framed)
+7. `adversarial` — Strobl, Boulesteix, Zeileis, Hothorn (2007) BMC Bioinformatics — null-feature diagnostic
+
+**🛡 Trader-coexistence architecture (added 2026-05-14)**:
+- At campaign start: V2 snapshots `data/` → `data/_v2_snapshot_<CID>/`
+- Each mode subprocess loads [_idea_patchers/v2_data_snapshot.py](_idea_patchers/v2_data_snapshot.py) which monkey-patches `pd.read_csv` to redirect `data/*` reads → `data/_v2_snapshot_<CID>/*`
+- Trader continues reading/writing live `data/` files unaffected
+- V2 reads frozen snapshot; no data drift possible across modes
+- Drift check repurposed: now verifies snapshot integrity (should never change since V2 owns it)
+- **TRADER CAN STAY ACTIVE during the entire 37h test** — no collision, no `--no-persist` conflicts (production CSV untouched by V2)
+
+**V2 over V1 improvements**:
+- Snapshot isolation (above) — trader coexistence
+- Failed runs (rc != 0) NOT marked complete (v1 bug — would skip on retry)
+- Methodologically-correct mode labels (e.g., `leaf_weight_l1_reg` corrects v1's misnamed `l1_alpha` "native feature pruning" claim)
+- Post-hoc PBO + DSR scoring stub at end (Bailey & López de Prado 2014, 2017)
+
+**Useful commands** (run anytime during execution):
+- `python tools/test_engine_modes_v2.py --status` — show which modes done (✓) / pending (·)
+- `python tools/test_engine_modes_v2.py --report-only` — rebuild verdict from existing snapshots (partial OK)
+- `python tools/test_engine_modes_v2.py --reset` — wipe state + per-mode CSVs + data snapshot dir, start fresh
+
+**Verification of trader isolation** — first subprocess log (e.g., `logs/test_engine_modes_v2_<TS>_baseline.log`) should show:
+```
+[V2_SNAPSHOT] pd.read_csv redirected: data/<file> -> _v2_snapshot_<CID>/<file>
+```
+If you see `[V2_SNAPSHOT] V2_DATA_SNAPSHOT not set`, the env var didn't wire — isolation OFF, drift possible. Stop and `--reset`.
+
+**Outputs to check after completion**:
+- `output/test_engine_modes_v2_<TS>_summary.txt` — verdict + rankings
+- `output/test_engine_modes_v2_<TS>.csv` — comparison table
+- `models/crypto_ed_production_mode_v2_<NAME>.csv` — per-mode Mode V winners (preserved)
+
+**Decision rule on completion**:
+- ≥1 mode strictly better than baseline on all 4 horizons AND PBO<50% AND DSR significant → ship it (after HRST validation)
+- No strict winner → conclusively closes within-engine importance/regularization fixes → pivot to **Lever 1 (per-horizon feature pools)** infrastructure work
+
+**Why this matters**: today's research (2026-05-13) tested 4 within-engine fixes (NOCAP, PERM, HYBRID, LGBM-only). All traded problems — no strict improvement. This 7-mode V2 test is the literature-grounded conclusive sweep. After this, we know whether ANY within-engine importance/regularization method can improve, or whether per-horizon work is the only remaining path.
+
+**Files (all shipped 2026-05-13/14)**:
+- [tools/test_engine_modes_v2.py](tools/test_engine_modes_v2.py) — orchestrator (snapshot isolation added 2026-05-14)
+- [_idea_patchers/v2_data_snapshot.py](_idea_patchers/v2_data_snapshot.py) — `pd.read_csv` redirect (NEW 2026-05-14)
+- [_idea_patchers/interventional_shap.py](_idea_patchers/interventional_shap.py) — mode 2
+- [_idea_patchers/loco_importance.py](_idea_patchers/loco_importance.py) — mode 3
+- [_idea_patchers/purged_cv_split_count.py](_idea_patchers/purged_cv_split_count.py) — mode 4
+- [_idea_patchers/lasso_prefilter.py](_idea_patchers/lasso_prefilter.py) — mode 5
+- [_idea_patchers/leaf_weight_l1_reg.py](_idea_patchers/leaf_weight_l1_reg.py) — mode 6
+- [_idea_patchers/adversarial.py](_idea_patchers/adversarial.py) — mode 7
+
+**Cleanup post-completion**: snapshot dir `data/_v2_snapshot_<CID>/` is ~100-500MB. `--reset` removes it after results are confirmed; or `rm -rf data/_v2_snapshot_*` manually.
+
+**V1 superseded**: [tools/test_engine_modes.py](tools/test_engine_modes.py) is kept on disk for reference but V2 is what should be launched. V1 had loose literature citations and a state-tracking bug.
+
+---
+
+### 🟡 P0b — RUN ON LAPTOP — Feature stability diagnostic (2026-05-14)
+
+**Run on Laptop in PARALLEL with the V2 sweep on Desktop**:
+```
+python tools/feature_stability_test.py
+```
+
+ETA ~15-30 min (11 subprocesses, single-config backtest each — not full Mode D).
+
+**What it answers**: a different, more fundamental question than V2. V2 asks "which feature-importance ranker picks the best Mode DV candidate?". P0b asks: **"is the D/V pipeline feature-stable at all, regardless of which ranker we use?"**
+
+Methodological premise: in a well-behaved pipeline, adding an irrelevant feature should produce ~zero change in backtest return (model ignores noise). If σ(return) across feature perturbations is large, the pipeline is over-fitting to feature noise — meaning *every* feature-related decision (which ranker, which features to add, which to drop) is dominated by noise, not signal.
+
+**Test design**:
+- Fixed config: production 8h ETH winner (RF+LGBM, w=150, gamma=0.995, 17 features) from `models/crypto_ed_production.csv`
+- 11 trials on same 1440h replay at conf=65 (bear regime threshold):
+  - 1 baseline (no perturbation, sanity check)
+  - 5 trials adding 1 random-noise feature (different seeds 42-46) — model should ignore
+  - 5 trials permuting one existing feature (pysr_1, pysr_2, deriv_basis_chg1d, hour_cos, logret_8h) — destroys feature info
+- Measures σ(return_pct) across all 11 trials
+
+**Verdict thresholds** (rule-of-thumb):
+- σ < 2pp → STABLE: pipeline is feature-robust; D/V methodology is sound
+- 2 ≤ σ < 5pp → MARGINAL: moderate feature sensitivity; consider fixes A/B/C below
+- σ ≥ 5pp → UNSTABLE: pipeline over-fits to feature noise; structural fix required before any feature-related decision can be trusted
+
+**If UNSTABLE, structural fixes (in priority order)**:
+- **Fix A**: Drop the n_features hard cap in [crypto_trading_system_ed.py:431-435](crypto_trading_system_ed.py#L431) (`N_FEATURES_RANGE = {4: (4, 40), 8: (4, 80)}`). The cap forces feature DISPLACEMENT — adding feature X kicks out feature Y. Without the cap, LGBM naturally ignores noise features.
+- **Fix B**: Bootstrap-aggregate the importance ranking (the existing `purged_cv_split_count` patcher is half of this — does folds, not bootstraps). Stabilizes ranking at small samples.
+- **Fix C**: Replace `combined_score` with a sample-size-robust metric (rolling Sharpe over 30-day windows instead of cumulative win-rate × return). Reduces Optuna's overfitting to thin-sample lottery results.
+
+**Why this is parallelizable with V2**:
+- Different machine (Laptop, not Desktop)
+- Reads from live `data/` (not the V2 snapshot dir) — so it captures CURRENT data state, not 2026-05-14 frozen snapshot. This is intentional: stability is a property of the pipeline + data, and we want to know about TODAY's pipeline.
+- Doesn't touch noprod.csv or any V2-relevant file
+- Trader can stay active (this test only does in-process backtest, no engine main() invocation)
+
+**Why both tests are useful (don't skip P0b in favor of just V2)**:
+- V2 result tells us if any specific ranker wins. P0b result tells us whether ANY ranker decision matters at all.
+- If P0b returns UNSTABLE, the V2 results are also untrustworthy regardless of which mode "wins" — the whole methodology is noise-amplifying.
+- If P0b returns STABLE, V2's null result (likely) is meaningful: the methodology is sound, the engine is feature-immune, and no ranker change helps.
+- P0b finishes in 15-30 min vs V2's 37h. It can inform whether V2 is worth waiting for or whether the rerun's verdict is moot.
+
+**Optional flags**:
+- `--conf 75` use bull threshold instead of bear (75 vs 65)
+- `--trials 3` reduce noise+permute trials to 3 each (faster ~10 min)
+
+**File**: [tools/feature_stability_test.py](tools/feature_stability_test.py) — single self-contained orchestrator (no separate patcher files needed; inline subprocess code applies perturbations to `_build_features` per trial).
+
+---
+
+### 🟡 P0c / P0d / P0e — Structural fixes CONDITIONAL on P0b verdict (2026-05-14)
+
+Only act on these IF P0b returns MARGINAL (σ 2-5pp) or UNSTABLE (σ ≥ 5pp). If P0b returns STABLE (σ < 2pp), all three are unnecessary — close them.
+
+**P0c — Fix A: Drop the n_features hard cap** *(highest impact, easiest to test)*
+- Patch [crypto_trading_system_ed.py:431-435](crypto_trading_system_ed.py#L431) — currently `N_FEATURES_RANGE = {HORIZON_SHORT: (4, 40), HORIZON_LONG: (4, 80)}`. Either remove the cap entirely (let LGBM pick from all features) or widen to (4, 200) so the cap doesn't bind.
+- Why: the hard cap forces feature DISPLACEMENT — adding feature X kicks out feature Y. Without cap, LGBM naturally weights real features higher and noise features get near-zero split-count.
+- After patch: re-run `python tools/feature_stability_test.py`. If σ drops below 2pp, Fix A is the root cause — keep the patch, ship it.
+- ETA: 5 min patch + 30 min re-test = ~45 min total.
+
+**P0d — Fix B: Bootstrap-aggregate the importance ranking**
+- The existing [_idea_patchers/purged_cv_split_count.py](_idea_patchers/purged_cv_split_count.py) does folds, not bootstraps. Extend it to do K=10 bootstrap resamples (with replacement) instead of (or in addition to) the 5 purged folds. Keep features in top-N rank on ≥60% of bootstraps. This stabilizes feature selection at small samples.
+- Use as a Mode D patcher (same pattern as V2 modes); replaces the default `_test_lgbm_importance`.
+- ETA: ~1h to write + 30 min stability re-test.
+- Only worth doing if Fix A alone doesn't fix the instability.
+
+**P0e — Fix C: Replace combined_score with sample-size-robust metric**
+- Current `combined_score` is `return_pct × accuracy / some_normalization` — at 5-10 trades, both factors are highly variable. Replace with rolling Sharpe over 30-day windows (~20 windows in 1440h replay = much higher effective sample).
+- Engine wide change: touches Mode D scoring, Mode V scoring, the production CSV column. ~half-day engineering.
+- Only worth doing if Fixes A + B together don't stabilize.
+
+**Decision chain post-P0b**:
+1. P0b STABLE → close P0c/P0d/P0e. Methodology is fine. V2 verdict (whenever it finishes) is meaningful as-is.
+2. P0b MARGINAL → do P0c, re-test. If still marginal, do P0d. Skip P0e unless needed.
+3. P0b UNSTABLE → do P0c, re-test. If still unstable, P0d. If still unstable, P0e (substantial engineering — pause and re-evaluate first).
+
+---
+
+
+### 🔄 RE-EVALUATION 2026-05-10 — shelved ideas RE-OPENED
+
+User pushback on the 2026-05-09 C05/C06 verdict triggered a thorough re-analysis. The "scoring-overlay family DEAD" pattern obscured a real mechanical issue: **Mode S regime sweep is the bottleneck, not the metric**. Per-horizon scoring wins (CVaR 6h Refined #1 +50.88%, CDaR 8h Refined #1 +67.03%) ARE real but get destroyed when Mode S picks a different detector than the one those wins were optimized under.
+
+**Reclassified from DEAD/SHELVED → TWEAKABLE**:
+- **C05 CVaR / C06 Sortino** — per-horizon wins material; HRST loss attributable to detector swap during Mode S
+- **C13 CDaR** — same pattern; single-horizon-only follow-up was already noted in CLAUDE.md but never executed
+- **C14 triple-barrier exit overlay** — 60d gain real (+10.48pp); 90d washed; needs vol-conditional gating
+- **C11 VPIN entry filter** — best variant +3.83pp at hourly; literature uses 1-min, never tested at 5-min sub-loop
+- **C16 disaster brake** — already actionable: just confirmed +1.96pp / 1 fire on 90d cache (ship now)
+
+**Confirmed GENUINELY DEAD** (no parameter tweak helps, root cause is concept/architecture):
+- C12 stability filter (LGBM bagging already does this internally)
+- C18 calibration / C45 conformal (architectural mismatch with binary engine)
+- C09/C10/C24/C02 exit/entry filters (tested with sweeps; model's exit timing IS the alpha)
+- C17 fracdiff / C19 turbulence (concept inverted on ETH bull regime)
+- C20 triple-barrier label (positive-class starvation)
+- C21 asymmetric loss / C22 Kelly (architectural mismatch with high-conf binary engine)
+- The 7 mid-effort retest ideas from 2026-05-10 batch (C03/C12/C23/C29ab/C31/C48) — confirmed DEAD on fixed harness with clean baseline. Net: 0 PASS, 1 MARGINAL+ (C29 HAR-RV +0.63 driven by single-horizon 5h win).
+
+### 🚀 Priority queue (post re-evaluation, updated 2026-05-10 evening)
+
+| # | Action | Effort | Expected payoff | Status |
+|---|---|---|---|---|
+| **P1** | **Enable C16 -5% disaster brake** in `regime_config_ed.json` (`ETH.disaster_brake_pct: 5`) | 5 min | +2pp / free downside insurance | ⏸ ON HOLD (won't fire in current regime; user paused 2026-05-10) |
+| **P2** | **Locked-detector HRST runner** — Mode S restricted to current detector (`tsmom_672h`); only sweep horizons + confs + scoring. | ~6h Desktop | tested CVaR, expected +3-8pp | ❌ DEAD 2026-05-10 (-8.88pp; scoring-overlay family conclusively closed 5-for-5) |
+| **P3** ⭐ | **CPCV HRST** — `python tools/run_cpcv_hrst_resumable.py`. Engine fork [crypto_trading_system_ed_cpcv.py](crypto_trading_system_ed_cpcv.py) implements Design Option A (adaptive gamma per fold, López de Prado AFML Ch 12). Re-validates Mode D top-6 candidates via 15-path CPCV with PBO scoring. Production untouched. | ~5-7h Desktop | (1) re-rank may improve Mode T REF; (2) PBO diagnostics show overfitting risk regardless of headline | ⭐ **ACTIVE — built 2026-05-10, ready to run on Desktop** |
+| **P4** | **C14 vol-conditional triple-barrier** retest — only use barriers when realized vol > p70 | ~2.5h | +3-5pp if conditional logic right | Standalone overlay sim |
+| **P5** | **C11 VPIN at 5-min cadence** — sub-loop in trader; literature framing | ~1 day coding | +3-7pp if literature transfers | Real engineering |
+| **P6** | **C15 meta-labeling on SOL/BTC** — door open per CLAUDE.md; primary weak there | ~6h | secondary asset enablement |  |
+| ~~P7~~ | ~~Mode S diagnostic~~ | n/a | n/a | ❌ Made obsolete 2026-05-10 by P2 result. Locked-detector test PROVED Mode S is NOT the bottleneck (CVaR DEAD even with detector locked). Skip. |
+
+**P3 is the highest-stakes test of the day.** CPCV is the only research direction that could (a) revive promotion of an alternate-scoring engine, OR (b) provide PBO-based confidence intervals on current production configs. Either outcome is informative.
+
+### 📚 Why P3 (CPCV) matters even if it doesn't ship
+
+López de Prado's CPCV (AFML Ch 12) is the gold-standard backtesting methodology for ML financial models. The Deku V1.4 attempt in March 2026 ([archive/crypto_trading_system_deku_v1_4_cpcv_gamma1_failed.py](archive/crypto_trading_system_deku_v1_4_cpcv_gamma1_failed.py)) FAILED because it forced `gamma=1.0` to make CPCV work. Design Option A fixes this: each CPCV fold's walk-forward uses the candidate's NATURAL gamma, preserving recency bias within each fold.
+
+Two outcomes possible:
+- **Headline win**: CPCV-driven candidate selection produces a Mode T REF >= +5pp over current production (+76.77%). Promote.
+- **Headline neutral, diagnostic win**: even if Mode T REF is unchanged, the new `cpcv_pbo` column in grid CSVs reveals which Mode D winners are overfit (PBO > 50%) vs robust (PBO < 30%). Useful intel for assessing the engine's stability.
+
+**Run command**:
+```
+python tools/run_cpcv_hrst_resumable.py
+```
+
+Single-instance lock ensures no duplicate-launch deadlock. State file at `output/cpcv_hrst_state_1440h.json`. Outputs to `_cpcv` suffixed files only.
+
+**Why this re-evaluation matters**: I had been pattern-matching to "this week's 0-PASS streak" and shelving anything that didn't pass cleanly. But looking at the underlying numbers, several "FAIL" verdicts had real positive signal at the per-horizon level that got destroyed by aggregation. The bottleneck isn't the feature pipeline or the scoring metric — it's the regime selection logic. P7 (Mode S diagnostic) is the most important unbuilt tool.
+
+### ✅ Closed 2026-05-10 (overnight mid-effort batch — fixed harness + clean baseline)
+
+7-idea batch via `tools/test_idea_batch_C03_C12_C23_C29_C31_C48.py` ran 2026-05-10 00:14 → 04:31 (4h17m). Verdicts computed directly from grid CSVs (auto-summary parser hit a Unicode crash but Mode D writes were clean):
+
+| CID | Idea | Avg APF Δ | Verdict | Notes |
+|---|---|---|---|---|
+| C03 | SHAP feature ranking | −2.91 | FAIL | 5h +2.45 isolated, others negative |
+| C12 | Stability filter @ thr=50 | −4.66 | FAIL | Worst of batch; concept genuinely dead |
+| C23 | Per-regime feature set | −1.86 | FAIL | 8h +5.22 single-horizon win, others net negative |
+| C29a | HAR-RV (Corsi 2009) | **+0.63** | **MARGINAL+** | Only positive avg; 5h +6.66 drives it |
+| C29b | Hurst exponent | −1.89 | FAIL | Same 5h +6.66; other horizons hurt |
+| C31 | Funding momentum | −1.90 | FAIL |  |
+| C48 | Sharpe-aware label | −2.92 | FAIL | 5h −9.98 catastrophic |
+
+**Net: 0 PASS, 1 MARGINAL+, 6 FAIL.** Suspect-pool from broken-harness era now formally closed. C29 HAR-RV's 5h +6.66 isolated win mirrors the C05/C06 per-horizon-vs-aggregator pattern — could be revivable via per-horizon-only application (not actionable as global feature add).
+
+### ✅ Closed 2026-05-09 → 2026-05-10 (overlay-tier batch)
+
+3-idea overlay batch via `tools/test_idea_batch_C16_C36_C45_C46_C48_C49_C51_C52_C53.py` (~30 sec runtime):
+
+| CID | Idea | Result | Verdict |
+|---|---|---|---|
+| **C16** | **Disaster brake -5%** | **+1.96pp / 1 fire on 90d** | **MARGINAL+ → ACTIONABLE (ship)** |
+| C52 | ATR trailing stop (12 sweep configs) | best 0pp (no fires); all firing variants lost (-3.78 to -13.39pp) | DEAD |
+| C53 | Volume-spike exit (12 sweep configs) | all variants -0.74 to -2.49pp | DEAD |
+
+C36, C45, C46, C48, C49, C51 returned STUB with explicit blockers (API keys / architectural / engine extension).
 
 ### ✅ Closed 2026-05-08 (overnight C50 HRST + trader fixes)
 

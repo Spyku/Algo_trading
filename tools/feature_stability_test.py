@@ -38,8 +38,10 @@ ENGINE = Path(__file__).resolve().parent.parent
 os.chdir(ENGINE)
 PY = sys.executable
 
-# Production 8h ETH winner (from models/crypto_ed_production.csv, ETH row, horizon=8)
-PROD_CFG = {
+# Default PROD_CFG = production 8h ETH winner (from models/crypto_ed_production.csv).
+# Override via `--csv path/to/x.csv --asset ETH --horizon 8` to test a different
+# config CSV (e.g. crypto_ed_production_robust.csv from the robust engine fork).
+DEFAULT_PROD_CFG = {
     'combo': 'RF+LGBM',
     'window': 150,
     'gamma': 0.995,
@@ -52,9 +54,43 @@ PROD_CFG = {
     ],
 }
 
+# Module-level placeholder, set by main() after parsing args.
+PROD_CFG = DEFAULT_PROD_CFG
+
 # ETH bear horizon=8 confidence per production regime config
 DEFAULT_CONF = 65
 REPLAY_HOURS = 1440
+
+
+def load_cfg_from_csv(csv_path: str, asset: str, horizon: int) -> dict:
+    """Read coin/horizon row from a crypto_ed_production*.csv and return a
+    PROD_CFG-shaped dict {combo, window, gamma, features}. Raises if no
+    matching row is found. If multiple rows match, uses the one with the
+    highest combined_score."""
+    import csv as _csv
+    candidates = []
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            if (row.get('coin', '').strip().upper() == asset.upper() and
+                    int(row.get('horizon', 0)) == int(horizon)):
+                candidates.append(row)
+    if not candidates:
+        raise SystemExit(f"  [csv] no row for asset={asset} horizon={horizon} in {csv_path}")
+    candidates.sort(key=lambda r: float(r.get('combined_score', 0)), reverse=True)
+    best = candidates[0]
+    feats = [f.strip() for f in best['optimal_features'].split(',') if f.strip()]
+    cfg = {
+        'combo': best['best_combo'].strip(),
+        'window': int(best['best_window']),
+        'gamma': float(best['gamma']),
+        'features': feats,
+    }
+    print(f"  [csv] loaded {asset} {horizon}h from {csv_path}:")
+    print(f"        combo={cfg['combo']} window={cfg['window']} gamma={cfg['gamma']:.4f} "
+          f"n_features={len(cfg['features'])} (sampler={best.get('sampler', '?')}, "
+          f"return={best.get('return_pct', '?')}%)")
+    return cfg
 
 # Features to permute (test "information destruction" of important features)
 PERMUTE_TARGETS = ['pysr_1', 'pysr_2', 'deriv_basis_chg1d', 'hour_cos', 'logret_8h']
@@ -69,6 +105,8 @@ os.chdir(r"{engine}")
 PERTURB = os.environ.get("STAB_PERTURB", "none")
 TARGET  = os.environ.get("STAB_TARGET", "")
 CONF    = int(os.environ.get("STAB_CONF", "65"))
+ASSET   = os.environ.get("STAB_ASSET", "ETH")
+HORIZON = int(os.environ.get("STAB_HORIZON", "8"))
 
 import crypto_trading_system_ed as eng
 
@@ -99,7 +137,7 @@ eng._build_features = _patched_build_features
 
 cfg = json.loads(os.environ["STAB_CFG_JSON"])
 try:
-    result = eng._backtest_one_config("ETH", 8, "STAB_" + PERTURB + "_" + str(TARGET), cfg, replay_hours={replay})
+    result = eng._backtest_one_config(ASSET, HORIZON, "STAB_" + PERTURB + "_" + str(TARGET), cfg, replay_hours=int(os.environ.get("STAB_REPLAY", "{replay}")))
 except Exception as e:
     print("STAB_RESULT:" + json.dumps({{"error": str(e)}}))
     sys.exit(0)
@@ -120,11 +158,14 @@ else:
 '''.format(engine=str(ENGINE), replay=REPLAY_HOURS)
 
 
-def run_trial(label: str, perturb: str, target: str, conf: int) -> dict | None:
+def run_trial(label: str, perturb: str, target: str, conf: int,
+              asset: str = 'ETH', horizon: int = 8) -> dict | None:
     env = os.environ.copy()
     env['STAB_PERTURB'] = perturb
     env['STAB_TARGET'] = str(target)
     env['STAB_CONF'] = str(conf)
+    env['STAB_ASSET'] = asset
+    env['STAB_HORIZON'] = str(horizon)
     env['STAB_CFG_JSON'] = json.dumps(PROD_CFG)
     env['PYTHONIOENCODING'] = 'utf-8'
     print(f'\n=== {label}  (perturb={perturb}, target={target!r}) ===', flush=True)
@@ -153,10 +194,26 @@ def run_trial(label: str, perturb: str, target: str, conf: int) -> dict | None:
 
 
 def main():
+    global PROD_CFG, PERMUTE_TARGETS
     ap = argparse.ArgumentParser()
     ap.add_argument('--conf', type=int, default=DEFAULT_CONF, help=f'confidence threshold (default {DEFAULT_CONF})')
     ap.add_argument('--trials', type=int, default=5, help='number of noise + permute trials each (default 5)')
+    ap.add_argument('--csv', default=None, help='alternate production CSV (e.g. models/crypto_ed_production_robust.csv)')
+    ap.add_argument('--asset', default='ETH', help='asset symbol (default ETH)')
+    ap.add_argument('--horizon', type=int, default=8, help='prediction horizon in hours (default 8)')
     args = ap.parse_args()
+
+    # If --csv provided, override the default PROD_CFG with the matching row.
+    if args.csv:
+        PROD_CFG = load_cfg_from_csv(args.csv, args.asset, args.horizon)
+        # Refresh permute targets to features that actually exist in the loaded
+        # config; fall back to first 5 features if the original PERMUTE_TARGETS
+        # don't intersect (different feature universe across robust vs prod).
+        live_perms = [f for f in PERMUTE_TARGETS if f in PROD_CFG['features']]
+        if len(live_perms) < args.trials:
+            extra = [f for f in PROD_CFG['features'] if f not in live_perms][:args.trials - len(live_perms)]
+            live_perms = (live_perms + extra)[:args.trials]
+        PERMUTE_TARGETS = live_perms
 
     trials = [('baseline', 'none', '')]
     for i in range(args.trials):
@@ -164,8 +221,11 @@ def main():
     for feat in PERMUTE_TARGETS[:args.trials]:
         trials.append((f'permute_{feat}', 'permute', feat))
 
+    src_label = f'CSV={args.csv}' if args.csv else 'default (prod 8h ETH)'
     print('=' * 76)
-    print(f'  FEATURE STABILITY TEST — production 8h ETH (RF+LGBM, w=150)')
+    print(f'  FEATURE STABILITY TEST — {args.asset} {args.horizon}h '
+          f'({PROD_CFG["combo"]}, w={PROD_CFG["window"]})')
+    print(f'  source: {src_label}')
     print(f'  conf threshold: {args.conf}%   replay: {REPLAY_HOURS}h   trials: {len(trials)}')
     print('=' * 76)
     print(f'  Production features ({len(PROD_CFG["features"])}): {", ".join(PROD_CFG["features"])}')
@@ -173,7 +233,7 @@ def main():
 
     results: dict[str, dict] = {}
     for label, perturb, target in trials:
-        r = run_trial(label, perturb, target, args.conf)
+        r = run_trial(label, perturb, target, args.conf, args.asset, args.horizon)
         if r is not None:
             results[label] = r
 
