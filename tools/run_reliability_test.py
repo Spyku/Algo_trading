@@ -259,10 +259,18 @@ def run_mode_dv(name: str, patchers: list[str], env_overrides: dict, snapshot_pa
     py_init += "import crypto_trading_system_ed as e; e.main()"
 
     horizons_arg = ','.join(f'{h}h' for h in HORIZONS_PHASE1)
+    # ENGINE CLI PARSER BUG WORKAROUND: 'ETH'.lower().endswith('h') is True, so
+    # the engine's positional-arg parser at line ~7347 enters the horizon
+    # detection branch, fails the isdigit check, consumes the elif WITHOUT
+    # setting horizons or assets, and assets_list defaults to ALL 9 assets.
+    # Appending a trailing comma forces the parser to fall through to the
+    # ELSE branch which correctly identifies ETH as an asset. Same trick used
+    # in crypto_trading_system_ed_robust.py for the same reason.
+    asset_arg = f'{ASSET},' if ASSET.lower().endswith('h') else ASSET
     cmd = [
         VENV_PY, '-c',
         f"import sys; "
-        f"sys.argv=['crypto_trading_system_ed.py', 'DV', '{ASSET}', '{horizons_arg}', "
+        f"sys.argv=['crypto_trading_system_ed.py', 'DV', '{asset_arg}', '{horizons_arg}', "
         f"'--replay', '{REPLAY}', '--no-persist', '--no-data-update', "
         f"'--grid-tag', 'REL_{name.upper()}']; "
         + py_init
