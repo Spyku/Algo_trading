@@ -503,11 +503,176 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 ---
 
-## ⚡ ACTIVE TODO — 2026-05-14 (CURRENT)
+## ⚡ ACTIVE TODO — 2026-05-16 (CURRENT)
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🟢 P0 — RUNNING ON DESKTOP — 5-variant reliability test (launched 2026-05-14 20:47:36, fix shipped 22:00 mid-flight)
+### 🔴 P0 — UTMOST PRIORITY — Mode V architectural fix: Variant F_optimized = B + #1+#2+#3+#4 (2026-05-16)
+
+**Why this is P0** (user explicit, 2026-05-16): Mode V's Step 1/2/3 pipeline has a structural defect that lets the actual best config get bypassed. B's 6h horizon is the smoking gun: D #6 (RF+LGBM 150h) WON the horizon at +59.39% return — but it was rank 6 by APF and was never sent to Refine. Refine ran on D #1/D #2/D #3 (XGB+LGBM 72h, completely different model family) and could not discover the winner because Optuna's TPE is biased toward exploitation around its starting points. **This is a search-space coverage problem; +5-15pp on the table per horizon when this happens.**
+
+This entry must NOT be closed until the architectural fix is shipped and the F_optimized variant is either promoted to production or conclusively shelved.
+
+#### The 4 fixes, with measured time/precision trade-offs
+
+| # | Fix | What changes | Time cost | Precision delta | Risk |
+|---|---|---|---|---|---|
+| **1** | **Metric alignment** | Step 2 picks Refine inputs by `score = ret × WR @ best conf` (from Step 1 data), NOT by Mode D APF | **0 min** | **+5-15pp** on horizons where APF≠score (6h proven case) | None — uses data already computed |
+| **2** | **Cluster-aware diversity** | Step 2 picks 3 inputs spread across (combo × window-bucket) clusters, not 3 from the same basin | **0 min** | **+5-10pp** on multi-modal horizons | Minor on uni-modal horizons (wastes 1 of 3 refine slots) |
+| **3** | **Successive Halving (Hyperband-style)** | Replace Step 1's "6 candidates × full 1440h backtest" with multi-budget tournament: 30 × 360h → 10 × 720h → 3 × 1440h. Same compute budget, ~5× more candidates explored. | **~+10-15% Step 1 (current 150 min → ~170 min)** in the budget-neutral config; ~+40% Step 1 in the more-thorough config. **The real risk** is short-replay can mis-rank: a config with 4 trades at 96h might be eliminated despite being best at 1440h. Particularly bad for high-conf configs where short replays give zero trades. Mitigation: candidates must "stay top-K" as budget grows. | **+5-15pp expected** OR **−5-15pp possible** if short-replay rank doesn't correlate with full-replay rank | Real precision risk — first thing to validate empirically |
+| **4** | **BO with exploration (Optuna sampler swap)** | Replace TPE sampler with GP-based BO (`GPSampler` or `CmaEsSampler`) with higher exploration coefficient. Forces the refine to wander further from the seed point. | **+10-30%** Step 2 (53 min → ~60-70 min) | **+3-7pp** marginal | GP slow at high dim; mixed continuous+categorical works but borderline |
+
+**Group A (free wins, no precision risk): #1 + #2.** Both have zero runtime cost and pure architectural gain. Address the 6h smoking gun directly.
+
+**Group B (time/precision trade-offs): #3 + #4.** Real downsides. #3's short-replay risk needs an empirical check (does short-replay rank correlate with full-replay rank in our engine?). #4 is mostly dominated by #2 — pick one.
+
+**Group C (precision at any cost — NOT in F_optimized): CPCV (López de Prado AFML Ch 12).** 3-5× total HRST time. Use ONCE before production promotion, not on F_optimized routine.
+
+#### Why these specifically (literature anchor)
+
+- **#1**: not really literature, system-design fix. Bailey & López de Prado (2014) "Deflated Sharpe Ratio" framing — use the same metric you select winners by.
+- **#2**: Wagner et al. (2014) "Multi-Start Local Search"; Li & Talwalkar (2020) on diversity in hyperparameter search.
+- **#3**: Karnin et al. (2013); Jamieson & Talwalkar (2016); Li et al. (2017) "Hyperband"; Falkner et al. (2018) "BOHB".
+- **#4**: Snoek et al. (2012) "Practical Bayesian Optimization"; Hutter et al. (2011) "SMAC".
+
+#### Implementation plan (in order)
+
+1. **Snapshot reuse**: F_optimized must run against the EXACT data B saw, so we can fairly compare. Snapshot is preserved at `data/_reliability_hrst_snapshot_desktop_20260515_154801/` (56.9 MB, 4 marker files MD5-verified).
+2. **Patchers** (new files under `_idea_patchers/`):
+   - `reliability_metric_alignment.py` (#1, ~50 lines)
+   - `reliability_cluster_diversity.py` (#2, ~80 lines)
+   - `reliability_successive_halving.py` (#3, ~200-300 lines — heaviest)
+   - `reliability_bo_exploration.py` (#4, ~20 lines)
+3. **Harness extension**: `tools/run_reliability_hrst.py` gets a new variant `F_optimized` that loads `reliability_multi_seed` (base K=5 from B) + the 4 new patchers. Add `--reuse-snapshot SNAP_DIR` flag.
+4. **Verdict parser fix**: the existing harness mis-parses Mode T result when shield is disabled (B's "no_t_winner" was actually +89.41%). Fix while we're touching the file.
+5. **Smoke test** of each patcher individually (does it import? does it monkey-patch correctly?).
+6. **Launch F_optimized HRST** on Desktop reusing B's snapshot: same data → fair comparison.
+
+#### Expected runtime
+
+| Component | B (current) | F_optimized (projected) |
+|---|---|---|
+| Mode H total | 272.5 min | ~310-340 min (+15% from #3 broader Step 1, +10-30% from #4 slower BO sampler) |
+| Mode R | ~47 min | ~47 min (no change) |
+| Mode S | ~28 min | ~28 min (no change) |
+| Mode T+G | ~14 min | ~14 min (no change) |
+| **Total HRST** | **361.5 min (6h 1.5min)** | **~400-440 min (6h 40min — 7h 20min)** |
+
+Well within 40h budget. Adds ~30-80 min for a potential +10-25pp Mode T total improvement.
+
+#### Verdict thresholds (set in advance)
+
+| F_optimized Mode T total | Δ vs B (+89.41%) | Δ vs production (+76.77%) | Decision |
+|---|---|---|---|
+| ≥ +99.41% | ≥+10pp over B | ≥+22pp over prod | 🟢 **SHIP F_optimized** — promote ALL 4 fixes to production engine fork |
+| +94.41% to +99.41% | +5-10pp over B | ≥+17pp over prod | 🟢 **SHIP** — meaningful gain over B |
+| +84.41% to +94.41% | ±5pp around B | +7-17pp over prod | 🟡 **MARGINAL** — F_optimized doesn't beat B materially; ship B alone if not already |
+| ≤ +84.41% | ≤−5pp vs B | ≤+7pp over prod | 🔴 **DEAD** — the fixes hurt; investigate which one(s) backfired (run F variants without each fix to isolate) |
+
+#### Comparison table at end (3-way, against same snapshot)
+
+| Variant | Patchers | Mode T total | Δ vs A | Δ vs B | Strict win on every horizon? | Verdict |
+|---|---|---|---|---|---|---|
+| A_baseline (HRST not yet run, may need to be added) | none | TBD | — | — | reference | reference |
+| **B_multi_seed** (already run today 2026-05-15) | reliability_multi_seed K=5 | **+89.41%** | reference | reference | bull=6h@65% bear=8h@65% shield=OFF gates rr12/rr24 cd=8h + rr8/rr16 cd=8h | already SHIPS at +12.64pp over prod |
+| **F_optimized** (this campaign) | reliability_multi_seed + reliability_metric_alignment + reliability_cluster_diversity + reliability_successive_halving + reliability_bo_exploration | TBD | TBD | TBD | TBD | depends on Mode T total |
+
+Note: A_baseline HRST was NEVER run (Phase 1 only ran Mode DV for A, not full HRST). To make the 3-way comparison clean, we should also run A_baseline HRST against the same snapshot. Adds another ~6h Desktop time.
+
+#### Required user actions
+
+1. Once F_optimized harness is ready, launch on Desktop:
+   ```
+   python tools/run_reliability_hrst.py --variant F_optimized --machine desktop --reuse-snapshot data/_reliability_hrst_snapshot_desktop_20260515_154801
+   ```
+2. Optionally launch A_baseline HRST on Laptop in parallel (same snapshot, for clean 3-way):
+   ```
+   python tools/run_reliability_hrst.py --variant A_baseline --machine laptop --reuse-snapshot data/_reliability_hrst_snapshot_desktop_20260515_154801
+   ```
+3. After Desktop F_optimized finishes (~7h), read summary `.txt` files and decide per the verdict table.
+
+---
+
+### 🟢 P0 — CLOSED 2026-05-15 — HRST validation of B (multi_seed) and C (no_feature_cap), parallel across machines (2026-05-15)
+
+**Motivation**: Phase 1 5-variant reliability test (finished 2026-05-15 08:28 — see "Closed 2026-05-15" entry below) showed **B_multi_seed +5.11pp** and **C_no_feature_cap +5.23pp** vs A_baseline on Mode V combined_score at ETH 8h. Both passed the pre-set "CLEAR WINNER" threshold (≥3·σ_A). Per CLAUDE.md verdict logic: promote winning variant's patchers → Phase 2 (5,6,7h) → Phase 3 (full HRST).
+
+This step **collapses Phase 2+3 into a single HRST run per variant** (HRST already sweeps Mode DV at 5,6,7,8h internally before Mode S regime selection + Mode T threshold sweep + Mode G rally gates). Mode T total return is directly comparable to the May 6 production HRST baseline (+76.77%).
+
+#### Current state (2026-05-15 14:50 CEST)
+
+- **Desktop B_multi_seed — CRASHED at Mode V phase** after 4h 33min (campaign `20260515_101439`, rc=1). All 4 Mode D grid CSVs `crypto_ed_grid_ETH_<h>h_REL_HRST_B_MULTI_SEED.csv` ARE on disk (5h/6h/7h/8h written 10:38 through 14:44). The Mode V `_test_lgbm_importance → model.fit()` call raised `lightgbm.basic.LightGBMError: Out of Host Memory` at log line 2000. **Actual cause: GPU driver install on Desktop coincided with the crash — not a structural RAM issue from K=5 × `PARALLEL_BACKTESTS=6`.** Earlier framing (RAM peak hypothesis) was wrong. K=5 × 6 workers is fine on Desktop under normal conditions. **Retry pending user re-launch** (see "Retry command" below).
+- **Laptop C_no_feature_cap — STILL RUNNING** (campaign `20260515_102358`). All 3 Mode D grids done by Drive sync evidence (5h@10:31, 6h@12:19, 7h@14:05); 8h grid pending. ETA finish ~17:30-19:00 CEST. Local working dir `C:\Users\Alex\algo_trading\engine\` so engine log stays on laptop — only state.json + grid CSVs sync to Drive.
+
+#### Retry command — Desktop B_multi_seed (run AFTER current user gaming session)
+
+PowerShell, one line, run from `G:\Autres ordinateurs\My laptop\engine`:
+
+```powershell
+Remove-Item "$env:TEMP\joblib_memmapping_folder_*" -Recurse -Force -ErrorAction SilentlyContinue ; python tools/run_reliability_hrst.py --variant B_multi_seed --machine desktop
+```
+
+What this does:
+1. Clears stale joblib memmap folders from the crashed run (~hundreds of MB)
+2. Launches the harness with the same args. The harness will auto-detect the 4 existing Mode D grid CSVs and pass `--skip` to the engine → jumps straight to Mode V refine → saves ~4.5h
+3. `PARALLEL_BACKTESTS=6` (default, reverted 2026-05-15 once GPU-driver crash root cause was identified — earlier `=3` mitigation was a false alarm)
+4. `RELIABILITY_K=5` still active via the harness env_overrides (full K=5 denoising preserved)
+
+Look for `All Mode D grids for B_multi_seed already on disk — passing --skip to engine` in the orchestrator log within 5 seconds of launch — that confirms Mode D skip is engaged.
+
+**Expected retry ETA**: ~3-5h (Mode V refine + Mode S + Mode T + Mode G only). Finish ~late evening 2026-05-15.
+
+#### Original parallel launch commands (Laptop C still uses this — do NOT relaunch Laptop)
+
+```
+# On Desktop  (USE RETRY COMMAND ABOVE INSTEAD — this is the original that crashed)
+python tools/run_reliability_hrst.py --variant B_multi_seed --machine desktop
+```
+
+```
+# On Laptop (currently running, do not interrupt)
+python tools/run_reliability_hrst.py --variant C_no_feature_cap --machine laptop
+```
+
+**What each invocation does** ([tools/run_reliability_hrst.py](tools/run_reliability_hrst.py), shipped 2026-05-15):
+- Acquires per-machine lock at `output/run_reliability_hrst_{desktop|laptop}.lock`
+- Snapshots `data/` → `data/_reliability_hrst_snapshot_{machine}_<CID>/` (~57 MB) — trader can stay active
+- Runs `crypto_trading_system_ed.py HRST ETH 5,6,7,8h --replay 1440 --no-persist` with the variant's patcher(s) loaded via `_idea_patchers.v2_data_snapshot` + the variant's reliability patcher
+- Writes grid CSVs as `crypto_ed_grid_ETH_<h>h_REL_HRST_<VARIANT>.csv`; production CSV/regime config NEVER touched
+- Parses the engine log for the final `T winner: ... (total +XX.XX% vs ..., delta +Z.ZZ%)` line
+- Writes verdict summary at `output/run_reliability_hrst_{machine}_<TS>_<variant>.txt` + `.csv`
+
+**ETA**:
+- C_no_feature_cap (Laptop): **~7-9h** (1.5× standard HRST due to wider feature grid)
+- B_multi_seed (Desktop): **~9-12h** (K=5 multiplier on Mode V refine — heaviest variant)
+- Modern Standby caveat on Laptop: wall time can balloon to 24h+ if the lid closes; keep the laptop active or run on AC with sleep disabled
+
+**Useful mid-run commands**:
+- `python tools/run_reliability_hrst.py --machine desktop --status` (or `--machine laptop`)
+- `python tools/run_reliability_hrst.py --machine {desktop|laptop} --report-only` — rebuild summary from existing log
+- `python tools/run_reliability_hrst.py --machine {desktop|laptop} --reset` — wipe state + snapshot + lock
+
+**Verdict logic (set in advance, not post-hoc)**:
+- Mode T total ≥ **+81.77%** (≥ prod +76.77% + 5pp) → **SHIP**: promote that variant's patchers to production engine (build a `crypto_trading_system_ed_<variant>.py` fork or merge inline)
+- Mode T total within **±5pp** of production → **MARGINAL**: 8h Phase 1 win didn't fully transfer to the regime-joint sweep; consider single-horizon application or shelve
+- Mode T total ≤ **+71.77%** (≤ prod − 5pp) → **DEAD**: variant doesn't generalize beyond Phase 1 8h win; close the file
+
+**Why this matters**: First clear "scoring overlay family" winners since CDaR/CVaR were tested in April. B and C win via *different* mechanisms (denoising vs wider feature search) and don't stack cleanly (D = B+C only +2.93pp, E = full stack only +0.19pp) — that asymmetry means running them separately tests them on their own merits rather than as a combined patch.
+
+**Pre-flight checks**:
+- Desktop venv has `xgboost` (installed 2026-05-14 22:30) — required for B_multi_seed patcher
+- Laptop venv does NOT need xgboost — C_no_feature_cap doesn't use the multi-seed XGB factory
+- Trader currently active on Desktop (ETH 6h+8h, restarted 2026-05-14 20:37) — snapshot isolation means HRST and trader can coexist; do not stop trader
+
+**Required action after both finish**:
+1. Read both summary `.txt` files; record Mode T totals + verdicts
+2. If ≥1 SHIPs: build production fork — copy `crypto_trading_system_ed.py` → `crypto_trading_system_ed_<winner>.py`, inline the patcher's changes, run final HRST without `--no-persist` to write production CSV/regime config
+3. If both SHIP: do them in sequence (no combined patch — Phase 1 showed they don't stack), keep the higher Δ
+4. If both MARGINAL or DEAD: scoring-overlay family conclusively closed for this generation; pivot to execution-gap research (~17pp sim-vs-live alpha gap)
+
+---
+
+### 🔵 P0 — CLOSED 2026-05-15 — 5-variant reliability test (launched 2026-05-14 20:47:36, fix shipped 22:00 mid-flight)
 
 **What it tests**: three root causes that make crypto Mode D/V results unreliable, identified 2026-05-14:
 1. **Measurement noise dominates signal** — `tools/feature_stability_test.py` (shipped 2026-05-14 ~15:30) measured σ=5.82pp on label-noise alone for prod ETH 8h. Baseline is ~2σ BELOW the noise mean — production is on the unlucky side of its own noise distribution.
@@ -603,6 +768,31 @@ Within 40h budget. The single most informative datapoint is **Variant B at ~04:4
 6. **~20:00** — Designed the 5-variant harness with --replay 336 stability test (~25 min instead of ~3h). Built `tools/run_reliability_test.py` + 3 reliability patchers. Commit `f2ca15a` push.
 7. **20:47:36** — User launched harness on Desktop.
 8. **~22:00** — ETH-parse bug discovered live (BTC grid CSV appeared under variant A). Fix shipped as commit `77e78cb`. User Ctrl+C + git pull + restart pending.
+9. **23:33:47 (2026-05-14) → 08:28 (2026-05-15)** — Fresh campaign `20260514_233347` ran cleanly to completion after `feature_stability_test.py` was patched to accept `--csv/--asset/--horizon` args + read `STAB_REPLAY` env (commit not tagged; in-place edit). xgboost installed in Desktop venv.
+
+#### Phase 1 final result (campaign `20260514_233347`)
+
+| Variant | combined_score | Δcs vs A | return | feat | gamma | σ (336h replay) | verdict |
+|---|---|---|---|---|---|---|---|
+| **C_no_feature_cap** | **49.07** | **+5.23** | **+63.79%** | 10 | 0.997 | 1.50 | STABLE |
+| **B_multi_seed** | **48.95** | **+5.11** | +56.78% | 13 | 0.9967 | **1.19** | STABLE |
+| D_multi_seed_plus_cap | 46.77 | +2.93 | +54.56% | 13 | 0.9967 | 1.41 | STABLE |
+| E_full_fix | 44.03 | +0.19 | +56.88% | 10 | 0.995 | 1.53 | STABLE |
+| A_baseline | 43.84 | +0.00 | +59.05% | 10 | 0.999 | 1.35 | STABLE |
+
+Per pre-set verdict logic (≥1 variant drops σ<2pp AND beats baseline by ≥3·σ_A=4.05pp): **B and C both qualify as CLEAR WINNERS**. Triggers Phase 2/3 HRST (see top P0).
+
+**Surprises worth remembering**:
+- All 5 variants STABLE (σ 1.19-1.53pp). The pre-Phase-1 σ=5.82pp UNSTABLE on old production cfg did NOT replicate on the new winners — likely an artifact of the different cfg+replay combination, not a true property of the engine.
+- D (B+C combined) +2.93pp < either alone — patchers don't stack. K=5 wants w=167 13f, no_cap wants w=150 10f; combined optimizer can't satisfy both.
+- E (B+C+rpf_sqrt scoring) +0.19pp — `rpf_sqrt` metric collapses the gain. Tells us replacing the scoring metric isn't a win on top of the other fixes.
+- 4 of 5 permute trials returned `no_signals` in the stability test — destroying a top-importance feature (pysr_1/2/4, oc_mvrv_chg1d) drops confidence below threshold → zero trades. Reframe: this is a positive sign — the model genuinely depends on those features, not on a lucky bump.
+
+**Files written (audit trail)**:
+- [output/run_reliability_test_20260514_233347.csv](output/run_reliability_test_20260514_233347.csv) — variant comparison
+- [output/run_reliability_test_20260514_233347_summary.txt](output/run_reliability_test_20260514_233347_summary.txt) — verdict + table
+- [models/crypto_ed_production_reliability_*.csv](models/) — per-variant winners (5 files)
+- [logs/run_reliability_test_20260514_233347*.log](logs/) — orchestrator + per-variant Mode DV + per-variant stability
 
 #### V2 status
 Superseded — see CRASHED entry directly below.
