@@ -593,6 +593,114 @@ If G_narrow_d's 7h OVERALL BEST is in the same conf=90% lottery range with <80 t
 
 ---
 
+### 🟢 P0 — ACTIVE — H_strict_family 7h-only diagnostic (engine fork, 2026-05-16)
+
+## 🚀 LAUNCH COMMAND (Laptop) — run AFTER G_narrow_d Mode V completes
+
+```powershell
+# In a Laptop PowerShell terminal, from the engine directory:
+$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+$env:RELIABILITY_K = "5"
+python crypto_trading_system_ed_h_strict_family.py DV "ETH," 7h --replay 1440 --no-persist --no-data-update --grid-tag H_STRICT_FAMILY
+```
+
+**CRITICAL** — same 2 launch-bug guards as G_narrow_d (both already caused live aborts on 2026-05-16):
+- **`"ETH,"` with trailing comma + double-quotes.** If you see `ASSET: BTC` at startup → kill, comma missing.
+- **`--no-data-update`** REQUIRED. If you see `MACRO & SENTIMENT DATA DOWNLOAD` → kill, flag missing.
+- **DO NOT launch while G_narrow_d Mode V is still running on the same laptop** — both will halve via CPU/GPU contention. Wait for G's background task `b48239rqv` to complete first (notification will fire).
+
+**Expected startup banners (post-fix)**:
+- `[H_STRICT_FAMILY_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
+- `[H_STRICT_FAMILY_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
+- `[H_STRICT_FAMILY] _diversity_key changed to (combo, w) — 1 V2 slot per (model_family, window) cluster`
+- `ED: Mode D | ETH | 7h | 150 trials` ← ETH only
+- `EXHAUSTIVE GRID: ETH 7h — 72 evals` ← B's full grid (NOT G_narrow_d's narrow 36)
+
+**ETA**: ~3-4h (Mode D ~25-30 min like G_narrow_d, Mode V ~2.5-3h). `DV` is one token = runs D AND V chained.
+
+#### Motivation
+
+B's 7h failure forensic (2026-05-16) showed all 6 V2 D-candidate slots filled by **XGB+LGBM 72h variants** (different gammas + features within same combo+window). The engine's `_diversity_key(window, gamma_band, feature_band)` doesn't include combo, so gamma/feature variants of the SAME model family all count as distinct clusters. RF+LGBM 100h (grid rank 10, APF=3.96) and other RF families were filtered out — never reached refine.
+
+User intuition (2026-05-16): "Test the single best of each family — don't waste V2 slots on near-duplicates of one family."
+
+#### Engine fork (file)
+
+[crypto_trading_system_ed_h_strict_family.py](crypto_trading_system_ed_h_strict_family.py) — 8,894-line full file copy of production engine with **three inlined changes** (production engine untouched).
+
+#### Changes vs B
+
+| Aspect | B (current production engine) | H_strict_family |
+|---|---|---|
+| GRID_COMBOS | [RF+LGBM, XGB+LGBM] | **unchanged** (same B grid) |
+| GRID_WINDOWS | [72, 100, 150] | **unchanged** |
+| GRID_FEATURES | [10, 13, 17, 25] | **unchanged** (B's spacing, NOT G_narrow_d's narrow [10,15,20]) |
+| GRID_GAMMAS | [0.999, 0.997, 0.995] | **unchanged** |
+| V1 total configs | 72 | **72** (same as B; G_narrow_d uses 36) |
+| `_diversity_key` | `(window, g_band, f_band)` | **`(combo, window)`** — strict, max 6 clusters total |
+| V3 Optuna ranges | seed ±20 window, ±5 features, ±0.002 gamma | **unchanged** from B (not G_narrow_d's wide-absolute) |
+| K=5 multi-seed | patcher | **inlined** at module end |
+| Snapshot redirect | external patcher | **inlined** via `V2_DATA_SNAPSHOT` env var |
+
+**Three changes only**: snapshot redirect + K=5 inlining + dedup. Clean A/B test vs B — any performance difference attributable to dedup change.
+
+#### How H differs from G_narrow_d
+
+| Aspect | G_narrow_d | H_strict_family |
+|---|---|---|
+| Grid spacing | narrow (36 configs, gaps of 5 features and 0.003 gamma) | B's full (72 configs, no spacing change) |
+| `_diversity_key` | `(combo, window, g_band, f_band)` — combo-aware but still allows gamma/feature variants | **`(combo, window)`** — strictest, no variants within (combo, window) |
+| V3 Optuna ranges | absolute [50,300] / [4,60] / [0.995,1.0] — wide search far from seeds | B's narrow seed-relative ranges |
+| REFINE_TRIALS | 75 | 50 (B's default) |
+
+**H tests dedup change in isolation**; G_narrow_d tests grid spacing + dedup + Optuna range jointly. Distinct experiments testing distinct hypotheses.
+
+#### Hypothesis being tested
+
+If `(combo, window)` dedup is the right architectural fix for B's 7h failure, H's V2 should have **3 RF+LGBM slots out of 6** (1 per RF window: 72h, 100h, 150h) — guaranteed by the dedup. V3 refine of those 3 RF candidates may surface a winner that doesn't exist in B's all-XGB-72h refine pool.
+
+Predicted top 6 V2 inputs (proxy: B's grid-APF top-of-family per (combo, window) cluster):
+
+| V2 slot | Family | Likely pick | grid APF | grid rank |
+|---|---|---|---|---|
+| 1 | XGB+LGBM 72h | XGB+LGBM 72h γ=0.999 f=13 | 14.42 | 1 |
+| 2 | XGB+LGBM 100h | XGB+LGBM 100h γ=0.999 f=10 | 0.99 | 47 |
+| 3 | XGB+LGBM 150h | XGB+LGBM 150h γ=0.999 f=25 | 3.04 | 17 |
+| 4 | **RF+LGBM 72h** | **RF+LGBM 72h γ=0.997 f=25** | 2.98 | 19 |
+| 5 | **RF+LGBM 100h** | **RF+LGBM 100h γ=0.999 f=17** | 3.96 | 10 |
+| 6 | **RF+LGBM 150h** | **RF+LGBM 150h γ=0.999 f=25** | 3.64 | 13 |
+
+(Holdout step may re-rank within family; this is grid-APF proxy.)
+
+#### Success criteria → next step
+
+| Result | Decision |
+|---|---|
+| ≥1 primary signal hit on H (RF+LGBM in V3 winner, positive at conf ≤ 80%, ≥80 trades, WR ≥ 75%) | **Run full 4-horizon HRST H_strict_family** on Desktop (~6-8h). If Mode T > B's +89.41%, build production fork and promote when trader flat. |
+| All primary signals miss on H | Combined with G_narrow_d miss: 7h is genuinely a weak horizon for ETH. Architecture isn't masking alpha. SHELVE both experiments. B (+89.41%) remains the unchallenged winner; ship when trader flat. |
+| H > G on 7h winner | Dedup criterion is the dominant lever (not grid spacing). Architectural conclusion: `(combo, w)` dedup should be promoted to production engine. |
+| G > H on 7h winner | Grid spacing + wide Optuna refine matters more than dedup. Different architectural conclusion. |
+
+#### Output files
+
+- `models/crypto_ed_grid_ETH_7h_H_STRICT_FAMILY.csv` — V1 grid CSV (72 configs)
+- `models/crypto_ed_production_noprod.csv` — V_final pick (overwritten by --no-persist; safe with trader)
+- `logs/ed_v1_<TS>.log` — engine log with V1/V2/V3 output
+
+#### Compare against B + G_narrow_d (the 3-way)
+
+Once all 3 land, fill the table:
+
+| Variant | 7h Mode V winner | conf | trades | WR | basis |
+|---|---|---|---|---|---|
+| **B** (yesterday) | XGB+LGBM 72h γ=0.997 f=10 | 90% | 59 | 66% | +11.21% (lottery) |
+| **G_narrow_d** (in-flight `b48239rqv`) | TBD | TBD | TBD | TBD | TBD |
+| **H_strict_family** (next) | TBD | TBD | TBD | TBD | TBD |
+
+3 experiments testing 3 different architectural angles for the same 7h failure. The matrix tells us which lever (grid spacing, wide refine, dedup) is the dominant cause.
+
+---
+
 ### 🔴 P0 — CLOSED 2026-05-16 — DEAD — Variant F_optimized = B + #1+#2+#3+#4
 
 **Verdict**: Mode T total **+63.58%** — **−13.19pp vs production (+76.77%)**, **−25.83pp vs B (+89.41%)**. DEAD by harness threshold (≤ −5pp vs prod) and by the CLAUDE.md updated threshold (≤ +84.41% vs B).
