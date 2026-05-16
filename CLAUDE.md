@@ -509,9 +509,49 @@ This is the freshest snapshot. All sections below this block (`---`) are preserv
 
 ### 🔴 P0 — UTMOST PRIORITY — Mode V architectural fix: Variant F_optimized = B + #1+#2+#3+#4 (2026-05-16)
 
+## 🚀 LAUNCH COMMAND (Desktop) — run this now
+
+```powershell
+# In a Desktop PowerShell terminal:
+cd G:\engine          # or wherever your desktop engine is
+git pull              # picks up commit 959865c (F_optimized + 3 new patchers + harness update)
+
+# Launch F_optimized reusing B's snapshot for fair comparison (same data B saw today):
+python tools/run_reliability_hrst.py --variant F_optimized --machine desktop --reuse-snapshot data/_reliability_hrst_snapshot_desktop_20260515_154801
+```
+
+**Why `--reuse-snapshot`**: we ran B today (2026-05-15) on the snapshot at `data/_reliability_hrst_snapshot_desktop_20260515_154801/` (56.9 MB, 4 marker files MD5-verified). F_optimized must run against the EXACT same data so the comparison is apples-to-apples. The harness verifies snapshot integrity before starting.
+
+**ETA**: ~7h total (Mode H ~5.5h + Mode R 47min + Mode S 28min + Mode T+G 14min).
+
+**Useful mid-run commands**:
+```powershell
+python tools/run_reliability_hrst.py --machine desktop --status
+python tools/run_reliability_hrst.py --machine desktop --report-only   # re-parses log (fix shipped 2026-05-16)
+python tools/run_reliability_hrst.py --machine desktop --reset         # nuclear reset
+```
+
+**OPTIONAL parallel A_baseline on Laptop** (clean 3-way A vs B vs F on the same snapshot):
+```powershell
+python tools/run_reliability_hrst.py --variant A_baseline --machine laptop --reuse-snapshot data/_reliability_hrst_snapshot_desktop_20260515_154801
+```
+
+---
+
 **Why this is P0** (user explicit, 2026-05-16): Mode V's Step 1/2/3 pipeline has a structural defect that lets the actual best config get bypassed. B's 6h horizon is the smoking gun: D #6 (RF+LGBM 150h) WON the horizon at +59.39% return — but it was rank 6 by APF and was never sent to Refine. Refine ran on D #1/D #2/D #3 (XGB+LGBM 72h, completely different model family) and could not discover the winner because Optuna's TPE is biased toward exploitation around its starting points. **This is a search-space coverage problem; +5-15pp on the table per horizon when this happens.**
 
 This entry must NOT be closed until the architectural fix is shipped and the F_optimized variant is either promoted to production or conclusively shelved.
+
+#### Implementation status (2026-05-16, commit 959865c pushed to origin/main)
+
+| Component | File | Status |
+|---|---|---|
+| Patcher #1: objective alignment (OPTUNA_METRIC=ret_wr) | [_idea_patchers/reliability_optuna_objective_align.py](_idea_patchers/reliability_optuna_objective_align.py) | ✅ shipped |
+| Patcher #4: BO with CMA-ES + ipop restart | [_idea_patchers/reliability_bo_exploration.py](_idea_patchers/reliability_bo_exploration.py) | ✅ shipped |
+| Patcher #2+#3: expanded grid (windows 3→5, features 4→5) | [_idea_patchers/reliability_expand_grid.py](_idea_patchers/reliability_expand_grid.py) | ✅ shipped |
+| Harness: F_optimized + A_baseline variants | [tools/run_reliability_hrst.py](tools/run_reliability_hrst.py) | ✅ shipped |
+| Harness: --reuse-snapshot flag | same | ✅ shipped |
+| Harness: parser fix for shield-disabled "no_t_winner" bug | same | ✅ shipped — verified B's HRST log now correctly parses to +89.41% |
 
 #### The 4 fixes, with measured time/precision trade-offs
 
