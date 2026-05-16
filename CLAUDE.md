@@ -515,18 +515,27 @@ This is the freshest snapshot. All sections below this block (`---`) are preserv
 # In a Laptop PowerShell terminal, from the engine directory:
 $env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
 $env:RELIABILITY_K = "5"
-python crypto_trading_system_ed_g_narrow_d.py D V ETH 7h --replay 1440 --no-persist --grid-tag G_NARROW_D
+python crypto_trading_system_ed_g_narrow_d.py D V "ETH," 7h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D
 ```
+
+**CRITICAL** — two non-obvious requirements (both hit live during the 2026-05-16 launch and re-fixed):
+
+1. **`"ETH,"` with TRAILING COMMA, double-quoted.** The engine's CLI parser at line 7347 treats `'eth'.endswith('h')` as a horizon match → eats ETH → asset_list defaults to ALL 9 ASSETS (BTC,ETH,XRP,SOL,LINK,BNB,SMI,DAX,CAC40). Trailing comma forces the asset-list branch. **If you see `ASSET: BTC` instead of `ASSET: ETH` after launch, kill it — the comma is missing.**
+
+2. **`--no-data-update` is REQUIRED.** Without it the engine spends ~10 min downloading fresh macro/onchain/derivatives data, which (a) wastes time, (b) writes to LIVE `data/macro_data/*.csv` (V2_DATA_SNAPSHOT only redirects READS, not writes), and (c) creates trader-contamination risk. **If you see `MACRO & SENTIMENT DATA DOWNLOAD` lines, kill it — the flag is missing.**
 
 **Pre-flight check**: `ls $env:V2_DATA_SNAPSHOT` should list ~47 CSV files. If empty, the Drive snapshot didn't sync to the laptop's working dir — fix before launching.
 
-**Look for these two prints at startup**:
-- `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
-- `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
+**Look for these prints at startup (post-fix)**:
+- `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>` ← snapshot redirect ON
+- `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])` ← K=5 active
+- `[--no-data-update] Skipping macro + OHLCV downloads. Using whatever is currently on disk.` ← downloads OFF
+- `ED: Mode D | ETH | 7h | 150 trials` ← ETH-only (NOT `BTC,ETH,XRP,SOL,LINK,BNB,SMI,DAX,CAC40`)
+- `EXHAUSTIVE GRID: ETH 7h — 36 evals` ← G_narrow_d's narrow-spacing grid (36, not 72)
 
 If `V2_DATA_SNAPSHOT not set — reading from live data/` appears, the snapshot env didn't load — abort and re-export.
 
-**ETA**: ~1-2h on Laptop. Trader can stay active — snapshot redirect isolates reads.
+**ETA**: ~2-3h on Laptop. Trader can stay active — snapshot redirect isolates reads.
 
 #### Motivation
 
