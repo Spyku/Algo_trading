@@ -507,7 +507,98 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
-### 🔴 P0 — UTMOST PRIORITY — Mode V architectural fix: Variant F_optimized = B + #1+#2+#3+#4 (2026-05-16)
+### 🟢 P0 — ACTIVE — G_narrow_d 7h-only diagnostic (engine fork, 2026-05-16)
+
+## 🚀 LAUNCH COMMAND (Laptop) — run this now
+
+```powershell
+# In a Laptop PowerShell terminal, from the engine directory:
+$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+$env:RELIABILITY_K = "5"
+python crypto_trading_system_ed_g_narrow_d.py D V ETH 7h --replay 1440 --no-persist --grid-tag G_NARROW_D
+```
+
+**Pre-flight check**: `ls $env:V2_DATA_SNAPSHOT` should list ~47 CSV files. If empty, the Drive snapshot didn't sync to the laptop's working dir — fix before launching.
+
+**Look for these two prints at startup**:
+- `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
+- `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
+
+If `V2_DATA_SNAPSHOT not set — reading from live data/` appears, the snapshot env didn't load — abort and re-export.
+
+**ETA**: ~1-2h on Laptop. Trader can stay active — snapshot redirect isolates reads.
+
+#### Motivation
+
+B's 7h Mode V winner was D #5 XGB+LGBM 72h g=0.997 f=10 conf=90% = +11.21% / 59 trades / WR 66% — a noise-spike lottery, not a real signal. Root cause: 9 candidates tied at APF=14.42 in Mode D's small held-out window (2-6 trades per config), all XGB+LGBM 72h. Top 6 selection deduped on (window, gamma_band, feature_band) but NOT combo, so 6 refine seeds were all XGB+LGBM 72h. RF+LGBM 150h (the family that wins 5h/6h/8h) never reached refine.
+
+User intuition (2026-05-16): "Less choice in V1, more leeway in V2/V3". Wide spacing in Mode D grid → V3 Optuna refine fills the gaps between V1 seeds with continuous search instead of redundantly testing tight neighbors.
+
+#### Fork file
+
+[crypto_trading_system_ed_g_narrow_d.py](crypto_trading_system_ed_g_narrow_d.py) — 8866-line full file copy of production engine with the changes below baked in. Production engine **untouched**.
+
+#### Changes vs B
+
+| Change | B (current prod) | G_narrow_d |
+|---|---|---|
+| GRID_FEATURES | `[10, 13, 17, 25]` (gaps 3/4/8) | `[10, 15, 20]` (gaps of 5 — wide spacing) |
+| GRID_GAMMAS | `[0.999, 0.997, 0.995]` (gaps 0.002) | `[0.999, 0.996]` (gap 0.003 — wide spacing) |
+| GRID_WINDOWS | `[72, 100, 150]` | `[72, 100, 150]` (unchanged — windows don't suffer ranking noise) |
+| GRID_COMBOS | both | both (unchanged) |
+| **V1 total configs** | **72** | **36** |
+| N_FEATURES_RANGE upper | 40/80 (hard cap) | 100 (cap dropped) |
+| REFINE_TRIALS | 50 | 75 |
+| `_diversity_key` | `(window, g_band, f_band)` | `(combo, window, g_band, f_band)` |
+| Top-6 selection | APF-rank + region dedup | **Force ≥1 of each combo** in Pass A, then APF dedup |
+| V3 Optuna ranges | seed ±20 window, ±5 features, ±0.002 gamma (narrow) | **Absolute**: window `[50, 300]`, features `[4, 60]`, gamma `[0.995, 1.0]` |
+| K=5 multi-seed | applied via patcher | **inlined** at module end |
+
+#### Hypothesis being tested
+
+If narrow-spaced V1 + force combo diversity + wide V3 Optuna refine works, the 7h Mode V winner should be a meaningfully better config than B's lottery-spike. Specifically:
+- RF+LGBM family should appear in the V3 refine pool
+- 7h OVERALL BEST should have positive return at conf ≤ 80%
+- ≥80 trades at chosen conf, WR ≥ 75%
+
+Stretch: beat F_optimized's 7h winner (+28.70% conf=90% 77 trades WR=84% — F found this via wider grid but lost 5h/6h/8h to do it).
+
+#### Success criteria → next step
+
+| Result | Decision |
+|---|---|
+| ≥1 primary signal hits (RF in refine pool, positive at conf≤80%, ≥80 trades, WR≥75%) | **Run full 4-horizon HRST G_narrow_d** on Desktop (~6-8h). If Mode T > B's +89.41%, build production fork and promote when trader flat. |
+| All primary signals miss | 7h is genuinely a weak horizon for ETH at this period. Architecture isn't masking alpha. SHELVE G_narrow_d. B (+89.41%) remains the unchallenged winner; ship when trader flat. |
+
+#### Output files
+
+- `models/crypto_ed_grid_ETH_7h_G_NARROW_D.csv` — V1 grid CSV (36 configs)
+- `models/crypto_ed_production_noprod.csv` — V_final pick (overwritten; safe with `--no-persist`)
+- `logs/ed_v1_<TS>.log` — engine log with V1/V2/V3 output
+
+#### Compare against B (the bar to beat)
+
+B's 7h Mode V SUMMARY winner: **D #5 XGB+LGBM 72h g=0.997 f=10 conf=90% = +11.21% / 59 trades / WR 66%**.
+
+If G_narrow_d's 7h OVERALL BEST is in the same conf=90% lottery range with <80 trades and <75% WR, the architectural change didn't help.
+
+---
+
+### 🔴 P0 — CLOSED 2026-05-16 — DEAD — Variant F_optimized = B + #1+#2+#3+#4
+
+**Verdict**: Mode T total **+63.58%** — **−13.19pp vs production (+76.77%)**, **−25.83pp vs B (+89.41%)**. DEAD by harness threshold (≤ −5pp vs prod) and by the CLAUDE.md updated threshold (≤ +84.41% vs B).
+
+**What costed F vs B**: F's per-horizon Mode V winners changed (metric alignment #1 + expanded grid #2/#3 + BO sampler #4 redirected the selection). F's 7h winner was genuinely better than B's (+28.70% vs +11.21%) — but 5h/6h/8h all lost 14-19pp each. **Crucially, Mode S converged to bull_h == bear_h == 5h** — the per-regime architecture collapsed. F's wider Optuna pulled all four horizons toward similar basins, eliminating the regime-differentiation alpha that B kept via its more APF-diverse per-horizon picks.
+
+**Lesson**: optimizing per-horizon scoring locally (F's metric flip) breaks a non-local property (regime horizon spread) that the production architecture depends on. Consistent with the "don't filter the model" pattern. G_narrow_d (now active P0 above) tries a different architectural lever — wider V1 spacing + force combo diversity — to fix B's 7h failure WITHOUT the per-horizon optimization that broke Mode S.
+
+**Files preserved**: [crypto_trading_system_ed.py:7347](crypto_trading_system_ed.py#L7347), [_idea_patchers/reliability_optuna_objective_align.py](_idea_patchers/reliability_optuna_objective_align.py), [_idea_patchers/reliability_expand_grid.py](_idea_patchers/reliability_expand_grid.py), [_idea_patchers/reliability_bo_exploration.py](_idea_patchers/reliability_bo_exploration.py). Do NOT delete — useful audit trail if a future variant revisits any of these levers.
+
+---
+
+(below: original F_optimized launch instructions, kept verbatim for context — DO NOT RE-RUN)
+
+
 
 ## 🚀 LAUNCH COMMAND (Desktop) — run this now
 
