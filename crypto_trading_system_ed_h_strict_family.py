@@ -4035,7 +4035,7 @@ GRID_GAMMAS = [0.999, 0.997, 0.995]  # all 3 picked at meaningful rates — kept
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
 REFINE_TOP_N = 3                   # how many configs to refine from Mode V
-REFINE_TRIALS = 50                 # Optuna trials per config (was 30 in V1.7)
+REFINE_TRIALS = 75                 # Optuna trials per config (was 50; bumped 2026-05-17 to match G_narrow_d budget for clean H-vs-G comparison)
 REFINE_GAMMA_RANGE = 0.002         # +/- around grid winner's gamma (minimal — grid already covers 0.995-0.999)
 REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
 REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window

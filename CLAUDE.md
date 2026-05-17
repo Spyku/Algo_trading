@@ -507,6 +507,88 @@ Initial Ed regime-switching backtests from the system's first week. These number
 
 This is the freshest snapshot. All sections below this block (`---`) are preserved as historical audit trail of tested/shelved decisions — re-read them when reviving a shelved item or when you need to remember why something was rejected.
 
+### 🟢 TODO 1705 — Finish G_narrow_d full HRST on Laptop (2026-05-17 17:05)
+
+**Search anchor**: `TODO 1705`
+
+**Why this exists**: G_narrow_d's Desktop HRST today (started 02:28, log [ed_v1_20260517_022856.log](logs/ed_v1_20260517_022856.log)) completed 5h Mode V (+74.54% RF+LGBM 281h) and 6h Mode V (+46.40% RF+LGBM 137h) but was killed mid-7h-refine. 8h Mode D never ran. Mode R/S/T never reached. The 5h/6h winners were ALSO wiped from `crypto_ed_production_noprod.csv` when H started the V 8h-only run at 18:37 (the `--no-persist` startup seed copied production B values back over G's writes). The only surviving record of G's 5h/6h winners is the LOG file. Need full HRST resume to produce a real Mode T verdict for G_narrow_d vs B (+89.41%) and vs H_strict.
+
+**Why on Laptop**: Desktop is occupied (H_strict V 8h in flight, finishing ~21:45). Trader also runs on Desktop with priority arrangement (no contention there — but launching a 3rd heavy run on Desktop adds nothing vs Laptop). Laptop is free.
+
+#### Step 1 — Snapshot existing G artifacts (run BEFORE the launch)
+
+```powershell
+cd "G:\Autres ordinateurs\My laptop\engine"
+$ts = Get-Date -Format "yyyyMMdd_HHmm"
+$dest = "models\_archive_g_narrow_d_$ts"
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+Copy-Item models\crypto_ed_grid_ETH_*_G_NARROW_D.csv $dest
+Copy-Item logs\ed_v1_20260517_022856.log $dest
+Copy-Item logs\ed_v1_20260516_144648.log $dest
+```
+
+#### Step 2 — Launch G full HRST resume
+
+```powershell
+$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+$env:RELIABILITY_K = "5"
+python crypto_trading_system_ed_g_narrow_d.py HRST "ETH," 5h,6h,7h,8h --skip --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D
+```
+
+**Critical guards** (all live-tested gotchas):
+- **`"ETH,"` with TRAILING COMMA, double-quoted** — without comma, `ETH` matches `endswith('h')` horizon parser → ALL 9 assets get loaded. Confirm `ASSET: ETH` at startup, not `ASSET: BTC`.
+- **`--no-data-update` REQUIRED** — without it the engine spends ~10 min downloading macro/onchain/derivatives AND writes to LIVE `data/macro_data/*.csv`. Snapshot redirect only affects READS.
+- **`--no-persist` REQUIRED** — without it, production files (and the live trader's reads) get overwritten with G's research configs.
+- **`--skip`** — skips Mode D for horizons with existing grid CSVs (5h/6h/7h all done from prior runs). Without `--skip`, Mode D re-runs for all 4 (~40 min wasted).
+
+#### Startup banners to confirm
+
+- `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
+- `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
+- `ED: Mode HRST | ETH | 5h,6h,7h,8h | 150 trials | --skip`
+- Per horizon: either `[--skip] Found existing grid CSV — skipping Mode D` (5h/6h/7h) or `EXHAUSTIVE GRID: ETH 8h — 36 evals` (8h, the only new D)
+- After Mode H: `MODE R`, then `MODE S`, then `MODE T`, then `MODE G` (T chains G automatically)
+
+#### ETA (Laptop)
+
+- Mode D 8h: ~12 min
+- Mode V 4 horizons re-run at K=5 + 75 trials + wider-Optuna: ~20h (G's per-horizon Mode V measured at ~5h on Desktop; Laptop ~30% slower → ~6.5h each × 4 = ~26h worst case)
+- Mode R + S + T+G: ~1.5h
+- **Total: ~22-27h. Done midday-to-evening 2026-05-18.**
+
+#### Step 3 — After HRST completes, snapshot final results
+
+```powershell
+$ts = Get-Date -Format "yyyyMMdd_HHmm"
+$dest = "models\_archive_g_narrow_d_COMPLETE_$ts"
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
+Copy-Item models\crypto_ed_grid_ETH_*_G_NARROW_D.csv $dest
+Copy-Item models\crypto_ed_production_noprod.csv "$dest\production_FINAL.csv"
+Copy-Item models\crypto_ed_best_models.csv "$dest\best_models_FINAL.csv"
+Copy-Item config\regime_config_ed_noprod.json "$dest\regime_config_FINAL.json"
+Copy-Item logs\ed_v1_$(Get-Date -Format yyyyMMdd)_*.log $dest
+```
+
+#### Success criteria → next step
+
+| Mode T total | Decision |
+|---|---|
+| G > B's +89.41% | G_narrow_d is a real production candidate. Compare against H_strict's HRST (TODO 1706 once H finishes V 8h@50, then re-run H full HRST at 75 trials per today's bump). Ship the higher of G/H when trader flat. |
+| G < B's +89.41% | G's wider-Optuna architecture didn't beat production despite finding stronger per-horizon Mode V winners. Likely Mode S regime collapse (same pattern that killed F_optimized). SHELVE G_narrow_d. |
+| G ≈ B (within ±5pp) | Inconclusive on G alone; full H@75 HRST becomes the decisive test. |
+
+#### Comparison context (filled per-horizon table — fill Mode T row when HRST finishes)
+
+| Horizon | B (production) | G_narrow_d | H_strict @ 50 | H_strict @ 75 (pending) |
+|---|---|---|---|---|
+| 5h Mode V | +59.05% XGB+LGBM 150h | **+74.54%** RF+LGBM 281h | not run | not run |
+| 6h Mode V | +68.47% XGB+LGBM 150h | +46.40% RF+LGBM 137h | not run | not run |
+| 7h Mode V | +11.21% XGB+LGBM 72h (lottery) | +29.94% XGB+LGBM 100h | +27.43% XGB+LGBM 100h | not run |
+| 8h Mode V | +56.54% RF+LGBM 150h | not run | in-flight | not run |
+| **Mode T total** | **+89.41%** (proven) | pending TODO 1705 | n/a (no HRST) | n/a (no HRST yet) |
+
+---
+
 ### 🟢 P0 — ACTIVE — G_narrow_d 7h-only diagnostic (engine fork, 2026-05-16)
 
 ## 🚀 LAUNCH COMMAND (Laptop) — run this now
