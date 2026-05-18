@@ -309,8 +309,21 @@ def _kill_orphan_workers():
         pass  # non-critical — don't fail if cleanup fails
 
 
+# ── G_NARROW_D output isolation (added 2026-05-18) ──────────────────────────
+# Default: production-shared 'models'/'config' dirs. Override via env vars to
+# isolate G_narrow_d's writes from a concurrent H_strict_family HRST (e.g.,
+# Desktop G + Laptop G + Desktop H75 all running, same Drive-synced dir).
+# Set both env vars to a sibling dir name to redirect ALL G_narrow_d writes
+# (RESUME_DIR, PRODUCTION_CSV, REGIME_CONFIG_PATH, MODELS_DIR, CONFIG_DIR).
+G_MODELS_DIR_OVERRIDE = os.environ.get('G_NARROW_MODELS_DIR', 'models')
+G_CONFIG_DIR_OVERRIDE = os.environ.get('G_NARROW_CONFIG_DIR', 'config')
+if G_MODELS_DIR_OVERRIDE != 'models' or G_CONFIG_DIR_OVERRIDE != 'config':
+    print(f"[G_NARROW_D_ISO] output dirs redirected: "
+          f"models={G_MODELS_DIR_OVERRIDE} config={G_CONFIG_DIR_OVERRIDE}")
+
+
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
-RESUME_DIR = 'models/.resume_hourly'
+RESUME_DIR = f'{G_MODELS_DIR_OVERRIDE}/.resume_hourly'
 
 def _resume_path(asset, horizon, step):
     return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
@@ -525,8 +538,8 @@ META_FILTER_THRESHOLD = None
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_ed_production.csv'
-REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
+PRODUCTION_CSV = f'{G_MODELS_DIR_OVERRIDE}/crypto_ed_production.csv'
+REGIME_CONFIG_PATH = f'{G_CONFIG_DIR_OVERRIDE}/regime_config_ed.json'
 
 
 def _ensure_parent_dir(path):
@@ -1064,8 +1077,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, k
 # so that --data-dir override works. CHARTS/MODELS/CONFIG are never isolated
 # (matrix variants write to `_noprod_<label>.*` tagged names, not a separate dir).
 CHARTS_DIR = 'charts'
-MODELS_DIR = 'models'
-CONFIG_DIR = 'config'
+MODELS_DIR = G_MODELS_DIR_OVERRIDE  # was 'models'; honors G_NARROW_MODELS_DIR env var
+CONFIG_DIR = G_CONFIG_DIR_OVERRIDE  # was 'config'; honors G_NARROW_CONFIG_DIR env var
 # Test harnesses set this env var to redirect model output away from production CSV
 MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 
