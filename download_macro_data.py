@@ -329,12 +329,74 @@ def _is_fresh(filepath, max_age_seconds=FRESHNESS_SECONDS):
 # ============================================================
 # 1. YFINANCE MACRO DATA
 # ============================================================
-def download_yfinance_data():
+# Incremental tail-update window: how many days of overlap to re-pull. Buys
+# correction headroom for any prior trailing-NaN ghost that the trim+ffill
+# logic might have left behind in the last refresh.
+_YF_INCREMENTAL_OVERLAP_DAYS = 7
+
+
+def _yf_resolve_window(outfile, full):
+    """Decide start/end for a yfinance batch.
+
+    full=True  → 2022-01-01 → tomorrow (legacy 3-year pull).
+    full=False → max(last_csv_date - 7d, 2022-01-01) → tomorrow when CSV
+                 exists and is parseable. Falls back to full pull otherwise.
+    Returns (start_date_str, end_date_str, mode_label).
+    """
+    end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')  # yfinance `end` is EXCLUSIVE
+    if full or not os.path.exists(outfile):
+        return '2022-01-01', end_date, 'full'
+    try:
+        existing = pd.read_csv(outfile, index_col=0, parse_dates=True)
+        if len(existing) == 0:
+            return '2022-01-01', end_date, 'full'
+        last = existing.index.max()
+        start = (last - pd.Timedelta(days=_YF_INCREMENTAL_OVERLAP_DAYS)).strftime('%Y-%m-%d')
+        return start, end_date, f'incremental (overlap from {start})'
+    except Exception as e:
+        print(f"  [!] Could not read {outfile} for incremental tail update ({e}); falling back to full pull.")
+        return '2022-01-01', end_date, 'full'
+
+
+def _yf_merge_with_existing(new_df, outfile, mode_label):
+    """If running in incremental mode and the existing CSV is present, drop
+    rows from existing whose date is in the new slice's range, then concat
+    so new fully replaces overlap (including any prior poisoned rows).
+    """
+    if mode_label == 'full' or not os.path.exists(outfile):
+        return new_df
+    try:
+        existing = pd.read_csv(outfile, index_col=0, parse_dates=True)
+    except Exception as e:
+        print(f"  [!] Existing {outfile} unreadable during merge ({e}); writing new slice only.")
+        return new_df
+    if len(existing) == 0 or len(new_df) == 0:
+        return new_df if len(new_df) else existing
+    # Align column sets — if upstream tickers were added/removed since the
+    # existing file was written, fall back to full pull semantics (the new
+    # slice alone won't cover history but at least won't smear schemas).
+    if set(existing.columns) != set(new_df.columns):
+        print(f"  [!] Column mismatch between existing CSV and new slice "
+              f"({set(existing.columns) ^ set(new_df.columns)}); writing new slice only.")
+        return new_df
+    keep = existing.loc[existing.index < new_df.index.min()]
+    merged = pd.concat([keep[new_df.columns], new_df]).sort_index()
+    merged = merged[~merged.index.duplicated(keep='last')]
+    return merged
+
+
+def download_yfinance_data(full=False):
     """Download macro indicators via yfinance batch download.
 
     Uses yfinance's native multi-ticker download (`yf.download([list,...])` with
     threads=True default) — yfinance handles internal parallelism safely; an
     external ThreadPoolExecutor caused 2D-shape race conditions in its state.
+
+    full=False (default): incremental tail update — pulls only the last
+      ~7 days from yfinance and merges with the existing CSV. ~150× less
+      bandwidth than the full pull and dramatically lower rate-limit risk.
+    full=True: 3-year refresh from 2022-01-01. Use after corruption is
+      detected beyond the 7-day overlap window, or for first-time setup.
     """
     try:
         import yfinance as yf
@@ -356,12 +418,11 @@ def download_yfinance_data():
         'OIL':      'CL=F',       # Crude Oil Futures
     }
 
-    # Download 3 years of daily data (more than enough for our models)
-    start_date = '2022-01-01'
-    end_date = datetime.now().strftime('%Y-%m-%d')
+    outfile = os.path.join(MACRO_DIR, 'macro_daily.csv')
+    start_date, end_date, mode_label = _yf_resolve_window(outfile, full)
 
     print(f"\n  Downloading {len(tickers)} macro indicators from yfinance (batch)...")
-    print(f"  Period: {start_date} to {end_date}")
+    print(f"  Period: {start_date} to {end_date} [{mode_label}]")
 
     # Single batch call — yfinance downloads all tickers internally with threads=True
     ticker_list = list(tickers.values())
@@ -422,11 +483,22 @@ def download_yfinance_data():
     macro_df.index.name = 'date'
     macro_df.index = pd.to_datetime(macro_df.index).tz_localize(None)
 
-    # Forward-fill gaps (weekends, holidays)
+    # Merge with existing CSV (incremental mode replaces only the overlap window).
+    macro_df = _yf_merge_with_existing(macro_df, outfile, mode_label)
+
+    # Trim trailing rows where US equity tickers (which only print on trading days)
+    # are ALL missing — otherwise 24/7 forex tickers extend the index past the last
+    # real close and the subsequent ffill duplicates Friday's values onto Sat/Sun/Mon,
+    # which then masquerades as fresh data to _file_is_fresh(). ffill internal gaps
+    # only (e.g. one ticker missing on a day others have it).
+    equity_cols = [c for c in ('SP500', 'NASDAQ', 'VIX') if c in macro_df.columns]
+    if equity_cols:
+        has_close = macro_df[equity_cols].notna().any(axis=1)
+        if has_close.any():
+            macro_df = macro_df.loc[:has_close[has_close].index[-1]]
     macro_df = macro_df.ffill()
 
     # Save
-    outfile = os.path.join(MACRO_DIR, 'macro_daily.csv')
     macro_df.to_csv(outfile)
     print(f"\n  Saved: {outfile} ({len(macro_df)} rows, {len(macro_df.columns)} columns)")
     print(f"  Columns: {list(macro_df.columns)}")
@@ -489,8 +561,13 @@ def download_fear_greed():
 # ============================================================
 # 4. CROSS-ASSET PAIRS (for correlation features)
 # ============================================================
-def download_cross_asset():
-    """Download BTC and major indices for cross-correlation features."""
+def download_cross_asset(full=False):
+    """Download BTC and major indices for cross-correlation features.
+
+    full=False (default): incremental tail update — last ~7 days only,
+      merged with the existing CSV (corrects up to 7 days of past poisoning).
+    full=True: 3-year refresh. Use after corruption beyond the overlap window.
+    """
     try:
         import yfinance as yf
     except ImportError:
@@ -505,10 +582,11 @@ def download_cross_asset():
         'DAX':      '^GDAXI',
     }
 
-    start_date = '2022-01-01'
-    end_date = datetime.now().strftime('%Y-%m-%d')
+    outfile = os.path.join(MACRO_DIR, 'cross_asset.csv')
+    start_date, end_date, mode_label = _yf_resolve_window(outfile, full)
 
     print(f"\n  Downloading cross-asset pairs for correlation features (batch)...")
+    print(f"  Period: {start_date} to {end_date} [{mode_label}]")
     ticker_list = list(pairs.values())
     raw = yf.download(ticker_list, start=start_date, end=end_date, progress=False, group_by='ticker')
 
@@ -553,9 +631,21 @@ def download_cross_asset():
         cross_df = pd.DataFrame(all_data)
         cross_df.index.name = 'date'
         cross_df.index = pd.to_datetime(cross_df.index).tz_localize(None)
+
+        # Merge with existing CSV (incremental mode replaces only the overlap window).
+        cross_df = _yf_merge_with_existing(cross_df, outfile, mode_label)
+
+        # Trim trailing rows where US equity tickers are ALL NaN — 24/7 BTC/ETH would
+        # otherwise extend the index past last real equity close, and the subsequent
+        # ffill would duplicate Friday's values forward, masquerading as fresh data
+        # to _file_is_fresh(). Internal ffill (per-ticker gaps) still applied.
+        equity_cols = [c for c in ('SP500', 'NASDAQ', 'DAX') if c in cross_df.columns]
+        if equity_cols:
+            has_close = cross_df[equity_cols].notna().any(axis=1)
+            if has_close.any():
+                cross_df = cross_df.loc[:has_close[has_close].index[-1]]
         cross_df = cross_df.ffill()
 
-        outfile = os.path.join(MACRO_DIR, 'cross_asset.csv')
         cross_df.to_csv(outfile)
         print(f"\n  Saved: {outfile} ({len(cross_df)} rows)")
         return cross_df
@@ -1416,19 +1506,19 @@ def download_kalshi_data():
 # ============================================================
 # MAIN
 # ============================================================
-def main():
+def main(full=False):
     print("=" * 60)
-    print("  MACRO & SENTIMENT DATA DOWNLOAD")
+    print("  MACRO & SENTIMENT DATA DOWNLOAD" + ("  [--full]" if full else ""))
     print("=" * 60)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # 1. Macro indicators
-    if _is_fresh(os.path.join(MACRO_DIR, 'macro_daily.csv')):
+    if not full and _is_fresh(os.path.join(MACRO_DIR, 'macro_daily.csv')):
         print("\n  Macro data: fresh (< 6h) — skipping")
         macro_df = None
     else:
-        macro_df = download_yfinance_data()
+        macro_df = download_yfinance_data(full=full)
 
     # 2. Fear & Greed
     if _is_fresh(os.path.join(MACRO_DIR, 'fear_greed.csv')):
@@ -1437,10 +1527,10 @@ def main():
         fg_df = download_fear_greed()
 
     # 4. Cross-asset pairs
-    if _is_fresh(os.path.join(MACRO_DIR, 'cross_asset.csv')):
+    if not full and _is_fresh(os.path.join(MACRO_DIR, 'cross_asset.csv')):
         print("  Cross-asset: fresh — skipping")
     else:
-        cross_df = download_cross_asset()
+        cross_df = download_cross_asset(full=full)
 
     # 5. On-chain data (BTC + ETH + XRP + SOL + LINK + BNB) — parallel across stale assets
     onchain_assets = ['btc', 'eth', 'xrp', 'sol', 'link', 'bnb']
@@ -1506,4 +1596,12 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import argparse
+    _ap = argparse.ArgumentParser(description='Download macro / sentiment / cross-asset data.')
+    _ap.add_argument('--full', action='store_true',
+                     help='Re-pull full 3-year history for yfinance sources '
+                          '(macro_daily, cross_asset). Default is incremental tail '
+                          'update (~7 days). Use --full after detecting corruption '
+                          'beyond the 7-day overlap window or for first-time setup.')
+    _args = _ap.parse_args()
+    main(full=_args.full)
