@@ -227,7 +227,7 @@ The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
 
 ### Stage 2 launch — Desktop overnight 2026-05-22 (combined: parallel-fork validation + long-horizon G_narrow_d research)
 
-**Why combine**: tests 9-12h horizons (10h/12h lightly tested, 11h NEVER tested, 9h "borderline" per CLAUDE.md) AND validates the parallel fork at 4-horizon HRST scale. Same wall-time we'd burn anyway. Uses the May 15 snapshot (same as G_narrow_d 5-8h May 20-21 run) for apples-to-apples comparison: Mode T REF here vs G_narrow_d 5-8h's +89.14% vs H75 LIVE's +89.41%.
+**Why combine**: tests 9-12h horizons (10h/12h lightly tested, 11h NEVER tested, 9h "borderline" per CLAUDE.md) AND validates the parallel fork at 4-horizon HRST scale. Same wall-time we'd burn anyway. Uses a **fresh snapshot of current live data (taken on Desktop just before launch)** so the data state is frozen and reproducible. Mode T REF comparable to G_narrow_d 5-8h's +89.14% and H75 LIVE's +89.41%, modulo the data-state delta (G_narrow_d 5-8h read the May 15 snapshot; this run reads ~May 22 data).
 
 ```powershell
 # ============================================================================
@@ -242,20 +242,34 @@ git pull
 powercfg /change standby-timeout-ac 0
 powercfg /change monitor-timeout-ac 0
 
-# 3. Env vars — SAME May 15 snapshot as G_narrow_d 5-8h May 20-21
+# 3. Create a fresh snapshot of current live data (Desktop, just before launch).
+#    Excludes existing snapshot dirs (data\_*) to avoid recursive nesting.
+$ts = Get-Date -Format "yyyyMMdd_HHmm"
+$snap = "data\_reliability_hrst_snapshot_desktop_$ts"
+New-Item -ItemType Directory -Path $snap -Force | Out-Null
+New-Item -ItemType Directory -Path "$snap\macro_data" -Force | Out-Null
+New-Item -ItemType Directory -Path "$snap\indices" -Force -ErrorAction SilentlyContinue | Out-Null
+Get-ChildItem data\*.csv,data\*.pkl,data\*.json -ErrorAction SilentlyContinue | Copy-Item -Destination $snap -Force
+Get-ChildItem data\macro_data\*.csv -ErrorAction SilentlyContinue | Copy-Item -Destination "$snap\macro_data" -Force
+if (Test-Path data\indices) { Copy-Item data\indices\* "$snap\indices" -Force -ErrorAction SilentlyContinue }
+Write-Host "Snapshot created: $snap" -ForegroundColor Green
+Get-ChildItem $snap | Format-Table Name,Length,LastWriteTime
+
+# 4. Env vars — point at the snapshot just created
 #    + isolated output dirs (separate from H75 LIVE prod files)
 #    + distinct grid tag (G_NARROW_LONG) so 9-12h grids don't overlap with
-#      the existing 5h/6h/7h G_NARROW_D grids in models_g_desktop/
-$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+#      the existing 5h/6h/7h G_NARROW_D grids in models_g_desktop\
+$env:V2_DATA_SNAPSHOT = $snap
 $env:RELIABILITY_K = "5"
 $env:G_NARROW_MODELS_DIR = "models_g_desktop"
 $env:G_NARROW_CONFIG_DIR = "config_g_desktop"
 
-# 4. Launch — full HRST on 9,10,11,12h, fresh grids (no --skip), parallel refine
-$ts = Get-Date -Format "yyyyMMdd_HHmm"
+# 5. Launch — full HRST on 9,10,11,12h, fresh grids (no --skip), parallel refine
 $logfile = "logs\parallel_hrst_long_$ts.log"
 python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 9h,10h,11h,12h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_LONG *>&1 | Tee-Object -FilePath $logfile
 ```
+
+**Verify snapshot is good** (the `Get-ChildItem $snap | Format-Table` line shows you the contents). Should include `eth_hourly_data.csv` dated today, all 6 `derivatives_*.csv`, `cross_asset.csv`, `macro_daily.csv`, etc. If anything missing → don't launch, debug the snapshot first.
 
 **Startup banners to verify (first 30 sec — abort if any missing)**:
 1. `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
