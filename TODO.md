@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 📌 | **H75-fresh LIVE** — `sma24>sma100` / 6h@65% bull / 6h@65% bear (symmetric) | active since 2026-05-20 09:04 | running |
 | 🔥 P1 | **H75-fresh LIVE OOS monitoring** — first 10 trades audit | window ~2026-06-03 (14 days) | 0/10 trades closed; flat |
-| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on Desktop overnight 2026-05-22 | 🟢 Stage 1 PASSED; Stage 2 = HRST 9,10,11,12h on parallel fork |
+| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on **LAPTOP** overnight 2026-05-22 (isolated from Desktop) | 🟢 Stage 1 PASSED; Stage 2 = HRST 9,10,11,12h on parallel fork |
 | ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
 | 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Fri 2026-05-22 (today) | 📅 PLANNED — procedure ready |
 | 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
@@ -225,51 +225,62 @@ The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
 
 **Speedup extrapolation from Stage 1**: 3.9 min refine for 5 trials × K=5 × 3 configs = 75 seed-evals. Linear scaling to full 75 trials × K=5 × 3 = 1125 seed-evals (15× more work) → **~58 min projected refine for 7h Mode V at full scale** vs **223 min** May 20-21 baseline = **3.8× speedup**. Full HRST projection: 23.4h → 10-11h, saves ~12-13h.
 
-### Stage 2 launch — Desktop overnight 2026-05-22 (combined: parallel-fork validation + long-horizon G_narrow_d research)
+### Stage 2 launch — LAPTOP overnight 2026-05-22 (parallel-fork validation + long-horizon G_narrow_d research)
 
-**Why combine**: tests 9-12h horizons (10h/12h lightly tested, 11h NEVER tested, 9h "borderline" per CLAUDE.md) AND validates the parallel fork at 4-horizon HRST scale. Same wall-time we'd burn anyway. Uses a **fresh snapshot of current live data (taken on Desktop just before launch)** so the data state is frozen and reproducible. Mode T REF comparable to G_narrow_d 5-8h's +89.14% and H75 LIVE's +89.41%, modulo the data-state delta (G_narrow_d 5-8h read the May 15 snapshot; this run reads ~May 22 data).
+**Why combine**: tests 9-12h horizons (10h/12h lightly tested, 11h NEVER tested, 9h "borderline" per CLAUDE.md) AND validates the parallel fork at 4-horizon HRST scale. Same wall-time we'd burn anyway. Uses a **fresh snapshot of current live data (taken on Laptop just before launch)** so the data state is frozen and reproducible. Mode T REF comparable to G_narrow_d 5-8h's +89.14% and H75 LIVE's +89.41%, modulo the data-state delta (G_narrow_d 5-8h read the May 15 snapshot; this run reads ~May 22 data).
+
+**Isolation from Desktop run** (live trader + any research process Desktop has going): output dirs are tagged `_laptop`, snapshot tagged `_laptop`, grid tag tagged `_LAPTOP`. Drive-sync will propagate the files to Desktop's view but no Desktop process should read those `_laptop`-tagged paths. Production CSV (`models/crypto_ed_production.csv`) and live regime config (`config/regime_config_ed.json`) are completely untouched.
 
 ```powershell
 # ============================================================================
-# TODO 2205 Stage 2 — HRST 9,10,11,12h on parallel fork (Desktop overnight)
+# TODO 2205 Stage 2 — HRST 9,10,11,12h on parallel fork (LAPTOP overnight)
+# Fully isolated from Desktop: _laptop output dirs + _laptop snapshot + _LAPTOP grid tag
 # ============================================================================
-cd G:\engine
+
+# 0. cd to Laptop's engine folder (adjust path if your local engine is elsewhere)
+cd C:\Users\Alex\algo_trading\engine
 
 # 1. Pull latest commit (parallel fork + this TODO + the launch query)
 git pull
 
-# 2. Keep Desktop awake for the full ~8-10h run
+# 2. Keep Laptop awake for the full ~9-11h run
 powercfg /change standby-timeout-ac 0
 powercfg /change monitor-timeout-ac 0
 
-# 3. Create a fresh snapshot of current live data (Desktop, just before launch).
-#    Excludes existing snapshot dirs (data\_*) to avoid recursive nesting.
+# 3. Create a fresh snapshot of current live data (Laptop, just before launch).
+#    Tagged "_laptop" so Desktop won't confuse it with its own snapshots.
 $ts = Get-Date -Format "yyyyMMdd_HHmm"
-$snap = "data\_reliability_hrst_snapshot_desktop_$ts"
+$snap = "data\_reliability_hrst_snapshot_laptop_$ts"
 New-Item -ItemType Directory -Path $snap -Force | Out-Null
 New-Item -ItemType Directory -Path "$snap\macro_data" -Force | Out-Null
 New-Item -ItemType Directory -Path "$snap\indices" -Force -ErrorAction SilentlyContinue | Out-Null
 Get-ChildItem data\*.csv,data\*.pkl,data\*.json -ErrorAction SilentlyContinue | Copy-Item -Destination $snap -Force
 Get-ChildItem data\macro_data\*.csv -ErrorAction SilentlyContinue | Copy-Item -Destination "$snap\macro_data" -Force
 if (Test-Path data\indices) { Copy-Item data\indices\* "$snap\indices" -Force -ErrorAction SilentlyContinue }
-Write-Host "Snapshot created: $snap" -ForegroundColor Green
+Write-Host "Snapshot created on Laptop: $snap" -ForegroundColor Green
 Get-ChildItem $snap | Format-Table Name,Length,LastWriteTime
 
-# 4. Env vars — point at the snapshot just created
-#    + isolated output dirs (separate from H75 LIVE prod files)
-#    + distinct grid tag (G_NARROW_LONG) so 9-12h grids don't overlap with
-#      the existing 5h/6h/7h G_NARROW_D grids in models_g_desktop\
+# 4. Env vars — Laptop-isolated everything
 $env:V2_DATA_SNAPSHOT = $snap
 $env:RELIABILITY_K = "5"
-$env:G_NARROW_MODELS_DIR = "models_g_desktop"
-$env:G_NARROW_CONFIG_DIR = "config_g_desktop"
+$env:G_NARROW_MODELS_DIR = "models_g_laptop"      # ← isolated from Desktop's models_g_desktop\
+$env:G_NARROW_CONFIG_DIR = "config_g_laptop"      # ← isolated from Desktop's config_g_desktop\
 
-# 5. Launch — full HRST on 9,10,11,12h, fresh grids (no --skip), parallel refine
-$logfile = "logs\parallel_hrst_long_$ts.log"
-python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 9h,10h,11h,12h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_LONG *>&1 | Tee-Object -FilePath $logfile
+# 5. Launch — full HRST on 9,10,11,12h, fresh grids (no --skip), parallel refine.
+#    --grid-tag G_NARROW_LONG_LAPTOP so the 9-12h grid CSVs are also isolated.
+$logfile = "logs\parallel_hrst_long_laptop_$ts.log"
+python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 9h,10h,11h,12h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_LONG_LAPTOP *>&1 | Tee-Object -FilePath $logfile
 ```
 
 **Verify snapshot is good** (the `Get-ChildItem $snap | Format-Table` line shows you the contents). Should include `eth_hourly_data.csv` dated today, all 6 `derivatives_*.csv`, `cross_asset.csv`, `macro_daily.csv`, etc. If anything missing → don't launch, debug the snapshot first.
+
+**Verify isolation banner** (first 30 sec after launch):
+```
+[G_NARROW_D_PARALLEL] patches applied (machine=LAPTOP, N_JOBS_PARALLEL=14):
+  resolved budget:   3 outer × 5 inner × 1 LGBM-thread = 15 OS threads (cap=14)
+[G_NARROW_D_ISO] output dirs redirected: models=models_g_laptop config=config_g_laptop
+```
+If `machine=DESKTOP` or `models=models_g_desktop` appears → Ctrl+C, you're on the wrong machine OR env vars didn't take. Desktop's run is at risk of corruption — relaunch with fresh PowerShell session.
 
 **Startup banners to verify (first 30 sec — abort if any missing)**:
 1. `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_desktop_20260515_154801/<file>`
