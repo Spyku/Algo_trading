@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 📌 | **H75-fresh LIVE** — `sma24>sma100` / 6h@65% bull / 6h@65% bear (symmetric) | active since 2026-05-20 09:04 | running |
 | 🔥 P1 | **H75-fresh LIVE OOS monitoring** — first 10 trades audit | window ~2026-06-03 (14 days) | 0/10 trades closed; flat |
-| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) | Stage 2 on Desktop overnight 2026-05-22 | 🟢 Stage 1 PASSED (3/3 refined, 3.8× projected); Stage 2 ready-to-launch |
+| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on Desktop overnight 2026-05-22 | 🟢 Stage 1 PASSED; Stage 2 = HRST 9,10,11,12h on parallel fork |
 | ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
 | 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Fri 2026-05-22 (today) | 📅 PLANNED — procedure ready |
 | 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
@@ -225,30 +225,36 @@ The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
 
 **Speedup extrapolation from Stage 1**: 3.9 min refine for 5 trials × K=5 × 3 configs = 75 seed-evals. Linear scaling to full 75 trials × K=5 × 3 = 1125 seed-evals (15× more work) → **~58 min projected refine for 7h Mode V at full scale** vs **223 min** May 20-21 baseline = **3.8× speedup**. Full HRST projection: 23.4h → 10-11h, saves ~12-13h.
 
-### Stage 2 launch — Desktop overnight 2026-05-22
+### Stage 2 launch — Desktop overnight 2026-05-22 (combined: parallel-fork validation + long-horizon G_narrow_d research)
+
+**Why combine**: tests 9-12h horizons (10h/12h lightly tested, 11h NEVER tested, 9h "borderline" per CLAUDE.md) AND validates the parallel fork at 4-horizon HRST scale. Same wall-time we'd burn anyway. Uses the May 15 snapshot (same as G_narrow_d 5-8h May 20-21 run) for apples-to-apples comparison: Mode T REF here vs G_narrow_d 5-8h's +89.14% vs H75 LIVE's +89.41%.
 
 ```powershell
 # ============================================================================
-# TODO 2205 Stage 2 — single-horizon real benchmark on Desktop overnight
+# TODO 2205 Stage 2 — HRST 9,10,11,12h on parallel fork (Desktop overnight)
 # ============================================================================
 cd G:\engine
 
-# 1. Keep Desktop awake for the full ~1.5-2h run
+# 1. Pull latest commit (parallel fork + this TODO + the launch query)
+git pull
+
+# 2. Keep Desktop awake for the full ~8-10h run
 powercfg /change standby-timeout-ac 0
 powercfg /change monitor-timeout-ac 0
 
-# 2. Set env vars — snapshot reuse + isolated output dirs
+# 3. Env vars — SAME May 15 snapshot as G_narrow_d 5-8h May 20-21
+#    + isolated output dirs (separate from H75 LIVE prod files)
+#    + distinct grid tag (G_NARROW_LONG) so 9-12h grids don't overlap with
+#      the existing 5h/6h/7h G_NARROW_D grids in models_g_desktop/
 $env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
 $env:RELIABILITY_K = "5"
 $env:G_NARROW_MODELS_DIR = "models_g_desktop"
 $env:G_NARROW_CONFIG_DIR = "config_g_desktop"
-# Optional on Desktop's 26 cores — bump LGBM internal threads from 1 → 2 for ~30% extra LGBM speed
-# $env:G_PARALLEL_LGBM_THREADS = "2"
 
-# 3. Launch Stage 2 — single horizon, full trials, full replay
+# 4. Launch — full HRST on 9,10,11,12h, fresh grids (no --skip), parallel refine
 $ts = Get-Date -Format "yyyyMMdd_HHmm"
-$logfile = "logs\parallel_bench_7h_$ts.log"
-python crypto_trading_system_ed_g_narrow_d_parallel.py V "ETH," 7h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath $logfile
+$logfile = "logs\parallel_hrst_long_$ts.log"
+python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 9h,10h,11h,12h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_LONG *>&1 | Tee-Object -FilePath $logfile
 ```
 
 **Startup banners to verify (first 30 sec — abort if any missing)**:
@@ -266,32 +272,38 @@ python crypto_trading_system_ed_g_narrow_d_parallel.py V "ETH," 7h --replay 1440
 - 3 separate `Refining #1 / #2 / #3 (LGBM=cpu): ...` blocks (interleaved is fine; output is captured-and-flushed per-worker)
 - Final `[Refine: X.X min] (3-worker parallel + K=5 thread fan-out, 3/3 configs refined)` — `3/3` is the key
 
-### ETA
+### ETA (HRST 9-12h on parallel fork, Desktop)
 
-| Phase | Time |
-|---|---|
-| Step 1 (6 backtests, parallel) | ~20-25 min |
-| Step 2 refine (3 workers × K=5 parallel × 75 trials) | **~45-60 min** target (vs 223 min baseline) |
-| Step 3 (3 refined backtests, parallel) | ~20-25 min |
-| **Total** | **~1.5-2h** (vs 4h 24m baseline) |
+| Phase | Time | Notes |
+|---|---|---|
+| Mode D × 4 horizons (no existing grids, can't `--skip`) | ~50 min | 4 × ~12 min each |
+| Mode V × 4 horizons (parallel-fork refine) | ~6-7h | 4 × ~95 min each (vs baseline ~250 min each = ~17h non-parallel) |
+| Mode R (regime backtest, C(4,2)=6 horizon pairs) | ~30 min | |
+| Mode S (joint sweep) | ~25 min | |
+| Mode T + G (rally-cooldown convergence, usually 2 iters) | ~30-60 min | |
+| **Total** | **~8-10h** | vs ~26-28h on non-parallel G_narrow_d |
 
-### Pass criteria → unlock Stage 3
+### Pass criteria — TWO things to check
 
+**(A) Parallel fork validation** (regardless of strategy verdict):
 | Metric | Pass | Action |
 |---|---|---|
-| `[Refine: <90 min] ... 3/3 configs refined` | ✅ | Proceed to Stage 3 (full HRST, see below) |
-| `[Refine: 90-150 min]` | ⚠️ | Slower than projected. Inspect log for one slow worker, check if `G_PARALLEL_LGBM_THREADS=2` helps |
-| `[Refine: >150 min]` or `<3/3 configs refined` | ❌ | Failure — review log, check for sequential-retry triggers, do NOT proceed to Stage 3 |
-| Refined APF values 5-30 range (matches G_narrow_d May 20-21 numbers like 28.2 for 5h, 26.1 for 6h) | ✅ | Identity preserved |
-| Refined APF wildly different from G_narrow_d shape | ❌ | Identity broken — diff seeds emitted, verify TPE state matches |
+| Each Mode V refine `[Refine: <90 min] ... 3/3 configs refined` | ✅ | Parallel fork works at HRST scale — promote patches to prod engine candidate |
+| Any Mode V refine `<3/3 configs refined` | ❌ | Sequential-retry fallback fired or workers died — review log, do not promote |
 
-### Stage 3 (only if Stage 2 passes)
+**(B) Long-horizon strategy verdict** (this run's research goal):
+| Mode T REF (full window) | vs G_narrow_d 5-8h +89.14% / H75 +89.41% | Verdict |
+|---|---|---|
+| ≥ +95% | beats short horizons by ≥5pp | **Very promising** — explore mixed 5-8 + 9-12 regime configs |
+| +80% to +95% | comparable to short horizons (±5pp) | **Promising** — long horizons hold their own; worth a follow-up with fresh data |
+| +50% to +80% | weaker than short horizons by 5-40pp | **Marginal** — confirms 5-8h is the sweet spot, but document the alpha source |
+| < +50% | significantly weaker | Long horizons not viable in current regime — close arc, archive learning |
 
-```powershell
-# Full HRST on Desktop (~9-11h projected vs 23h baseline)
-$ts = Get-Date -Format "yyyyMMdd_HHmm"
-python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 5h,6h,7h,8h --skip --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath "logs\parallel_hrst_$ts.log"
-```
+### Stage 3 — only if (A) passes AND (B) shows promise
+
+If Mode T REF ≥ +80% AND parallel fork validated: follow up with a **mixed regime test** — bull from 5-8h (using H75 LIVE config) + bear from the best 9-12h pair from this run. Asymmetric regime configs have never been tested with mixed horizon families.
+
+If only (A) passes (parallel fork works) but (B) shows long horizons are weak: **port the 3 patches to the prod engine `crypto_trading_system_ed.py`** as the standalone parallel speedup (independent of long-horizon outcome). Estimated production HRST: 23h → ~10h.
 
 ### Promotion criterion → engine
 
