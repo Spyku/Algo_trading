@@ -144,6 +144,44 @@ def _suppress_stderr():
         os.close(devnull_fd)
         os.close(old_stderr_fd)
 import pandas as pd
+
+# ============================================================
+# H_STRICT_FAMILY: pd.read_csv redirect to data snapshot (inlined from
+# v2_data_snapshot.py). Reads V2_DATA_SNAPSHOT env var; if set, redirects
+# all data/<file> reads to <snapshot>/<file>. Lets H_strict_family reuse
+# B's frozen snapshot for fair comparison.
+# ============================================================
+_H_SNAPSHOT_DIR = os.environ.get('V2_DATA_SNAPSHOT')
+if _H_SNAPSHOT_DIR:
+    from pathlib import Path as _H_Path
+    _h_snapshot = _H_Path(_H_SNAPSHOT_DIR).resolve()
+    _h_data_dir = _h_snapshot.parent.resolve()
+    _h_orig_read_csv = pd.read_csv
+
+    def _h_redirected_read_csv(filepath_or_buffer, *args, **kwargs):
+        try:
+            if isinstance(filepath_or_buffer, (str, os.PathLike)):
+                p = _H_Path(filepath_or_buffer).resolve()
+                try:
+                    rel = p.relative_to(_h_data_dir)
+                except ValueError:
+                    return _h_orig_read_csv(filepath_or_buffer, *args, **kwargs)
+                rel_str = str(rel)
+                # Recursion guard
+                if rel_str.startswith('_v2_snapshot_') or rel_str.startswith('_reliability_'):
+                    return _h_orig_read_csv(filepath_or_buffer, *args, **kwargs)
+                redirected = _h_snapshot / rel
+                if redirected.exists():
+                    return _h_orig_read_csv(str(redirected), *args, **kwargs)
+        except Exception:
+            pass
+        return _h_orig_read_csv(filepath_or_buffer, *args, **kwargs)
+
+    pd.read_csv = _h_redirected_read_csv
+    print(f'[H_STRICT_FAMILY_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_h_snapshot.name}/<file>')
+else:
+    print('[H_STRICT_FAMILY_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
+
 import numpy as np
 from datetime import datetime, timedelta
 from itertools import combinations
@@ -247,8 +285,21 @@ def _kill_orphan_workers():
         pass  # non-critical — don't fail if cleanup fails
 
 
+# ── H_STRICT_FAMILY output isolation (added 2026-05-17) ─────────────────────
+# Default: production-shared 'models'/'config' dirs. Override via env vars to
+# isolate H_strict's writes from a concurrent G_narrow_d HRST writing to the
+# default paths (e.g., G on Laptop + H75 on Desktop, same Drive-synced dir).
+# Set both env vars to a sibling dir name to redirect ALL H_strict writes
+# (RESUME_DIR, PRODUCTION_CSV, REGIME_CONFIG_PATH, MODELS_DIR, CONFIG_DIR).
+H75_MODELS_DIR = os.environ.get('H_STRICT_MODELS_DIR', 'models')
+H75_CONFIG_DIR = os.environ.get('H_STRICT_CONFIG_DIR', 'config')
+if H75_MODELS_DIR != 'models' or H75_CONFIG_DIR != 'config':
+    print(f"[H_STRICT_FAMILY_ISO] output dirs redirected: "
+          f"models={H75_MODELS_DIR} config={H75_CONFIG_DIR}")
+
+
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
-RESUME_DIR = 'models/.resume_hourly'
+RESUME_DIR = f'{H75_MODELS_DIR}/.resume_hourly'
 
 def _resume_path(asset, horizon, step):
     return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
@@ -462,8 +513,8 @@ META_FILTER_THRESHOLD = None
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_ed_production.csv'
-REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
+PRODUCTION_CSV = f'{H75_MODELS_DIR}/crypto_ed_production.csv'
+REGIME_CONFIG_PATH = f'{H75_CONFIG_DIR}/regime_config_ed.json'
 
 
 def _ensure_parent_dir(path):
@@ -1001,8 +1052,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, k
 # so that --data-dir override works. CHARTS/MODELS/CONFIG are never isolated
 # (matrix variants write to `_noprod_<label>.*` tagged names, not a separate dir).
 CHARTS_DIR = 'charts'
-MODELS_DIR = 'models'
-CONFIG_DIR = 'config'
+MODELS_DIR = H75_MODELS_DIR  # was 'models'; honors H_STRICT_MODELS_DIR env var
+CONFIG_DIR = H75_CONFIG_DIR  # was 'config'; honors H_STRICT_CONFIG_DIR env var
 # Test harnesses set this env var to redirect model output away from production CSV
 MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 
@@ -3997,7 +4048,7 @@ GRID_GAMMAS = [0.999, 0.997, 0.995]  # all 3 picked at meaningful rates — kept
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
 REFINE_TOP_N = 3                   # how many configs to refine from Mode V
-REFINE_TRIALS = 50                 # Optuna trials per config (was 30 in V1.7)
+REFINE_TRIALS = 75                 # Optuna trials per config (was 50; bumped 2026-05-17 to match G_narrow_d budget for clean H-vs-G comparison)
 REFINE_GAMMA_RANGE = 0.002         # +/- around grid winner's gamma (minimal — grid already covers 0.995-0.999)
 REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
 REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window
@@ -4584,14 +4635,18 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         else:
             print(f"  Hold-out skipped: smallest fold only {min_fold_rows} rows (need 200+)")
 
-        # Save top 6 holdout candidates with DIVERSITY constraint
+        # H_STRICT_FAMILY: dedup key changed from (w, g_band, f_band) to
+        # (combo, w) — enforces "best per (model_family, window) cluster" so
+        # the top 6 V2 inputs span max-6 distinct families instead of
+        # accumulating gamma/feature near-duplicates of the same family.
+        # B's 7h analysis (2026-05-16): all 6 V2 D-candidates ended up as
+        # XGB+LGBM 72h variants because dedup didn't include combo, and
+        # RF+LGBM family was filtered out entirely. New key guarantees 1
+        # slot per (combo, window).
         def _diversity_key(trial):
-            g = trial.params['gamma']
-            f = trial.params['n_features']
+            combo = trial.params['combo']
             w = trial.params['window']
-            g_band = 0 if g < 0.996 else (1 if g < 0.998 else 2)
-            f_band = 0 if f <= 15 else (1 if f <= 30 else 2)
-            return (w, g_band, f_band)
+            return (combo, w)
 
         DOOHAN_SAVE_TOP_N = 6
         candidates_to_save = []
@@ -7343,14 +7398,18 @@ Examples:
         # Check if it's a mode
         if upper in VALID_MODES and mode is None:
             mode = upper
-        # Check if it's horizons (ends with h, contains digits)
-        elif arg.lower().endswith('h') and arg[:-1].replace(',', '').isdigit():
-            horizons = [int(h) for h in arg[:-1].split(',')]
-        # Otherwise treat as asset list
-        else:
+        # Check if it's an asset list FIRST (must come before the horizon check
+        # because 'ETH' / 'BCH' / etc end in 'h' and the old order silently ate
+        # them, defaulting assets_list to ALL 9 ASSETS — see TODO 1705B audit).
+        elif any(a.strip().upper() in ASSETS for a in arg.split(',')):
             parsed = [a.strip().upper() for a in arg.split(',') if a.strip().upper() in ASSETS]
             if parsed:
                 assets_list = parsed
+        # Check if it's horizons. Accepts either "5h" or "5h,6h,7h,8h" or "5,6,7,8".
+        elif arg.lower().endswith('h') or (',' in arg and all(p.strip().rstrip('h').isdigit() for p in arg.split(','))):
+            parts = [p.strip().lower().rstrip('h') for p in arg.split(',')]
+            if all(p.isdigit() for p in parts):
+                horizons = [int(p) for p in parts]
 
     if mode and mode in VALID_MODES:
         # Defaults
@@ -8766,3 +8825,85 @@ if __name__ == '__main__':
         os._exit(0)
     except Exception:
         pass
+
+
+# ============================================================
+# H_STRICT_FAMILY: K=5 multi-seed denoising (inlined from
+# _idea_patchers/reliability_multi_seed.py).
+# Wraps _deku_eval_with_pruning to run K seeded inner-loop evals and return
+# the median cum_return result. Applied at module-load so workers re-importing
+# this module also get the wrapped version.
+# ============================================================
+_H_K = int(os.environ.get('RELIABILITY_K', '5'))
+_H_SEEDS = list(range(42, 42 + _H_K))
+_H_ORIG_DEKU_EVAL = _deku_eval_with_pruning
+
+
+def _h_factories_seeded(seed):
+    """Mirror _get_deku_diagnostic_models() with random_state=seed."""
+    from lightgbm import LGBMClassifier
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.linear_model import LogisticRegression
+    from xgboost import XGBClassifier
+
+    def _rf():
+        return RandomForestClassifier(
+            n_estimators=100, max_depth=4, class_weight='balanced',
+            random_state=seed, n_jobs=1,
+        )
+
+    def _gb():
+        return GradientBoostingClassifier(
+            n_estimators=100, max_depth=3, random_state=seed,
+        )
+
+    def _xgb():
+        return XGBClassifier(
+            n_estimators=100, max_depth=3, learning_rate=0.05,
+            random_state=seed, tree_method='hist', verbosity=0, n_jobs=1,
+        )
+
+    def _lr():
+        return LogisticRegression(
+            max_iter=1000, class_weight='balanced', random_state=seed,
+        )
+
+    def _lgbm():
+        return LGBMClassifier(
+            n_estimators=100, max_depth=4, learning_rate=0.05,
+            class_weight='balanced', verbose=-1, random_state=seed,
+            device='gpu',
+        )
+
+    return {'RF': _rf, 'GB': _gb, 'XGB': _xgb, 'LR': _lr, 'LGBM': _lgbm}
+
+
+def _h_deku_eval_median_k(features_np, labels_np, closes_np, combo, window, n,
+                          step, model_factories, gamma=1.0, trial=None,
+                          horizon=None):
+    """Drop-in replacement that runs the inner walk-forward K times with
+    different seeds. Returns the result whose cum_return (tuple index 4) is
+    the median across the K trials."""
+    if horizon is None:
+        horizon = PREDICTION_HORIZON
+
+    results = []
+    for seed in _H_SEEDS:
+        factories = _h_factories_seeded(seed)
+        r = _H_ORIG_DEKU_EVAL(
+            features_np, labels_np, closes_np, combo, window, n,
+            step, factories, gamma=gamma, trial=None, horizon=horizon,
+        )
+        if r is not None:
+            results.append(r)
+
+    if not results:
+        return None
+
+    results.sort(key=lambda rr: rr[4])
+    return results[len(results) // 2]
+
+
+_deku_eval_with_pruning = _h_deku_eval_median_k
+print(f'[H_STRICT_FAMILY_K5] _deku_eval_with_pruning patched (K={_H_K} seeds={_H_SEEDS})')
+print(f'[H_STRICT_FAMILY] _diversity_key changed to (combo, w) — 1 V2 slot per (model_family, window) cluster')

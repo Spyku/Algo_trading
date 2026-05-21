@@ -4,18 +4,18 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-Automated ML trading system for crypto (BTC, ETH, XRP, DOGE, SOL, LINK, ADA, AVAX, DOT). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h — optimized via Mode H). Executes trades on Revolut X via Ed25519-signed API.
+Automated ML trading system for crypto. **5 active assets**: ETH (live since 2026-05-18 H75 promotion), BTC/SOL/LINK/XRP (standby, `enabled: false` — HRST done, results not promoted). BNB code-wired 2026-05-02 but PySR/HRST not yet run. DOGE/ADA/AVAX/DOT pruned 2026-04-19 (weak priors, no diversification). Generates hourly BUY/SELL/HOLD signals using ensemble ML models with walk-forward validation, temporal decay sample weighting, and embargo-corrected labels. Variable horizon per asset (5h, 6h, 7h, 8h — optimized via Mode H).
 
 **Production:**
 - **Ed V2** — Regime-switching trading (`crypto_trading_system_ed.py` + `crypto_revolut_ed_v2.py`). Dynamic bull/bear horizon selection via external config (`config/regime_config_ed.json`). Maker-order pricing at `bid+0.01` with `post_only` for 0% fees. Mode R regime backtest. Currently ETH-only.
 
 Doohan V1.7.1, Deku, CASCA and all prior versions archived (Doohan retired 2026-04, others 2026-03-24). See `archive/`.
 
-**Owner:** Alex, Lausanne, Switzerland (CET/CEST timezone)
+**Owner:** Alex (CET/CEST timezone)
 
 ---
 
-## Engine Reference Card (2026-04-17)
+## Engine Reference Card (built 2026-04-17, kept current — H75 live state inline)
 
 **Base knowledge for current models + future analysis.** Built from live audit of `crypto_ed_production.csv` (48 models) + CLAUDE.md / README history. Do not delete — update in place when new evidence arrives.
 
@@ -54,9 +54,9 @@ Grades = frequency of feature selection across the 48 production models.
 
 ### Horizon status
 
-Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14h = 2**, 16h = 1.
+Production CSV (2026-05-18, post-H75 promote): 4h = 5, 5h = 6, 6h = 6, 7h = 6, 8h = 6, 10h = 4, 12h = 4, 14h = 2, 16h = 1. (Per-coin: ETH covers 4-12h; BTC covers 5-16h; LINK covers 4-14h; SOL/XRP/BNB cover the core 4-8h band.)
 
-- **5h, 6h, 7h, 8h** — core band, default sweep in Ed ([line 5428](crypto_trading_system_ed.py#L5428)). Current production: ETH bull=6h@85%, bear=5h@65% (live; updated 2026-04-30 to 2-detector 6h/5h).
+- **5h, 6h, 7h, 8h** — core band, default sweep in Ed ([line 5428](crypto_trading_system_ed.py#L5428)). **Current live (H75, promoted 2026-05-18 22:02 CEST): ETH detector=`sma24>sma100`, bull=5h@75%, bear=8h@65%**, shields OFF, per-regime gates (bull rr8h≥2.0 OR rr14h≥6.0 cd=6h; bear rr10h≥5.5 OR rr12h≥2.0 cd=8h), min_sell_pnl=0%, max_hold=10h. Prior live (2026-04-30 → 2026-05-18): bull=6h@85% / bear=5h@65% on `named:price>sma72`.
 - **4h — REVIVED 2026-05-01 (was previously "structurally broken").** ETH 8h HRST 4-16h Mode V on 1440h replay produced ETH 4h winner +41.23% / 143 trades / 69% WR (refined RF+LGBM w=88h). XRP HRST 2026-05-02 picked bull=4h@80% as winner. The earlier "broken post-embargo" verdict was specific to the 2026-03-24 data snapshot and pre-feature-additions pipeline. 4h is asset-conditional, not universally dead — but it never wins the regime joint sweep over 5-8h on ETH (Mode S TOP 15 from 8h HRST: zero entries with bull=4h; 7h dominates).
 - **9h, 12h, 16h — TESTED 2026-05-01 (8h HRST), VIABLE.** Single-horizon Mode V: 9h +31.36%/62%WR (borderline), 12h +33.27%/67%WR/42 trades (real), 16h +30.79%/77%WR/26 trades (high WR / thin). **Mode S TOP 15 plateau**: ALL 15 entries had bull=7h; bear migrated to 16h (×7), 12h (×5), 8h (×2). Bear 5/6/7 absent from TOP 15. Mode S WINNER: `tsmom_672h bull=7h@85% / bear=16h@75%` → Mode T REF +68.81% / 24 trades / WR 92% (gates active, both shields OFF) — competitive with claimed live ~+70%. **Promotion pending**: validate on a fresh window before flipping live bear from 5h to 16h.
 - **10h — incidental rows in CSV** from earlier non-default sweeps; no recent dedicated test.
@@ -88,10 +88,10 @@ Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14
 - **GDELT geopolitical features (21 features).** Downloaded from GDELT DOC 2.0 API (iran_vol, geopolitical_tone, etc.). iran_vol_zscore ranked #9 in one LGBM importance run (2026-04-10) but was **never selected into any of 33 production models** (0% selection rate across ETH/BTC/SOL/LINK/XRP). VIX and equity 1-day changes capture macro fear faster because they're market-priced. Download takes 5-10 min of rate-limited API calls per Mode D. **Disabled from both download and feature pipeline 2026-04-19.** Code kept commented for future use.
 - **Kelly criterion position sizing.** Evaluated 2026-04-19. Not backtested — architectural mismatch with all-in/all-out binary position model. Kelly sizes by confidence gradient (95% = big, 65% = small), but system only enters at high confidence (85-95%) with no position-size gradient to exploit. Would only matter if confidence thresholds were lowered. **Not implemented.**
 - **Stablecoin market cap features (3 features).** Downloaded 2026-04-19 from CoinGecko (USDT+USDC market cap, 1y daily). Features: `stable_mcap_chg1d`, `stable_mcap_chg7d`, `stable_mcap_zscore`. LGBM importance: all ranked below 1% on both ETH 6h and 8h. **Grade 1 — dead.** Data kept in `stablecoin_flows.csv` but features are effectively noise.
+- **Volatility-scaled horizons (C01).** Originally promising on 2-month replay 2026-04-19: `vol_2band low→8h high→6h @90%` = +33.82% / 46 trades / 65% WR, +5.02pp over `tsmom_672h` baseline. **4-month confirmation FAILED to replicate.** Best 4mo variant `vol_2band low→8h high→6h @90%` = +30.98% vs current baseline `tsmom_672h bull=6h bear=8h @90% +38.49%` = **−7.51pp**. A different best variant on 4mo (`vol_median below→8h above→6h @90%` +41.48%) only beats baseline by +2.99pp — below the +5pp promotion threshold. Verdict: 2mo win was window-shopping, doesn't generalize. **Vol-scaled horizons family closed.** Additional caveat: the 2mo +5.02pp gain was measured against the now-defunct `tsmom_672h` baseline used pre-H75-promote; with live now on `sma24>sma100` (H75) the baseline has shifted further. SHELVED.
 
 ### What's promising (tested, pending decision)
 
-- **Volatility-scaled horizons.** Tested 2026-04-19 on ETH 2-month replay (`tools/test_vol_scaled_horizon.py`). Instead of fixed regime-based horizon (tsmom bull=6h / bear=8h), dynamically pick horizon based on 24h realized vol percentile rank (vs 30-day window). **Best: `vol_2band low→8h high→6h @90%` = +33.82%, 46 trades, 65% WR — beats current tsmom regime (+28.80%) by +5.02pp and beats every single-horizon baseline.** Logic: high vol (>70th pctile) → shorter 6h horizon (faster signal); low vol → longer 8h (more confirmation). Hybrid tsmom+vol variants also tested but didn't beat the pure vol picker. **Next step: validate on 4-month window and consider replacing tsmom detector or combining.**
 - **ETH derivatives as features (funding rate + open interest).** Added 2026-04-19 — extended Binance derivatives download to ETH (was BTC-only). LGBM importance ranking: `deriv_funding_chg1d` ranked **#4 on 6h (4.2%)** and **#2 on 8h (3.7%)**. `deriv_oi_chg3d` ranked **#5 on 6h (3.3%)**, `deriv_oi_chg1d` ranked **#4 on 8h (3.6%)**. These are top-tier — higher than established features like `adx_14h` and `price_to_sma100h`. Mode D grid produced 0 valid candidates initially due to OI NaN (30-day history only); fixed by excluding sparse features from `dropna()` (LGBM handles NaN natively). **Next step: re-run Mode D or HRST with the NaN fix to get actual production candidates.**
 
 ### What's untested (queued)
@@ -106,8 +106,8 @@ Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14
 
 ### Regime-conditional asymmetries (important for future models)
 
-- **ETH horizon asymmetry:** bull=6h / bear=8h. Longer horizon in bear = more confirmation needed in volatile regime.
-- **ETH confidence asymmetry:** bull=85% / bear=65%. Counterintuitive but battle-tested — bear's low-confidence signals are mean-reversion setups that *should* fire.
+- **ETH horizon asymmetry:** bull=5h / bear=8h (since H75 2026-05-18; was 6h/8h pre-H75). Longer horizon in bear = more confirmation needed in volatile regime.
+- **ETH confidence asymmetry:** bull=75% / bear=65% (since H75 2026-05-18; was 85%/65% pre-H75). Counterintuitive but battle-tested — bear's low-confidence signals are mean-reversion setups that *should* fire. H75 lowered bull threshold 85%→75% because strict-(combo,w) dedup yielded a more conservative 5h winner that benefits from a lower confidence gate.
 - **No per-regime SL/TP found useful.** All rules that override SELL timing lose.
 - **No per-regime feature set found useful yet.** Open question: should bear use more macro, bull more technical? Not tested.
 
@@ -128,19 +128,21 @@ Production CSV: 5h/6h/8h = 9 models each, 7h = 8, 10h = 4, 12h = 4, **4h = 2, 14
 
 ## Machine Setup
 
-**One shared engine folder** synced via Google Drive — both machines use the same code, data, and models. Only the venv is local per machine.
+**One shared engine folder** synced via Google Drive — all three machines use the same code, data, and models. Only the venv is local per machine.
 
 | Machine | Engine Path | Venv | Python |
 |---------|-------------|------|--------|
 | Desktop (primary) | `G:\engine\` (Google Drive synced) | `C:\algo_trading\venv\` | `C:\algo_trading\venv\Scripts\python.exe` |
 | Laptop | `G:\Autres ordinateurs\My laptop\engine\` (Google Drive synced) | `C:\Users\Alex\algo_trading\venv\` | `C:\Users\Alex\algo_trading\venv\Scripts\python.exe` |
+| Yoga | `G:\Autres ordinateurs\Yoga\engine\` (Google Drive synced) — *path TBC, user to confirm* | *TBD — user to fill in* | *TBD — user to fill in* |
 
 - **Desktop:** i7-14700KF, RTX 4080, 32GB — used for long Mode D runs
 - **Laptop:** 16 cores, RTX 3070 Ti
+- **Yoga:** CPU-only (no GPU) — used for lightweight tests / PySR workers (2 workers per per-machine policy); engine auto-detects `LGBM_DEVICE=cpu` on Yoga, `gpu` on Desktop/Laptop
 - **GitHub:** https://github.com/Spyku/Algo_trading
 - **Push:** `git_push.bat` from `G:\engine\`
 - **OS:** Windows 11, Python 3.14 venv (NOT conda)
-- **GPU:** LGBM uses GPU (`device='gpu'`), configured in `hardware_config.py`
+- **GPU:** LGBM uses GPU on Desktop/Laptop (`device='gpu'`); Yoga falls back to CPU. Configured in `hardware_config.py`.
 
 ### Install / Venv Setup
 
@@ -201,13 +203,13 @@ python crypto_trading_system_eli.py H BTC 4,5,6,7,8,9,10       # Horizon sweep
 python crypto_trading_system_eli.py HRS BTC 4,5,6,7,8,9,10     # Full pipeline
 
 # === Legacy regime backtest (pre-Ed) ===
-python tools/backtest_regime_master.py                         # 2-month default, all horizons
-python tools/backtest_regime_master.py --months 4              # 4-month backtest
-python tools/backtest_regime_master.py --horizons 6,8          # only test 6h and 8h (fast)
-python tools/backtest_regime_master.py --bull 6 --bear 8       # fix pair, compare regimes only
-python tools/backtest_regime_master.py --regimes sma,rsi       # filter regime families
-python tools/backtest_regime_master.py --no-combos             # single-horizon baselines only
-python tools/backtest_regime_master.py --asset ETH             # test other assets
+python tools/backtest_regime_master.py                          # 2-month default, all horizons
+python tools/backtest_regime_master.py --months 4               # 4-month backtest
+python tools/backtest_regime_master.py --horizons 6,8           # only test 6h and 8h (fast)
+python tools/backtest_regime_master.py --bull 6 --bear 8        # fix pair, compare regimes only
+python tools/backtest_regime_master.py --regimes sma,rsi        # filter regime families
+python tools/backtest_regime_master.py --no-combos              # single-horizon baselines only
+python tools/backtest_regime_master.py --asset ETH              # test other assets
 ```
 
 **Telegram commands (Ed V2 trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/regime` (show current bull/bear state per asset) `/gate [ASSET on\|off\|clear]` (V7 rally-cooldown gate)
@@ -288,7 +290,7 @@ Estimates I previously quoted as "~6h", "~3.5h", "~30 min Mode D × 4", "~30-120
 ### Production File Chain
 
 ```
-crypto_trading_system_ed.py  (Ed V1.0 — Modes P/D/V/H/S/R/HRS)
+crypto_trading_system_ed.py  (Ed V1.0 — Modes P/D/V/H/S/R/HRS/HRST/T/G/F)
   └── hardware_config.py
 crypto_revolut_ed_v2.py  (Ed V2 auto-trader — reads regime_config_ed.json)
   └── crypto_live_trader_ed.py  (regime-aware signal generation)
@@ -313,7 +315,7 @@ Doohan V1.7.1 retired 2026-04. Deku, CASCA, V1.1-V1.7 archived 2026-03-24. All l
 - **Scoring:** APF (Adjusted Profit Factor) = `raw_PF / buyhold_PF`. Normalizes against market regime.
 - **Exhaustive grid (Mode D):** 3 combos × 6 windows × 6 features × 3 gammas = 324 evals per horizon. Saves top 6 candidates.
 - **3-fold rolling holdout:** Train on fold 1 (60%), re-rank winners by out-of-sample performance across 3 folds with embargo. Reduces overfitting.
-- **Refined-only production selection:** Mode V backtests D candidates to pick top 3 for Optuna refine (50 trials each), then selects production model from refined configs only. D candidates consistently underperform refined versions.
+- **Refined-only production selection:** Mode V backtests D candidates to pick top 3 for Optuna refine (75 trials each since H75, was 50 before 2026-05-18), then selects production model from refined configs only. D candidates consistently underperform refined versions.
 - **MIN_COMBO_SIZE=2:** Solo models removed. Prevents overconfidence from uncalibrated single-model predictions.
 - **MIN_TRADES=8:** Optuna objective returns 0 for trials with <8 trades.
 - **Models:** RF, GB, XGB, LR, LGBM — 3 viable combos: XGB+LGBM, RF+LGBM, RF+XGB (dead combos RF+GB, RF+LR, GB+LR dropped).
@@ -321,6 +323,8 @@ Doohan V1.7.1 retired 2026-04. Deku, CASCA, V1.1-V1.7 archived 2026-03-24. All l
 - **PySR symbolic regression:** Mode P runs offline discovery (`pysr_discover_features.py`), saves expressions to JSON. Production loads them as computed columns. Anti-leakage: PySR formulas are discovered on months 12→6 ago only, never overlapping with Mode D's last-6-month evaluation window.
 - **PySR anti-leakage checks:** `_check_pysr_leakage()` runs early in Mode D, V, and Refine. If PySR JSON lacks `discovery_method == "historical"`, all PySR features are stripped before the run starts. Mode V also blocks production CSV writes for leaky PySR configs.
 - **Model hot-reload:** Trader checks production CSV every 5 minutes.
+- **K=5 multi-seed denoising (since H75 2026-05-18):** Every Optuna trial in Mode V refine is averaged over 5 random seeds (42, 43, 44, 45, 46) before being scored. Reduces single-seed run-to-run variance from ~5-10pp to ~2-3pp. Wraps `_deku_eval_with_pruning`; controlled by `RELIABILITY_K` env var (default 5). Cost: 5× per trial; offset by REFINE_TRIALS bump 50→75.
+- **Strict `(combo, w)` diversity dedup (since H75 2026-05-18):** Mode V's `_diversity_key()` returns `(model_combo, window)` — at most 1 V2 refine slot per (combo, window) cluster. Pre-H75 allowed multiple seeds of the same (combo, window) pair into the top-6, which biased refine toward "lottery" configs. Strict dedup forces V2 to explore distinct (combo, window) buckets — yields more conservative/robust winners.
 - **Regime-switching horizons:** `backtest_regime_master.py` tests whether switching between horizons based on market regime (e.g., SMA24>SMA100 = bull -> use 6h model, bear -> use 8h model) outperforms a fixed single-horizon strategy. Evaluates multiple regime detectors (SMA, RSI, volatility, etc.) and horizon pairs.
 
 ### Data Flow
@@ -333,7 +337,7 @@ models/crypto_ed_production.csv        <- Ed production model (written by Mode V
 config/regime_config_ed.json           <- Ed: per-asset regime detector, bull/bear horizon+confidence+position
 config/position_ed_{ASSET}.json        <- Ed position tracking
 config/revolut_x_config.json           <- Revolut X API key
-config/private.pem                     <- Ed25519 signing key
+config/private.pem                     <- Ed***** signing key
 config/telegram_config.json            <- Telegram bot token (trader)
 config/telegram_optimizer_config.json  <- Telegram bot token (optimizer bot — separate bot)
 ```
@@ -361,7 +365,7 @@ GRID_FEATURES = [5, 10, 15, 20, 25, 30]            # feature counts to test
 GRID_GAMMAS = [0.995, 0.997, 0.999]                # gamma values
 DIAG_STEP = 36                                      # walk-forward step
 DEKU_DEFAULT_TRIALS = 150                           # Optuna trial count
-REFINE_TRIALS = 50                                  # Optuna refine trials per config
+REFINE_TRIALS = 75                                  # Optuna refine trials per config (bumped 50→75 with H75 promotion 2026-05-18)
 REFINE_TOP_N = 3                                    # top N D candidates to refine
 MODE_G_REPLAY_HOURS = 336                           # 2-week backtest window
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]  # confidence thresholds to test
@@ -374,9 +378,10 @@ EMBARGO_CANDLES = horizon                           # label overlap fix (dynamic
 
 | File | Status | Notes |
 |------|--------|-------|
-| `crypto_trading_system_ed.py` | **Production** | Single-file Ed V1.0 engine. **Merged 2026-05-02**: previously split into entry-point + `_engine.py` + `_parallel_p.py` (parallelism wrapper) + `_wrapper`; all merged back into one file. Modes P/D/V/H/S/R/HRS/HRST/T/G/F. Embargo-fixed grid (2×3×4×3=72 evals after trim), 50-trial Optuna refine, PySR symbolic features. Built-in parallel paths for Modes V/S/T (loky workers, LGBM cpu inside parallel sections, hybrid GPU+CPU refine dispatcher). Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. Pre-merge snapshots in `archive/crypto_trading_system_ed_engine_pre_merge_20260502.py` + `_parallel_p_pre_merge_20260502.py` + `_wrapper_pre_merge_20260502.py`. |
+| `crypto_trading_system_ed.py` | **Production** | Single-file Ed V1.0 engine. **Merged 2026-05-02**: previously split into entry-point + `_engine.py` + `_parallel_p.py` (parallelism wrapper) + `_wrapper`; all merged back into one file. **H75 promotion 2026-05-18 added K=5 multi-seed denoising + REFINE_TRIALS=75 + strict `(combo, w)` diversity dedup** (pre-H75 snapshot: `crypto_trading_system_ed_pre_H75_20260518.py`). Modes P/D/V/H/S/R/HRS/HRST/T/G/F. Embargo-fixed grid (2×3×4×3=72 evals after trim), 75-trial Optuna refine, PySR symbolic features. Built-in parallel paths for Modes V/S/T (loky workers, LGBM cpu inside parallel sections, hybrid GPU+CPU refine dispatcher). Reads/writes `crypto_ed_production.csv` and `regime_config_ed.json`. Pre-merge snapshots in `archive/crypto_trading_system_ed_engine_pre_merge_20260502.py` + `_parallel_p_pre_merge_20260502.py` + `_wrapper_pre_merge_20260502.py`. |
 | `crypto_trading_system_ed_noprod.py` | Active wrapper | Safety wrapper for research runs. Sets `MODELS_CSV_OVERRIDE` env var before importing the engine, monkey-patches `PRODUCTION_CSV` + `REGIME_CONFIG_PATH` to `*_noprod.*` paths, seeds the noprod files from prod on first run. Equivalent to engine's built-in `--no-persist` flag; kept as the file-based alternative. |
 | `crypto_trading_system_ed_cdar.py` | **Research fork** (added 2026-05-03) | Literal copy of `crypto_trading_system_ed.py` with CDaR-aware scoring integrated (Idea #6 from 20-ideas roadmap). Five edits vs source: (1) `PRODUCTION_CSV → crypto_ed_production_cdar.csv` and `REGIME_CONFIG_PATH → regime_config_ed_cdar.json` so live trader is unaffected; (2) added `CDAR_LAMBDA = 1.0` constant; (3) added `'cdar'` branch in `_compute_optuna_score` returning `cum_return - λ × max_dd_pct` (Mode D scoring); (4) `OPTUNA_METRIC` default flipped from `'apf'` to `'cdar'`; (5) `_simulate_with_threshold` now tracks per-bar drawdown and returns `max_dd_pct` (Mode V's per-hour live backtest); (6) all 4 Mode V/HRST winner-selection scoring sites (lines 4962, 4976, 6194, 7986, 7999) changed from `score = ret * wr if ret > 0 else ret` to `score = (ret * wr if ret > 0 else ret) - CDAR_LAMBDA * max_dd_pct`. Run identically to the source: `python crypto_trading_system_ed_cdar.py HRST ETH 5,6,7,8h --replay 1440`. Production CSV/config seeded from live on 2026-05-03 19:45. **Validation pending**: full HRST run + comparison of Mode T REF to current production HRST (+86.19% from May 3 morning) — promote if ≥+5pp. |
+| `crypto_trading_system_ed_g_narrow_d_parallel.py` | **Research fork** (added 2026-05-22, TODO 2205) | Parallelization benchmark over `crypto_trading_system_ed_g_narrow_d.py`. Imports g_narrow_d, applies 3 identity-preserving monkey-patches on top of its K=5 wrap: (1) `_g_factories_seeded` reads `G_PARALLEL_LGBM_DEVICE` env var instead of hardcoding `device='gpu'` — fixes hybrid GPU+CPU contention bug; (2) `_g_deku_eval_median_k` replaced with thread-pool version that runs K=5 seeds concurrently via `ThreadPoolExecutor(5)` instead of sequential for-loop — same seeds, same median selection; (3) `_refine_top_configs_hybrid` replaced with 3-worker version (`max_workers=3`, `initial_devices=['gpu','cpu','cpu']`) — all 3 D-top configs refine in parallel instead of 2-then-dynamic-1. Workers spawned via `ProcessPoolExecutor` re-import the fork on Windows so patches propagate. Production CSVs/configs/engine source untouched. Target: refine 17.7h → ~4h on full HRST (3-5× speedup). Run identically to G_narrow_d: `python crypto_trading_system_ed_g_narrow_d_parallel.py V ETH 7h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D`. **Validation pending**: 3-stage benchmark (smoke / single-horizon / full HRST) — see TODO 2205. If conclusive, port the same 3 fixes into engine's H_STRICT_FAMILY K=5 block (lines 8831-8909) to speed up all post-H75 HRSTs by ~13h per run. |
 | `crypto_revolut_ed_v2.py` | **Live** | Ed V2 auto-trader — maker orders (0% fee) with market fallback. Penny-improvement pricing: buy/sell at `bid+0.01`. `post_only` ensures maker. Stale order cleanup, NTP clock sync, locked funds detection. Reads `regime_config_ed.json`. |
 | `crypto_live_trader_ed.py` | **Live** | Ed signal generation — regime-aware. `detect_regime()` + `generate_regime_signal()`. Reports current market price (not label-shifted). |
 | `crypto_trading_system_meta.py` | Research | Standalone meta-labeling research tool. Imported lazily by `crypto_trading_system_ed.py` when `--meta-filter P` flag is used. R3 RESOLVED: AB matrix variants D+E showed meta hurts on strong baselines (E vs A −2.12pp). Kept available for SOL/BTC/XRP retests. |
@@ -410,27 +415,19 @@ All Doohan, Deku, CASCA, V1.1-V1.7, and legacy backtests in `archive/`.
 
 ---
 
-## Current Regime Config (Ed V2 — 2026-04-26)
+## Current Regime Config — see TODO.md `📌 LIVE STATE` for current
 
-```json
-{
-  "ETH": {
-    "detector": "named:price>sma72",
-    "bull": "6h@80%/$12k, shield=ON, gate=rr20≥4.0% OR rr24≥4.5%, cd=12h",
-    "bear": "7h@85%/$12k, shield=ON, gate=rr30≥9.0% OR rr36≥9.0%, cd=48h",
-    "shared": "min_sell_pnl=0.5%, max_hold=10h",
-    "disaster_brake_pct": 0,   // currently OFF (key absent from JSON; brake_pct=0 disables). M-04+N-03 fixes are in place — user opted to keep disabled 2026-04-25.
-    "backtest_fee_per_leg": "0.0005 (5 bps, realistic maker blend)",
-    "enabled": true
-  },
-  "BTC":  { "enabled": false, "note": "HRST done 2026-04-19; shelved — opportunity cost vs ETH" },
-  "SOL":  { "enabled": false, "note": "HRST done 2026-04-19; shelved" },
-  "LINK": { "enabled": false, "note": "standby" },
-  "XRP":  { "enabled": false, "note": "standby; decorrelation candidate (~0.60 corr w/ ETH)" }
-}
-```
+Live H75 config (since 2026-05-18 22:02 CEST) lives in [TODO.md](TODO.md) `📌 LIVE STATE — H75` section. This block intentionally does NOT duplicate it because live config changes more often than this stable-reference file — keeping the source of truth in one place (TODO.md) prevents drift.
 
-**Promoted 2026-04-26 14:22 from AB matrix variant A** (`A_floorON_trimOFF`) — 60d sim Mode T REF +66.79% (beats live HRST by ~+10pp). Mode T converged iter 2. Backups: `regime_config_ed_pre_A_20260426.json` + `crypto_ed_production_pre_A_20260426.csv`.
+Quick summary of current live (2026-05-18 → present): detector `sma24>sma100`, bull=5h@75% XGB+LGBM w=100 γ=0.9993, bear=8h@65% RF+LGBM w=162 γ=0.9954, shields OFF, per-regime gates, min_sell_pnl=0%, max_hold=10h. Per-asset enabled state: ETH live, BTC/SOL/LINK/XRP all `enabled: false` (HRST done, results not promoted), BNB code-wired since 2026-05-02 (PySR/HRST not yet run).
+
+### Prior production states (historical audit trail)
+
+- **2026-05-18 → present**: H75 (current) — see [TODO.md](TODO.md) and [ARCHIVED_LOG.md "PROMOTED 2026-05-18 ~22:02 CEST"](ARCHIVED_LOG.md).
+- **2026-04-30 → 2026-05-18**: bull=6h@85% / bear=5h@65% on `named:price>sma72`.
+- **2026-04-26 → 2026-04-30**: AB matrix variant A (`A_floorON_trimOFF`) promoted from `regime_config_ed_pre_A_20260426.json` — bull=6h@80% / bear=7h@85% on `named:price>sma72`, shields ON, gates rr20≥4.0% OR rr24≥4.5% cd=12h (bull) / rr30≥9.0% OR rr36≥9.0% cd=48h (bear), min_sell_pnl=0.5%, max_hold=10h. 60d sim Mode T REF +66.79%.
+- **2026-04-18 → 2026-04-26**: HRSTG refresh; bull=tsmom_672h 95% / bear 80%.
+- **2026-04-07 → 2026-04-18**: `sma168>sma480` bull=7h@75% / bear=8h@85%. Mode S +60.72%.
 
 ### Training-time feature pipeline knobs (production state 2026-04-26)
 
@@ -495,23 +492,28 @@ Initial Ed regime-switching backtests from the system's first week. These number
     ```
     Do NOT emit the absolute venv path (`"C:/algo_trading/venv/Scripts/python.exe" ...`) by default — the venv is activated, so `python` resolves to the venv's interpreter. Quoted paths cause PowerShell parse errors (PowerShell needs the `&` call operator before a quoted path, which adds friction the user has explicitly rejected). Only emit a venv-explicit path if the user requests it or if the venv is provably not active. Internal `Bash` tool calls I make for myself can use any form they need; this rule is about what I tell the user to type. **User explicitly requested this default 2026-05-03 — do not revert.**
 
+19. **Verify trader is flat (`state=cash` in `position_ed_v2_<ASSET>.json`) before any config / production CSV swap.** Promoting new winners while the trader is mid-position can cause: (a) the trader's regime cache loads stale model parameters mid-trade; (b) the SELL hour's signal generation uses the new model but the BUY hour's `entry_price` was from the old model → bookkeeping inconsistency; (c) rollback requires re-flatting before reverting. **The user can override per-promotion** (e.g. if the new config is strictly more conservative and the trade is already losing). **Default rule**: verify flat first, ask user if not. This is enforced via the [[feedback-flat-before-promotion]] memory and was the operational rule used during the H75 promotion 2026-05-18 (waited for the 22:00 SELL to fire before the 22:02 config swap).
+
 ---
 
 ## Pending Work
 
-Active TODOs, current research priorities, the canonical ideas scoreboard (C01-C82), and the full historical audit trail of tested/shelved decisions live in [TODO.md](TODO.md). Split out of CLAUDE.md on 2026-05-18 to keep this file focused on stable reference material (engine card, machine setup, commands, architecture, critical rules).
+Active TODOs and in-flight runs live in [TODO.md](TODO.md). Historical audit trail (canonical ideas scoreboard C01-C82, MERGED TOPICS, closed/DEAD/SHELVED entries) lives in [ARCHIVED_LOG.md](ARCHIVED_LOG.md). Split out of CLAUDE.md on 2026-05-18 (CLAUDE.md/TODO.md) then 2026-05-19 (TODO.md/ARCHIVED_LOG.md) to keep this file focused on stable reference material (engine card, machine setup, commands, architecture, critical rules).
 
-**🔔 Whenever the user asks to "open CLAUDE.md" / "show CLAUDE.md" / "review my CLAUDE" or any equivalent phrasing, automatically read [TODO.md](TODO.md) as well and surface the ⚡ ACTIVE TODO block + any in-flight job status in the response. The user shouldn't have to ask for the TODO separately — opening CLAUDE.md is implicitly asking for the current state of work.** User explicitly requested this default 2026-05-18 — do not revert.
+**🔔 Whenever the user asks to "open CLAUDE.md" / "show CLAUDE.md" / "review my CLAUDE" or any equivalent phrasing, automatically read [TODO.md](TODO.md) as well and surface the ⚡ ACTIVE block + any in-flight job status in the response. The user shouldn't have to ask for the TODO separately — opening CLAUDE.md is implicitly asking for the current state of work.** User explicitly requested this default 2026-05-18 — do not revert.
 
 **Read TODO.md when:**
-- Starting any work session — the "⚡ ACTIVE TODO" block at the top is the freshest snapshot of in-flight runs and pending decisions.
-- Considering a feature/idea — check the canonical scoreboard (C01-C82) to avoid retesting something already DEAD or revisiting a SHELVED idea without its revival conditions.
-- Reviving a historical decision — the "📜 HISTORICAL TODO" section preserves why ideas were rejected (revisit conditions in SHELVED entries, root causes in DEAD entries).
-
-**Update TODO.md when:**
+- Starting any work session — the "⚡ ACTIVE" block at the top is the freshest snapshot of in-flight runs and pending decisions.
 - Launching a long-running job (HRST, Mode P, AB matrix) — add an entry under ACTIVE so future-you / next-session knows what's running.
-- Closing a research arc — move the entry from ACTIVE → Closed/DEAD/SHELVED with the verdict + numerical evidence inline.
-- Promoting a config to live — record the backup paths + rollback command so future-you can revert in one line.
+- Promoting a config to live — record backup paths + rollback command so future-you can revert in one line.
 
-This CLAUDE.md is now stable reference — don't write volatile state here; that's TODO.md's job.
+**Read ARCHIVED_LOG.md when:**
+- Considering a feature/idea — check the canonical scoreboard (C01-C82) to avoid retesting something already DEAD or revisiting a SHELVED idea without its revival conditions.
+- Reviving a historical decision — preserved verdicts include revival conditions in SHELVED entries and root causes in DEAD entries.
+- Auditing past decisions ("why did we reject X?", "what was the verdict on Y?").
 
+**Update rules:**
+- Active work changes (new HRST launched, config promoted, rollback executed) → TODO.md
+- Closing a research arc → move the entry from TODO.md → ARCHIVED_LOG.md with the verdict + numerical evidence inline
+
+This CLAUDE.md is now stable reference — don't write volatile state here; that's TODO.md's job. ARCHIVED_LOG.md is append-only — don't edit closed entries; add new entries that reference old ones rather than rewriting history.

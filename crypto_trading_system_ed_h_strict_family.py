@@ -285,8 +285,21 @@ def _kill_orphan_workers():
         pass  # non-critical — don't fail if cleanup fails
 
 
+# ── H_STRICT_FAMILY output isolation (added 2026-05-17) ─────────────────────
+# Default: production-shared 'models'/'config' dirs. Override via env vars to
+# isolate H_strict's writes from a concurrent G_narrow_d HRST writing to the
+# default paths (e.g., G on Laptop + H75 on Desktop, same Drive-synced dir).
+# Set both env vars to a sibling dir name to redirect ALL H_strict writes
+# (RESUME_DIR, PRODUCTION_CSV, REGIME_CONFIG_PATH, MODELS_DIR, CONFIG_DIR).
+H75_MODELS_DIR = os.environ.get('H_STRICT_MODELS_DIR', 'models')
+H75_CONFIG_DIR = os.environ.get('H_STRICT_CONFIG_DIR', 'config')
+if H75_MODELS_DIR != 'models' or H75_CONFIG_DIR != 'config':
+    print(f"[H_STRICT_FAMILY_ISO] output dirs redirected: "
+          f"models={H75_MODELS_DIR} config={H75_CONFIG_DIR}")
+
+
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
-RESUME_DIR = 'models/.resume_hourly'
+RESUME_DIR = f'{H75_MODELS_DIR}/.resume_hourly'
 
 def _resume_path(asset, horizon, step):
     return os.path.join(RESUME_DIR, f'{asset}_{horizon}_{step}.json')
@@ -500,8 +513,8 @@ META_FILTER_THRESHOLD = None
 MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
-PRODUCTION_CSV = 'models/crypto_ed_production.csv'
-REGIME_CONFIG_PATH = 'config/regime_config_ed.json'
+PRODUCTION_CSV = f'{H75_MODELS_DIR}/crypto_ed_production.csv'
+REGIME_CONFIG_PATH = f'{H75_CONFIG_DIR}/regime_config_ed.json'
 
 
 def _ensure_parent_dir(path):
@@ -1039,8 +1052,8 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, k
 # so that --data-dir override works. CHARTS/MODELS/CONFIG are never isolated
 # (matrix variants write to `_noprod_<label>.*` tagged names, not a separate dir).
 CHARTS_DIR = 'charts'
-MODELS_DIR = 'models'
-CONFIG_DIR = 'config'
+MODELS_DIR = H75_MODELS_DIR  # was 'models'; honors H_STRICT_MODELS_DIR env var
+CONFIG_DIR = H75_CONFIG_DIR  # was 'config'; honors H_STRICT_CONFIG_DIR env var
 # Test harnesses set this env var to redirect model output away from production CSV
 MODELS_CSV_OVERRIDE = os.environ.get('MODELS_CSV_OVERRIDE', '')
 

@@ -220,7 +220,8 @@ def _backtest_with_per_trade_capture(asset: str, horizon: int, combo: list,
     """
     import numpy as np
     import crypto_trading_system_ed as eng
-    from crypto_trading_system_ed import (load_data, _build_features,
+    from crypto_trading_system_ed import (load_data, build_all_features,
+                                          _compute_pysr_features,
                                           _test_lgbm_importance,
                                           get_decay_weights, DIAG_STEP,
                                           BACKTEST_FEE_PER_LEG, TRADING_FEE,
@@ -247,9 +248,16 @@ def _backtest_with_per_trade_capture(asset: str, horizon: int, combo: list,
     df_raw = load_data(asset)
     if df_raw is None:
         return None
-    df_features, feature_cols = _build_features(df_raw, asset,
-                                                feature_override=None,
-                                                horizon=horizon)
+    # M-32 fix (2026-05-09): use build_all_features + _compute_pysr_features
+    # directly instead of _build_features. The latter calls _get_active_features()
+    # under the hood which returns FEATURE_SET_A (18 hardcoded features, no
+    # pysr) when feature_override=None — meaning pysr_1..5 (top-2 importance
+    # in production) were INVISIBLE to the LGBM ranking + top-N selection.
+    # Direct build → pysr in_place add → all_cols (~189 features) → ranking
+    # sees pysr → top-N selection includes pysr. Matches production Mode D.
+    df_features, feature_cols = build_all_features(df_raw, asset_name=asset,
+                                                   horizon=horizon, verbose=False)
+    _compute_pysr_features(df_features, feature_cols, asset, horizon, verbose=False)
     df_clean = df_features.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
     importance_df = _test_lgbm_importance(df_clean, feature_cols, gamma=1.0)
     ranked = importance_df['feature'].tolist()

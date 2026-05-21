@@ -39,14 +39,18 @@ def _prepare_data_cached(asset, horizon):
     if key in _CACHED_FEATURES:
         return _CACHED_FEATURES[key]
 
-    from crypto_trading_system_ed import (load_data, _build_features,
+    from crypto_trading_system_ed import (load_data, build_all_features,
+                                          _compute_pysr_features,
                                           _test_lgbm_importance)
 
     df_raw = load_data(asset)
     if df_raw is None:
         raise RuntimeError(f"load_data({asset}) returned None")
-    df_features, feature_cols = _build_features(df_raw, asset, feature_override=None,
-                                                horizon=horizon)
+    # M-32 fix (2026-05-09): _build_features returns FEATURE_SET_A (no pysr).
+    # Direct build matches production Mode D and includes pysr_1..5.
+    df_features, feature_cols = build_all_features(df_raw, asset_name=asset,
+                                                   horizon=horizon, verbose=False)
+    _compute_pysr_features(df_features, feature_cols, asset, horizon, verbose=False)
     df_clean = df_features.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
     if len(df_clean) < 500:
         raise RuntimeError(f"only {len(df_clean)} clean rows")

@@ -65,7 +65,7 @@ import pandas as pd
 
 # Engine imports — guard import-time so the script gives a clear message if engine moved
 from crypto_trading_system_ed import (
-    load_data, _build_features, _test_lgbm_importance, ALL_MODELS,
+    load_data, build_all_features, _compute_pysr_features, _test_lgbm_importance, ALL_MODELS,
     get_decay_weights, BACKTEST_FEE_PER_LEG, _feature_floor_indices,
     _build_regime_indicators_and_detectors,
 )
@@ -142,9 +142,12 @@ def generate_hourly_signals(asset: str, horizon: int, model_spec: dict,
     if df_raw is None:
         raise RuntimeError(f'load_data({asset}) returned None')
 
-    df_features, feature_cols = _build_features(df_raw, asset,
-                                                feature_override=None,
-                                                horizon=horizon)
+    # M-32 fix (2026-05-09): _build_features returns FEATURE_SET_A (no pysr).
+    # Direct build_all_features + _compute_pysr_features matches production
+    # Mode D and includes pysr_1..5 in the candidate pool.
+    df_features, feature_cols = build_all_features(df_raw, asset_name=asset,
+                                                   horizon=horizon, verbose=False)
+    _compute_pysr_features(df_features, feature_cols, asset, horizon, verbose=False)
     df_clean = df_features.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
     importance_df = _test_lgbm_importance(df_clean, feature_cols, gamma=1.0)
     ranked = importance_df['feature'].tolist()

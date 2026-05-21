@@ -174,7 +174,8 @@ def refit_and_compute_dd(asset: str, horizon: int, combo: list, window: int,
     """Refit the model with given config, walk-forward simulate, return
     (return_pct, max_dd_pct, cdar_5pct, n_trades)."""
     import numpy as np
-    from crypto_trading_system_ed import (load_data, _build_features,
+    from crypto_trading_system_ed import (load_data, build_all_features,
+                                          _compute_pysr_features,
                                           _test_lgbm_importance, ALL_MODELS,
                                           get_decay_weights, DIAG_STEP,
                                           BACKTEST_FEE_PER_LEG, TRADING_FEE,
@@ -184,8 +185,11 @@ def refit_and_compute_dd(asset: str, horizon: int, combo: list, window: int,
     if df_raw is None:
         return None
 
-    df_features, feature_cols = _build_features(df_raw, asset, feature_override=None,
-                                                horizon=horizon)
+    # M-32 fix (2026-05-09): _build_features returns FEATURE_SET_A (no pysr).
+    # Direct build matches production Mode D and includes pysr_1..5.
+    df_features, feature_cols = build_all_features(df_raw, asset_name=asset,
+                                                   horizon=horizon, verbose=False)
+    _compute_pysr_features(df_features, feature_cols, asset, horizon, verbose=False)
     # Get LGBM importance ranking
     df_clean = df_features.dropna(subset=feature_cols + ['label']).reset_index(drop=True)
     importance_df = _test_lgbm_importance(df_clean, feature_cols, gamma=1.0)
