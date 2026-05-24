@@ -8,7 +8,8 @@
 |---|---|---|---|
 | 📌 | **H75-fresh LIVE** — `sma24>sma100` / 6h@65% bull / 6h@65% bear (symmetric) | active since 2026-05-20 09:04 | running |
 | 🔥 P1 | **H75-fresh LIVE OOS monitoring** — first 10 trades audit | window ~2026-06-03 (14 days) | 0/10 trades closed; flat |
-| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on **LAPTOP** overnight 2026-05-22 (isolated from Desktop) | 🟢 Stage 1 PASSED; Stage 2 = HRST 9,10,11,12h on parallel fork |
+| 🔥 P1 | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop overnight 2026-05-24 | 📅 PLANNED — parallel-fork grid bug fixed today, A/B vs tainted Stage 2 |
+| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on **LAPTOP** overnight 2026-05-22 (isolated from Desktop) | ⚠️ Stage 2 verdict INVALID — fork had grid bug (fixed 2026-05-24, see TODO 0524) |
 | ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
 | 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Fri 2026-05-22 (today) | 📅 PLANNED — procedure ready |
 | 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
@@ -196,6 +197,121 @@ The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
 | Crashes with diagnosable log | Implement specific fix; relaunch as TODO 0520 |
 
 **Rerun verdict (2026-05-20 11:05 → 2026-05-21 10:28, wall ~23h 22m, log `logs/ed_v1_20260520_110556.log`):** completed full 4-horizon HRST + R + S + T. Mode T converged at iteration 2 unchanged, baseline H1=+25.30% / H2=+51.02% / **REF=+89.14%** vs B's +89.41% — within ±0.3pp of B baseline, so G ≈ B per the success table. **G_narrow_d shelved** — no promotion regret signal. The bigger win from this run came from the per-phase timing data: **refine is 76% of HRST wall (17.7h of 23.4h)**, K=5 multi-seed runs the 5 seeds sequentially per trial, and `_g_factories_seeded` hardcodes `device='gpu'` which breaks the hybrid GPU+CPU dispatcher. → spawned TODO 2205 (below).
+
+---
+
+## 🔥 TODO 0524 — Top-horizons clean rerun on fixed parallel fork (Desktop)
+
+**Search anchor**: `TODO 0524`
+
+**Status**: 📅 PLANNED for Desktop overnight. Replaces the 2205 Stage 2 9-12h run whose verdict is invalidated by the parallel-fork grid bug fixed 2026-05-24.
+
+**Why these 5 horizons**: The 5/6/7/8h May 20-21 G_narrow_d run + the (tainted) 9/10/11/12h May 22 parallel run together expose a "top 5" — drop the bottom 3 (7h weakest clean, 9h weakest tainted, 10h middling) and rerun the survivors on the now-fixed fork. Apples-to-apples on the SAME May 22 snapshot the Stage 2 9-12h run used → direct A/B test of the bug-fix isolation.
+
+| Horizon | Source of inclusion | Current data point |
+|---|---|---|
+| 5h | live bull, +72% / 84% WR (clean) | RF+LGBM w=281 γ=0.998 f=12 conf=70% |
+| 6h | clean +47% / 79% WR | RF+LGBM w=137 γ=0.997 f=18 |
+| 8h | live bear, +46% / 90% WR (clean) | RF+LGBM w=293 γ=0.999 f=16 |
+| 11h | tainted +47% / 81% WR — best long, NEEDS clean rerun | XGB+LGBM w=157 γ=0.997 f=18 conf=80% (suspect) |
+| 12h | tainted +30-58% / 75% WR — high variance, NEEDS clean rerun | RF+LGBM w=142 γ=0.998 f=8 conf=85% (suspect) |
+
+Skipped: 7h (weakest clean, +29%/72% WR), 9h (weakest tainted, +18%/67% WR), 10h (middling, +34%/82% WR).
+
+### Parallel-fork bug fix (2026-05-24, applied to [crypto_trading_system_ed_g_narrow_d_parallel.py:73-101](crypto_trading_system_ed_g_narrow_d_parallel.py#L73-L101))
+
+Pre-fix the fork imported G_narrow_d for K=5 patches but called `ENGINE.main()`, which read GRID/N_FEATURES/output-dir constants from ENGINE's namespace — not G's. Three categories patched in:
+
+- **GRID propagation**: `ENGINE.GRID_COMBOS/WINDOWS/FEATURES/GAMMAS ← G.*` — fork now searches `RF+LGBM, XGB+LGBM × [72,100,150] × [10,15,20] × [0.999,0.996]` as intended (was `3 combos × [10,13,17,25] × [0.999,0.997,0.995]`).
+- **N_FEATURES_RANGE**: `(4,40)/(4,80) → (4,100)` per G's "drop hard cap" design.
+- **Output routing**: `MODELS_DIR/CONFIG_DIR/PRODUCTION_CSV/REGIME_CONFIG_PATH/RESUME_DIR ← G.*` — `G_NARROW_MODELS_DIR` / `G_NARROW_CONFIG_DIR` env vars now actually route writes (were silently ignored).
+
+Banner prints all 5 resolved values + dirs on launch — verify in first 30 sec.
+
+### One-shot launch query (copy-paste on Desktop, with `(venv)` activated)
+
+```powershell
+# ============================================================================
+# TODO 0524 — Top-5 HRST on FIXED parallel fork (Desktop overnight)
+# Reuses May 22 Laptop snapshot for direct A/B against tainted Stage 2 result.
+# Production CSVs / configs / engine untouched (--no-persist).
+# ============================================================================
+
+cd G:\engine
+git pull
+
+# UTF-8 console — without this the engine's em-dashes / box-drawing chars
+# render as cp1252 mojibake (— → ÔÇö, ─ → ÔöÇ) in console AND in the Tee log.
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
+# Keep Desktop awake for the full ~10-12h run
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+
+# Use the SAME snapshot Stage 2 ran on, so 11h/12h tainted vs clean is a
+# pure bug-fix delta (no data-state confound).
+$snap = "data\_reliability_hrst_snapshot_laptop_20260522_0139"
+if (-not (Test-Path $snap)) { Write-Host "SNAPSHOT MISSING — abort" -ForegroundColor Red; exit 1 }
+
+$env:V2_DATA_SNAPSHOT = $snap
+$env:RELIABILITY_K = "5"
+$env:G_NARROW_MODELS_DIR = "models_g_desktop_0524"   # isolated, doesn't touch live or G_desktop
+$env:G_NARROW_CONFIG_DIR = "config_g_desktop_0524"
+
+$ts = Get-Date -Format "yyyyMMdd_HHmm"
+$logfile = "logs\parallel_hrst_0524_desktop_$ts.log"
+
+python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 5h,6h,8h,11h,12h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_0524 *>&1 | Tee-Object -FilePath $logfile
+```
+
+### Startup banners to verify (first 30 sec — abort if any missing)
+
+1. `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> _reliability_hrst_snapshot_laptop_20260522_0139/<file>`
+2. `[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G`
+3. `  combos=['RF+LGBM', 'XGB+LGBM']`
+4. `  features=[10, 15, 20]`
+5. `  gammas=[0.999, 0.996]`
+6. `  n_features_range={...: (4, 100), ...: (4, 100)}`
+7. `  models_dir=models_g_desktop_0524`
+8. `  config_dir=config_g_desktop_0524`
+9. `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
+10. `[G_NARROW_D_PARALLEL] patches applied (machine=DESKTOP, N_JOBS_PARALLEL=26):` + 3 numbered patch lines
+11. `Refine: 3-worker outer × 5-thread K=5 inner`
+12. `--no-persist ACTIVE`
+13. `[refine-3worker] dispatching 3 configs across 3 workers (devices=['cpu', 'cpu', 'cpu'], K_parallel=5)`
+
+### ETA (HRST 5,6,8,11,12h on parallel fork, Desktop)
+
+| Phase | Time |
+|---|---|
+| Mode D × 5 horizons (no `--skip`, fresh grids) | ~55-60 min (5 × ~11 min) |
+| Mode V × 5 horizons (parallel-fork refine) | ~8h (5 × ~95 min) |
+| Mode R (regime backtest, C(5,2)=10 horizon pairs) | ~40 min |
+| Mode S (joint sweep) | ~25 min |
+| Mode T + G (rally-cooldown convergence, ~2 iters) | ~30-60 min |
+| **Total** | **~10-12h** |
+
+### Pass criteria
+
+**(A) Bug-fix validation** (5h is the diagnostic):
+| 5h refined winner matches May 20-21 baseline (RF+LGBM w≈281 γ≈0.998 f≈12) within ±10pp Mode V return | ✅ → fix confirmed |
+| 5h diverges by >10pp | ❌ → patches missed something; abort downstream interpretation |
+
+**(B) Long-horizon clean verdict** (11h/12h vs tainted Stage 2):
+| 11h clean Mode V return ≥ 40% / WR ≥ 75% | promising — explore mixed regime (bull 5h, bear 11h) in Mode S |
+| 11h clean Mode V return drops below 30% | tainted result was wider-grid inflation; close long-horizon arc |
+| 12h clean Mode V return ≥ 40% | viable bear alternative; consider Mode S sweep including 12h |
+
+**(C) Promotion gate** (joint Mode T REF):
+| Mode T REF ≥ +95% on the new 5-horizon basket | better than live; discuss promotion (trader-flat-first per [[feedback-flat-before-promotion]]) |
+| +80% to +95% | comparable to current G_narrow live (+89.14% on 4-horizon); document but don't auto-promote |
+| < +80% | the 5-horizon basket loses to current 4-horizon live; close arc |
+
+### Rollback / abort
+
+`--no-persist` means live config is bulletproof — even if the run crashes or produces garbage, only `models_g_desktop_0524/` and `config_g_desktop_0524/` files are written. Live trader continues on current G_narrow models. To kill the run: `Ctrl+C` in the Desktop terminal.
 
 ---
 
