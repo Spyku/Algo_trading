@@ -120,6 +120,12 @@ ENGINE.PRODUCTION_CSV = G.PRODUCTION_CSV
 ENGINE.REGIME_CONFIG_PATH = G.REGIME_CONFIG_PATH
 ENGINE.RESUME_DIR = G.RESUME_DIR
 
+# Ensure redirected output dirs exist before any to_csv / json.dump fires.
+# Without this, the first write into a fresh G_NARROW_MODELS_DIR / _CONFIG_DIR
+# crashes with "Cannot save file into a non-existent directory" (engine line 4736).
+for _d in (G.MODELS_DIR, G.CONFIG_DIR, G.RESUME_DIR):
+    os.makedirs(_d, exist_ok=True)
+
 print(f'[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G', flush=True)
 print(f'  combos={ENGINE.GRID_COMBOS}', flush=True)
 print(f'  windows={ENGINE.GRID_WINDOWS}', flush=True)
