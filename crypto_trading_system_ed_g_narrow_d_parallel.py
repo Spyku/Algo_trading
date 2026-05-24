@@ -71,6 +71,53 @@ import crypto_trading_system_ed as ENGINE
 
 
 # ════════════════════════════════════════════════════════════════════════
+# FIX #0: grid-constant propagation (pre-existing bug, identified 2026-05-24)
+# ════════════════════════════════════════════════════════════════════════
+# This fork calls ENGINE.main() at the bottom, which reads GRID_* from the
+# ENGINE module namespace — not from G. G_narrow_d defines narrower grids
+# (RF+LGBM/XGB+LGBM × [10,15,20] × [0.999,0.996]) but those never reach
+# ENGINE.main(). Without this patch the parallel fork runs the engine's
+# WIDER grid (3 combos × [10,13,17,25] × [0.999,0.997,0.995]), producing
+# different Mode D top-6 candidates, different refine starting points,
+# and ultimately different winners than a plain g_narrow_d.py run.
+#
+# Propagate G's narrow grid into ENGINE so ENGINE.main() searches the
+# same hyperparameter space g_narrow_d would have searched.
+# ════════════════════════════════════════════════════════════════════════
+ENGINE.GRID_COMBOS = G.GRID_COMBOS
+ENGINE.GRID_WINDOWS = G.GRID_WINDOWS
+ENGINE.GRID_FEATURES = G.GRID_FEATURES
+ENGINE.GRID_GAMMAS = G.GRID_GAMMAS
+
+# Mode V refine n_features search bounds (Optuna upper cap).
+# Engine caps short-horizon at 40 and long at 80; G drops the cap to 100
+# per g_narrow_d's explicit "drop hard cap" design (LGBM's internal reg
+# prunes — the cap was creating the B-7h tied-APF trap).
+ENGINE.N_FEATURES_RANGE = G.N_FEATURES_RANGE
+ENGINE.N_FEATURES_RANGE_DEFAULT = G.N_FEATURES_RANGE_DEFAULT
+
+# Output routing — propagate G's MODELS_DIR / CONFIG_DIR / derived paths so
+# the G_NARROW_MODELS_DIR / G_NARROW_CONFIG_DIR env vars set by the user
+# (e.g. for Laptop isolation per TODO 2205) actually take effect when
+# ENGINE.main() writes results. Without this, ENGINE reads H_STRICT_*
+# instead and the G_NARROW_* env vars are silently ignored.
+ENGINE.MODELS_DIR = G.MODELS_DIR
+ENGINE.CONFIG_DIR = G.CONFIG_DIR
+ENGINE.PRODUCTION_CSV = G.PRODUCTION_CSV
+ENGINE.REGIME_CONFIG_PATH = G.REGIME_CONFIG_PATH
+ENGINE.RESUME_DIR = G.RESUME_DIR
+
+print(f'[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G', flush=True)
+print(f'  combos={ENGINE.GRID_COMBOS}', flush=True)
+print(f'  windows={ENGINE.GRID_WINDOWS}', flush=True)
+print(f'  features={ENGINE.GRID_FEATURES}', flush=True)
+print(f'  gammas={ENGINE.GRID_GAMMAS}', flush=True)
+print(f'  n_features_range={ENGINE.N_FEATURES_RANGE}', flush=True)
+print(f'  models_dir={ENGINE.MODELS_DIR}', flush=True)
+print(f'  config_dir={ENGINE.CONFIG_DIR}', flush=True)
+
+
+# ════════════════════════════════════════════════════════════════════════
 # Machine-aware auto-tuning (Desktop / Laptop / Yoga)
 # ════════════════════════════════════════════════════════════════════════
 # Single file, one set of patches, but knobs auto-scale per machine via
