@@ -21,7 +21,7 @@ applies pd.read_csv redirect at import time (same mechanism as
 _idea_patchers/v2_data_snapshot.py).
 
 Launch (7h-only diagnostic, on B's snapshot):
-  $env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+  $env:V2_DATA_SNAPSHOT = "data\\_reliability_hrst_snapshot_desktop_20260515_154801"
   $env:RELIABILITY_K = "5"
   python crypto_trading_system_ed_g_narrow_d.py D V ETH 7h --replay 1440 --no-persist --grid-tag G_NARROW_D
 
