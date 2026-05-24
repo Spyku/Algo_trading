@@ -57,6 +57,19 @@ Benchmark recipe:
 import os
 import sys
 import time
+import warnings
+
+# Silence sklearn's LGBMClassifier feature-names warning. The model is trained
+# from a DataFrame and called with a numpy array in some paths; predictions are
+# identical either way, but the warning floods the log (one per predict call)
+# and gets wrapped as NativeCommandError by PowerShell 5.1's *>&1 redirect.
+# Applied at module-import time so every ProcessPool worker (Windows spawn
+# reimports this file) inherits the filter before any sklearn predict runs.
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+)
+
 from concurrent.futures import ThreadPoolExecutor, as_completed as _thread_as_completed
 from concurrent.futures import ProcessPoolExecutor as _PoolExec
 from concurrent.futures import as_completed as _proc_as_completed
