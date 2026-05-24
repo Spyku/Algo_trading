@@ -2,14 +2,14 @@
 
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
-## 📊 At-a-glance — active TODO dashboard (2026-05-22)
+## 📊 At-a-glance — active TODO dashboard (2026-05-24)
 
 | Pri | Item | When | Status |
 |---|---|---|---|
-| 📌 | **H75-fresh LIVE** — `sma24>sma100` / 6h@65% bull / 6h@65% bear (symmetric) | active since 2026-05-20 09:04 | running |
-| 🔥 P1 | **H75-fresh LIVE OOS monitoring** — first 10 trades audit | window ~2026-06-03 (14 days) | 0/10 trades closed; flat |
-| 🔥 P1 | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop overnight 2026-05-24 | 📅 PLANNED — parallel-fork grid bug fixed today, A/B vs tainted Stage 2 |
-| 🔥 P1 | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Combined Stage 2 on **LAPTOP** overnight 2026-05-22 (isolated from Desktop) | ⚠️ Stage 2 verdict INVALID — fork had grid bug (fixed 2026-05-24, see TODO 0524) |
+| 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) running on **H75 engine** (K=5 + 75 trial refine) — `sma24>sma100` / bull 5h@65% / bear 8h@65% | active since 2026-05-21 21:56 (G_narrow promote); engine unchanged from 2026-05-18 H75 | running |
+| 🔥 P1 | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop launched 2026-05-24 20:27 (log `logs/parallel_hrst_0524_desktop_20260524_2027.log`) | 🟢 RUNNING — fork patched (FIX #0 grid + mkdir + warnings-filter), 3 failed pre-fix launches before success |
+| ✅ | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Stage 1 Laptop 2026-05-22 00:26; Stage 2 Laptop 2026-05-22 01:39 → 18:09 | ⚠️ Stage 2 verdict INVALID (grid bug). Stage 1 PASSED. Parallel fork retained + bug-fixed; superseded by TODO 0524 |
+| 🔥 P1 | **OOS monitoring** — first 10 trades audit on live G_narrow config | window ~2026-06-04 (14 days from 2026-05-21 promote) | 0/10 closed; trader running |
 | ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
 | 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Fri 2026-05-22 (today) | 📅 PLANNED — procedure ready |
 | 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
@@ -21,7 +21,7 @@
 | ⚪ P4 | **TODO 0519C** — CPCV HRST diagnostic | trigger-based re-run | available, no plan |
 | ⚪ P4 | **Kalshi** — prediction-market data integration | needs API key + impl | backlog |
 
-**Honest top-of-mind**: H75 is live, monitoring is passive. The two scheduled compute jobs (0519 tonight + 0519B-G1 Friday) are the only "act this week" items. Everything below P2 is wait-or-research.
+**Honest top-of-mind**: G_narrow models live since 2026-05-21 21:56 (CSV + regime config), running on the H75 engine (K=5 + 75-trial refine, unchanged from 2026-05-18). TODO 0524 is the active compute job — top-5 HRST running on Desktop since 20:27 (~10-12h wall). After it lands tomorrow, decide whether the clean 11h/12h numbers justify a mixed-regime test (bull 5h / bear 11h or 12h). Everything else is wait-or-research.
 
 ---
 
@@ -204,7 +204,16 @@ The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
 
 **Search anchor**: `TODO 0524`
 
-**Status**: 📅 PLANNED for Desktop overnight. Replaces the 2205 Stage 2 9-12h run whose verdict is invalidated by the parallel-fork grid bug fixed 2026-05-24.
+**Status**: 🟢 **RUNNING on Desktop** — launched 2026-05-24 20:27 CEST after 3 failed pre-fix attempts. Log: `logs/parallel_hrst_0524_desktop_20260524_2027.log`. ETA: ~10-12h → finish ~06:30-08:30 CEST 2026-05-25. Replaces the 2205 Stage 2 9-12h run whose verdict is invalidated by the parallel-fork grid bug fixed 2026-05-24.
+
+### Bug correction history (all landed before successful 20:27 launch)
+
+The fork needed three rounds of fixes between 19:06 (first patch) and 20:27 (successful launch):
+
+1. **19:06 — FIX #0 (grid + N_FEATURES_RANGE + output dirs)** — original bug found in user conversation. Engine grid `[10,13,17,25]`/`[0.999,0.997,0.995]` replaced by G's narrow `[10,15,20]`/`[0.999,0.996]`. `N_FEATURES_RANGE` 40/80 cap → 100. `G_NARROW_MODELS_DIR`/`G_NARROW_CONFIG_DIR` env vars actually wired.
+2. **19:44 launch FAILED — `Cannot save file into a non-existent directory` at engine line 4736** — engine's `to_csv` calls assume `MODELS_DIR` exists. Fix landed: `os.makedirs(_d, exist_ok=True)` loop after the path redirect ([crypto_trading_system_ed_g_narrow_d_parallel.py:126-127](crypto_trading_system_ed_g_narrow_d_parallel.py#L126-L127)).
+3. **20:14 launch FAILED — PowerShell `*>&1` wrapped LGBM feature-names warnings as `NativeCommandError`, breaking the redirect tee** — added module-level `warnings.filterwarnings("ignore", message="X does not have valid feature names...")` so every spawned worker inherits the filter on Windows re-import ([crypto_trading_system_ed_g_narrow_d_parallel.py:60-71](crypto_trading_system_ed_g_narrow_d_parallel.py#L60-L71)).
+4. **20:27 launch SUCCEEDED** — all banners visible, Mode D progressing across 5 horizons in parallel.
 
 **Why these 5 horizons**: The 5/6/7/8h May 20-21 G_narrow_d run + the (tainted) 9/10/11/12h May 22 parallel run together expose a "top 5" — drop the bottom 3 (7h weakest clean, 9h weakest tainted, 10h middling) and rerun the survivors on the now-fixed fork. Apples-to-apples on the SAME May 22 snapshot the Stage 2 9-12h run used → direct A/B test of the bug-fix isolation.
 
@@ -245,6 +254,14 @@ git pull
 $env:PYTHONIOENCODING = "utf-8"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 chcp 65001 | Out-Null
+
+# Suppress sklearn LGBM "X does not have valid feature names" warning across
+# ALL python processes including ProcessPool refine workers. The Python-level
+# warnings.filterwarnings() in the fork only covers the main process; Mode V
+# refine spawns workers that re-import sklearn fresh, so the filter has to
+# live in an env var to propagate. Predictions are byte-identical with or
+# without column names — sklearn is just complaining.
+$env:PYTHONWARNINGS = "ignore:X does not have valid feature names:UserWarning"
 
 # Keep Desktop awake for the full ~10-12h run
 powercfg /change standby-timeout-ac 0
