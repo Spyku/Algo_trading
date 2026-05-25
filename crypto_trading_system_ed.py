@@ -7425,7 +7425,11 @@ Examples:
 
         trials_str = f" | {n_trials} trials" if mode in ('D', 'DS', 'DV', 'DVS', 'DVRS', 'H', 'HRS') else ""
         skip_str = " | --skip" if flag_skip and mode in ('H', 'HRS', 'DVRS') else ""
-        h_str = '' if mode == 'G' else ' | ' + ','.join(str(h)+'h' for h in horizons)
+        # Modes that ignore CLI horizons and read bull/bear from regime config instead.
+        # Listing them in the banner is misleading — the default fallback ([HORIZON_SHORT]=4h)
+        # has nothing to do with what the mode actually computes.
+        _horizon_agnostic = {'T', 'G', 'F'}
+        h_str = '' if mode in _horizon_agnostic else ' | ' + ','.join(str(h)+'h' for h in horizons)
         print("=" * 60)
         print(f"  ED: Mode {mode} | {','.join(assets_list)}{h_str}{trials_str}{skip_str}")
         print("=" * 60)
