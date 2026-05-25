@@ -7007,7 +7007,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'T', 'G', 'F'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'RST', 'T', 'G', 'F'}
 
     # ── CLI shortcuts (added 2026-05-02) ─────────────────────────────
     # `--<integer>` → `--replay <integer>` (e.g. --1440 ≡ --replay 1440)
@@ -7599,15 +7599,18 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.top = flag_top
         run_mode_s(assets_list, horizons, _r_args)
-    elif mode == 'RS':
+    elif mode in ('RS', 'RST'):
         class _Args: pass
         _r_args = _Args()
         _r_args.replay = flag_replay
         _r_args.conf = flag_conf
         _r_args.top = flag_top
+        _r_args.max_iter = flag_max_iter
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
+        if mode == 'RST':
+            run_mode_t(assets_list, _r_args)
     elif mode in ('HRS', 'DVRS', 'HRST'):
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip,
                    replay_hours=flag_replay or None,
