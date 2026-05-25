@@ -2,16 +2,17 @@
 
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
-## 📊 At-a-glance — active TODO dashboard (2026-05-24)
+## 📊 At-a-glance — active TODO dashboard (2026-05-25)
 
 | Pri | Item | When | Status |
 |---|---|---|---|
 | 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) running on **H75 engine** (K=5 + 75 trial refine) — `sma24>sma100` / bull 5h@65% / bear 8h@65% | active since 2026-05-21 21:56 (G_narrow promote); engine unchanged from 2026-05-18 H75 | running |
-| 🔥 P1 | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop launched 2026-05-24 20:27 (log `logs/parallel_hrst_0524_desktop_20260524_2027.log`) | 🟢 RUNNING — fork patched (FIX #0 grid + mkdir + warnings-filter), 3 failed pre-fix launches before success |
-| ✅ | **TODO 2205** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Stage 1 Laptop 2026-05-22 00:26; Stage 2 Laptop 2026-05-22 01:39 → 18:09 | ⚠️ Stage 2 verdict INVALID (grid bug). Stage 1 PASSED. Parallel fork retained + bug-fixed; superseded by TODO 0524 |
+| 🔥 P1 | **TODO 0525** — G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350 | Desktop launched 2026-05-25 [time] — output dir `models_g_desktop_0525/` | 🟢 RUNNING — testing whether the seed-lottery fix lets refine reach LIVE-grade w=281/293 basins |
+| ✅ | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop 2026-05-24 22:53 → 2026-05-25 06:39 (Mode H+R+S); Mode T reruns 2026-05-25 12:35 + 13:17 | DONE — Mode T REF +80.56% vs LIVE's +91.01% on same May 22 data. No promotion. Parallel fork validated (~8× refine speedup = real shipped win). Root cause of weaker REF: narrow grid [72,100,150] couldn't seed Optuna refine to reach LIVE's w=281/293 basin. → spawned TODO 0525 |
+| ✅ | **TODO 0522** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Stage 1 Laptop 2026-05-22 00:26; Stage 2 Laptop 2026-05-22 01:39 → 18:09 | ⚠️ Stage 2 verdict INVALID (grid bug). Stage 1 PASSED. Parallel fork retained + bug-fixed; superseded by TODO 0524 |
 | 🔥 P1 | **OOS monitoring** — first 10 trades audit on live G_narrow config | window ~2026-06-04 (14 days from 2026-05-21 promote) | 0/10 closed; trader running |
 | ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
-| 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Fri 2026-05-22 (today) | 📅 PLANNED — procedure ready |
+| 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Originally scheduled 2026-05-22; slipped — Desktop booked by TODO 0524 until ~2026-05-25 morning | 📅 PENDING — procedure ready, awaiting Desktop free |
 | 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
 | 🚀 P3 | **P4** — C14 vol-conditional triple-barrier retest | when capacity (~2.5h) | open |
 | 🚀 P3 | **P5** — C11 VPIN at 5-min cadence | when capacity (~1 day eng) | open |
@@ -21,7 +22,7 @@
 | ⚪ P4 | **TODO 0519C** — CPCV HRST diagnostic | trigger-based re-run | available, no plan |
 | ⚪ P4 | **Kalshi** — prediction-market data integration | needs API key + impl | backlog |
 
-**Honest top-of-mind**: G_narrow models live since 2026-05-21 21:56 (CSV + regime config), running on the H75 engine (K=5 + 75-trial refine, unchanged from 2026-05-18). TODO 0524 is the active compute job — top-5 HRST running on Desktop since 20:27 (~10-12h wall). After it lands tomorrow, decide whether the clean 11h/12h numbers justify a mixed-regime test (bull 5h / bear 11h or 12h). Everything else is wait-or-research.
+**Honest top-of-mind**: G_narrow live since 2026-05-21 21:56 (CSV + regime config), H75 engine unchanged. TODO 0524 closed — Mode T head-to-head on May 22 data showed LIVE +91.01% beats new +80.56% (gap from narrow grid missing LIVE's w=281/293 basin). TODO 0525 (in flight on Desktop, ~9-9.5h) tests whether grid [72,100,150,200,250,300,350] + V2 top-10 + Optuna win_hi=350 fixes that. Validation gate: does ETH 5h refine reach w≈281 and 8h reach w≈293. If yes, REF should land near LIVE's +91% on May 22 data. Everything else is wait-or-research.
 
 ---
 
@@ -34,177 +35,159 @@
 
 ---
 
-## 📌 LIVE STATE — H75-fresh (promoted 2026-05-20 09:04 CEST)
+## 📌 LIVE STATE — G_narrow models on H75 engine (promoted 2026-05-21 21:56 CEST)
 
-Engine: `crypto_trading_system_ed.py` is the H_STRICT_FAMILY merge (K=5 multi-seed + REFINE_TRIALS=75 + strict `(combo, w)` dedup) — **unchanged from 2026-05-18 H75 promotion**, only config + production CSV swapped.
+**Engine** (unchanged since 2026-05-18 H75 promotion): `crypto_trading_system_ed.py` — H_STRICT_FAMILY merge (K=5 multi-seed + REFINE_TRIALS=75 + strict `(combo, w)` dedup).
 
-Detector: `sma24>sma100` ✅ (unchanged from prior H75). Bull = **6h@65%** RF+LGBM w=150 γ=0.999 10f. Bear = **6h@65%** (same model). **Symmetric regime** — both sides use the 6h winner. Shields OFF. Gates: rr8h≥2.0% OR rr12h≥2.0% cd=8h (bull); rr12h≥2.0% OR rr36h≥6.5% cd=6h (bear). min_sell_pnl=0%. max_hold=10h.
+**Models + regime config** (swapped 2026-05-21 21:56 from H75-fresh to G_narrow_d's HRST output; G_fresh "promote" on 2026-05-22 19:51 was content-identical and effectively no-op for ETH 5h/8h):
+- Detector: `sma24>sma100` (unchanged across all 3 promotions)
+- Bull = **5h@65%** RF+LGBM w=281 γ=0.9981 12f (G_narrow_d May 20-21 Desktop refine winner)
+- Bear = **8h@65%** RF+LGBM w=293 γ=0.9990 16f (G_narrow_d May 20-21 Desktop refine winner)
+- Shields OFF (both regimes)
+- **Rally cooldown OFF** (both regimes — manually toggled 2026-05-23 22:21 from `enabled: true`)
+- min_sell_pnl=0%, max_hold=10h, max_position_usd=$14,300
+
+**Asset universe**: ETH live; BTC/SOL/LINK/BNB `enabled: false`; XRP removed from trader data pipeline 2026-05-23 (silent-crash mitigation).
 
 **Rollback ladder (one-command each, hot-reloads within 5 min):**
 
 ```powershell
-# One level back — to H75-snapshot (live 2026-05-18 → 2026-05-20)
+# One level back — to G_fresh / H75-fresh promote state (live 2026-05-20 09:04 → 2026-05-21 21:56)
+# Note: pre_G_narrow snapshot captures H75-fresh state exactly
+copy config\regime_config_ed_pre_G_narrow_20260521.json    config\regime_config_ed.json
+copy models\crypto_ed_production_pre_G_narrow_20260521.csv models\crypto_ed_production.csv
+
+# Two levels back — to H75-snapshot (live 2026-05-18 22:02 → 2026-05-20 09:04)
 copy config\regime_config_ed_pre_H75fresh_20260520.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_H75fresh_20260520.csv models\crypto_ed_production.csv
 
-# Two levels back — to pre-H75 (live before 2026-05-18)
+# Three levels back — to pre-H75 baseline (live before 2026-05-18)
 copy config\regime_config_ed_pre_H75_20260518.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_H75_20260518.csv models\crypto_ed_production.csv
 # Optional engine-layer rollback (only if reverting to the pre-H_STRICT_FAMILY engine):
 copy crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.py
 ```
 
-Promotion source: Laptop H75 HRST fresh-data run (started 2026-05-18 23:38, completed 2026-05-20 03:03). Mode T REF +76.91% (converged iter 2).
+**Promotion source**: Desktop G_narrow_d HRST run 2026-05-20 11:05 → 2026-05-21 10:28 (wall ~23h 22m, log `logs/ed_v1_20260520_110556.log`). Mode T REF +89.14% (converged iter 2, no STRICT rally-cooldown winner).
 
-Full promotion event in [ARCHIVED_LOG.md "PROMOTED 2026-05-20 ~09:04 CEST"](ARCHIVED_LOG.md). Prior H75 (snapshot) promotion event also preserved in archive.
+**Promotion timeline**:
+1. 2026-05-18 22:02 — H75 promoted (snapshot: `pre_H75_20260518`)
+2. 2026-05-20 09:04 — H75-fresh promoted (snapshot: `pre_H75fresh_20260520`)
+3. **2026-05-21 21:56 — G_narrow promoted (current)** (snapshot: `pre_G_narrow_20260521`)
+4. 2026-05-22 19:51 — G_fresh promoted (content-identical ETH rows; snapshot: `pre_G_fresh_20260522`)
+5. 2026-05-23 22:21 — manual: rally_cooldown enabled → disabled
+
+Full promotion events in ARCHIVED_LOG.md.
 
 ---
 
 # 🔥 P1 — Act this week
 
-## ⚡ H75-fresh LIVE OOS monitoring — passive, ~1-2 weeks
+## ⚡ G_narrow LIVE OOS monitoring — active, ~14 days
 
-**Search anchor**: `H75-OOS-MONITOR`
+**Search anchor**: `G_NARROW-OOS-MONITOR`
 
-**Current state (2026-05-20 09:04)**: 🆕 **OOS window reset.** New live config (6h@65% symmetric) just promoted. Trader flat (last SELL fired at 02:00 CEST on prior config, PnL −0.53% / −$75.02). **0 closed round-trips** under new config. Window ends ~2026-06-03 (14 days).
+**Current state (2026-05-24 23:30)**: Trader currently **invested** (BUY 2026-05-24 21:03Z @ $2094.11). 2 closed round-trips under G_narrow so far — both losses. Window started 2026-05-21 21:56 → ends ~2026-06-04 (14 days).
 
-**One closed trade under prior config (H75-snapshot, 2026-05-18 → 2026-05-20)** for historical reference:
-- BUY 2026-05-19 17:05 UTC @ $2,121.13 (bear 8h@65% gate fired @ 65.30% conf)
-- SELL 2026-05-20 02:00 CEST @ $2,109.79 — **PnL −0.53% / −$75.02 / 9h hold**
-- That's 1 trade / WR 0% on prior config. Insufficient for any judgment; data now belongs to the snapshot-H75 audit trail.
+**Closed trades under G_narrow** (since 2026-05-21 21:56 promote):
 
-**Rollback triggers under new config** (any one fires → discuss with user):
-- Cumulative realized alpha < +5% after first 10 trades
-- MaxDD exceeds −10% on new config alone (sim Mode T REF was +76.91%, no per-trade-DD sim available yet)
-- First 10 trades WR < 50% (Laptop fresh Mode S showed 86% WR / 85 trades on 60d sim)
-- Trade count vastly different from sim 85/60d (= 42/30d) — expect ~1.4 trades/day under symmetric 6h/6h
+| # | Open | Close | Entry | Exit | PnL |
+|---|---|---|---|---|---|
+| 1 | 2026-05-22 18:22Z (manual BUY) | 2026-05-23 22:00 CEST (auto SELL) | $2120.96 | $2075.26 | **−2.15% / −$298.81** |
+| 2 | 2026-05-24 18:02Z (auto BUY) | 2026-05-24 22:00 CEST (auto SELL) | $2100.60 | $2098.32 | **−0.11% / −$14.73** |
 
-**Decision tree after 1-2 weeks**:
+Cumulative realized **−2.26%** / 2 trades / WR **0%**. Note the first trade was a manual BUY (user-initiated), so it's only partially attributable to G_narrow signal quality. Trade #2 was fully automated and still lost.
+
+**Rollback triggers under G_narrow** (any one fires → discuss with user):
+- Cumulative realized alpha < +5% after first 10 trades (currently −2.26% on 2 — too early)
+- MaxDD exceeds −10% on G_narrow alone (sim Mode T REF was +89.14% on 4-horizon, no per-trade-DD sim)
+- First 10 trades WR < 50% (currently 0% on 2 — flag if it persists; sim showed 84% WR on 5h, 90% on 8h)
+- Trade count vastly different from sim (sim showed ~146 5h trades / 60d ≈ 2.4/day; G_narrow live is 2 auto-trades over ~3 days ≈ 0.67/day — running below sim pace)
+
+**Decision tree after 1-2 weeks (or 10 closed trades, whichever first)**:
 | Outcome | Action |
 |---|---|
-| H75-fresh holds OOS (≥+50% of sim alpha, no triggers) | Close TODO 0519 verdict, SHELVE G_narrow_d |
-| H75-fresh underperforms (>2 triggers OR alpha<5%) | **Rollback to H75-snapshot** (one-command, see LIVE STATE rollback ladder). If that ALSO underperforms, two-level back to pre-H75 |
-| Borderline (1 trigger fired) | Watch another 1-2 weeks |
-| 0519 G shows G > H75-fresh by >+5pp on snapshot data | Don't auto-act; live OOS > sim |
+| G_narrow holds OOS (≥+44% of sim alpha = +39% realized, no triggers) | Continue. Document the +5pp upgrade vs H75-fresh as real. |
+| G_narrow underperforms (>2 triggers OR alpha < +5% after 10 trades) | **Rollback to H75-fresh** (one-command, see LIVE STATE rollback ladder L1). If H75-fresh ALSO underperforms (would mean broader issue), L2 to H75-snapshot. |
+| Borderline (1 trigger fired, including current WR 0% on 2) | Watch another 1-2 weeks; don't act on small samples |
+| TODO 0524 produces clean basket Mode T REF > +95% AND 11h/12h have promise | Don't auto-act — live OOS > sim. But schedule a discussion. |
 
-**Symmetric-regime caveat**: this is the first live config with bull-horizon == bear-horizon (both 6h). Prior live configs all had asymmetric splits. Watch for unexpected behavior at regime-transition cycles — model decisions should be smooth but the "regime switch saves alpha" thesis hasn't been tested with symmetric configs.
+**Asymmetric-regime context**: G_narrow restored the asymmetric 5h/8h split (bull faster, bear slower for more confirmation in volatile regime). This matches the CLAUDE.md "longer horizon in bear" pattern that held under H75-snapshot too. The 2-day H75-fresh symmetric experiment (6h/6h) was abandoned by the May 21 G_narrow promote.
 
 ---
 
-## 📅 TODO 0519 — G_narrow_d relaunch on Desktop tonight (with safeguards)
+## ✅ TODO 0519 — G_narrow_d relaunch on Desktop (CLOSED)
 
-**Search anchor**: `TODO 0519`
+**Status**: Run completed 2026-05-21 10:28 with Mode T REF +89.14%. Initially marked "shelved" but **subsequently promoted to live 2026-05-21 21:56** based on per-horizon win comparison (G's 5h winner ret +72.16% beat H75-fresh's 5h ret +53.76% even though aggregate Mode T REF was equivalent). G_narrow models still live as of today.
 
-**Status**: 📅 PLANNED for tonight. Replaces failed 1805D (DIED Desktop 2026-05-19 08-10 am with no diagnostic log — terminal-only output). User saw "purple lines" (likely K=5 LGBM warnings, not crash signal). Step 1 saves ~5h vs full HRST by preserving G's 5h Mode V winner already in `models_g_desktop/crypto_ed_production_noprod.csv` row 41 (ETH XGB+LGBM w=279 γ=0.9979 11f +58.87% — G's signature wide-Optuna pattern).
+Full launch query, safeguards, banners, ETA, success table, and verdict moved to [ARCHIVED_LOG.md "TODO 0519 — G_narrow_d relaunch (CLOSED 2026-05-21)"](ARCHIVED_LOG.md).
 
-### One-shot launch query (copy-paste on Desktop tonight)
-
-```powershell
-# ============================================================================
-# TODO 0519 — G_narrow_d relaunch with safeguards (run on Desktop, Drive engine)
-# ============================================================================
-cd G:\engine
-
-# 1. Keep Desktop awake for the full ~16h run
-powercfg /change standby-timeout-ac 0
-powercfg /change monitor-timeout-ac 0
-
-# 2. Defensive backup of row 41 (G's 5h Mode V winner)
-copy models_g_desktop\crypto_ed_production_noprod.csv models_g_desktop\crypto_ed_production_noprod_5h_only_pre_0519.csv
-
-# 3. Set env vars (snapshot + K=5 + isolated output dirs)
-$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
-$env:RELIABILITY_K = "5"
-$env:G_NARROW_MODELS_DIR = "models_g_desktop"
-$env:G_NARROW_CONFIG_DIR = "config_g_desktop"
-
-# 4. Launch Mode H for 6h, 7h, 8h only — captures stdout AND stderr to disk
-$ts = Get-Date -Format "yyyyMMdd_HHmm"
-$logfile = "logs\g_relaunch_0519_$ts.log"
-python crypto_trading_system_ed_g_narrow_d.py H "ETH," 6h,7h,8h --skip --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath $logfile
-```
-
-**Critical safeguards** (non-negotiable):
-- `Tee-Object *>&1` — captures stdout+stderr to disk so any crash IS diagnosable this time
-- `powercfg standby-timeout 0` — kills Modern Standby (suspect #2 from this morning)
-- `"ETH,"` trailing comma — older fork's `endswith('h')` parser bug; without comma → all 9 assets load
-- `--no-data-update` — snapshot env var only redirects READS; without this flag, downloads write to LIVE
-- `--no-persist` — production CSV untouched
-- `--skip` — 6h/7h Mode D skipped (grids exist), only 8h Mode D runs (~12 min)
-- `--grid-tag G_NARROW_D` — without it engine uses untagged grids (production B's)
-- Both env vars `G_NARROW_MODELS_DIR` + `G_NARROW_CONFIG_DIR` set — confirm `[G_NARROW_D_ISO]` banner
-
-### Startup banners to verify (first 30 sec)
-
-1. `[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: ...`
-2. `[G_NARROW_D_ISO] output dirs redirected: models=models_g_desktop config=config_g_desktop`
-3. `[G_NARROW_D_K5] _deku_eval_with_pruning patched (K=5 seeds=[42, 43, 44, 45, 46])`
-4. `--no-persist ACTIVE` block listing `models_g_desktop/crypto_ed_production_noprod.csv`
-5. `ED: Mode H | ETH | 6h,7h,8h`
-6. `Mode D results already exist for ETH 6h — skipping D (--skip)` (6h/7h) + `EXHAUSTIVE GRID: ETH 8h — 36 evals` (only 8h)
-
-**Abort if any banner missing.** Ctrl+C, fix env vars, relaunch.
-
-### ETA
-
-| Phase | Time |
-|---|---|
-| Mode D × 1 (8h fresh) | ~12 min |
-| Mode V × 3 horizons @ K=5 × 75 trials wider-Optuna | ~15h |
-| **Step 1 total** | **~15-16h** |
-| Step 2: R + S + T+G (separate launches) | ~1.5h |
-| **Grand total** | **~17-17.5h** |
-
-Done midday-late afternoon 2026-05-20.
-
-### Step 2 — After Mode H finishes (~1.5h sequential)
-
-```powershell
-# Same PowerShell session (env vars still set)
-
-# Verify 5h row 41 is still in noprod CSV
-Get-Content models_g_desktop\crypto_ed_production_noprod.csv | Select-String -Pattern "^ETH,.*,5,0\."
-# Expected: ETH,279,XGB+LGBM,...,5,0.9979,Refined
-# If MISSING: copy models_g_desktop\crypto_ed_production_noprod_5h_only_pre_0519.csv models_g_desktop\crypto_ed_production_noprod.csv
-
-# Mode R then S then T (T chains Mode G automatically)
-python crypto_trading_system_ed_g_narrow_d.py R "ETH," 5,6,7,8h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath "logs\g_relaunch_0519_R_$(Get-Date -Format yyyyMMdd_HHmm).log"
-python crypto_trading_system_ed_g_narrow_d.py S "ETH," 5,6,7,8h --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath "logs\g_relaunch_0519_S_$(Get-Date -Format yyyyMMdd_HHmm).log"
-python crypto_trading_system_ed_g_narrow_d.py T "ETH," --replay 1440 --no-persist --no-data-update --grid-tag G_NARROW_D *>&1 | Tee-Object -FilePath "logs\g_relaunch_0519_T_$(Get-Date -Format yyyyMMdd_HHmm).log"
-```
-
-### If it crashes again
-
-The `g_relaunch_0519_*.log` file will have the crash trace this time. Diagnose:
-- CUDA / GPU OOM in log → force CPU LGBM (`hardware_config.py` device='cpu'), ETA 25-30h
-- MemoryError / Python OOM → reduce K=5 to K=3 (`$env:RELIABILITY_K = "3"`)
-- Modern Standby (log cuts mid-line, no error) → powercfg fix should have prevented this
-- Hard exit → terminal got closed; reconsider screen-locked PS
-
-### Success criteria → 3-way verdict
-
-| Variant | Mode T total | vs H75 | Decision |
-|---|---|---|---|
-| B (pre-H75 production) | +89.41% | — | baseline |
-| H75 (current live) | from promotion HRST log | — | live |
-| G_narrow_d (this run) | TBD | TBD | this TODO |
-
-| Outcome | Action |
-|---|---|
-| G > H75 by >+5pp | Possible promotion regret. Discuss rollback (trader-flat-first per [[feedback-production-swap-when-flat]]) |
-| G ≈ H75 (±5pp) | Both valid; keep H75 live (simpler code) |
-| G < H75 by >5pp | Confirms H75 promotion was correct; SHELVE G_narrow_d |
-| Crashes with diagnosable log | Implement specific fix; relaunch as TODO 0520 |
-
-**Rerun verdict (2026-05-20 11:05 → 2026-05-21 10:28, wall ~23h 22m, log `logs/ed_v1_20260520_110556.log`):** completed full 4-horizon HRST + R + S + T. Mode T converged at iteration 2 unchanged, baseline H1=+25.30% / H2=+51.02% / **REF=+89.14%** vs B's +89.41% — within ±0.3pp of B baseline, so G ≈ B per the success table. **G_narrow_d shelved** — no promotion regret signal. The bigger win from this run came from the per-phase timing data: **refine is 76% of HRST wall (17.7h of 23.4h)**, K=5 multi-seed runs the 5 seeds sequentially per trial, and `_g_factories_seeded` hardcodes `device='gpu'` which breaks the hybrid GPU+CPU dispatcher. → spawned TODO 2205 (below).
+Key spinoff: this run's per-phase timing exposed refine as 76% of HRST wall (17.7h of 23.4h) → spawned TODO 0522 (parallel speedup fork).
 
 ---
 
-## 🔥 TODO 0524 — Top-horizons clean rerun on fixed parallel fork (Desktop)
+## 🔥 TODO 0525 — G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350 (Desktop)
+
+**Search anchor**: `TODO 0525`
+
+**Status**: 🟢 **RUNNING on Desktop** — launched 2026-05-25 [time]. Output dir: `models_g_desktop_0525/` + `config_g_desktop_0525/`. ETA: ~9-9.5h.
+
+**Hypothesis**: the May 24 narrow-grid rerun (TODO 0524) produced REF +80.56% vs LIVE's +91.01% on the SAME May 22 data because Mode V Optuna refine couldn't reach the high-window basin where LIVE's winners live. LIVE has 5h @ w=281 and 8h @ w=293 (both Refined). The narrow grid [72,100,150] seeded Optuna's TPE in a low-window basin; max refined window reached was w=168. With seeds at 250/300/350 + Optuna win_hi=350 + V2 widened to top-10, refine should anchor in the [220-350] region and produce winners comparable to LIVE.
+
+**Three coordinated tweaks** (commit `e3c450c`, [crypto_trading_system_ed_g_narrow_d.py](crypto_trading_system_ed_g_narrow_d.py)):
+1. `GRID_WINDOWS [72,100,150] → [72,100,150,200,250,300,350]` (line 4065)
+2. `DOOHAN_SAVE_TOP_N 6 → 10` (line 4674) — V2 funnel widened proportional to grid (top-7% of 84 evals was too strict)
+3. `win_hi 300 → 350` in serial refine (line 5281) AND K=5 parallel worker (line 8607)
+
+**Validation gates** (run-level diagnostics, before any promotion talk):
+| Test | Pass criterion | Fail = |
+|---|---|---|
+| ETH 5h refined #1 window | w ≥ 240 (LIVE basin) | seed-lottery fix didn't take — refine still anchored low |
+| ETH 8h refined #1 window | w ≥ 250 (LIVE basin) | same as above |
+| Mode V Step 1 backtest count | ≥ 8 of top-10 attempted | V2 expansion broke something |
+| Mode V Step 2 refine count | 3/3 configs refined | parallel fork still healthy |
+
+**Promotion gate** (same as TODO 0524):
+| Mode T REF | Action |
+|---|---|
+| ≥ +95% on May 22 data | better than LIVE (+91.01%); discuss promotion (trader-flat-first per [[production-swap-when-flat]]) |
+| +80% to +95% | comparable to LIVE — document but don't auto-promote |
+| < +80% | grid extension didn't help; close arc, reconsider architecture |
+
+**Setup notes**:
+- Same May 22 snapshot as TODO 0524 (`data/_reliability_hrst_snapshot_laptop_20260522_0139`)
+- Same horizons (5h, 6h, 8h, 11h, 12h) for direct A/B vs TODO 0524 numbers
+- Production CSV / live regime config untouched (`--no-persist` + isolated `_0525` dirs)
+- After HRST completes, run Mode T head-to-head against LIVE (same protocol as 2026-05-25 ~20:47 baseline test) to land the apples-to-apples REF
+
+---
+
+## ✅ TODO 0524 — Top-horizons clean rerun on fixed parallel fork (Desktop)
 
 **Search anchor**: `TODO 0524`
 
-**Status**: 🟢 **RUNNING on Desktop** — launched 2026-05-24 20:27 CEST after 3 failed pre-fix attempts. Log: `logs/parallel_hrst_0524_desktop_20260524_2027.log`. ETA: ~10-12h → finish ~06:30-08:30 CEST 2026-05-25. Replaces the 2205 Stage 2 9-12h run whose verdict is invalidated by the parallel-fork grid bug fixed 2026-05-24.
+**Status**: ✅ **DONE 2026-05-25 ~13:33**. Launched 2026-05-24 20:27 CEST after 3 failed pre-fix attempts. Mode H+R+S completed 2026-05-25 06:39 (~7.8h wall). Mode T failed once (regime config FileNotFoundError, fork patch added), failed once (live-seed overwrote Mode S verdict, fork patch added), succeeded 2026-05-25 13:33. Log: `logs/ed_v1_20260524_225312.log` (HRST), `logs/ed_v1_20260525_131704.log` (final Mode T).
+
+**Outcome**: Mode T REF **+80.56%** on May 22 data. Apples-to-apples head-to-head test 2026-05-25 ~20:47 showed LIVE config (sma24>sma100 bull=5h@65% w=281 / bear=8h@65% w=293) on the SAME May 22 data → REF **+91.01%**. **LIVE wins by +10.45pp.** No promotion.
+
+**Root cause analysis** (production CSV diff, [models_g_desktop_0524/crypto_ed_production_noprod.csv](models_g_desktop_0524/crypto_ed_production_noprod.csv) vs [models/crypto_ed_production.csv](models/crypto_ed_production.csv)):
+- 4 of 5 ETH horizons in the new run shipped Mode D `Grid` candidates (w=150 RF+LGBM γ=0.999 f=10) instead of refined ones
+- The 75-trial Optuna refine landed at w=168 / 132 / 95 for 5h and w=136 / 118 / 84 for 8h — never approached LIVE's w=281 / w=293
+- TPE sampler is anchored on top-6 Mode D seeds; with all seeds in [72,100,150], refine stayed in that basin even though search range was nominally [50, 300]
+- **Architecture flaw exposed**: G_narrow_d's narrow grid is data-state sensitive. May 15 data (production refine source) → seeds happened to surface a high-window basin. May 22 data → seeds clustered low. Same engine, different snapshot, different winner basin.
+
+**What shipped from this run**:
+1. **Parallel fork validated at HRST scale (~8× refine speedup, real shipped win)** — independent of the strategy verdict
+2. Fork patches added: FIX #0 (grid + dirs + N_FEATURES_RANGE propagation), mkdir auto-create, sklearn warning filter, regime-config seed/preserve logic
+3. New engine mode `RST` added to dispatcher (commit `d71a1be`) — for follow-up runs that don't need the H phase
+4. Engine banner fix: Mode T/G/F no longer prints misleading `| 4h` (commit `59b1c1c`)
+5. Apples-to-apples comparison protocol established — copy live config/models into isolated dir, switch env vars, run Mode T on the new snapshot
+
+**Spinoff**: TODO 0525 (above) tests whether extending GRID_WINDOWS + V2 top-N + Optuna win_hi fixes the basin-coverage problem.
+
+### Original plan and procedure (preserved for history)
+
+Launched 2026-05-24 20:27 CEST after 3 failed pre-fix attempts. Replaces the 2205 Stage 2 9-12h run whose verdict was invalidated by the parallel-fork grid bug fixed 2026-05-24.
 
 ### Bug correction history (all landed before successful 20:27 launch)
 
@@ -332,9 +315,9 @@ python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 5h,6h,8h,11h,
 
 ---
 
-## 🔥 TODO 2205 — Parallel refine speedup (G_narrow_d_parallel fork)
+## 🔥 TODO 0522 — Parallel refine speedup (G_narrow_d_parallel fork)
 
-**Search anchor**: `TODO 2205`
+**Search anchor**: `TODO 0522`
 
 **Status**: 🟢 STAGE 1 PASSED on Laptop 2026-05-22 ~00:26 CEST. **STAGE 2 PLANNED — launching on Desktop tonight for overnight run.**
 
@@ -366,7 +349,7 @@ python crypto_trading_system_ed_g_narrow_d_parallel.py HRST "ETH," 5h,6h,8h,11h,
 
 ```powershell
 # ============================================================================
-# TODO 2205 Stage 2 — HRST 9,10,11,12h on parallel fork (LAPTOP overnight)
+# TODO 0522 Stage 2 — HRST 9,10,11,12h on parallel fork (LAPTOP overnight)
 # Fully isolated from Desktop: _laptop output dirs + _laptop snapshot + _LAPTOP grid tag
 # ============================================================================
 
@@ -475,11 +458,22 @@ If Stage 3 passes with refined configs matching G_narrow_d shape (= identity con
 
 ---
 
-## 📅 TODO 0519B-G1 — deriv_oi_* re-enable A/B test (Fri 2026-05-22 — today)
+## 📅 TODO 0519B-G1 — deriv_oi_* re-enable A/B test (slipped from 2026-05-22; pending Desktop free)
 
 **Search anchor**: `TODO 0519B-G1`
 
-**Features**: `deriv_oi_chg1d`, `deriv_oi_chg3d`, `deriv_oi_zscore`. ~63d Binance OI history + 72h warmup buffer.
+**Status**: 📅 PENDING. Originally scheduled for 2026-05-22 but Desktop was occupied: 2026-05-22 Stage 2 of TODO 0522 (Laptop ran HRST 9-12h, but Desktop also had separate work in progress), then 2026-05-24 TODO 0524 launched and is still running through ~2026-05-25 morning. Procedure below is ready to launch the moment Desktop frees up.
+
+**Features**: `deriv_oi_chg1d`, `deriv_oi_chg3d`, `deriv_oi_zscore`. **Data source switched to Bybit 2026-05-24** — Binance OI API only returns ~30d and the daily download doesn't accumulate; Bybit public OI endpoint paginates back **208 days** at hourly resolution for ETHUSDT (5,000 rows, 2025-10-28 → 2026-05-24). One-shot backfill script: [tools/_bybit_oi_backfill_eth.py](tools/_bybit_oi_backfill_eth.py). Source-switch caveat: Bybit ETH OI is ~36% of Binance magnitude (Bybit is #2-3 perp exchange) but level corr 0.82 and engine features are relative (`chg1d`/`chg3d`/`zscore`) so scale washes out. Importance rankings from April-May on Binance OI may not transfer cleanly to Bybit.
+
+**Workflow gotcha**: The live trader's data-refresh cycle (via `download_macro_data.py`) calls Binance OI and overwrites the column with a 30d window — wiping the Bybit backfill. Policy is to **re-run the backfill manually whenever needed** (script is idempotent, takes ~10 sec):
+```powershell
+python tools/_bybit_oi_backfill_eth.py            # idempotent: re-run anytime
+python tools/_bybit_oi_backfill_eth.py --dry-run  # check coverage without saving
+```
+**Before launching G1 OFF baseline AND before launching G1 ON test**: run the backfill once to confirm 208d coverage is in place. If `--dry-run` reports `non-NaN OI rows = 721 (30d)`, the trader clobbered it — re-run without `--dry-run`. If it reports `5,000 (208d)`, you're good.
+
+If G1 verdict is ≥ +5pp ON over OFF, the next step is integrating Bybit into `download_macro_data.py` (add a Bybit fetcher alongside or replacing the Binance one). If G1 fails, leave both the one-shot script and the backup CSV in place but don't modify the live download flow.
 
 **Pre-flight**:
 ```powershell
