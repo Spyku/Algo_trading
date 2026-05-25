@@ -4062,10 +4062,16 @@ GRID_COMBOS = [
     # if a future regime favors it (no evidence in current ETH data).
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results in V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [72, 100, 150]  # trimmed 2026-04-27 from [72,100,150,200,250,300].
-                                # 200/250/300 had 0/20 wins in last month — ETH 1h is
-                                # fast-moving, longer windows dilute recent signal.
-                                # Refine step extends ±20h, so can drift toward 170h.
+GRID_WINDOWS = [72, 100, 150, 200, 250, 300, 350]
+                                # Re-extended 2026-05-25 from [72,100,150]: the May 20-21
+                                # production refine landed at w=281/293 for ETH 5h/8h, which
+                                # the narrow [72,100,150] grid couldn't reseed in the May 24
+                                # rerun (Optuna's local TPE never anchored above w=168).
+                                # Apples-to-apples Mode T on May 22 data showed live config
+                                # REF +91% vs the narrow-grid rerun's +80% — gap traced to
+                                # window basin coverage. 7 windows × 2 combos × 3 features ×
+                                # 2 gammas = 84 evals; Mode D parallelizes across 26 workers
+                                # so wall-time impact is ~+1 min/horizon.
 GRID_FEATURES = [10, 15, 20]       # G_NARROW_D: wide spacing (gaps of 5) so V3 refine
                                    # interpolates new values (12, 13, 17, 18, etc.).
 GRID_GAMMAS = [0.999, 0.996]       # G_NARROW_D: wide spacing (gap 0.003) so V3 refine
@@ -4671,7 +4677,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             f_band = 0 if f <= 15 else (1 if f <= 30 else 2)
             return (c, w, g_band, f_band)
 
-        DOOHAN_SAVE_TOP_N = 6
+        DOOHAN_SAVE_TOP_N = 10  # bumped from 6 on 2026-05-25 alongside GRID_WINDOWS extension; with 84 evals (was 36), top-6 was top-7% — too strict to let new high-window candidates reach refine.
         candidates_to_save = []
         seen_regions = set()
         seen_combos = set()
@@ -5278,7 +5284,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         feat_lo = 4
         feat_hi = min(60, len(ranked_features))
         win_lo = 50
-        win_hi = 300
+        win_hi = 350  # extended 2026-05-25 from 300 alongside GRID_WINDOWS=[...,350]; pair lets refine reach beyond the prior cap if seeded at 350.
 
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1}: {combo_name}  w={base_window}h  g={base_gamma:.4f}  f={base_feats}")
@@ -8604,7 +8610,7 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         feat_lo = 4
         feat_hi = min(60, len(ranked_features))
         win_lo = 50
-        win_hi = 300
+        win_hi = 350  # extended 2026-05-25 from 300 alongside GRID_WINDOWS=[...,350]; pair lets refine reach beyond the prior cap if seeded at 350.
 
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1} (LGBM={lgbm_device}): {combo_name}  "
