@@ -126,6 +126,21 @@ ENGINE.RESUME_DIR = G.RESUME_DIR
 for _d in (G.MODELS_DIR, G.CONFIG_DIR, G.RESUME_DIR):
     os.makedirs(_d, exist_ok=True)
 
+# Seed the isolated CONFIG_DIR with a copy of the live regime config. Mode R's
+# _apply_mode_r_to_config (engine line 6525) READS the existing config, updates
+# the bull/bear horizons, and writes back — if the source file doesn't exist
+# it silently returns. Without a seed, Mode S/T then crash with FileNotFoundError
+# on regime_config_ed_noprod.json. Copy from the live H75 config to template.
+import shutil as _shutil
+_live_regime_cfg = os.path.join(ENGINE.H75_CONFIG_DIR, 'regime_config_ed.json')
+_seed_regime_cfg = G.REGIME_CONFIG_PATH
+if not os.path.exists(_seed_regime_cfg):
+    if os.path.exists(_live_regime_cfg):
+        _shutil.copyfile(_live_regime_cfg, _seed_regime_cfg)
+        print(f'[G_NARROW_D_PARALLEL] seeded regime config: {_live_regime_cfg} -> {_seed_regime_cfg}', flush=True)
+    else:
+        print(f'[G_NARROW_D_PARALLEL] WARN: live regime config not found at {_live_regime_cfg} — Mode R/S/T may fail', flush=True)
+
 print(f'[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G', flush=True)
 print(f'  combos={ENGINE.GRID_COMBOS}', flush=True)
 print(f'  windows={ENGINE.GRID_WINDOWS}', flush=True)
