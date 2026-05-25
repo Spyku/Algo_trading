@@ -4648,13 +4648,21 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             w = trial.params['window']
             return (combo, w)
 
-        DOOHAN_SAVE_TOP_N = 6
+        DOOHAN_SAVE_TOP_N = 10  # bumped from 6 on 2026-05-25 alongside G_narrow_d GRID_WINDOWS extension; with 84 evals (was 36) and 14 possible (combo, w) clusters, top-6 was too narrow.
         candidates_to_save = []
         seen_regions = set()
+        # Filter: candidates with 0 trades in ALL holdout folds have no predictive
+        # signal — they're being included only because they're (combo, w) cluster
+        # representatives. Refining them wastes ~6-9 min per candidate and produces
+        # garbage configs. Surfaced on the May 25 TODO 0525 run where w=300 and
+        # w=250 candidates scored APF=11.235 in Mode D from 1-2 lucky trades but
+        # got 0 trades across all 3 holdout folds.
         if holdout_results:
             for ho_entry in holdout_results:
                 if len(candidates_to_save) >= DOOHAN_SAVE_TOP_N:
                     break
+                if ho_entry[4] == 0:  # ho_trades; see unpacking at the for-loop below
+                    continue
                 trial = ho_entry[0]
                 region = _diversity_key(trial)
                 if region in seen_regions and len(candidates_to_save) >= 1:
@@ -4665,6 +4673,8 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                 for ho_entry in holdout_results:
                     if len(candidates_to_save) >= DOOHAN_SAVE_TOP_N:
                         break
+                    if ho_entry[4] == 0:
+                        continue
                     if ho_entry not in candidates_to_save:
                         candidates_to_save.append(ho_entry)
 
