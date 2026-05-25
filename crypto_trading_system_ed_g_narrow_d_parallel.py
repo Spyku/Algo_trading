@@ -126,15 +126,24 @@ ENGINE.RESUME_DIR = G.RESUME_DIR
 for _d in (G.MODELS_DIR, G.CONFIG_DIR, G.RESUME_DIR):
     os.makedirs(_d, exist_ok=True)
 
-# Seed the isolated CONFIG_DIR with a copy of the live regime config. Mode R's
-# _apply_mode_r_to_config (engine line 6525) READS the existing config, updates
-# the bull/bear horizons, and writes back — if the source file doesn't exist
-# it silently returns. Without a seed, Mode S/T then crash with FileNotFoundError
-# on regime_config_ed_noprod.json. Copy from the live H75 config to template.
+# Seed the isolated CONFIG_DIR with a regime config. Two scenarios:
+#   1. Fresh dir (neither regime_config_ed.json nor _noprod.json exists)
+#      → seed from live so Mode R/S has a template to update.
+#   2. Follow-up command after a prior RS/HRST left results in _noprod.json
+#      → promote _noprod.json back onto regime_config_ed.json. The engine's
+#        --no-persist code unconditionally does shutil.copyfile(regime_config_ed.json,
+#        _noprod.json) on every invocation, which would otherwise WIPE OUT
+#        Mode R/S's writes when Mode T is launched as a separate command.
+# Mode R's _apply_mode_r_to_config (engine line 6525) reads the source then
+# rewrites it; without a seed, Mode S/T crash with FileNotFoundError.
 import shutil as _shutil
 _live_regime_cfg = os.path.join(ENGINE.H75_CONFIG_DIR, 'regime_config_ed.json')
 _seed_regime_cfg = G.REGIME_CONFIG_PATH
-if not os.path.exists(_seed_regime_cfg):
+_noprod_regime_cfg = _seed_regime_cfg.replace('.json', '_noprod.json')
+if os.path.exists(_noprod_regime_cfg):
+    _shutil.copyfile(_noprod_regime_cfg, _seed_regime_cfg)
+    print(f'[G_NARROW_D_PARALLEL] preserved prior run state: {_noprod_regime_cfg} -> {_seed_regime_cfg}', flush=True)
+elif not os.path.exists(_seed_regime_cfg):
     if os.path.exists(_live_regime_cfg):
         _shutil.copyfile(_live_regime_cfg, _seed_regime_cfg)
         print(f'[G_NARROW_D_PARALLEL] seeded regime config: {_live_regime_cfg} -> {_seed_regime_cfg}', flush=True)
