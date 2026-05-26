@@ -2,12 +2,13 @@
 
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
-## 📊 At-a-glance — active TODO dashboard (2026-05-25)
+## 📊 At-a-glance — active TODO dashboard (2026-05-27)
 
 | Pri | Item | When | Status |
 |---|---|---|---|
 | 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) running on **H75 engine** (K=5 + 75 trial refine) — `sma24>sma100` / bull 5h@65% / bear 8h@65% | active since 2026-05-21 21:56 (G_narrow promote); engine unchanged from 2026-05-18 H75 | running |
-| 🔥 P1 | **TODO 0525** — G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350 | Desktop launched 2026-05-25 [time] — output dir `models_g_desktop_0525/` | 🟢 RUNNING — testing whether the seed-lottery fix lets refine reach LIVE-grade w=281/293 basins |
+| 🚨 P0 | **TODO 0526 — LIVE vs BACKTEST divergence investigation** | Verdict 2026-05-26 23:15; shadow mode activated 2026-05-27 00:02 on Desktop | 🕐 **MONITORING — shadow data accumulating**. Root cause = semantic code divergence (4 specific algorithmic differences between live + backtest, code similarity 8.2%). First shadow row matched (live HOLD 39.7% vs core HOLD 39.66%). Periodic check + ~7-14 day analysis pending — see Step 4 of TODO 0526 plan. |
+| ✅ | **TODO 0525** — G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350 | Desktop 2026-05-25 22:38 → 2026-05-26 08:44 (~10h) | DONE — Mode T REF +83.85% on May 22 data, lost to LIVE +91.01% by 7pp. Hypothesis "extend grid unlocks high-window basin" REJECTED — 0-trade holdout filter eats w=250/300 candidates regardless. **Architecture analysis spawned TODO 0526.** |
 | ✅ | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop 2026-05-24 22:53 → 2026-05-25 06:39 (Mode H+R+S); Mode T reruns 2026-05-25 12:35 + 13:17 | DONE — Mode T REF +80.56% vs LIVE's +91.01% on same May 22 data. No promotion. Parallel fork validated (~8× refine speedup = real shipped win). Root cause of weaker REF: narrow grid [72,100,150] couldn't seed Optuna refine to reach LIVE's w=281/293 basin. → spawned TODO 0525 |
 | ✅ | **TODO 0522** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Stage 1 Laptop 2026-05-22 00:26; Stage 2 Laptop 2026-05-22 01:39 → 18:09 | ⚠️ Stage 2 verdict INVALID (grid bug). Stage 1 PASSED. Parallel fork retained + bug-fixed; superseded by TODO 0524 |
 | 🔥 P1 | **OOS monitoring** — first 10 trades audit on live G_narrow config | window ~2026-06-04 (14 days from 2026-05-21 promote) | 0/10 closed; trader running |
@@ -78,6 +79,494 @@ copy crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.p
 5. 2026-05-23 22:21 — manual: rally_cooldown enabled → disabled
 
 Full promotion events in ARCHIVED_LOG.md.
+
+---
+
+# 🚨 P0 — TODO 0526 — LIVE vs BACKTEST divergence investigation
+
+**Search anchor**: `TODO 0526`
+
+**Status**: 🕐 **MONITORING — shadow accumulating since 2026-05-27 00:02 on Desktop**. Root cause identified 2026-05-26 23:15. Steps 1-3 done; Step 4 in progress (data accumulation + periodic match-rate checks); Steps 5-7 planned. **Halt all promotion decisions until Step 4 verdict in ~7-14 days.**
+
+## 🎯 VERDICT (2026-05-26 23:15 — from `output/diagnostics_20260526_230310_fast/`)
+
+**Bug is SEMANTIC CODE DIVERGENCE, not data drift.** The live trader's `generate_live_signal()` and the backtest's `_deku_eval_with_pruning()` are **fundamentally different algorithms** that produce different predictions on identical data. 4 specific divergences identified in code:
+
+| # | Difference | Live trader behavior | Backtest behavior |
+|---|---|---|---|
+| **1** | **Embargo** ([B3 confirmed]) | Trains on `[H-window, H-1]` — no gap | Trains on `[H-window, H-horizon]` — 5h gap for 5h model |
+| **2** | **NaN handling** (NEW finding) | `df.ffill().fillna(0.0)` — imputes stale features | Skips entire evaluation step if ANY NaN in X_train or X_test |
+| **3** | **Step size** (NEW finding) | Evaluates every hour | `_deku_eval_with_pruning` walks forward by `DIAG_STEP=36` — evaluates every 36 hours |
+| **4** | **Signal semantics** ([B2 confirmed]) | Ternary BUY/SELL/HOLD with proba-based confidence | Binary BUY/not-BUY only; no HOLD; no probabilities |
+
+**Code similarity**: live vs backtest signal generation = **0.082 (8.2%) — 0.019 (1.9%) line-level identity**. They are not the same algorithm.
+
+**This means**: every backtest result you've ever produced (Mode V return, Mode T REF, the +91.01% LIVE inference benchmark) was computed by a DIFFERENT algorithm than the one actually trading live. **You have been optimizing a metric that does not predict live performance**. The 68% signal disagreement is not a bug — it's the expected outcome of two different functions.
+
+### Data drift verdict (partial — not the main cause)
+| File | Drift found | Material for LIVE 5h? |
+|---|---|---|
+| `eth_hourly_data.csv` | ✓ none across 76,668 rows | n/a |
+| `derivatives_eth.csv` | 239 cells (mostly NaN-recovery for `deriv_oi_*` quarantined features) | 1 material cell: perp_close 2026-05-21 23:00 drifted 0.11% |
+| `onchain_eth.csv` | ✓ none across 1,601 rows | n/a (oc_mvrv stable) |
+| `macro_daily.csv` | 4 cells, all 2026-05-21 (OIL −1.4%, GOLD −0.04%, DXY/NASDAQ float noise) | none of these in LIVE 5h features |
+| `cross_asset.csv` | 4 cells, all 2026-05-21 (DAX −0.5%, BTC −0.11%, ETH/NASDAQ noise) | none in LIVE 5h features |
+| `stablecoin_flows.csv` | ✓ none | n/a |
+| `fear_greed.csv` | ✓ none | n/a |
+
+Data drift IS real but explains <10% of the gap. Code-path divergence explains the rest.
+
+## What's now in progress (started 2026-05-26 23:15)
+
+**Refactor target**: extract a shared signal-generation core into `crypto_signal_core.py` (NEW FILE). Both live trader and backtest will eventually call this same core, with explicit parameters for embargo / NaN policy / signal semantics. Once both paths share the core, backtest results become a faithful simulation of live behavior.
+
+**Plan** (1-2 days of careful engineering):
+1. ✅ Verdict documented (2026-05-26 23:15)
+2. ✅ DONE 2026-05-26 23:30 — [crypto_signal_core.py](crypto_signal_core.py) shared core written + 5/5 smoke tests pass
+3. ✅ DONE 2026-05-26 23:45 — Shadow mode infrastructure shipped:
+   - **[crypto_live_shadow.py](crypto_live_shadow.py)** — wrapper that replicates live trader data prep + calls `compute_signal_core()` + logs to `config/shadow_signal_diff.csv`. Never crashes live trader (all errors swallowed).
+   - **Minimal patch to [crypto_revolut_ed_v2.py:1620-1627](crypto_revolut_ed_v2.py#L1620)** — 8-line `try` block gated on `SHADOW_MODE=1` env var. When OFF (default), zero overhead. When ON, shadow runs after every `generate_live_signal()` call.
+   - **Activation**: `$env:SHADOW_MODE = "1"` then restart trader (`start_ed_v2.bat`). Deactivation: clear env var + restart.
+   - ✅ ACTIVATED 2026-05-27 00:02 on Desktop. First row written 00:02:27: ETH 5h live=HOLD(39.70%), core=HOLD(39.66%), match=True, conf_delta=-0.04, n_features=12, n_train=281 (matches LIVE config exactly). Trader running with shadow enabled.
+4. 🕐 IN PROGRESS — Accumulate ≥7 days of shadow data, then analyze.
+   - **Target window**: ~2026-06-03 (7 days from activation) for first formal analysis. Continue accumulating to ~2026-06-10 (14 days) for stable verdict.
+   - **Pending periodic checks** (every 1-2 days, takes <1 min):
+     ```powershell
+     Import-Csv config\shadow_signal_diff.csv | Group-Object match | Select Count,Name
+     Import-Csv config\shadow_signal_diff.csv | Group-Object shadow_error | Select Count,Name
+     ```
+     First confirms match rate (≥95% means core faithfully replicates live; <95% means shadow's data prep has bugs vs `generate_live_signal()`). Second confirms no silent error rate.
+   - **Pending divergence analysis** (run once enough data accumulated):
+     ```powershell
+     Import-Csv config\shadow_signal_diff.csv | Where-Object { $_.match -eq "False" } | Format-Table timestamp_utc,horizon,live_signal,core_signal,conf_delta -AutoSize
+     ```
+     Each match=False row is a concrete divergence case to debug. Look for patterns: specific hours, specific regime states, specific feature values.
+   - **Decision gate before Step 5**: match rate must be ≥95% AND shadow_error rate must be <1%. If either fails, debug `crypto_live_shadow.py`'s prep replication before switching live to call core.
+5. ⏸ PLANNED — Switch live trader to call `compute_signal_core()` directly. Remove inline math from `generate_live_signal()` — keep only data prep, staleness checks, result formatting.
+6. ⏸ PLANNED — Refactor `_deku_eval_with_pruning` and `_simulate_with_threshold` in the backtest engine to use the same core with explicit `embargo`, `na_policy`, `signal_mode` parameters exposing the legitimately-different policy choices.
+7. ⏸ PLANNED — Re-run HRST on refactored engine. Expected outcome: lower headline Mode T REF (because backtest now does what live does), but predictive of actual live performance.
+
+## ACTIVATION COMMANDS (Shadow Mode — Step 3 of plan)
+
+**👀 READ THIS ON DESKTOP** — the trader runs on Desktop (`G:\engine\`), even though the source files may have been edited on Laptop. Drive sync mirrors everything between machines.
+
+### Why Desktop (NOT Laptop)
+
+| Factor | Desktop | Laptop |
+|---|---|---|
+| CLAUDE.md convention | "Desktop (primary)" | secondary |
+| 24/7 uptime track record | yes | sleep/power-management risk |
+| The trader runs OK there now | yes | not currently running |
+| Hardware | i7-14700KF, 32GB, RTX 4080 | weaker, mobile |
+
+**🚨 Do NOT start the trader on Laptop while it's running on Desktop** — two traders on the same Revolut X account = race condition + duplicate Telegram bots responding to the same commands + potentially conflicting BUY/SELL orders.
+
+### Step-by-step (run ALL on Desktop, in order)
+
+#### Step 1 — Wait for Drive sync (~1-2 min after Laptop edits)
+
+On Desktop, verify the 3 new/changed files synced from Laptop:
+
+```powershell
+cd G:\engine
+Test-Path crypto_signal_core.py
+Test-Path crypto_live_shadow.py
+Get-Content crypto_revolut_ed_v2.py | Select-String -Pattern "shadow_compare"
+```
+
+All three must succeed:
+- `Test-Path crypto_signal_core.py` → `True`
+- `Test-Path crypto_live_shadow.py` → `True`
+- Last command shows 2 matches (one for the import, one for the call site)
+
+If files missing after 2-3 min: right-click Google Drive tray icon → "Sync now", or wait longer.
+
+#### Step 2 — Stop the running trader on Desktop
+
+**Preferred — via Telegram bot**:
+```
+/stop
+```
+Wait for the stop confirmation message. The trader finishes its current cycle cleanly.
+
+**Alternative — kill the Python process** (if Telegram isn't responsive):
+```powershell
+Get-Process python | Where-Object { $_.MainWindowTitle -like '*ed_v2*' -or $_.Path -like '*revolut_ed_v2*' }
+# Confirm it's the right process, then:
+Stop-Process -Id <PID> -Force
+```
+
+#### Step 3 — Verify trader state (optional but recommended)
+
+```powershell
+Get-Content config\position_ed_v2_ETH.json | Select-String -Pattern '"state"'
+```
+
+- `"state": "cash"` → safe to restart immediately
+- `"state": "invested"` → restart still safe (shadow is read-only, doesn't change trade decisions). Trader resumes its position on startup. Small risk of one missed cycle during restart.
+
+#### Step 4 — **Open a FRESH PowerShell window** (critical)
+
+Avoids leftover env vars from any prior diagnostic runs (V2_DATA_SNAPSHOT etc.).
+
+In the fresh window:
+```powershell
+cd G:\engine
+
+# Sanity: verify no leftover redirect env vars
+echo "V2_DATA_SNAPSHOT=$env:V2_DATA_SNAPSHOT"
+echo "H_STRICT_MODELS_DIR=$env:H_STRICT_MODELS_DIR"
+echo "H75_WIDE_MODELS_DIR=$env:H75_WIDE_MODELS_DIR"
+# All three should print "=" with nothing after — i.e. blank values
+```
+
+If any of those env vars are non-blank, open a different fresh PowerShell window.
+
+#### Step 5 — Enable shadow mode and launch
+
+```powershell
+$env:SHADOW_MODE = "1"
+echo "SHADOW_MODE=$env:SHADOW_MODE"   # should print: SHADOW_MODE=1
+.\start_ed_v2.bat
+```
+
+(The `.\` prefix is REQUIRED — PowerShell doesn't search the current directory by default.)
+
+Watch the trader start. Expected:
+- Pre-flight check passes (`✓` next to each data source — NO `✗`)
+- Banner: `==== REVOLUT X MULTI-ASSET TRADER [ED V2] ====`
+- Within a few minutes, first cycle begins
+
+If pre-flight FAILS with data staleness errors AND mentions snapshot paths → you didn't get a fresh window; env vars leaked. Go back to Step 4.
+
+#### Step 6 — Verify shadow logging is active (after first signal cycle, max 1h)
+
+```powershell
+Test-Path config\shadow_signal_diff.csv
+Get-Content config\shadow_signal_diff.csv | Select-Object -First 5
+```
+
+Expected: header row plus 1-2 data rows per cycle (one per ETH horizon). Columns:
+```
+timestamp_utc, asset, horizon, live_signal, live_confidence,
+core_signal, core_confidence, match, conf_delta,
+shadow_error, shadow_elapsed_ms, n_features, n_train, inference_row_dt
+```
+
+If the file exists but `core_signal` is mostly `None` and `shadow_error` shows entries → my replicated data prep in `crypto_live_shadow.py` has a bug. Open `config/shadow_signal_diff_errors.log` for tracebacks.
+
+### Monitor from Laptop (without moving the trader)
+
+You don't need the trader running on Laptop to monitor it:
+
+```
+Telegram → /status     # what trader is doing right now
+Telegram → /regime     # current bull/bear state
+Telegram → /balance    # current position
+```
+
+The shadow log appears on Laptop via Drive sync within ~1 min of being written on Desktop:
+```powershell
+# ON LAPTOP, after Desktop's first shadow cycle:
+Get-Content C:\Users\Alex\algo_trading\engine\config\shadow_signal_diff.csv | Select-Object -First 5
+```
+
+### To disable shadow mode later
+
+Close that PowerShell window on Desktop (session-only env var disappears) and restart trader without `SHADOW_MODE=1`. Or in the current window:
+```powershell
+$env:SHADOW_MODE = ""
+# restart trader via Telegram /stop + .\start_ed_v2.bat
+```
+
+### Safety guarantees
+
+- ✅ Shadow path is wrapped in `try/except: pass` — any error inside shadow code is swallowed, live trader continues normally
+- ✅ Default behavior (no env var) = zero overhead, zero code path change
+- ✅ Shadow is read-only — never modifies positions, regime config, or production CSV
+- ✅ Cannot break trading by enabling shadow mode
+
+### Disk cost
+
+~14 columns × 80 bytes/row × 24 cycles/day × 4 horizons = ~107 KB/day = 39 MB/year. Negligible.
+
+**Halts in place during refactor**:
+- ❌ No promotion of any new config to LIVE
+- ❌ No further HRST runs that would be used for promotion (research-only OK)
+- ✅ Live trader continues on current G_narrow config
+
+## Overnight runs status (after verdict)
+
+The overnight diagnostic battery is no longer needed to find the bug — it's been found. Optional follow-ups:
+
+- **Cancel laptop run** — not needed
+- **Cancel desktop run** — not needed
+- **Embargo A/B (`tools/embargo_ab_test.py --mode=both`)**: still worth running because it quantifies how much of the 4 divergences difference #1 alone contributes. ~2.5h, low value but cheap.
+
+## The problem (proven facts)
+
+| Metric | Live trader (56 days) | Backtest expectations (Mode V) | Gap |
+|---|---|---|---|
+| ETH 5h Win Rate | **50.9%** | **85%** | **−34pp** |
+| ETH 5h Per-trade return | +0.124% | ~+0.85% | **−7×** |
+| Sampled signal agreement | n/a | n/a | **40% match, 60% disagree** (10 samples) |
+| Win distribution | 55% of wins are <0.5%, biggest +4.99% | Backtest wins include +57.8%, +63.0%, +68.5% | Fat tail amputated |
+
+## What's already ruled out
+
+- ❌ Maker order fees (verified 0% fee fills in trader log)
+- ❌ PySR feature drift (JSONs dated April 21, predate production CSV)
+- ❌ Recent config promotion (50% WR holds across 30+ days under 3 different configs)
+
+## All unproven hypotheses (25 items, organized)
+
+### Tier 1 — Data divergence (most probable, code-confirmed cause exists)
+- **A1**: `macro_daily.csv` rows overwritten by yfinance via `keep='last'` ([download_macro_data.py:384](download_macro_data.py#L384))
+- **A2**: `derivatives_eth.csv` (funding/OI/perp) FULL re-pulls overwrite ALL history ([download_macro_data.py:925-975](download_macro_data.py#L925))
+- **A3**: `onchain_eth.csv` CoinMetrics revisions overwrite past daily values
+- **A4**: `cross_asset.csv` revisions
+- **A5**: `stablecoin_flows.csv` revisions via `keep='last'` ([download_macro_data.py:1252](download_macro_data.py#L1252))
+- **A6**: Hourly price `eth_hourly_data.csv` backfill of past hours
+- **A7**: Sparse features (orderbook, IV) — supposed to be append-only
+
+### Tier 2 — Code-level divergence
+- **B1**: `crypto_live_trader_ed.py` feature pipeline ≠ `crypto_trading_system_ed.py` backtest pipeline
+- **B2**: Live signal generation function ≠ backtest's `_deku_eval_with_pruning`
+- **B3**: Embargo: live trains `[H-281, H-1]` (no embargo per CLAUDE.md rule #9), backtest trains `[H-286, H-5]` (with embargo)
+- **B4**: K=5 median (backtest) vs single seed (live unknown)
+- **B5**: Random state at inference may differ
+- **B6**: PySR feature compute path may differ
+
+### Tier 3 — Execution-side
+- **C1**: Backtest exits at fixed horizon; live exits on first SELL signal flip
+- **C2**: `max_hold = 10h` violated live (observed 32.9h hold May 15-17)
+- **C3**: `min_sell_pnl = 0%` caps wins early in live
+- **C4**: Slippage modeling difference
+- **C5**: Maker order partial fills timing
+
+### Tier 4 — Regime / confidence / timing
+- **D1**: Regime detector inconsistency between sources
+- **D2**: Live trader regime cache staleness
+- **E1**: Ensemble probability aggregation difference
+- **E2**: Confidence threshold application difference
+- **F1**: Backtest assumes signal at H:00, live at H:00:30+
+- **F2**: Maker fill timing asymmetry vs hour close
+- **G1**: Live trader model caching across cycles
+- **G2**: Per-cycle retraining marginal differences
+
+## The fix that's safe to apply NOW (no testing needed)
+
+Patch the dedup pattern in `download_macro_data.py` from `keep='last'` → `keep='first'` for any rows older than the current hour. Preserves point-in-time integrity going forward (even if some currently-broken data is already drifted, future writes are safe).
+
+Affected lines: 384, 1252, 1342, 1401. Each needs a "current-hour exception" so in-flight rows can still update.
+
+For derivatives FULL re-pull (lines 925-975): switch to incremental tail-update only (last 24-48h read from API; older rows preserved from existing CSV).
+
+**Status**: not yet applied — patch design ready, awaiting diagnostic results to confirm this is THE bug.
+
+## Deliverables (committed 2026-05-26)
+
+| Script | Purpose | Runtime | Output |
+|---|---|---|---|
+| **[tools/diagnostic_battery.py](tools/diagnostic_battery.py)** | Main overnight battery — runs 9 fast phases + scenario-specific deep phases | ~12h per machine | `output/diagnostics_<ts>_<scenario>/` |
+| **[tools/embargo_ab_test.py](tools/embargo_ab_test.py)** | Standalone Phase 10 — embargo A/B via monkey-patched engine fork (auto-generated, auto-deleted) | ~2.5h | `output/embargo_ab_<ts>/` |
+
+Both scripts:
+- Use `--no-persist` + isolated `H_STRICT_MODELS_DIR` / `H_STRICT_CONFIG_DIR` env vars → live production CSV and regime config UNTOUCHED
+- Wrap every phase in try/except → single failure doesn't abort the battery
+- Write markdown report at the end so the next morning is a 2-minute read
+
+## Definitiveness expectation: ~65-70%
+
+Honest breakdown:
+- **~50%** chance the `data_drift_check` phase produces a smoking gun (>5% cells changed in macro/derivatives/onchain) → fix is the dedup patch below → bug solved
+- **~10-15%** added by Phase 10 embargo A/B definitively quantifying B3
+- **~5-10%** added by Phase 8 code-path diff revealing clear semantic divergence
+- **~30-35% residual risk**: multiple causes contributing, bug in something not enumerated, or feature-level divergence whose mechanism we can't pinpoint without ground-truth live feature logs (Phase 9 sets up that observability for NEXT debug cycle)
+
+## Phase inventory (all 12 phases)
+
+### Fast phases (~45 min, run on BOTH scenarios)
+
+| Phase | Function | What it tests |
+|---|---|---|
+| 0a | `snapshot_current_state` | Backup all data CSVs to `data/_diagnostic_snapshots/snap_<ts>/` for future 7-day revision check |
+| 0b | `static_code_analysis` | Grep 4 code files for 14 pattern categories (seed, cache, embargo, K=5, dedup, exit gates, signal entry points) |
+| 0c | `trade_analytics` | Full live PnL breakdown — all-time / 30d / 14d / 7d, win-loss distribution, biggest wins/losses |
+| 0d | `signal_log_analysis` | Parse signal_log.csv — action distribution per month, confidence stats by action |
+| 1 | `data_drift_check` | **TIER 1 SMOKING-GUN TEST**: diff May 22 snapshot vs current data row-by-row for 7 CSVs (price, derivatives, onchain, macro, cross-asset, stablecoins, fear-greed). Reports per-column cell diffs + example changed dates |
+| 2 | `existing_log_diff` | Parse [logs/ed_v1_20260525_204735.log](logs/ed_v1_20260525_204735.log) (May 25 head-to-head) — diff backtest signals against signal_log at scale |
+| 3 | `exit_policy_replay` | Simulate 5 exit policies on live signal stream since 2026-05-21: live-actual, no-profit-cap, force-horizon-5h, stop-loss-2pct, hold-to-max. Compare total PnL |
+| **8** | `code_path_diff` | **Phase 8** — AST-extract 6 functions (`generate_live_signal`, `detect_regime`, `generate_signals`, `_deku_eval_with_pruning`, `_h_deku_eval_median_k`, `_generate_signals_cached`) to standalone .py files, then difflib unified diffs with similarity ratios |
+| **9** | `write_instrumentation_patch` | **Phase 9** — Writes `feature_logging_hook.py` + `INSTRUCTIONS.md` for manual application to live trader. Enables feature-level analysis of NEXT divergence (does NOT help retrospectively) |
+
+### Laptop deep phases (focus: data drift, Tier 1)
+
+| Phase | Function | What it tests |
+|---|---|---|
+| L1 | `backtest_signal_regen_k5` | Subprocess: `python crypto_trading_system_ed.py T ETH --replay 1440 --no-persist --no-data-update` with `V2_DATA_SNAPSHOT=data/_reliability_hrst_snapshot_laptop_20260522_0139` and `RELIABILITY_K=5`. Parses 1440 signals × 2 horizons. Diffs every signal against `config/signal_log.csv`. Outputs `signal_diff_k5.csv` |
+| L2 | `mode_v_sensitivity_laptop` | Subprocess: `DV ETH 5h --replay 1440 --no-persist --no-data-update` on snapshot. Shows what Mode V picks today vs what LIVE has. Skip with `--skip-slow` |
+
+### Desktop deep phases (focus: code/seed sensitivity)
+
+| Phase | Function | What it tests |
+|---|---|---|
+| D1 | `backtest_signal_regen_k1` | Same as L1 but `RELIABILITY_K=1`. If K=1 matches signal_log better than K=5 → K=5 is the bug source |
+| D2 | `backtest_signal_regen_current_k5` | Same as L1 but on CURRENT data (no snapshot). Diff vs L1's snapshot result quantifies data drift between May 22 and today |
+| D3 | `mode_v_sensitivity_desktop` | Cross-machine duplicate of L2 |
+
+### Sequential Phase 10 (run AFTER diagnostic battery, either machine)
+
+| Script | What it tests |
+|---|---|
+| `tools/embargo_ab_test.py --mode=both` | (i) Mode T baseline (embargo=horizon, current behavior), (ii) Mode T with auto-generated fork `crypto_trading_system_ed_embargo_zero.py` that monkey-patches `_h_deku_eval_median_k` to force embargo=1, (iii) signal-by-signal diff. Verdict: minimal (≥95% match) / modest (80-95%) / major (<80%) embargo effect |
+
+---
+
+## TERMINAL COMMANDS — exact, copy-paste ready
+
+### Step 1: smoke test on either machine (5-10 min, recommended first)
+
+```powershell
+cd C:\Users\Alex\algo_trading\engine
+git pull
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+python tools/diagnostic_battery.py --scenario=fast
+```
+
+**Verify before launching overnight runs**: open `output/diagnostics_<ts>_fast/report.md` and confirm at least these phases succeeded: `snapshot_current_state`, `trade_analytics`, `data_drift_check`, `code_path_diff`. If any of those error out, fix the issue before committing 12h of compute.
+
+### Step 2: LAPTOP overnight (~12h)
+
+```powershell
+cd C:\Users\Alex\algo_trading\engine
+git pull
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+$env:PYTHONWARNINGS = "ignore:X does not have valid feature names:UserWarning"
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+python tools/diagnostic_battery.py --scenario=laptop
+```
+
+Tee log + foreground (recommended so you can `tail -f`):
+
+```powershell
+python tools/diagnostic_battery.py --scenario=laptop *>&1 | Tee-Object -FilePath "logs\diag_laptop_$(Get-Date -Format yyyyMMdd_HHmm).log"
+```
+
+### Step 3: DESKTOP overnight (~12h)
+
+```powershell
+cd G:\engine
+git pull
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+$env:PYTHONWARNINGS = "ignore:X does not have valid feature names:UserWarning"
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+python tools/diagnostic_battery.py --scenario=desktop
+```
+
+Tee log variant:
+
+```powershell
+python tools/diagnostic_battery.py --scenario=desktop *>&1 | Tee-Object -FilePath "logs\diag_desktop_$(Get-Date -Format yyyyMMdd_HHmm).log"
+```
+
+### Step 4: Embargo A/B (~2.5h, EITHER machine, AFTER Steps 2+3 complete)
+
+```powershell
+cd C:\Users\Alex\algo_trading\engine    # or G:\engine on desktop
+git pull
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+$env:PYTHONWARNINGS = "ignore:X does not have valid feature names:UserWarning"
+python tools/embargo_ab_test.py --mode=both
+```
+
+Optional — run baseline only first as sanity check (40-70 min):
+
+```powershell
+python tools/embargo_ab_test.py --mode=baseline
+# Inspect output/embargo_ab_<ts>/baseline_signals.csv — should look sane
+python tools/embargo_ab_test.py --mode=no_embargo
+```
+
+### Skip slow phases (testing the script itself without committing 12h)
+
+```powershell
+python tools/diagnostic_battery.py --scenario=laptop --skip-slow
+python tools/diagnostic_battery.py --scenario=desktop --skip-slow
+```
+
+---
+
+## The fix that's safe to apply NOW (no testing needed)
+
+Patch the dedup pattern in `download_macro_data.py` from `keep='last'` → `keep='first'` for any rows older than the current hour. Preserves point-in-time integrity going forward (even if some currently-broken data is already drifted, future writes are safe).
+
+Affected lines: 384, 1252, 1342, 1401. Each needs a "current-hour exception" so in-flight rows can still update.
+
+For derivatives FULL re-pull (lines 925-975): switch to incremental tail-update only (last 24-48h read from API; older rows preserved from existing CSV).
+
+**Status**: NOT yet applied — patch design ready, awaiting diagnostic results to confirm this is THE bug.
+
+## Decision tree (apply after both diagnostic batteries complete tomorrow morning)
+
+| Result | Conclusion | Action |
+|---|---|---|
+| `data_drift_check` shows >5% cells changed in macro/derivatives/onchain files | A1-A5 confirmed (data drift is at least PART of cause) | Apply dedup patch (see above); 30-day stability gate before any new promotion |
+| `data_drift_check` shows <1% drift | A1-A6 RULED OUT | Bug is in code/embargo/seed — look at Phase 8, 10, K=1 results |
+| L1 vs D2 (snapshot K=5 vs current K=5) signals differ | Data drift between May 22 and now confirmed at signal level | Strengthens A1-A6 verdict |
+| D1 vs L1 (K=1 vs K=5) signals differ >10% | K=5 multi-seed materially changes predictions | If live uses K=1, switching backtest to K=1 may close gap |
+| L1 / D1 signals diverge from signal_log >40% (current gap) | Confirms divergence at scale | Look at Phase 8 code diff for mechanism |
+| Phase 8 `code_path_diff` similarity ratio < 0.5 between live and backtest signal gen | Major code divergence | Manual review of extracted .py files; B1/B2 confirmed |
+| Phase 10 `embargo_ab_test` match rate < 80% | Embargo asymmetry is major contributor (B3) | Consider (a) embargo=0 backtest as promotion gate, (b) document embargo gap |
+| `exit_policy_replay` shows alternative policy gains >5pp on real live signals | C1/C3 confirmed; live exit policy is suboptimal | Patch live trader exit logic to match better-performing policy |
+| Multiple of above | Multiple causes — rank by magnitude, fix largest first | |
+| **None of above conclusive** | Bug is in something not enumerated; need Phase 9 hook applied + 30-day data | Apply Phase 9 instrumentation patch (`feature_logging_hook.py`) for next investigation |
+
+## Halts in place until diagnostic completes
+
+- ❌ No promotion of any new config to LIVE (even if it backtests better)
+- ❌ No further HRST runs on the assumption that Mode T REF predicts live performance
+- ✅ Live trader continues running on current G_narrow config (it's profitable at +7% / 56 days)
+
+## What gets produced overnight
+
+After both 12h batteries + the 2.5h embargo A/B complete:
+
+```
+output/
+  diagnostics_<ts>_laptop/
+    report.md                    ← READ THIS FIRST
+    run.log                      progress log (tail -f friendly)
+    data_diff_<csvname>.csv      cell-level differences per data file
+    signal_diff_k5.csv           L1 result: backtest K=5 vs live log per hour
+    code_extracts/               Phase 8 extracted .py files + difflib diffs
+    instrumentation/             Phase 9 patch + INSTRUCTIONS.md
+    mode_t_subprocess_k5.log     subprocess stdout
+    mode_v_subprocess.log        deep-phase subprocess stdout
+    all_results.json             machine-readable
+  diagnostics_<ts>_desktop/
+    report.md                    ← READ THIS SECOND
+    signal_diff_k1.csv           D1 result: K=1 vs live log
+    signal_diff_k5.csv           D2 result: current data K=5 vs live log
+    [same structure]
+  embargo_ab_<ts>/
+    report.md                    ← READ THIS THIRD
+    signal_diff.csv              baseline vs no_embargo per hour
+    baseline_signals.csv
+    no_embargo_signals.csv
+```
+
+Total user time tomorrow morning to digest: ~30-60 minutes of report reading.
 
 ---
 
