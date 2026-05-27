@@ -1074,20 +1074,37 @@ def _backup_models_csv():
         import shutil
         bak = f'{MODELS_DIR}/crypto_ed_best_models_backup.csv'
         shutil.copy2(src, bak)
+# Cache stores (mtime_seen, df) so we can invalidate when download_macro_data
+# refreshes the file on disk. Previously the cache had no mtime check, so
+# values loaded at trader startup persisted in RAM for the life of the
+# process — every macro / cross-asset / sentiment / on-chain feature stayed
+# frozen at startup-time values regardless of fresh data being written to
+# disk. This was a major contributor to the live-vs-backtest gap surfaced
+# by 2026-05-27 PIT validation.
 _macro_cache = {}
 
 
 def _load_macro_csv(filename):
-    if filename in _macro_cache:
-        return _macro_cache[filename]
     path = os.path.join(MACRO_DIR, filename)
     if not os.path.exists(path):
-        return None
+        # If we have a cached value but the file vanished (e.g. Drive sync hiccup),
+        # serve the cache rather than returning None — closes a brittleness window
+        # the pre-existing code already had.
+        cached = _macro_cache.get(filename)
+        return cached[1] if cached else None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        cached = _macro_cache.get(filename)
+        return cached[1] if cached else None
+    cached = _macro_cache.get(filename)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     try:
         df = pd.read_csv(path, parse_dates=[0], index_col=0)
         idx = pd.to_datetime(df.index)
         df.index = idx.tz_localize(None) if idx.tz is None else idx.tz_convert(None)
-        _macro_cache[filename] = df
+        _macro_cache[filename] = (mtime, df)
         return df
     except Exception as e:
         print(f"  Warning: Could not load {path}: {e}")

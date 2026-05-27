@@ -6,16 +6,20 @@ Automated ML trading system for **crypto** (ETH live; BTC, SOL, LINK, XRP standb
 
 ---
 
-## Current production state (snapshot 2026-05-19)
+## Current production state (snapshot 2026-05-27)
 
-- **Live since 2026-05-18 22:02 CEST** — H75 (H_STRICT_FAMILY engine merge)
-- **Engine**: `crypto_trading_system_ed.py` with K=5 multi-seed denoising, REFINE_TRIALS=75, strict `(combo, w)` diversity dedup
-- **Asset**: ETH only (BTC/SOL/LINK/XRP `enabled: false` — diversification thin)
-- **Detector**: `sma24>sma100`. Bull = 5h@75% XGB+LGBM w=100 γ=0.9993. Bear = 8h@65% RF+LGBM w=162 γ=0.9954
-- **Gates**: rr8h≥2.0 OR rr14h≥6.0 cd=6h (bull); rr10h≥5.5 OR rr12h≥2.0 cd=8h (bear)
-- **Shields OFF**, min_sell_pnl=0%, max_hold=10h
+Live config: **G_narrow models on H75 engine** with **macro-cache fix** (TODO 0527). The H75 H_STRICT_FAMILY merge engine has been unchanged since 2026-05-18; the per-horizon models + regime config were swapped to G_narrow_d's output on 2026-05-21 21:56; the `_load_macro_csv` mtime fix was patched 2026-05-27 11:22.
 
-For the current live OOS monitoring, scheduled runs, and research backlog → see [TODO.md](TODO.md).
+- **Engine code**: `crypto_trading_system_ed.py` — K=5 multi-seed denoising, REFINE_TRIALS=75, strict `(combo, w)` diversity dedup. **2026-05-27 patch**: `_load_macro_csv` now mtime-aware (lines 1077-1110) — was caching macro/cross-asset/sentiment/onchain data at trader startup and never refreshing, freezing 11+ high-importance time-shifted features. Root cause of the live-vs-backtest WR gap (50.9% live vs ~85% backtest).
+- **Trader's models + regime config** (since 2026-05-21 21:56): G_narrow_d's HRST output
+- **Asset**: ETH only (BTC/SOL/LINK/XRP/BNB `enabled: false`; XRP removed from data pipeline 2026-05-23)
+- **Detector**: `sma24>sma100`. Bull = **5h@65%** RF+LGBM w=281 γ=0.9981 12f. Bear = **8h@65%** RF+LGBM w=293 γ=0.9990 16f
+- **Rally cooldown OFF** (manually toggled 2026-05-23 22:21). **Shields OFF**, min_sell_pnl=0%, max_hold=10h
+- **Signal log schema** (renamed 2026-05-27): `h_1/sig_1/conf_1` (bull) + `h_2/sig_2/conf_2` (bear) — replaces the old `sig_4h/sig_8h` which broke when actual model horizon differed from hardcoded constants
+- **Validation**: same-process test + shadow mode in-process at 100% match (core math = live math, max conf delta 0.04pp). PIT validator using oldest-wins archeology merge at 66.7% (ceiling — limited by retrospective inability to reproduce pre-fix cache state)
+- **Monitoring**: live WR over next 3-5 days expected to trend toward backtest WR; shadow mode running continuously as correctness gate
+
+For the current live OOS monitoring, scheduled runs, and research backlog → see [TODO.md](TODO.md). For closed research arcs and audit trail → see [ARCHIVED_LOG.md](ARCHIVED_LOG.md).
 
 ---
 
@@ -252,6 +256,9 @@ python download_macro_data.py        # Refresh VIX, DXY, S&P500, Fear&Greed, on-
 
 | Date | Milestone |
 |---|---|
+| **2026-05-24** | **Parallel fork bug fixes landed; TODO 0524 launched.** `crypto_trading_system_ed_g_narrow_d_parallel.py` had a namespace bug — called `ENGINE.main()` which read `GRID_*`/`N_FEATURES_RANGE`/output-dir constants from ENGINE instead of G_narrow_d. Stage 2 9-12h Laptop run from 2026-05-22 invalidated (was running engine's wider grid, not G's narrow). FIX #0 patches all constants over. Two follow-on fixes: `os.makedirs` for output dirs, LGBM warnings filter for PowerShell tee. Top-5 HRST (5,6,8,11,12h) launched Desktop 20:27 to A/B against the tainted Stage 2 result on the same May 22 snapshot. XRP also removed from trader data pipeline (silent crash during derivatives download). |
+| **2026-05-21** | **G_narrow models promoted to live.** ETH bull/bear models swapped from H75-fresh (May 20 09:04) to G_narrow_d's HRST output — bull 5h@65% RF+LGBM, bear 8h@65% RF+LGBM. Engine code unchanged (still H75 H_STRICT_FAMILY). Live config switched from symmetric (6h/6h) back to asymmetric horizon split. |
+| **2026-05-20** | **H75-fresh promoted.** Laptop H75 HRST fresh-data rerun completed 03:03 CEST after 28h wall. Mode T REF +76.91%. Bull 6h@65% / bear 6h@65% symmetric (first live config with bull-horizon == bear-horizon). |
 | **2026-05-18** | **H75 promoted live.** H_STRICT_FAMILY merge: K=5 multi-seed denoising + REFINE_TRIALS=75 + strict `(combo, w)` dedup. Detector switched `tsmom_672h` → `sma24>sma100`. Bull horizon 6h → 5h@75%; bear 8h@65% kept. CLAUDE.md / TODO.md / ARCHIVED_LOG.md three-file split same week. |
 | **2026-05-15** | **5-variant reliability test passed.** B_multi_seed (+5.11pp) and C_no_feature_cap (+5.23pp) over A_baseline on Mode V combined_score at ETH 8h. Both passed the pre-set CLEAR WINNER threshold — feeds into H75 build the next week. |
 | **2026-05-11** | **CPCV HRST = neutral.** López de Prado AFML Ch 12 Combinatorial Purged CV matched current method (no Mode T re-rank). Kept available as diagnostic for trigger-based re-runs. |

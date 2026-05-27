@@ -38,6 +38,108 @@ os.makedirs(MACRO_DIR, exist_ok=True)
 FRESHNESS_SECONDS = 21600  # 6 hours
 
 
+# ============================================================
+# Point-in-time dedup helper (added 2026-05-27 for TODO 0526 data drift fix)
+# ============================================================
+# PROBLEM: every call site that used `drop_duplicates(keep='last')` or
+# `index.duplicated(keep='last')` would SILENTLY OVERWRITE historical rows
+# when upstream APIs returned revised values for past dates. This caused
+# data drift between live-time and backtest-time — backtest sees corrected
+# values that the live trader never saw at decision time, inflating its
+# results vs reality.
+#
+# FIX: this helper splits the dataframe into HISTORICAL rows (older than the
+# current hour/day) and CURRENT rows. Historical rows get keep='first' (the
+# originally-observed value is frozen). Current rows get keep='last' (allows
+# in-progress updates within the current period — e.g. derivatives open
+# interest updating multiple times within the current hour before close).
+#
+# Used by: _yf_merge_with_existing (macro_daily), stablecoin mcap merge,
+# options IV snapshot append, orderbook snapshot append.
+def _dedup_preserve_history(df, freq='1h', subset=None):
+    """Dedup with point-in-time preservation.
+
+    Historical rows (datetime < start of current period) keep='first'.
+    Current rows (datetime >= start of current period) keep='last'.
+
+    df: DataFrame to dedup.
+        If subset=None, dedup by df.index (must be DatetimeIndex).
+        If subset=['col', ...], uses subset[0] as the datetime column.
+    freq: '1h' for hourly cutoff, 'D' for daily cutoff.
+    """
+    import datetime as _dt
+    try:
+        cutoff = pd.Timestamp(_dt.datetime.utcnow()).floor(freq)
+    except Exception:
+        # Fallback: treat everything as historical (safest — never overwrites)
+        cutoff = pd.Timestamp('2099-01-01')
+
+    if subset is None:
+        if not isinstance(df.index, pd.DatetimeIndex):
+            # Index isn't datetime — fall back to original keep='last' behavior
+            return df[~df.index.duplicated(keep='last')]
+        hist_mask = df.index < cutoff
+        hist = df.loc[hist_mask]
+        curr = df.loc[~hist_mask]
+        hist = hist[~hist.index.duplicated(keep='first')]
+        curr = curr[~curr.index.duplicated(keep='last')]
+        return pd.concat([hist, curr]).sort_index()
+    else:
+        time_col = subset[0]
+        if time_col not in df.columns:
+            return df.drop_duplicates(subset=subset, keep='last')
+        times = pd.to_datetime(df[time_col], errors='coerce')
+        hist_mask = times < cutoff  # NaT comparisons → False, so NaT rows go to current
+        hist = df.loc[hist_mask].drop_duplicates(subset=subset, keep='first')
+        curr = df.loc[~hist_mask].drop_duplicates(subset=subset, keep='last')
+        return pd.concat([hist, curr], ignore_index=True).sort_values(time_col).reset_index(drop=True)
+
+
+def _merge_preserve_history(new_df, existing_df, freq='1h'):
+    """Cell-level merge of new_df with existing_df preserving historical values.
+
+    For rows BEFORE current period: existing values WIN (frozen). Any NaN cells
+    in existing get filled from new (covers schema additions — e.g. first time
+    a new metric column appears, its historical values come from new).
+
+    For rows IN current period: new values WIN (allows in-progress updates).
+    Any NaN cells in new get filled from existing (covers sub-source failures
+    where today's download lacks a column).
+
+    Schema-safe: handles columns present in one but not the other via
+    pandas combine_first semantics (union of columns + cell-level fill).
+
+    Both DataFrames must have datetime-indexed rows.
+    freq: '1h' (derivatives/snapshots) or 'D' (onchain/macro daily).
+
+    Added 2026-05-27 (TODO 0526 data drift fix) — fixes full-file-replace
+    downloads (derivatives, onchain) that silently overwrote historical rows
+    when upstream APIs returned revised values.
+    """
+    import datetime as _dt
+    try:
+        cutoff = pd.Timestamp(_dt.datetime.utcnow()).floor(freq)
+    except Exception:
+        cutoff = pd.Timestamp('2099-01-01')  # safest fallback: treat all as historical
+
+    if not isinstance(existing_df.index, pd.DatetimeIndex) or not isinstance(new_df.index, pd.DatetimeIndex):
+        # Indices not datetime — fall back to plain concat + keep='last' dedup
+        combined = pd.concat([existing_df, new_df])
+        return combined[~combined.index.duplicated(keep='last')]
+
+    hist_e = existing_df[existing_df.index < cutoff]
+    hist_n = new_df[new_df.index < cutoff]
+    # Historical: existing values frozen; new only fills cells where existing was NaN
+    hist_merged = hist_e.combine_first(hist_n) if len(hist_e) else hist_n
+
+    curr_e = existing_df[existing_df.index >= cutoff]
+    curr_n = new_df[new_df.index >= cutoff]
+    # Current: new values win; existing only fills cells where new was NaN
+    curr_merged = curr_n.combine_first(curr_e) if len(curr_n) else curr_e
+
+    return pd.concat([hist_merged, curr_merged]).sort_index()
+
+
 def _binance_get(url, ctx, timeout=30, retries=4, backoff=(1, 2, 5, 10), verbose=False):
     """Resilient Binance GET. Retries transient HTTP 400/429/5xx + connection
     errors with exponential backoff. Captures response body on every HTTP
@@ -381,7 +483,10 @@ def _yf_merge_with_existing(new_df, outfile, mode_label):
         return new_df
     keep = existing.loc[existing.index < new_df.index.min()]
     merged = pd.concat([keep[new_df.columns], new_df]).sort_index()
-    merged = merged[~merged.index.duplicated(keep='last')]
+    # TODO 0526 data drift fix (2026-05-27): was `keep='last'` which let yfinance
+    # revisions silently overwrite historical macro values. Now preserves the
+    # originally-observed value for past dates; today's row can still update.
+    merged = _dedup_preserve_history(merged, freq='D')
     return merged
 
 
@@ -544,8 +649,21 @@ def download_fear_greed():
         fg_df = fg_df.sort_values('date').set_index('date')
         fg_df.index = fg_df.index.tz_localize(None)
 
-        # Save
+        # TODO 0526 data drift fix (2026-05-27): merge with existing file to
+        # preserve historical Fear & Greed values. The alternative.me API
+        # returns all-history each call; without this merge, any upstream
+        # revision to a past day silently overwrites the originally-observed
+        # value. Cell-level merge keeps existing historical values frozen and
+        # only allows the current day to update.
         outfile = os.path.join(MACRO_DIR, 'fear_greed.csv')
+        if os.path.exists(outfile):
+            try:
+                existing = pd.read_csv(outfile, parse_dates=['date'], index_col='date')
+                if existing.index.tz is not None:
+                    existing.index = existing.index.tz_localize(None)
+                fg_df = _merge_preserve_history(fg_df, existing, freq='D')
+            except Exception as e:
+                print(f"  [!] Could not merge with existing fear_greed.csv ({e}); writing fresh.")
         fg_df.to_csv(outfile)
         print(f"  Saved: {outfile} ({len(fg_df)} rows)")
         print(f"  Date range: {fg_df.index[0].date()} to {fg_df.index[-1].date()}")
@@ -785,6 +903,26 @@ def download_onchain_data(asset='btc'):
 
     # Save
     outfile = os.path.join(MACRO_DIR, f'onchain_{asset}.csv')
+
+    # TODO 0526 data drift fix (2026-05-27): merge with existing CSV preserving
+    # historical CoinMetrics values. Without this, every download replaces the
+    # whole file — historical metric values could be silently revised by upstream
+    # API corrections, drifting from what the live trader saw at decision time.
+    if os.path.exists(outfile):
+        try:
+            existing_oc = pd.read_csv(outfile, parse_dates=[0], index_col=0)
+            if existing_oc.index.tz is not None:
+                existing_oc.index = existing_oc.index.tz_localize(None)
+            n_before = len(onchain_df)
+            onchain_df = _merge_preserve_history(onchain_df, existing_oc, freq='D')
+            n_after = len(onchain_df)
+            if n_after != n_before:
+                print(f"  [drift-fix] merged with existing: {n_before} -> {n_after} rows "
+                      f"(historical preserved from existing, today's row may update)")
+        except Exception as _e:
+            print(f"  [drift-fix] could not merge with existing onchain CSV ({_e}); "
+                  f"writing fresh download (historical drift NOT prevented this cycle)")
+
     onchain_df.to_csv(outfile)
     print(f"\n  Saved: {outfile} ({len(onchain_df)} rows, {len(onchain_df.columns)} columns)")
     print(f"  Columns: {list(onchain_df.columns)}")
@@ -1076,6 +1214,30 @@ def download_derivatives_data(assets=None):
                 print(f"  [LKG] Could not splice from previous CSV ({_e}); "
                       f"writing partial CSV — model may see column shape mismatch.")
 
+        # TODO 0526 data drift fix (2026-05-27): merge with existing CSV preserving
+        # historical rows. Without this, every download replaces the whole file —
+        # Binance returns paginated history every cycle, and any minor differences
+        # in OI/funding/perp values for past hours silently overwrote what the live
+        # trader saw at decision time. This caused the bulk of the derivatives drift
+        # we measured (239 cells diff between May 22 snapshot and current data).
+        #
+        # This runs AFTER the LKG splicing block above — so even when a sub-source
+        # fails, the LKG-spliced columns are also preserved through the merge.
+        if os.path.exists(outfile):
+            try:
+                existing_dv = pd.read_csv(outfile, parse_dates=[0], index_col=0)
+                if existing_dv.index.tz is not None:
+                    existing_dv.index = existing_dv.index.tz_localize(None)
+                n_before = len(deriv_df)
+                deriv_df = _merge_preserve_history(deriv_df, existing_dv, freq='1h')
+                n_after = len(deriv_df)
+                if n_after != n_before:
+                    print(f"  [drift-fix] merged with existing: {n_before} -> {n_after} rows "
+                          f"(historical preserved from existing, current hour may update)")
+            except Exception as _e:
+                print(f"  [drift-fix] could not merge with existing derivatives CSV ({_e}); "
+                      f"writing fresh download (historical drift NOT prevented this cycle)")
+
         deriv_df.to_csv(outfile)
         print(f"  Saved: {outfile} ({len(deriv_df)} rows, {len(deriv_df.columns)} columns)")
         print(f"  Date range: {deriv_df.index[0]} to {deriv_df.index[-1]}")
@@ -1249,7 +1411,8 @@ def download_stablecoin_flows():
                 mc = pd.DataFrame(data['market_caps'], columns=['timestamp', f'{label}_mcap'])
                 mc['datetime'] = pd.to_datetime(mc['timestamp'], unit='ms')
                 mc = mc[['datetime', f'{label}_mcap']].set_index('datetime').sort_index()
-                mc = mc[~mc.index.duplicated(keep='last')]
+                # TODO 0526 data drift fix (2026-05-27): preserve historical mcap values
+                mc = _dedup_preserve_history(mc, freq='D')
                 all_dfs.append(mc)
                 print(f"{len(mc)} days")
             else:
@@ -1339,7 +1502,13 @@ def download_options_iv_skew():
     # Append to existing file
     if os.path.exists(outfile):
         existing = pd.read_csv(outfile)
-        df = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=['datetime', 'asset'], keep='last')
+        # TODO 0526 data drift fix (2026-05-27): preserve historical IV snapshots —
+        # was keep='last' which let a re-snapshot within the same hour overwrite
+        # the first reading. Now first reading per (hour, asset) is frozen.
+        df = _dedup_preserve_history(
+            pd.concat([existing, df], ignore_index=True),
+            freq='1h', subset=['datetime', 'asset'],
+        )
     df.to_csv(outfile, index=False)
     print(f"  Saved: {outfile} ({len(df)} rows)")
     return df
@@ -1398,7 +1567,11 @@ def download_orderbook_snapshot(assets=None):
     outfile = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
     if os.path.exists(outfile):
         existing = pd.read_csv(outfile)
-        df = pd.concat([existing, df], ignore_index=True).drop_duplicates(subset=['datetime', 'asset'], keep='last')
+        # TODO 0526 data drift fix (2026-05-27): preserve historical orderbook snapshots
+        df = _dedup_preserve_history(
+            pd.concat([existing, df], ignore_index=True),
+            freq='1h', subset=['datetime', 'asset'],
+        )
     df.to_csv(outfile, index=False)
     print(f"  Saved: {outfile} ({len(df)} rows)")
     return df

@@ -1616,6 +1616,16 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
         sig = generate_live_signal(asset, cfg, df_raw=df_raw, verbose=first, metrics_out=m_out)
         sigs_by_horizon[h] = sig
         per_horizon_metrics[h] = m_out
+        # TODO 0526 Phase 2: shadow-mode comparison. When SHADOW_MODE=1 env var is
+        # set, also run compute_signal_core() on equivalent inputs and log the diff
+        # to config/shadow_signal_diff.csv. Trading uses `sig` (unchanged). All
+        # shadow errors are swallowed — see crypto_live_shadow.py for details.
+        try:
+            from crypto_live_shadow import is_shadow_enabled, shadow_compare
+            if is_shadow_enabled():
+                shadow_compare(asset, cfg, df_raw, sig)
+        except Exception:
+            pass  # NEVER let shadow path crash live trader
         first = False
 
     # Apply strategy — Ed regime always uses single horizon (Xh_only)
@@ -1677,11 +1687,16 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
     print(f"  {asset}: {' | '.join(sig_strs)} → {action} ({confidence:.2f}%) [{regime_label.upper()}] [{reason}] | pos={position['state']}")
 
     # Log signal for /chart command
-    _log_signal(asset, price, sigs_by_horizon, action, confidence)
+    _log_signal(asset, price, sigs_by_horizon, action, confidence, regime_label=regime_label)
 
-    # Expose sig_short, sig_long for Telegram message
-    sig_short = sigs_by_horizon.get(HORIZON_SHORT)
-    sig_long = sigs_by_horizon.get(HORIZON_LONG)
+    # Expose sig_short, sig_long for Telegram message. Look up by SORTED order
+    # of actually-computed horizons, not by hardcoded HORIZON_SHORT/HORIZON_LONG
+    # constants — those literal 4 and 8 mismatch the production horizons (5 bull,
+    # 8 bear) under H75/G_narrow and would leave sig_short permanently None on
+    # bull cycles. Same root cause as the prior sig_4h logging bug fixed today.
+    _ordered_h = sorted(sigs_by_horizon.keys())
+    sig_short = sigs_by_horizon.get(_ordered_h[0]) if _ordered_h else None
+    sig_long = sigs_by_horizon.get(_ordered_h[1]) if len(_ordered_h) >= 2 else None
 
     # Execute
     executed = False
@@ -2119,9 +2134,17 @@ def process_asset(asset, trading_cfg, dry_run=False, cycle_metrics=None):
                 pass
             _trade_lock_held = False
 
-    # Get gamma from the primary horizon model
+    # Get gamma from the primary horizon model. When regime_horizon is unknown
+    # (no regime decided), prefer horizons we ACTUALLY computed signals for in
+    # this cycle — not hardcoded HORIZON_SHORT/HORIZON_LONG constants which
+    # mismatch production (bull=5 under H75/G_narrow leaves HORIZON_SHORT=4 stale).
     gamma_val = ''
-    gamma_horizons = [regime_horizon] if regime_horizon else [HORIZON_LONG, HORIZON_SHORT]
+    if regime_horizon:
+        gamma_horizons = [regime_horizon]
+    elif sigs_by_horizon:
+        gamma_horizons = sorted(sigs_by_horizon.keys(), reverse=True)  # prefer longer horizon first
+    else:
+        gamma_horizons = [HORIZON_LONG, HORIZON_SHORT]  # last-resort fallback
     for h in gamma_horizons:
         cfg_g = load_best_config(asset, horizon=h)
         if cfg_g:
@@ -2583,7 +2606,8 @@ def _handle_reload_command(trading_cfg):
 
     enabled_assets = [a for a, c in (trading_cfg or {}).items() if c.get('enabled')]
     if not enabled_assets:
-        enabled_assets = ['BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB']
+        # XRP excluded — see _DATA_DEP_ASSETS rationale in run_loop.
+        enabled_assets = ['BTC', 'ETH', 'SOL', 'LINK', 'BNB']
 
     ok, failed = [], []
 
@@ -2598,7 +2622,8 @@ def _handle_reload_command(trading_cfg):
 
     try:
         from crypto_live_trader_ed import download_asset as _dl_asset
-        for a in ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'):
+        # XRP excluded — see _DATA_DEP_ASSETS rationale in run_loop.
+        for a in ('BTC', 'ETH', 'SOL', 'LINK', 'BNB'):
             _try(f'ohlcv_{a.lower()}', lambda _a=a: _dl_asset(_a, update_only=True))
     except Exception as e:
         failed.append(f'ohlcv (import): {e}')
@@ -2615,7 +2640,8 @@ def _handle_reload_command(trading_cfg):
         send_telegram(f"⚠️ <b>Reload partial</b>\n✓ {len(ok)} OK\n✗ macro module import failed: {e}")
         return
 
-    for a in ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB'):
+    # XRP derivatives excluded — the silent-crash source — see _DATA_DEP_ASSETS rationale.
+    for a in ('BTC', 'ETH', 'SOL', 'LINK', 'BNB'):
         _try(f'derivatives_{a.lower()}', lambda _a=a: download_derivatives_data(assets=[_a]))
 
     _try('macro_daily',      download_yfinance_data)
@@ -2623,7 +2649,8 @@ def _handle_reload_command(trading_cfg):
     _try('cross_asset',      download_cross_asset)
     _try('stablecoin_flows', download_stablecoin_flows)
 
-    for oc in ('btc', 'eth', 'xrp', 'link'):
+    # XRP on-chain excluded — see _DATA_DEP_ASSETS rationale.
+    for oc in ('btc', 'eth', 'link'):
         _try(f'onchain_{oc}', lambda _o=oc: download_onchain_data(asset=_o))
 
     _try('orderbook_snapshot', lambda: download_orderbook_snapshot(assets=enabled_assets))
@@ -3220,15 +3247,49 @@ def _handle_hold_shield_command(msg, trading_cfg):
 SIGNAL_LOG_DIR = 'config'
 SIGNAL_LOG_FILE = os.path.join(SIGNAL_LOG_DIR, 'signal_log.csv')
 
-def _log_signal(asset, price, sigs_by_horizon, action, confidence):
-    """Append one row per signal to signal_log.csv for chart rendering."""
+def _log_signal(asset, price, sigs_by_horizon, action, confidence, regime_label=None):
+    """Append one row per signal to signal_log.csv for chart rendering.
+
+    Columns are regime-anchored, not position-anchored:
+      sig_1 / conf_1 / h_1 = bull-regime model output  (lower horizon by convention)
+      sig_2 / conf_2 / h_2 = bear-regime model output  (higher horizon by convention)
+
+    In regime-restricted mode (which is the default) only one horizon runs per
+    cycle, so exactly one of (sig_1, sig_2) is populated and the other stays
+    empty — that empty slot tells you which regime was NOT active. Without the
+    regime_label parameter the function falls back to sort-order (lower horizon
+    → slot 1) for backward compatibility.
+
+    This replaces the prior sig_4h / sig_8h naming, which was tied to the
+    hardcoded HORIZON_SHORT / HORIZON_LONG constants and silently broke
+    whenever the actual model horizon differed from those constants (e.g. bull
+    horizon promoted to 5h left sig_4h permanently empty under the old code).
+    """
     import csv
     fieldnames = ['timestamp', 'asset', 'price', 'action', 'confidence',
-                  f'sig_{HORIZON_SHORT}h', f'conf_{HORIZON_SHORT}h', f'sig_{HORIZON_LONG}h', f'conf_{HORIZON_LONG}h']
+                  'h_1', 'sig_1', 'conf_1', 'h_2', 'sig_2', 'conf_2']
     file_exists = os.path.exists(SIGNAL_LOG_FILE) and os.path.getsize(SIGNAL_LOG_FILE) > 0
     try:
-        sig_s = sigs_by_horizon.get(HORIZON_SHORT)
-        sig_l = sigs_by_horizon.get(HORIZON_LONG)
+        ordered = sorted(sigs_by_horizon.keys())
+        # Slot assignment rules:
+        #  - 0 horizons: both slots empty (defensive — shouldn't happen).
+        #  - 1 horizon (regime-restricted mode, common case): use regime_label
+        #    to pick slot 1 (bull) vs slot 2 (bear). If regime_label is None
+        #    or unknown, default to slot 1.
+        #  - 2+ horizons (fallback mode when regime detector returned no horizon):
+        #    lower-horizon -> slot 1, higher-horizon -> slot 2, ignoring
+        #    regime_label so we never drop a computed signal.
+        if len(ordered) == 0:
+            h_1, h_2 = None, None
+        elif len(ordered) == 1:
+            if regime_label == 'bear':
+                h_1, h_2 = None, ordered[0]
+            else:
+                h_1, h_2 = ordered[0], None
+        else:
+            h_1, h_2 = ordered[0], ordered[1]
+        sig_1 = sigs_by_horizon.get(h_1) if h_1 is not None else None
+        sig_2 = sigs_by_horizon.get(h_2) if h_2 is not None else None
         with open(SIGNAL_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
@@ -3239,10 +3300,12 @@ def _log_signal(asset, price, sigs_by_horizon, action, confidence):
                 'price': f'{price:.2f}',
                 'action': action,
                 'confidence': f'{confidence:.1f}',
-                f'sig_{HORIZON_SHORT}h': sig_s['signal'] if sig_s else '',
-                f'conf_{HORIZON_SHORT}h': f"{sig_s['confidence']:.1f}" if sig_s else '',
-                f'sig_{HORIZON_LONG}h': sig_l['signal'] if sig_l else '',
-                f'conf_{HORIZON_LONG}h': f"{sig_l['confidence']:.1f}" if sig_l else '',
+                'h_1': h_1 if h_1 is not None else '',
+                'sig_1': sig_1['signal'] if sig_1 else '',
+                'conf_1': f"{sig_1['confidence']:.1f}" if sig_1 else '',
+                'h_2': h_2 if h_2 is not None else '',
+                'sig_2': sig_2['signal'] if sig_2 else '',
+                'conf_2': f"{sig_2['confidence']:.1f}" if sig_2 else '',
             })
     except Exception as e:
         print(f"  [!] Signal log error: {e}")
@@ -4333,7 +4396,15 @@ def run_all_once(trading_cfg, dry_run=False):
     import time as _time
     import json as _json
 
-    _DATA_DEP_ASSETS = ('BTC', 'ETH', 'XRP', 'SOL', 'LINK', 'BNB')
+    # XRP removed 2026-05-22: the XRP derivatives download from Binance
+    # silently kills the trader process during the perp-klines fetch step
+    # (3 crashes in 5 days, all at the same spot, no Python traceback).
+    # Audit shows XRP data is never used for ETH inference (0 references in
+    # 55 PySR ETH expressions, 0 XRP-derived features in 97 ETH models,
+    # no xa_xrp_* feature defined in code, no XRP column in cross_asset.csv).
+    # To re-enable XRP later: add it back here AND audit that the crash
+    # signature is gone in download_macro_data.py:_download_derivatives_data.
+    _DATA_DEP_ASSETS = ('BTC', 'ETH', 'SOL', 'LINK', 'BNB')
 
     def _file_is_fresh(relpath, max_age_sec):
         """Fix #7 (2026-04-24): content-aware freshness using last-row datetime.
@@ -4408,7 +4479,8 @@ def run_all_once(trading_cfg, dry_run=False):
         # SLA 60h to match feature_sources.json (M-24 fix 2026-04-25 absorbs
         # CoinMetrics T-1 publish + catch-up gap). Previous 6h SLA caused
         # re-download every cycle.
-        for _oc in ('btc', 'eth', 'xrp', 'link'):
+        # XRP on-chain removed 2026-05-22 — see _DATA_DEP_ASSETS rationale.
+        for _oc in ('btc', 'eth', 'link'):
             _SOURCE_REGISTRY[f'onchain_{_oc}'] = {
                 'file': f'data/macro_data/onchain_{_oc}.csv',
                 'max_age_sec': 60 * 3600,
@@ -4507,7 +4579,14 @@ def run_all_once(trading_cfg, dry_run=False):
             if not load_best_config(asset, horizon=_cfg_h):
                 continue
         else:
-            if not load_best_config(asset, horizon=HORIZON_SHORT) and not load_best_config(asset, horizon=HORIZON_LONG):
+            # Preflight: at least one of the asset's regime horizons must have
+            # a loadable model config. Use the asset's ACTUAL bull/bear horizons
+            # from the regime config (not hardcoded HORIZON_SHORT/HORIZON_LONG
+            # constants, which mismatch production for H75/G_narrow where bull=5).
+            _bull_h = cfg.get('bull', {}).get('horizon')
+            _bear_h = cfg.get('bear', {}).get('horizon')
+            _candidates = [h for h in (_bull_h, _bear_h) if h]
+            if _candidates and not any(load_best_config(asset, horizon=h) for h in _candidates):
                 continue
         bull_h = cfg.get('bull', {}).get('horizon', '?')
         bear_h = cfg.get('bear', {}).get('horizon', '?')
