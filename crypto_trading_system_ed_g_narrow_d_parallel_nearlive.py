@@ -182,8 +182,15 @@ print(f'  config_dir={ENGINE.CONFIG_DIR}', flush=True)
 # and Mode V refine eval runs under the new semantics.
 # ════════════════════════════════════════════════════════════════════════
 import crypto_trading_system_ed_step6_nearlive as ENGINE_NL  # noqa: E402
-ENGINE._H_ORIG_DEKU_EVAL = ENGINE_NL._H_ORIG_DEKU_EVAL  # pre-K=5 inner, with compute_signal_core delegation
-print(f'[G_NARROW_D_PARALLEL_NEARLIVE] patched ENGINE._H_ORIG_DEKU_EVAL -> step6_nearlive inner _deku_eval_with_pruning', flush=True)
+# The parallel fork replaces `_deku_eval_with_pruning` with a custom
+# `_parallel_deku_eval_median_k` (defined later in this file) that calls
+# `G._G_ORIG_DEKU_EVAL` — NOT `ENGINE._H_ORIG_DEKU_EVAL`. So we MUST patch
+# G._G_ORIG_DEKU_EVAL to get NEAR_LIVE_MODE into the actual eval path.
+# We also patch ENGINE._H_ORIG_DEKU_EVAL for defense-in-depth in case any
+# code path falls through to the ENGINE wrapper.
+G._G_ORIG_DEKU_EVAL = ENGINE_NL._H_ORIG_DEKU_EVAL  # primary patch — what _parallel_deku_eval_median_k actually calls
+ENGINE._H_ORIG_DEKU_EVAL = ENGINE_NL._H_ORIG_DEKU_EVAL  # defense-in-depth
+print(f'[G_NARROW_D_PARALLEL_NEARLIVE] patched G._G_ORIG_DEKU_EVAL + ENGINE._H_ORIG_DEKU_EVAL -> step6_nearlive inner _deku_eval_with_pruning', flush=True)
 print(f'  NEAR_LIVE_MODE env var honored inside step6_nearlive (na=mean_last_10, signal=ternary, step=1, embargo=horizon)', flush=True)
 print(f'  Off-by-default — set $env:NEAR_LIVE_MODE = "1" to activate', flush=True)
 
