@@ -2,29 +2,51 @@
 
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
-## 📊 At-a-glance — active TODO dashboard (2026-05-27)
+## 📊 At-a-glance — active TODO dashboard (2026-05-27 evening, post-TODO 0527 fix)
 
-| Pri | Item | When | Status |
+| Pri | Item | Where | Status |
 |---|---|---|---|
-| 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) running on **H75 engine** (K=5 + 75 trial refine) — `sma24>sma100` / bull 5h@65% / bear 8h@65% | active since 2026-05-21 21:56 (G_narrow promote); engine unchanged from 2026-05-18 H75 + macro_cache mtime fix 2026-05-27 11:22 | running |
-| 🚨 ✅ P0 | **TODO 0527 — `_macro_cache` mtime bug = ROOT CAUSE of LIVE-vs-BACKTEST gap** | Diagnosed + fixed + audited 2026-05-27; trader restarted with fix | DONE — `_load_macro_csv` now mtime-aware. Live trader was reading macro/cross-asset/fear_greed/onchain ONCE at startup and using stale RAM for entire process lifetime. With cache stale, `m_vix_chg1d`/`m_sp500_chg1d`/`oc_mvrv_chg1d` etc. collapsed to ~0 once the cache aged beyond the day's first row. Shadow mode in-process at **100% match (10/10, max delta 0.04pp)** after fix. **3-5 day live WR monitor pending.** |
-| ✅ P0 | **TODO 0526** — LIVE vs BACKTEST divergence investigation | Resolved 2026-05-27 by TODO 0527 root cause discovery | CLOSED — the "4 semantic divergences" diagnosis was directionally right but the dominant cause was the `_macro_cache` bug in TODO 0527 (cache desync, not code-path differences). Shadow mode now validates core==live at 100%. Full closing entry in ARCHIVED_LOG.md. |
-| ✅ | **TODO 0525** — G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350 | Desktop 2026-05-25 22:38 → 2026-05-26 08:44 (~10h) | DONE — Mode T REF +83.85% on May 22 data, lost to LIVE +91.01% by 7pp. Hypothesis "extend grid unlocks high-window basin" REJECTED — 0-trade holdout filter eats w=250/300 candidates regardless. **Architecture analysis spawned TODO 0526.** |
-| ✅ | **TODO 0524** — Top-5 HRST (5,6,8,11,12h) clean rerun on fixed parallel fork | Desktop 2026-05-24 22:53 → 2026-05-25 06:39 (Mode H+R+S); Mode T reruns 2026-05-25 12:35 + 13:17 | DONE — Mode T REF +80.56% vs LIVE's +91.01% on same May 22 data. No promotion. Parallel fork validated (~8× refine speedup = real shipped win). Root cause of weaker REF: narrow grid [72,100,150] couldn't seed Optuna refine to reach LIVE's w=281/293 basin. → spawned TODO 0525 |
-| ✅ | **TODO 0522** — Parallel refine speedup (G_narrow_d_parallel fork) + long-horizon G test (9-12h) | Stage 1 Laptop 2026-05-22 00:26; Stage 2 Laptop 2026-05-22 01:39 → 18:09 | ⚠️ Stage 2 verdict INVALID (grid bug). Stage 1 PASSED. Parallel fork retained + bug-fixed; superseded by TODO 0524 |
-| 🔥 P1 | **OOS monitoring** — first 10 trades audit on live G_narrow config | window ~2026-06-04 (14 days from 2026-05-21 promote) | 0/10 closed; trader running |
-| ✅ | **TODO 0519** — G_narrow_d relaunch on Desktop | completed 2026-05-20 → 2026-05-21 | DONE — Mode T REF +89.14%, converged iter 2, no STRICT winner |
-| 🔥 P1 | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | Originally scheduled 2026-05-22; slipped — Desktop booked by TODO 0524 until ~2026-05-25 morning | 📅 PENDING — procedure ready, awaiting Desktop free |
-| 📋 P2 | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | 2026-06-18 (~30 days) | 📋 SCHEDULED — depends on G1 outcome |
-| 🚀 P3 | **P4** — C14 vol-conditional triple-barrier retest | when capacity (~2.5h) | open |
-| 🚀 P3 | **P5** — C11 VPIN at 5-min cadence | when capacity (~1 day eng) | open |
+| 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) on H75 engine + macro_cache mtime fix (2026-05-27 11:22) — `sma24>sma100` / bull 5h@65% / bear 8h@65%, shields OFF, gates OFF | **Desktop** (always) | running, **shadow at 100% match (10/10)** |
+| 🔥 **P0** | **Live WR/P&L monitor — 3-5 days then 2-4 weeks** post macro_cache fix | **Desktop** (passive observation) | 🕐 IN PROGRESS — first window closes ~2026-05-30; check trades closed + WR vs counterfactual prediction. **No promotions allowed in this window.** |
+| 🔥 **P0** | **Shadow mode continuous match-rate check** — primary live correctness gate | **Desktop** (passive observation) | 🕐 IN PROGRESS — every 1-2 days run the match-rate query; any drop below ~99% = NEW bug to investigate. |
+| 🔥 **P1** | **Counterfactual backtest on wider window** (May 7 → May 27, 3 weeks) for statistical power | **Laptop** (~30 min) | 📅 NEXT — current 5-day counterfactual showed +0.50pp better return + 2× per-trade edge with cache fix, but only 4 vs 7 trades (sub-significant). Wider window needs ~25-40 trades per condition. |
+| 🔥 **P1** | **Embargo A/B test** (`tools/embargo_ab_test.py --mode=both`) | **Laptop** (~2.5h) | 📅 NEXT — quantifies contribution of embargo (divergence #1 of the original TODO 0526 "4 semantic differences") to backtest-vs-live gap. Now actionable as scoping for Step 6 refactor. |
+| 🔥 **P1** | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | **Desktop** (~6h, off-hours) | 📅 PENDING — Desktop is free between trader cycles. Newly relevant post-cache-fix: with fresh derivatives features now flowing, this could swing differently than pre-fix expectation. |
+| 📋 **P2** | **Step 6 engine refactor** (`docs/STEP_6_ENGINE_REFACTOR.md`) — make backtest call `compute_signal_core()` so HRST results predict live | **Laptop** (~1.5 calendar days + 12h compute) | 📋 DESIGNED — implementation pending. After this, backtest WR projection will be realistic (likely 65-75%, not 85%). Required before next promotion. |
+| 📋 **P2** | **Re-run HRST on refactored engine** to get realistic backtest WR | **Desktop** (one HRST, ~7h) | ⏸ BLOCKED — depends on Step 6 done |
+| 📋 **P2** | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | **Desktop** (~6h) | 📋 SCHEDULED ~2026-06-18; depends on G1 outcome |
+| 📋 **P2** | **Verify feature importances stable** after cache fix — re-run Mode V importance ranking, compare to pre-fix | **Laptop** (~30 min) | 📋 OPTIONAL — sanity check that the same features still rank high once they actually vary across time |
+| 🚀 P3 | **Continuous macro archeology** — capture daily snapshots so future PIT validation has clean coverage | **Desktop** (cron, 5 min/day) | 📅 NEW — set up nightly `python tools/drive_archeology.py --preset all` so the next time we need PIT, drift is bounded |
+| 🚀 P3 | **P4** — C14 vol-conditional triple-barrier retest | Laptop (~2.5h) | open |
+| 🚀 P3 | **P5** — C11 VPIN at 5-min cadence | Laptop (~1 day eng) | open |
 | 🚀 P3 | **P6** — C15 meta-labeling SOL/BTC | blocked (assets shelved, ~6h) | open |
 | 🚀 P3 | **IDEA QUEUE Tier A** — Untested clean (C13-narrow, C54, C55, C58, C59) | research backlog | 5 items open |
 | 🚀 P3 | **IDEA QUEUE Tier B** — V3-lit C60-C82 (16 of 23 patcher-ready) | research backlog | 23 items open |
 | ⚪ P4 | **TODO 0519C** — CPCV HRST diagnostic | trigger-based re-run | available, no plan |
 | ⚪ P4 | **Kalshi** — prediction-market data integration | needs API key + impl | backlog |
 
-**Honest top-of-mind**: G_narrow live since 2026-05-21 21:56 (CSV + regime config), H75 engine unchanged. TODO 0524 closed — Mode T head-to-head on May 22 data showed LIVE +91.01% beats new +80.56% (gap from narrow grid missing LIVE's w=281/293 basin). TODO 0525 (in flight on Desktop, ~9-9.5h) tests whether grid [72,100,150,200,250,300,350] + V2 top-10 + Optuna win_hi=350 fixes that. Validation gate: does ETH 5h refine reach w≈281 and 8h reach w≈293. If yes, REF should land near LIVE's +91% on May 22 data. Everything else is wait-or-research.
+### Recently CLOSED (today, 2026-05-27)
+
+| Item | Status |
+|---|---|
+| **TODO 0527** — `_macro_cache` mtime bug | ✅ DONE — root cause of live-vs-backtest gap. Cache fix shipped; shadow mode 100% match. See ARCHIVED_LOG.md for full writeup. |
+| **TODO 0526** — LIVE vs BACKTEST divergence investigation | ✅ CLOSED — superseded by TODO 0527 root-cause discovery. "4 semantic divergences" framing was directionally right but cache was the dominant cause. Step 6 refactor still pending to address residual backtest-vs-live semantic gap. |
+| **Audit of sig_1/sig_2 + data drift fix + cache fix** | ✅ DONE — 3 audits across multiple angles each. Found + fixed 4 additional latent HORIZON_SHORT/LONG bugs (sig_short Telegram, asset preflight, gamma fallback, _log_signal edge case) + 1 missing safe-merge call site (`download_fear_greed`). |
+| **Counterfactual backtest tool** (`tools/counterfactual_backtest.py`) | ✅ NEW — runs hourly inference with fresh data via oldest-wins archeology + simulates trades. 5-day result on May 22-27: +0.50pp return, 2× per-trade edge, smaller drawdowns vs broken-cache actual (4 vs 7 trades, sample too small to be definitive). |
+| **CLAUDE.md stale-reference cleanup + ETH legacy-key strip** | ✅ DONE — CLAUDE.md now reflects G_narrow live state; regime_config_ed.json ETH block stripped of inert top-level `horizon: 8` + `min_confidence: 85` legacy keys (no behavior change). |
+| **TODO 0525** — G_narrow_d HRST with extended grid (May 25-26) | ✅ DONE — REF +83.85% lost to LIVE +91.01% by 7pp. Triggered TODO 0526 architecture analysis which led to TODO 0527 discovery. Underlying hypothesis (extended grid unlocks high-window basin) rejected. |
+| **TODO 0524** — Top-5 HRST clean rerun (May 24-25) | ✅ DONE — REF +80.56% lost to LIVE +91.01%. Parallel fork validated (~8× refine speedup retained). |
+| **TODO 0522** — Parallel refine speedup fork | ✅ DONE — Stage 1 passed; Stage 2 verdict invalidated by grid bug, bug-fixed, superseded by TODO 0524. |
+| **TODO 0519** — G_narrow_d relaunch on Desktop | ✅ DONE — REF +89.14%, no STRICT winner but per-horizon V winners drove G_narrow promote 2026-05-21. |
+
+### Machine allocation summary
+
+| Machine | Active load | What runs here next |
+|---|---|---|
+| **Desktop** | Trader (live, with shadow mode logging) | OOS monitor (passive); TODO 0519B-G1 in off-hours; eventually re-run HRST after Step 6 |
+| **Laptop** | Currently idle | Wider counterfactual backtest; embargo A/B test; Step 6 refactor implementation; idea-queue research |
+
+**Honest top-of-mind (2026-05-27 evening)**: TODO 0527 (`_macro_cache` mtime bug) found and fixed today — was likely the dominant cause of the 50.9% live vs ~85% backtest WR gap. 5-day counterfactual backtest shows fresh data → fewer but better trades (+0.50pp return, 2× per-trade edge), but sample is too small to be conclusive. **Next 5 days: passive monitoring on Desktop (don't disturb live trader)**. **Next 1-2 weeks on Laptop: wider counterfactual + embargo A/B test + Step 6 refactor implementation**. **No promotions until 4 weeks of post-fix live data have accumulated.** The "85% backtest WR" expectation is itself optimistic given the unresolved backtest-vs-live semantic gap — realistic target after Step 6 refactor is ~65-75% WR.
 
 ---
 
