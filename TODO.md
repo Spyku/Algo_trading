@@ -246,6 +246,111 @@ When the broader gate from Step 6 (engine↔trader shared core) is in place, sha
 
 ---
 
+# 🔥 P1 — Re-evaluate disqualified items under LIVE_EQUIVALENT_MODE (CONDITIONAL on Step 6 verdict)
+
+**Search anchor**: `STEP6-REEVAL`
+
+**Status**: 📅 PLANNED, conditional on Step 6 LIVE_EQUIVALENT_MODE results showing a meaningful gap vs current backtest baseline. If gap is >10pp, prior "DEAD" / "SHELVED" verdicts in the ideas scoreboard may have been methodology artifacts and worth re-testing.
+
+**Why this exists**: every "DEAD"/"SHELVED" verdict in CLAUDE.md / ARCHIVED_LOG.md was reached using the SAME `_deku_eval_with_pruning` math that Step 6 is exposing as overoptimistic. The 4 semantic divergences (embargo, NaN policy, step size, signal mode) hurt different candidates asymmetrically — meaning relative rankings under broken backtest may not predict relative rankings under live.
+
+**Decision gate**: re-test only if Step 6's LIVE_EQUIVALENT_MODE shows cum_return materially below baseline. If LIVE_EQUIVALENT ≈ baseline, prior verdicts hold and this whole block is moot.
+
+## Priority list (ordered by recovery potential under LIVE_EQUIVALENT_MODE)
+
+### Priority 1 — NaN-sensitive (sparse-history features quarantined by 'skip' policy)
+
+These were filtered out because backtest's `na_policy='skip'` dropped any row with NaN in their column. Under `na_policy='ffill'` (live), they'd contribute.
+
+| Item | Reason originally quarantined | Re-test action |
+|---|---|---|
+| `deriv_oi_*` family | Sparse OI data (30-day history only) → most training rows had NaN → skip removed them | TODO 0519B-G1 already queued; now reframed under Step 6 lens |
+| Orderbook (`ob_imbalance`, `spread_bps`) | Hourly snapshots, gaps | Part of TODO 0519B-G2 |
+| IV (`avg_iv`, `iv_skew`) | Sparse data | Part of TODO 0519B-G2 |
+| Stablecoin mcap (3 features) | Currently Grade 1 (all importance <1%) | Re-test with ffill |
+
+### Priority 2 — Step-size sensitive (hourly-cadence ideas)
+
+Backtest evaluates every 36h; live every 1h. Anything responsive to short-term changes was undersampled.
+
+| Item | Re-test action |
+|---|---|
+| C11 VPIN at 5-min cadence | Re-test with `eval_step=1` |
+
+### Priority 3 — Embargo-sensitive (short-window logrets)
+
+Backtest uses `embargo=horizon` (5-8h gap before test); live uses 0. Recent-momentum features lose their freshest data.
+
+| Item | Re-test action |
+|---|---|
+| `logret_2h`, `logret_5h`, `logret_8h` (currently Grade 1) | Re-test with `embargo=0` |
+| Any `chg1d` feature | Re-test with `embargo=0` |
+
+### Priority 4 — Signal-mode sensitive (HOLD-aware strategies)
+
+Backtest forces BUY-or-not on every step; live ternary allows HOLD. High-confidence-only strategies were penalized.
+
+| Item | Re-test action |
+|---|---|
+| C14 triple-barrier overlay | Re-test with `signal_mode='ternary'` |
+| C15 meta-labeling | Re-test with `signal_mode='ternary'` |
+| Asymmetric loss (`scale_pos_weight`) | Re-test with `signal_mode='ternary'` |
+| C56/C57 regime detectors | Re-test with `signal_mode='ternary'` |
+
+### Priority 5 — HYPERPARAMETER RE-GRID (the biggest recovery surface)
+
+**This is bigger than the idea/feature re-tests.** The current production winners — `RF+LGBM w=281 γ=0.9981 12f` (5h) and `RF+LGBM w=293 γ=0.9990 16f` (8h) — were selected by the same broken `_deku_eval_with_pruning` math. EVERY hyperparameter chosen (combo, window, gamma, feature count) was scored under backtest semantics that don't predict live performance.
+
+If LIVE_EQUIVALENT_MODE shows a meaningful gap, the "best config" rankings can shift entirely. Different combos may win. Different windows. Different gammas. Different feature counts.
+
+| Hyperparameter | Current production grid | Expanded re-grid (live-equivalent) | Recovery hypothesis |
+|---|---|---|---|
+| **Model combos** | 3 viable: RF+LGBM, XGB+LGBM, RF+XGB | Add back: **LR**, **GB**, **single-model LGBM**, **RF+GB**, **RF+LR**, **GB+LR** | Solo models may work in ternary HOLD mode (less overfitting risk); LR may benefit from ffill giving more usable rows |
+| **Windows** | [72, 100, 150, 200, 250, 300] | [30, 50, 72, 100, 150, 200, 250, 300, 350, 400, 500, 720] | Shorter windows benefit from `eval_step=1` (more recent regime weighting); longer windows benefit from less embargo cutting away signal |
+| **Gammas** | [0.995, 0.997, 0.999] | [0.99, 0.995, 0.997, 0.998, 0.999, 0.9995, 1.0] | Different time-decay weights under live semantics; `gamma=1.0` (no decay) might suddenly be viable when step=1 makes recent data more informative |
+| **Feature counts** | [5, 10, 15, 20, 25, 30] + Optuna range [4, 40-80] | [3, 5, 8, 10, 15, 20, 25, 30, 40, 60, 100] | With ffill, sparse features become viable → more features can pass selection; with ternary HOLD, fewer features may suffice |
+| **MIN_COMBO_SIZE** | 2 (solo removed) | 1 (solo allowed) | Solo LGBM or solo XGB may dominate when the ternary HOLD semantics provide their own "abstain" risk filter |
+
+**Compute estimate**: current grid = 324 configs × 1 horizon ≈ 30 min on Desktop. Expanded grid = ~5,000 configs × 2 horizons ≈ 5-7h on Desktop. Plus Mode V refine for top candidates: +3-4h.
+
+**Plan** (conditional on Step 6 showing meaningful gap):
+1. Expand `GRID_COMBOS`, `GRID_WINDOWS`, `GRID_GAMMAS`, `GRID_FEATURES`, `MIN_COMBO_SIZE` in fork
+2. Run Mode D ETH 5h + 8h with `LIVE_EQUIVALENT_MODE=1` on expanded grid
+3. Compare top-10 winners under live-equivalent vs current production
+4. If a meaningfully better config emerges → promote (after appropriate validation)
+5. If current production is still in the top-10 under live-equivalent → it was selected correctly despite the broken backtest math; no change
+
+This is **the highest-value single experiment** after Step 6 validates.
+
+### Priority 6 — Dead model combos (subset of P5 — broken out for clarity)
+
+| Item | Re-test action |
+|---|---|
+| GB+LR, RF+GB, RF+LR combos (dropped from `GRID_COMBOS`) | Covered by P5 expanded re-grid |
+
+### Priority 7 — Disabled feature families
+
+| Item | Re-test action |
+|---|---|
+| GDELT 21 features (disabled 2026-04-19, 0/33 selection) | Re-enable temporarily, run Mode V live-equivalent |
+
+### Priority 8 — Full IDEA QUEUE Tier A/B sweep
+
+Only if Step 6 shows >15pp gap AND P5 expanded re-grid produces meaningfully different winners — then ALL prior verdicts are suspect and a sweep is justified.
+
+## How re-testing will work
+
+Once Step 6 verdict is in, if gap is meaningful:
+
+1. **Build `tools/re_evaluate_dead_ideas.py`** — takes a config + identifier list, runs each under both `backtest` mode (legacy) and `LIVE_EQUIVALENT_MODE`, outputs side-by-side delta table.
+2. **Stage candidates from Priority 1 first** — already-queued G1/G2 work becomes the proof-of-concept for the methodology.
+3. **If P1 produces a flipped verdict** (item revives), expand to P2-P4.
+4. **Update scoreboard** in ARCHIVED_LOG.md with new verdicts. Old verdicts kept as audit trail, new entries reference them.
+
+**Budget cap**: stop after spending 3 days of compute on re-testing. If nothing flips, prior verdicts hold; if many flip, the engine has a fundamentally different ranking under live semantics and a full HRST re-run + retraining is warranted.
+
+---
+
 # 🔥 P1 — Act this week (Laptop preferred unless noted)
 
 ## 📝 Wider counterfactual backtest (Laptop, ~30 min, RUNNING NOW)
