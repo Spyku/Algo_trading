@@ -80,6 +80,21 @@ if not os.environ.get(_WARNINGS_SENTINEL):
     # so the same two warnings flooded the log thousands of times. Catch-all
     # 'ignore' wins regardless: it matches every category and every message.
     os.environ['PYTHONWARNINGS'] = 'ignore'
+
+    # Bake NEAR_LIVE_MODE=1 by default — this fork's whole purpose is the
+    # near-live semantics (step=1, na_policy=mean_last_10, signal=ternary,
+    # return_probas=True). User can still override via:
+    #     $env:NEAR_LIVE_MODE = "0"
+    # before launching, if testing the parallel infra without near-live.
+    os.environ.setdefault('NEAR_LIVE_MODE', '1')
+
+    # Bake isolation dirs so this fork's writes never overlap with production
+    # 'models/' and 'config/' directories. --no-persist alone uses _noprod
+    # suffixes inside production dirs; isolation dirs add a stronger guarantee
+    # (no shared parent at all). User can override either via env var before launch.
+    os.environ.setdefault('G_NARROW_MODELS_DIR', 'models_g_desktop_nearlive')
+    os.environ.setdefault('G_NARROW_CONFIG_DIR', 'config_g_desktop_nearlive')
+
     os.environ[_WARNINGS_SENTINEL] = '1'
     # Re-exec with `-W ignore` BEFORE the script argv. The -W command-line flag
     # is equivalent to PYTHONWARNINGS but applied even earlier (parsed by the
