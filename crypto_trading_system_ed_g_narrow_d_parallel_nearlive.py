@@ -58,41 +58,48 @@ import os
 import sys
 
 # ════════════════════════════════════════════════════════════════════════
-# BULLETPROOF WARNING SUPPRESSION via PYTHONWARNINGS re-exec (2026-05-27 evening)
+# BULLETPROOF WARNING SUPPRESSION — 4-layer defense (2026-05-27 late evening)
 # ════════════════════════════════════════════════════════════════════════
-# Python-level warnings.filterwarnings() gets reset/leaked by inner
-# `warnings.catch_warnings()` context managers used in sklearn/joblib paths
-# (seen in production engine despite a global catch-all filter at line 61).
-# PYTHONWARNINGS, however, is read at INTERPRETER STARTUP and applies
-# process-wide. So we set it in os.environ then re-exec the same script —
-# the second process inherits PYTHONWARNINGS at startup and silences the
-# warnings reliably across main process AND all subprocess workers.
+# First attempt (per-message PYTHONWARNINGS filters) leaked: sklearn or joblib
+# calls warnings.simplefilter('always') after PYTHONWARNINGS is applied, which
+# wipes the matched filters and lets the same two warnings flood thousands of
+# times (29MB log of just two warning messages).
+# Four layers now, in order of robustness:
+#   1. `-W ignore` command-line flag added to execv argv — read at interpreter
+#      startup, highest priority.
+#   2. `PYTHONWARNINGS=ignore` env var — catch-all, also read at startup.
+#   3. `warnings.filterwarnings('ignore')` after import — Python-level catch-all.
+#   4. Monkey-patch `warnings.warn = no-op` — neutralizes the warning emission
+#      function itself. Bulletproof against simplefilter('always') resets, since
+#      the warn function never reaches the filter chain.
 # A sentinel env var prevents infinite re-exec.
 _WARNINGS_SENTINEL = '_PARALLEL_NEARLIVE_WARNINGS_BAKED'
 if not os.environ.get(_WARNINGS_SENTINEL):
-    # Multiple filter entries comma-separated. Format: action:message:category:module:lineno
-    # 1. sklearn LGBM feature_names warning (substring match on message)
-    # 2. sklearn.utils.parallel `delayed` warning (any UserWarning from that module)
-    # 3. ResourceWarning (unclosed file handles in some engine paths)
-    os.environ['PYTHONWARNINGS'] = (
-        'ignore:X does not have valid feature names:UserWarning,'
-        'ignore::UserWarning:sklearn.utils.parallel,'
-        'ignore::ResourceWarning'
-    )
+    # Earlier attempt used per-message filters; they were silently overridden
+    # by some sklearn/joblib code path that calls warnings.simplefilter('always'),
+    # so the same two warnings flooded the log thousands of times. Catch-all
+    # 'ignore' wins regardless: it matches every category and every message.
+    os.environ['PYTHONWARNINGS'] = 'ignore'
     os.environ[_WARNINGS_SENTINEL] = '1'
-    # Re-exec the current script with PYTHONWARNINGS set. os.execv replaces
-    # this process with a new Python invocation that reads PYTHONWARNINGS at
-    # startup. Argv is preserved. On Windows this uses CreateProcess underneath.
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    # Re-exec with `-W ignore` BEFORE the script argv. The -W command-line flag
+    # is equivalent to PYTHONWARNINGS but applied even earlier (parsed by the
+    # interpreter command-line, not via env). Belt-and-suspenders for cases
+    # where PYTHONWARNINGS is reset by spawned worker init code.
+    os.execv(sys.executable, [sys.executable, '-W', 'ignore'] + sys.argv)
 
 import time
 import warnings
 
-# Belt-and-suspenders Python-level filters. PYTHONWARNINGS above is the
-# primary suppression mechanism; these are defensive in case any future
-# code resets filters and still relies on the Python-level chain.
-warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
-warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.*")
+# Layer 3: Python-level catch-all filter (in case PYTHONWARNINGS/-W get reset).
+warnings.filterwarnings("ignore")
+
+# Layer 4: monkey-patch warnings.warn to no-op. Brutal but bulletproof against
+# any library code that calls warnings.simplefilter('always') / resetwarnings()
+# after our filters were applied. sklearn's validation.py:2691 and parallel.py:144
+# both use `warnings.warn(...)` — patching the module-level function neutralizes
+# both. Real errors continue to raise via exceptions, not via warnings.warn.
+warnings.warn = lambda *a, **k: None
+warnings.warn_explicit = lambda *a, **k: None
 
 from concurrent.futures import ThreadPoolExecutor, as_completed as _thread_as_completed
 from concurrent.futures import ProcessPoolExecutor as _PoolExec
