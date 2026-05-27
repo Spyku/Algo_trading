@@ -4062,7 +4062,7 @@ GRID_COMBOS = [
     # if a future regime favors it (no evidence in current ETH data).
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results in V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [72, 100, 150, 200, 250, 300, 350]
+GRID_WINDOWS = [72, 100, 150, 200, 250]  # 2026-05-27 evening: dropped 300/350 — empirically dead weight in 0524/0525 runs (no winners selected, just doubled grid time)
                                 # Re-extended 2026-05-25 from [72,100,150]: the May 20-21
                                 # production refine landed at w=281/293 for ETH 5h/8h, which
                                 # the narrow [72,100,150] grid couldn't reseed in the May 24
@@ -5284,7 +5284,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_c
         feat_lo = 4
         feat_hi = min(60, len(ranked_features))
         win_lo = 50
-        win_hi = 350  # extended 2026-05-25 from 300 alongside GRID_WINDOWS=[...,350]; pair lets refine reach beyond the prior cap if seeded at 350.
+        win_hi = 250  # 2026-05-27: rolled back from 350 to match GRID_WINDOWS max=250 after dropping 300/350 (no winners observed above 250).
 
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1}: {combo_name}  w={base_window}h  g={base_gamma:.4f}  f={base_feats}")
@@ -8610,7 +8610,7 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         feat_lo = 4
         feat_hi = min(60, len(ranked_features))
         win_lo = 50
-        win_hi = 350  # extended 2026-05-25 from 300 alongside GRID_WINDOWS=[...,350]; pair lets refine reach beyond the prior cap if seeded at 350.
+        win_hi = 250  # 2026-05-27: rolled back from 350 to match GRID_WINDOWS max=250 after dropping 300/350 (no winners observed above 250).
 
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1} (LGBM={lgbm_device}): {combo_name}  "
