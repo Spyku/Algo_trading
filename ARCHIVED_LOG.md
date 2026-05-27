@@ -10,6 +10,40 @@ This file preserves the full historical decision trail of the engine: tested/she
 
 ---
 
+### ✅ CLOSED 2026-05-27 — TODO 0525 (G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350)
+
+**Outcome**: Desktop run 2026-05-25 22:38 → 2026-05-26 08:44 (~10h). Mode T REF +83.85% on May 22 data lost to current LIVE +91.01% by 7pp. Hypothesis "extend the window grid to `[72,100,150,200,250,300,350]` + bump V2 top-N to 10 + raise Optuna `win_hi` to 350 will unlock the high-window basin that LIVE's w=281/293 sits in" was **REJECTED** — the 0-trade holdout filter still ate the w=250/300 candidates regardless of grid expansion. The grid changes worked as designed but the holdout filter was the binding constraint, not the grid coverage.
+
+**Spinoff**: spawned TODO 0526 architecture analysis (which itself was superseded by TODO 0527's `_macro_cache` root cause). Mode V top-N=10 + zero-holdout skip code changes from this run shipped in production engine commit `27a695f` (kept).
+
+**Files**: log `logs/ed_v1_20260525_223822.log`, output trade tables retained in models/_grid_extended/.
+
+---
+
+### ✅ CLOSED 2026-05-25 — TODO 0524 (Top-5 HRST clean rerun on fixed parallel fork)
+
+**Outcome**: Desktop 2026-05-24 22:53 → 2026-05-25 06:39 (Mode H+R+S), Mode T reruns 12:35 + 13:17. Mode T REF +80.56% vs current LIVE's +91.01% on same May 22 data — **no promotion**. The narrow grid `[72, 100, 150]` couldn't seed Optuna refine to reach LIVE's w=281/293 basin.
+
+**Spinoff**: spawned TODO 0525 (extended grid) which also failed for a different reason (holdout filter). Both runs together established that the LIVE config sits in a region the current research grid can't naturally produce.
+
+**Spinoff #2 — actually shipped**: validated the parallel-refine speedup from TODO 0522 produces clean output once the grid bug was fixed. **~8× refine speedup retained as production capability**. This is the only durable win from the 0522 → 0524 → 0525 arc.
+
+**Files**: snapshot `data/_reliability_hrst_snapshot_desktop_20260524_2253` retained, log `logs/ed_v1_20260524_225309.log`.
+
+---
+
+### ✅ CLOSED 2026-05-24 — TODO 0522 (Parallel refine speedup G_narrow_d_parallel fork + long-horizon G test)
+
+**Outcome (2-stage)**:
+- **Stage 1** (Laptop 2026-05-22 00:26): identity-preserving parallel refine fork against the canonical g_narrow_d on a fixed snapshot — **PASSED**. Outputs bit-identical to serial refine within numerical tolerance. ~8× speedup measured. Fork kept as `crypto_trading_system_ed_g_narrow_d_parallel.py`.
+- **Stage 2** (Laptop 2026-05-22 01:39 → 18:09): full HRST on 9,10,11,12h with the parallel fork — **VERDICT INVALIDATED** by a grid configuration bug discovered later (the fork's grid passing into refine differed silently from the canonical fork). Numbers from this run shouldn't be trusted; reruns under TODO 0524 with bug-fixed parallel fork supersede.
+
+**Net**: parallel refine speedup itself is real and shipped. The long-horizon question (9-12h) became moot when TODO 0525's analysis showed no horizon outside 5h/8h was going to beat LIVE on the current data with the current model setup. Idea family for 9-12h horizons closed.
+
+**Files**: Stage 1 log `logs/g_parallel_stage1_20260522_0026.log`, Stage 2 log `logs/g_parallel_stage2_20260522_0139.log` (numbers void), bug-fix commit `f88e4dc`.
+
+---
+
 ### ✅ CLOSED 2026-05-27 — TODO 0527 (`_macro_cache` mtime bug — root cause of LIVE-vs-BACKTEST gap)
 
 **Outcome**: Diagnosed + fixed + audited in one session. The dominant cause of the 50.9% live WR vs ~85% backtest WR gap was a process-lifetime in-memory cache in the live trader (`crypto_trading_system_ed.py:1077` `_macro_cache`) that was set once at trader startup and never refreshed. All macro/cross-asset/sentiment/onchain features were frozen at their startup-day values, so time-shifted features like `m_vix_chg1d`, `m_sp500_chg1d`, `fg_chg5d`, `oc_mvrv_chg1d`, `xa_dax_relstr5d` collapsed to ~0 once the cache aged beyond a day (the formula `(today − yesterday)/yesterday` becomes `(startup − startup)/startup = 0` when both lookups ffill to the same row).
