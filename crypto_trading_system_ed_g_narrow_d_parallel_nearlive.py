@@ -56,19 +56,43 @@ Benchmark recipe:
 """
 import os
 import sys
+
+# ════════════════════════════════════════════════════════════════════════
+# BULLETPROOF WARNING SUPPRESSION via PYTHONWARNINGS re-exec (2026-05-27 evening)
+# ════════════════════════════════════════════════════════════════════════
+# Python-level warnings.filterwarnings() gets reset/leaked by inner
+# `warnings.catch_warnings()` context managers used in sklearn/joblib paths
+# (seen in production engine despite a global catch-all filter at line 61).
+# PYTHONWARNINGS, however, is read at INTERPRETER STARTUP and applies
+# process-wide. So we set it in os.environ then re-exec the same script —
+# the second process inherits PYTHONWARNINGS at startup and silences the
+# warnings reliably across main process AND all subprocess workers.
+# A sentinel env var prevents infinite re-exec.
+_WARNINGS_SENTINEL = '_PARALLEL_NEARLIVE_WARNINGS_BAKED'
+if not os.environ.get(_WARNINGS_SENTINEL):
+    # Multiple filter entries comma-separated. Format: action:message:category:module:lineno
+    # 1. sklearn LGBM feature_names warning (substring match on message)
+    # 2. sklearn.utils.parallel `delayed` warning (any UserWarning from that module)
+    # 3. ResourceWarning (unclosed file handles in some engine paths)
+    os.environ['PYTHONWARNINGS'] = (
+        'ignore:X does not have valid feature names:UserWarning,'
+        'ignore::UserWarning:sklearn.utils.parallel,'
+        'ignore::ResourceWarning'
+    )
+    os.environ[_WARNINGS_SENTINEL] = '1'
+    # Re-exec the current script with PYTHONWARNINGS set. os.execv replaces
+    # this process with a new Python invocation that reads PYTHONWARNINGS at
+    # startup. Argv is preserved. On Windows this uses CreateProcess underneath.
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 import time
 import warnings
 
-# Silence sklearn's LGBMClassifier feature-names warning. The model is trained
-# from a DataFrame and called with a numpy array in some paths; predictions are
-# identical either way, but the warning floods the log (one per predict call)
-# and gets wrapped as NativeCommandError by PowerShell 5.1's *>&1 redirect.
-# Applied at module-import time so every ProcessPool worker (Windows spawn
-# reimports this file) inherits the filter before any sklearn predict runs.
-warnings.filterwarnings(
-    "ignore",
-    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
-)
+# Belt-and-suspenders Python-level filters. PYTHONWARNINGS above is the
+# primary suppression mechanism; these are defensive in case any future
+# code resets filters and still relies on the Python-level chain.
+warnings.filterwarnings("ignore", message=".*does not have valid feature names.*")
+warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.*")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed as _thread_as_completed
 from concurrent.futures import ProcessPoolExecutor as _PoolExec
