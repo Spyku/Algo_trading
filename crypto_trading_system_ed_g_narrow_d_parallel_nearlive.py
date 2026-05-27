@@ -266,11 +266,25 @@ def _device_aware_factories_seeded(seed):
     from xgboost import XGBClassifier
 
     device = os.environ.get('G_PARALLEL_LGBM_DEVICE', 'cpu')
-    # Thread budget auto-computed at module load (see _DEFAULT_LGBM_THREADS).
-    # Defaults to 1 on Desktop/Laptop/Yoga to avoid OpenMP oversubscription
-    # of the 3 outer × 5 inner = 15 concurrent LGBM instances.
+    # Phase-aware thread budget (2026-05-27 late evening).
+    # G_PARALLEL_LGBM_DEVICE is set ONLY by refine workers (lines 411, 538).
+    # Its absence means we're in Mode D's serial grid loop — only K=5 inner is
+    # parallel, not 3-outer × 5-inner. So we can give each LGBM N_JOBS // 5
+    # threads instead of N_JOBS // 15, and fully saturate the CPU.
+    #
+    #   Mode D   Desktop: 26 // 5  = 5 threads/LGBM × 5 K = 25 cores
+    #   Refine   Desktop: 26 // 15 = 1 thread/LGBM × 15 = 15 cores
+    #
+    # Without this, Mode D under-utilizes (5 cores × 1 thread = 5 cores raw,
+    # GIL-bound to ~3 effective → 11% on a 26-core machine, observed on the
+    # 2026-05-27 NEAR_LIVE_MODE run).
+    _in_refine = 'G_PARALLEL_LGBM_DEVICE' in os.environ
+    if _in_refine:
+        _phase_default_threads = _DEFAULT_LGBM_THREADS
+    else:
+        _phase_default_threads = max(1, N_JOBS_PARALLEL // _PARALLEL_K)
     lgbm_threads = int(os.environ.get(
-        'G_PARALLEL_LGBM_THREADS', str(_DEFAULT_LGBM_THREADS)))
+        'G_PARALLEL_LGBM_THREADS', str(_phase_default_threads)))
 
     def _rf():
         return RandomForestClassifier(
