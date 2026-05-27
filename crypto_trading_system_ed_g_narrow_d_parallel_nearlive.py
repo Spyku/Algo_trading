@@ -281,25 +281,19 @@ def _device_aware_factories_seeded(seed):
     from xgboost import XGBClassifier
 
     device = os.environ.get('G_PARALLEL_LGBM_DEVICE', 'cpu')
-    # Phase-aware thread budget (2026-05-27 late evening).
-    # G_PARALLEL_LGBM_DEVICE is set ONLY by refine workers (lines 411, 538).
-    # Its absence means we're in Mode D's serial grid loop — only K=5 inner is
-    # parallel, not 3-outer × 5-inner. So we can give each LGBM N_JOBS // 5
-    # threads instead of N_JOBS // 15, and fully saturate the CPU.
+    # Thread budget auto-computed at module load (see _DEFAULT_LGBM_THREADS).
+    # Defaults to 1 on Desktop/Laptop/Yoga.
     #
-    #   Mode D   Desktop: 26 // 5  = 5 threads/LGBM × 5 K = 25 cores
-    #   Refine   Desktop: 26 // 15 = 1 thread/LGBM × 15 = 15 cores
-    #
-    # Without this, Mode D under-utilizes (5 cores × 1 thread = 5 cores raw,
-    # GIL-bound to ~3 effective → 11% on a 26-core machine, observed on the
-    # 2026-05-27 NEAR_LIVE_MODE run).
-    _in_refine = 'G_PARALLEL_LGBM_DEVICE' in os.environ
-    if _in_refine:
-        _phase_default_threads = _DEFAULT_LGBM_THREADS
-    else:
-        _phase_default_threads = max(1, N_JOBS_PARALLEL // _PARALLEL_K)
+    # 2026-05-27 late evening: previously tried phase-aware logic (N_JOBS//5
+    # in Mode D, N_JOBS//15 in refine) — measured a REGRESSION on Mode D
+    # (3.8 min/eval → 5.3 min/eval with NEAR_LIVE step=1). LGBM trees with
+    # n_estimators=100, max_depth=4 on 864 train rows are too small for the
+    # OpenMP thread spin-up to pay off (~milliseconds work per tree). The K=5
+    # ThreadPool already gives 5x raw parallelism with effectively zero
+    # overhead — multiplying by intra-LGBM threads thrashed L1/L2 cache and
+    # added context-switch cost. Keep this simple: 1 thread per LGBM.
     lgbm_threads = int(os.environ.get(
-        'G_PARALLEL_LGBM_THREADS', str(_phase_default_threads)))
+        'G_PARALLEL_LGBM_THREADS', str(_DEFAULT_LGBM_THREADS)))
 
     def _rf():
         return RandomForestClassifier(
