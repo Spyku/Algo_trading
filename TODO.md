@@ -7,6 +7,7 @@
 | Pri | Item | Where | Status |
 |---|---|---|---|
 | 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) on H75 engine + macro_cache mtime fix (2026-05-27 11:22) — `sma24>sma100` / bull 5h@65% / bear 8h@65%, shields OFF, **gates ON** (reverted to Mode T optimal 2026-05-27 13:18) | **Desktop** (always) | running, **shadow at 100% match (10/10)** |
+| 🔥 **P0** | **Step 6 fork — run wider regression + LIVE_EQUIVALENT_MODE diagnostic on Desktop** | **Desktop** (~20 min Step 2+3) | 📅 READY — fork `crypto_trading_system_ed_step6.py` shipped commit `50a63ab`. Smoke regression bit-identical. Full instructions under "STEP6-DESKTOP-RUN" anchor below. |
 | 🔥 **P0** | **Live WR/P&L monitor — 3-5 days then 2-4 weeks** post macro_cache fix | **Desktop** (passive observation) | 🕐 IN PROGRESS — first window closes ~2026-05-30; check trades closed + WR vs counterfactual prediction. **No promotions allowed in this window.** |
 | 🔥 **P0** | **Shadow mode continuous match-rate check** — primary live correctness gate | **Desktop** (passive observation) | 🕐 IN PROGRESS — every 1-2 days run the match-rate query; any drop below ~99% = NEW bug to investigate. |
 | 🔥 **P1** | **Counterfactual backtest on wider window** (May 7 → May 27, 3 weeks) for statistical power | **Laptop** (~30 min) | 📅 NEXT — current 5-day counterfactual showed +0.50pp better return + 2× per-trade edge with cache fix, but only 4 vs 7 trades (sub-significant). Wider window needs ~25-40 trades per condition. |
@@ -104,6 +105,91 @@ copy crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.p
 7. **2026-05-27 13:18 — manual: rally_cooldown disabled → enabled** (reverted to Mode T optimal; backup: `regime_config_ed_pre_rc_reenable_20260527_131848.json`)
 
 Full promotion events in ARCHIVED_LOG.md.
+
+---
+
+# 🔥 P0 — Step 6 fork ready to test on Desktop (action items)
+
+**Search anchor**: `STEP6-DESKTOP-RUN`
+
+**Status**: Step 6a + 6b + 6c shipped in research fork `crypto_trading_system_ed_step6.py` (commit `50a63ab`, 2026-05-27). Smoke regression (1 grid point) confirmed BIT-IDENTICAL vs production engine. Wider regression + LIVE_EQUIVALENT_MODE diagnostic pending — should run on Desktop (faster).
+
+**What Step 6 is**: refactor of `_deku_eval_with_pruning` to delegate to `crypto_signal_core.compute_signal_core()`. With default parameters, output is bit-identical to current engine (regression-safe). New params (`embargo`, `na_policy`, `signal_mode`, `return_probas`, `eval_step`) let callers opt into live-trader semantics. `LIVE_EQUIVALENT_MODE=1` env var overrides all 5 to live conventions.
+
+**Why it matters**: lets HRST runs produce a REALISTIC backtest projection that should predict live performance. Current backtest math (`_deku_eval_with_pruning` original) uses different semantics from live trader (binary signals, step=36, embargo=horizon, NaN skip) → it overstates live WR. Step 6c diagnostic mode tells us by how much.
+
+## Desktop run instructions
+
+### Step 1 — Confirm Drive sync (~1 min)
+
+Fresh PowerShell on Desktop, venv activated:
+
+```powershell
+cd G:\engine
+Test-Path crypto_trading_system_ed_step6.py
+Test-Path tools\test_step6_regression.py
+```
+
+Both should be True.
+
+### Step 2 — Wider regression test (~10 min, builds confidence beyond the 1-point smoke)
+
+```powershell
+# Clear any leftover env vars
+$env:V2_DATA_SNAPSHOT = ""
+$env:LIVE_EQUIVALENT_MODE = ""
+
+# Capture baseline with the ORIGINAL engine (12 grid points)
+python tools\test_step6_regression.py --engine ed --save baseline_wide
+
+# Compare fork against that baseline
+python tools\test_step6_regression.py --engine step6 --compare baseline_wide
+```
+
+Expected output: `[OK] BIT-IDENTICAL` on all 12 grid points.
+
+If any point diverges, paste output to assistant for debug. If all 12 match, Phase 6a/6b verified production-grade.
+
+### Step 3 — LIVE_EQUIVALENT_MODE diagnostic (~10 min)
+
+The payoff — see what the model's realistic backtest WR looks like with live-trader semantics:
+
+```powershell
+# Enable LIVE_EQUIVALENT_MODE — overrides all 4 backtest semantics to live
+$env:LIVE_EQUIVALENT_MODE = "1"
+
+# Run the same 12-point grid; the fork's _deku_eval_with_pruning will now
+# use embargo=1, na_policy='ffill', signal_mode='ternary', eval_step=1
+python tools\test_step6_regression.py --engine step6 --save liveeq_diag
+
+# Disable so subsequent runs are normal
+$env:LIVE_EQUIVALENT_MODE = ""
+```
+
+Paste per-grid-point cum_return / accuracy / trades back to assistant. Comparing against `baseline_wide`:
+- LIVE_EQUIVALENT cum_return **dramatically lower** than baseline → confirms backtest math was overoptimistic, Step 6 thesis validated
+- LIVE_EQUIVALENT cum_return **similar** → either (a) backtest math wasn't the dominant issue or (b) small per-feature drift was already dominating
+
+### Step 4 — Full HRST in LIVE_EQUIVALENT_MODE (optional, ~7h, the real test)
+
+If Steps 2+3 look good, run a full HRST with the fork and live-equivalent mode to get the REAL Mode T REF projection:
+
+```powershell
+$env:LIVE_EQUIVALENT_MODE = "1"
+$env:V2_DATA_SNAPSHOT = "data\_reliability_hrst_snapshot_desktop_20260515_154801"
+
+python crypto_trading_system_ed_step6.py HRST ETH 5,8h --replay 1440 --no-persist --no-data-update
+```
+
+This gives a Mode T REF number that should approximate what live performance actually delivers. Probably much lower than the current overoptimistic ~89%. That number becomes the **realistic target** — any future HRST should be evaluated against it instead of the current backtest WR.
+
+### Decision after Steps 2+3 (+ optionally 4)
+
+| Step 2 result | Step 3 result | What it means | Next action |
+|---|---|---|---|
+| All 12 BIT-IDENTICAL | LIVE_EQUIVALENT much lower than baseline | Refactor correct + backtest was overoptimistic | Promote fork to production engine. Future HRST runs use LIVE_EQUIVALENT_MODE. |
+| All 12 BIT-IDENTICAL | LIVE_EQUIVALENT ≈ baseline | Refactor correct + backtest math wasn't the dominant gap source | Keep fork as research tool only. Look elsewhere for model improvements. |
+| Any DIFF in Step 2 | — | Refactor broke bit-identical | Paste DIFF output to assistant; debug before doing Step 3 or 4. |
 
 ---
 
