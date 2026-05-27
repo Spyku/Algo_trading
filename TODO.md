@@ -6,7 +6,7 @@
 
 | Pri | Item | Where | Status |
 |---|---|---|---|
-| 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) on H75 engine + macro_cache mtime fix (2026-05-27 11:22) — `sma24>sma100` / bull 5h@65% / bear 8h@65%, shields OFF, gates OFF | **Desktop** (always) | running, **shadow at 100% match (10/10)** |
+| 📌 | **G_narrow LIVE** (CSV+config since 2026-05-21 21:56) on H75 engine + macro_cache mtime fix (2026-05-27 11:22) — `sma24>sma100` / bull 5h@65% / bear 8h@65%, shields OFF, **gates ON** (reverted to Mode T optimal 2026-05-27 13:18) | **Desktop** (always) | running, **shadow at 100% match (10/10)** |
 | 🔥 **P0** | **Live WR/P&L monitor — 3-5 days then 2-4 weeks** post macro_cache fix | **Desktop** (passive observation) | 🕐 IN PROGRESS — first window closes ~2026-05-30; check trades closed + WR vs counterfactual prediction. **No promotions allowed in this window.** |
 | 🔥 **P0** | **Shadow mode continuous match-rate check** — primary live correctness gate | **Desktop** (passive observation) | 🕐 IN PROGRESS — every 1-2 days run the match-rate query; any drop below ~99% = NEW bug to investigate. |
 | 🔥 **P1** | **Counterfactual backtest on wider window** (May 7 → May 27, 3 weeks) for statistical power | **Laptop** (~30 min) | 📅 NEXT — current 5-day counterfactual showed +0.50pp better return + 2× per-trade edge with cache fix, but only 4 vs 7 trades (sub-significant). Wider window needs ~25-40 trades per condition. |
@@ -68,7 +68,7 @@
 - Bull = **5h@65%** RF+LGBM w=281 γ=0.9981 12f (G_narrow_d May 20-21 Desktop refine winner)
 - Bear = **8h@65%** RF+LGBM w=293 γ=0.9990 16f (G_narrow_d May 20-21 Desktop refine winner)
 - Shields OFF (both regimes)
-- **Rally cooldown OFF** (both regimes — manually toggled 2026-05-23 22:21 from `enabled: true`)
+- **Rally cooldown ON** (both regimes — REVERTED 2026-05-27 13:18 to Mode T optimal recommendation, after May 23 22:21 manual-OFF intermezzo). Bull: rr8h≥2.0 OR rr14h≥6.0 cd=6h. Bear: rr10h≥5.5 OR rr12h≥2.0 cd=8h.
 - min_sell_pnl=0%, max_hold=10h, max_position_usd=$14,300
 
 **Asset universe**: ETH live; BTC/SOL/LINK/BNB `enabled: false`; XRP removed from trader data pipeline 2026-05-23 (silent-crash mitigation).
