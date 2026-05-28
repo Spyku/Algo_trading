@@ -10,6 +10,26 @@ This file preserves the full historical decision trail of the engine: tested/she
 
 ---
 
+### 🗄 ARCHIVED 2026-05-28/29 — v3 fork shipped + 4 superseded engine forks moved to `ARCHIVED/2026-05-28_v3_cleanup/`
+
+**Triggered by**: night-of 2026-05-28 dev session debugging the running NEAR_LIVE_MODE HRST (parallel_nearlive v2, started 2026-05-27 23:46). Multiple iterations of warning suppression + grid trim + phase-aware threading (then reverted as a measured regression) — resulted in the **v3 fork** committed `f688e0e` and the **archive cleanup** committed `b2dbe7a`.
+
+**v3 fork — `crypto_trading_system_ed_g_narrow_d_parallel_nearlive_v3.py`** (509 lines): builds on parallel_nearlive v2 with TRUE Mode D outer-loop parallelization via **dispatcher pattern** (no 545-line engine function replication). Monkey-patches `ENGINE._get_deku_diagnostic_models` to capture grid-setup locals via `inspect.currentframe().f_back`, then replaces `ENGINE._deku_eval_with_pruning` with a routing dispatcher: on first Mode D call it enumerates all 60 configs and submits them to `ProcessPoolExecutor(max_workers=8)`; each subsequent call blocks on its specific Future. Engine's serial for-loop still runs but every call hits a parallel-pre-dispatched cache. **8 outer × K=5 inner = 40 concurrent LGBM fits** (was 5). Worker function re-imports `parallel_nearlive` to inherit its patches; K=5 ThreadPool inside each worker UNCHANGED for quality preservation. Prints EVERY eval (not just NEW BEST). Writes full per-eval CSV `mode_d_full_{asset}_{horizon}_{ts}.csv` with K=5 seed-by-seed metrics. Expected ~5-6× Mode D speedup, ~3-4× full HRST. Other calls (Mode V step 1/2/3, holdout folds) fall back to parallel_nearlive's K=5 wrap unchanged.
+
+**Archived files (4 .py forks → `ARCHIVED/2026-05-28_v3_cleanup/`)**:
+- `crypto_trading_system_ed_pre_H75_20260518.py` (May 18, only doc refs — TODO.md rollback ladder)
+- `crypto_trading_system_ed_pre_cli_fix_20260518.py` (May 18, 0 refs)
+- `crypto_trading_system_ed_h75_wide.py` (May 26, 0 refs — superseded by parallel_nearlive)
+- `crypto_trading_system_ed_g_narrow_d_parallel.py` (May 25, only doc refs in README/CLAUDE/TODO — superseded by parallel_nearlive then v3)
+
+Files stay in git history; archive just declutters the working directory. Verified before move: no `.py` imports, no `.bat` launchers, no active tools reference any of the four. Isolation dirs (`models_h75/`, `config_h75/`, `models_h75_wide_laptop/`, `config_h75_wide_laptop/`, `models_g_desktop_0525/`, `config_g_desktop_0525/`) stay in place per user choice to preserve post-run CSVs for potential analysis.
+
+**Companion deliverable — `tools/merge_pysr_old_new.py`** (committed `c753f46`): tool to keep OLD PySR (April 21) AND NEW PySR (May 28 Laptop run) as candidate features in one merged JSON per horizon. Slots `pysr_1..5` = OLD (preserves existing 5h/6h production models' references — zero inference drift); slots `pysr_6..10` = NEW (additional candidates). LGBM gain-based ranking + Optuna's `n_features` parameter then decides which to use during new training. Correlated OLD/NEW pairs split the gain budget; only one usually survives the top-N cut. Backs up OLD JSONs as `*_pre_20260528_old_only.json` before overwrite for one-rename rollback.
+
+**Files**: v3 fork commit `f688e0e`, archive commit `b2dbe7a`, merge tool commit `c753f46`.
+
+---
+
 ### ✅ CLOSED 2026-05-27 — TODO 0525 (G_narrow_d HRST with extended grid + V2 top-10 + Optuna win_hi=350)
 
 **Outcome**: Desktop run 2026-05-25 22:38 → 2026-05-26 08:44 (~10h). Mode T REF +83.85% on May 22 data lost to current LIVE +91.01% by 7pp. Hypothesis "extend the window grid to `[72,100,150,200,250,300,350]` + bump V2 top-N to 10 + raise Optuna `win_hi` to 350 will unlock the high-window basin that LIVE's w=281/293 sits in" was **REJECTED** — the 0-trade holdout filter still ate the w=250/300 candidates regardless of grid expansion. The grid changes worked as designed but the holdout filter was the binding constraint, not the grid coverage.

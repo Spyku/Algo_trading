@@ -91,7 +91,8 @@ copy models\crypto_ed_production_pre_H75fresh_20260520.csv models\crypto_ed_prod
 copy config\regime_config_ed_pre_H75_20260518.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_H75_20260518.csv models\crypto_ed_production.csv
 # Optional engine-layer rollback (only if reverting to the pre-H_STRICT_FAMILY engine):
-copy crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.py
+# Note: pre-H75 snapshot archived 2026-05-28 — fetch from ARCHIVED/2026-05-28_v3_cleanup/
+copy ARCHIVED\2026-05-28_v3_cleanup\crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.py
 ```
 
 **Promotion source**: Desktop G_narrow_d HRST run 2026-05-20 11:05 → 2026-05-21 10:28 (wall ~23h 22m, log `logs/ed_v1_20260520_110556.log`). Mode T REF +89.14% (converged iter 2, no STRICT rally-cooldown winner).
