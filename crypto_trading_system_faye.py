@@ -575,6 +575,8 @@ NEAR_LIVE_SIGNAL_MODE = 'ternary'  # FAYE default: K=5 votes → BUY/HOLD/SELL (
 NEAR_LIVE_NA_POLICY = 'mean_last_10'  # FAYE default: smooth NaN fill (was 'ffill' in Ed)
 NEAR_LIVE_RETURN_PROBAS = True  # Track K=5 prob averages for ternary tie-breaking
 NEAR_LIVE_HOLD_THRESHOLD = 0.0  # buy_ratio > 0.5 + hold_threshold → BUY; default 0 (any majority = BUY)
+K5_K = int(os.environ.get('RELIABILITY_K', '5'))  # FAYE: multi-seed denoising count (was monkey-patch in Ed v3)
+K5_SEEDS = list(range(42, 42 + K5_K))  # FAYE: K=5 seeds [42, 43, 44, 45, 46] for median-of-K eval
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 EMBARGO_CANDLES_DEFAULT = 8  # gap between train/test — must be >= horizon to prevent label overlap leakage
@@ -2065,6 +2067,23 @@ def _get_deku_diagnostic_models():
         'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
                                         class_weight='balanced', verbose=-1, random_state=42, device='gpu'),
     }
+
+
+def _get_deku_diagnostic_models_seeded(seed):
+    """FAYE K=5 multi-seed denoising helper. Mirrors _get_deku_diagnostic_models()
+    but with random_state=seed instead of 42. Used by _deku_eval_with_pruning to
+    run K=5 seeded walk-forward evals and return the median by cum_return."""
+    from lightgbm import LGBMClassifier
+    return {
+        'RF':   lambda: RandomForestClassifier(n_estimators=100, max_depth=4, class_weight='balanced', random_state=seed, n_jobs=1),
+        'GB':   lambda: GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=seed),
+        'XGB':  lambda: XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=seed,
+                                       tree_method='hist', verbosity=0, n_jobs=1),
+        'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=seed),
+        'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
+                                        class_weight='balanced', verbose=-1, random_state=seed, device='gpu'),
+    }
+
 
 ALL_MODELS = _get_deku_models()
 
@@ -4225,16 +4244,19 @@ def _mean_last_10_fill(arr, context=None, k=10):
     return out
 
 
-def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
-                             step, model_factories, gamma=1.0, trial=None,
-                             horizon=PREDICTION_HORIZON,
-                             signal_mode=NEAR_LIVE_SIGNAL_MODE,
-                             na_policy=NEAR_LIVE_NA_POLICY,
-                             return_probas=NEAR_LIVE_RETURN_PROBAS,
-                             hold_threshold=NEAR_LIVE_HOLD_THRESHOLD):
-    """FAYE walk-forward evaluation. NEAR_LIVE defaults built in (no env var gating):
+def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, window, n,
+                                   step, model_factories, gamma=1.0, trial=None,
+                                   horizon=PREDICTION_HORIZON,
+                                   signal_mode=NEAR_LIVE_SIGNAL_MODE,
+                                   na_policy=NEAR_LIVE_NA_POLICY,
+                                   return_probas=NEAR_LIVE_RETURN_PROBAS,
+                                   hold_threshold=NEAR_LIVE_HOLD_THRESHOLD):
+    """FAYE walk-forward evaluation (single-seed inner loop). NEAR_LIVE defaults built in:
       step=1, signal_mode='ternary' (BUY/HOLD/SELL via K-vote consensus),
       na_policy='mean_last_10', embargo=horizon, return_probas=True.
+
+    Called by _deku_eval_with_pruning (K=5 outer median wrapper) — callers should
+    invoke _deku_eval_with_pruning, not this directly, to get multi-seed denoising.
 
     signal_mode:
       'binary' (Ed legacy): buy_ratio > 0.5 → BUY, else SELL.
@@ -4320,7 +4342,7 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                     except Exception:
                         pass
             except Exception as e:
-                _log_fit_exception(f'_deku_eval_with_pruning/{model_name}', e)
+                _log_fit_exception(f'_deku_eval_with_pruning_inner/{model_name}', e)
                 continue
         if not votes:
             step_idx += 1
@@ -4420,6 +4442,55 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
 
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
             trades, total_gain, total_loss, max_dd * 100, adjusted_pf, raw_pf, bh_pf)
+
+
+def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
+                             step, model_factories, gamma=1.0, trial=None,
+                             horizon=PREDICTION_HORIZON,
+                             signal_mode=NEAR_LIVE_SIGNAL_MODE,
+                             na_policy=NEAR_LIVE_NA_POLICY,
+                             return_probas=NEAR_LIVE_RETURN_PROBAS,
+                             hold_threshold=NEAR_LIVE_HOLD_THRESHOLD):
+    """FAYE K=5 multi-seed median ensemble (canonical entry point).
+
+    Runs _deku_eval_with_pruning_inner K=5 times with seeds [42..46] and returns
+    the result whose cum_return (tuple index 4) is the median across the K runs.
+    This denoises Optuna's TPE sampler against random_state luck and gives a
+    more reliable signal for the K=5 candidate ranking.
+
+    Note on `model_factories`: this argument is accepted for signature
+    compatibility with callers but IGNORED. The K=5 wrap always builds seeded
+    factories via _get_deku_diagnostic_models_seeded(seed) to ensure each of
+    the K runs has a distinct random_state. Callers that need a different
+    model family should call _deku_eval_with_pruning_inner directly with K=1.
+
+    Hyperband pruning: `trial` is forwarded to only the FIRST seed's inner
+    call. Pruning the other seeds mid-run would invalidate the median, so they
+    get trial=None (full walk-forward, no intermediate reporting).
+    """
+    results = []
+    for i, seed in enumerate(K5_SEEDS):
+        factories = _get_deku_diagnostic_models_seeded(seed)
+        r = _deku_eval_with_pruning_inner(
+            features_np, labels_np, closes_np, combo, window, n,
+            step, factories, gamma=gamma,
+            trial=(trial if i == 0 else None),
+            horizon=horizon,
+            signal_mode=signal_mode,
+            na_policy=na_policy,
+            return_probas=return_probas,
+            hold_threshold=hold_threshold,
+        )
+        if r is not None:
+            results.append(r)
+
+    if not results:
+        return None
+
+    # Median by cum_return (tuple index 4). For even K, pick the upper-middle
+    # (results[K//2]) — matches Ed v3 monkey-patch behavior exactly.
+    results.sort(key=lambda rr: rr[4])
+    return results[len(results) // 2]
 
 
 def _build_combo_list():
@@ -9057,86 +9128,3 @@ if __name__ == '__main__':
         os._exit(0)
     except Exception:
         pass
-
-
-# ============================================================
-# H_STRICT_FAMILY: K=5 multi-seed denoising (inlined from
-# _idea_patchers/reliability_multi_seed.py).
-# Wraps _deku_eval_with_pruning to run K seeded inner-loop evals and return
-# the median cum_return result. Applied at module-load so workers re-importing
-# this module also get the wrapped version.
-# ============================================================
-_H_K = int(os.environ.get('RELIABILITY_K', '5'))
-_H_SEEDS = list(range(42, 42 + _H_K))
-_H_ORIG_DEKU_EVAL = _deku_eval_with_pruning
-
-
-def _h_factories_seeded(seed):
-    """Mirror _get_deku_diagnostic_models() with random_state=seed."""
-    from lightgbm import LGBMClassifier
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-    from sklearn.linear_model import LogisticRegression
-    from xgboost import XGBClassifier
-
-    def _rf():
-        return RandomForestClassifier(
-            n_estimators=100, max_depth=4, class_weight='balanced',
-            random_state=seed, n_jobs=1,
-        )
-
-    def _gb():
-        return GradientBoostingClassifier(
-            n_estimators=100, max_depth=3, random_state=seed,
-        )
-
-    def _xgb():
-        return XGBClassifier(
-            n_estimators=100, max_depth=3, learning_rate=0.05,
-            random_state=seed, tree_method='hist', verbosity=0, n_jobs=1,
-        )
-
-    def _lr():
-        return LogisticRegression(
-            max_iter=1000, class_weight='balanced', random_state=seed,
-        )
-
-    def _lgbm():
-        return LGBMClassifier(
-            n_estimators=100, max_depth=4, learning_rate=0.05,
-            class_weight='balanced', verbose=-1, random_state=seed,
-            device='gpu',
-        )
-
-    return {'RF': _rf, 'GB': _gb, 'XGB': _xgb, 'LR': _lr, 'LGBM': _lgbm}
-
-
-def _h_deku_eval_median_k(features_np, labels_np, closes_np, combo, window, n,
-                          step, model_factories, gamma=1.0, trial=None,
-                          horizon=None):
-    """Drop-in replacement that runs the inner walk-forward K times with
-    different seeds. Returns the result whose cum_return (tuple index 4) is
-    the median across the K trials."""
-    if horizon is None:
-        horizon = PREDICTION_HORIZON
-
-    results = []
-    for seed in _H_SEEDS:
-        factories = _h_factories_seeded(seed)
-        r = _H_ORIG_DEKU_EVAL(
-            features_np, labels_np, closes_np, combo, window, n,
-            step, factories, gamma=gamma, trial=None, horizon=horizon,
-        )
-        if r is not None:
-            results.append(r)
-
-    if not results:
-        return None
-
-    results.sort(key=lambda rr: rr[4])
-    return results[len(results) // 2]
-
-
-_deku_eval_with_pruning = _h_deku_eval_median_k
-if _FAYE_IS_MAIN_PROCESS:
-    print(f'[FAYE_K5] _deku_eval_with_pruning patched (K={_H_K} seeds={_H_SEEDS})')
-    print(f'[FAYE] _diversity_key changed to (combo, w) — 1 V2 slot per (model_family, window) cluster')
