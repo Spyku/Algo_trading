@@ -4504,6 +4504,93 @@ def _build_combo_list():
     return combo_options
 
 
+# ============================================================
+# FAYE MODE D 8-WORKER GRID DISPATCHER
+# ============================================================
+# Replaces Ed v3's inspect-frame state-capture monkey-patch chain
+# (crypto_trading_system_ed_g_narrow_d_parallel_nearlive_v3.py).
+#
+# Architecture:
+#   - Main process builds all (combo, window, n_feat, gamma) configs upfront
+#   - Submits all to a ProcessPool with MODE_D_OUTER_WORKERS workers (default 8)
+#   - Each worker runs K=5 seeded inner-loops via ThreadPool (5 concurrent fits)
+#   - Net concurrency: 8 outer × 5 inner = 40 concurrent LGBM fits
+#   - Results returned in completion order; monitor prints + writes per-eval CSV
+#   - Each CSV row has the median plus per-seed apf/ret/trades for diagnostics
+#
+# Why bytes instead of shared memory: arrays are small (~864 rows × ~25 features
+# × 8 bytes = ~170KB), pickle overhead negligible, no Windows shm hassles.
+# ============================================================
+MODE_D_OUTER_WORKERS = int(os.environ.get('MODE_D_OUTER_WORKERS', '8'))
+
+
+def _faye_grid_worker(args):
+    """ProcessPool worker for FAYE Mode D 8-worker dispatcher.
+
+    Runs ONE (combo, window, n_feat, gamma) config with K=5 ThreadPool fan-out.
+    Each seed gets its own _deku_eval_with_pruning_inner call so we capture
+    per-seed metrics for the CSV; the median (by cum_return) is the headline.
+
+    Args is a tuple (picklable):
+      (combo_name, window, n_feat, gamma,
+       features_b, features_shape, features_dtype,
+       labels_b, labels_shape, labels_dtype,
+       closes_b, closes_shape, closes_dtype,
+       ranked_features, n, horizon)
+
+    Returns: (combo_name, window, n_feat, gamma, median_result, seed_results)
+      where seed_results is a list of K=5 result tuples (or None for failures).
+    """
+    import numpy as _np
+    from concurrent.futures import ThreadPoolExecutor as _TPool, as_completed as _tas
+    # Workers re-import FAYE on spawn so all module-level state is fresh.
+    # _SCRIPT_DIR + _FAYE_IS_MAIN_PROCESS guard banners against worker spam.
+    import crypto_trading_system_faye as _F
+
+    (combo_name, window, n_feat, gamma,
+     features_b, features_shape, features_dtype,
+     labels_b, labels_shape, labels_dtype,
+     closes_b, closes_shape, closes_dtype,
+     ranked_features, n, horizon) = args
+
+    features_np = _np.frombuffer(features_b, dtype=features_dtype).reshape(features_shape)
+    labels_np = _np.frombuffer(labels_b, dtype=labels_dtype).reshape(labels_shape)
+    closes_np = _np.frombuffer(closes_b, dtype=closes_dtype).reshape(closes_shape)
+
+    combo = combo_name.split('+')
+    sel_idx = _F._feature_floor_indices(ranked_features, n_feat)
+    feat_np = features_np[:, sel_idx]
+
+    def _run_one_seed(seed):
+        try:
+            factories = _F._get_deku_diagnostic_models_seeded(seed)
+            return _F._deku_eval_with_pruning_inner(
+                feat_np, labels_np, closes_np, combo, window, n,
+                _F.DIAG_STEP, factories,
+                gamma=gamma, trial=None, horizon=horizon,
+            )
+        except Exception:
+            return None
+
+    seed_results = [None] * len(_F.K5_SEEDS)
+    with _TPool(max_workers=len(_F.K5_SEEDS)) as pool:
+        futures = {pool.submit(_run_one_seed, s): i for i, s in enumerate(_F.K5_SEEDS)}
+        for f in _tas(futures):
+            i = futures[f]
+            try:
+                seed_results[i] = f.result()
+            except Exception:
+                seed_results[i] = None
+
+    valid = [r for r in seed_results if r is not None]
+    if not valid:
+        return (combo_name, window, n_feat, gamma, None, seed_results)
+
+    valid.sort(key=lambda rr: rr[4])
+    median = valid[len(valid) // 2]
+    return (combo_name, window, n_feat, gamma, median, seed_results)
+
+
 def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEFAULT_TRIALS, resume=False, replay_hours=None):
     """
     Mode D: Exhaustive grid search.
@@ -4727,76 +4814,173 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         best_apf = 0.0
         eval_count = 0
 
-        for combo_name in GRID_COMBOS:
-            combo = combo_name.split('+')
-            print(f"\n  {'─'*60}")
-            print(f"  {combo_name}")
-            print(f"  {'─'*60}")
+        # ────────────────────────────────────────────────────────────────
+        # FAYE 8-worker parallel grid dispatch (was V3 monkey-patch in Ed).
+        # Builds all configs upfront, submits to ProcessPool, K=5 ThreadPool
+        # inside each worker. Net: ~5-6x speedup over serial K=5.
+        # Falls back to serial when MODE_D_OUTER_WORKERS <= 1 (debug only).
+        # ────────────────────────────────────────────────────────────────
+        from concurrent.futures import ProcessPoolExecutor as _GridPool, as_completed as _grid_as_completed
 
+        # Build all configs in engine iteration order (for stable [N/M] indexing)
+        config_list = []
+        for combo_name in GRID_COMBOS:
             for window in GRID_WINDOWS:
                 for n_feat in GRID_FEATURES:
                     if n_feat > len(ranked_features):
                         continue
-                    sel_idx = _feature_floor_indices(ranked_features, n_feat)
-                    feat_np = features_np[:, sel_idx]
-
                     for gamma in GRID_GAMMAS:
-                        eval_count += 1
+                        config_list.append((combo_name, window, n_feat, gamma))
+        n_grid_actual = len(config_list)
+        key_to_idx = {(c, w, f, round(g, 5)): i + 1 for i, (c, w, f, g) in enumerate(config_list)}
 
-                        result = _deku_eval_with_pruning(
-                            feat_np, labels_np, closes_np, combo, window, n,
-                            DIAG_STEP, model_factories, gamma=gamma, trial=None,
-                            horizon=horizon
-                        )
+        # Serialize numpy arrays once for all workers (small enough to pickle)
+        features_b = features_np.tobytes()
+        features_shape = features_np.shape
+        features_dtype = str(features_np.dtype)
+        labels_b = labels_np.tobytes()
+        labels_shape = labels_np.shape
+        labels_dtype = str(labels_np.dtype)
+        closes_b = closes_np.tobytes()
+        closes_shape = closes_np.shape
+        closes_dtype = str(closes_np.dtype)
 
-                        if result is None:
-                            grid_rows.append({
-                                'combo': combo_name, 'window': window,
-                                'n_features': n_feat, 'gamma': gamma,
-                                'apf': 0, 'return_pct': 0, 'trades': 0,
-                                'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
-                                'status': 'FAILED',
-                            })
-                            continue
+        # Per-eval CSV with K=5 seed breakdown — written incrementally as
+        # configs complete so a crash mid-grid preserves partial results.
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        per_eval_csv = os.path.join(
+            FAYE_MODELS_DIR,
+            f'mode_d_full_{asset_name}_{horizon}h_{_ts}.csv',
+        )
+        per_eval_rows = []
 
-                        trades = result[6]
-                        # Score gate must match MIN_GRID_TRADES — otherwise low-trade
-                        # candidates pass the validity check but get apf=0 (misleading
-                        # display + breaks ranking). Was hardcoded `trades >= 3`,
-                        # caused all 6 valid candidates to show apf=0/ret=0% on short
-                        # replays. Aligned to MIN_GRID_TRADES on 2026-05-02.
-                        score = _compute_optuna_score(result) if trades >= MIN_GRID_TRADES else 0.0
-                        ret = result[4]
-                        acc = result[2]
-                        win_rate = result[5]
-                        raw_pf = result[11]
+        print(f"\n  [FAYE] dispatching {n_grid_actual} configs across "
+              f"{MODE_D_OUTER_WORKERS} ProcessPool workers (K=5 ThreadPool inside each)")
+        print(f"  [FAYE] per-eval CSV: {per_eval_csv}")
 
-                        grid_rows.append({
-                            'combo': combo_name, 'window': window,
-                            'n_features': n_feat, 'gamma': gamma,
-                            'apf': round(score, 4), 'return_pct': round(ret, 2),
-                            'trades': trades, 'win_rate': round(win_rate, 2),
-                            'accuracy': round(acc, 4), 'raw_pf': round(raw_pf, 4),
-                            'status': 'OK' if trades >= MIN_GRID_TRADES else f'LOW_TR({trades})',
-                        })
+        with _GridPool(max_workers=MODE_D_OUTER_WORKERS) as pool:
+            futures = {}
+            for (combo_name, window, n_feat, gamma) in config_list:
+                args = (
+                    combo_name, window, n_feat, gamma,
+                    features_b, features_shape, features_dtype,
+                    labels_b, labels_shape, labels_dtype,
+                    closes_b, closes_shape, closes_dtype,
+                    ranked_features, n, horizon,
+                )
+                f = pool.submit(_faye_grid_worker, args)
+                futures[f] = (combo_name, window, n_feat, gamma)
 
-                        if trades >= MIN_GRID_TRADES:
-                            all_candidates.append(_FakeTrial(
-                                {'combo': combo_name, 'window': window,
-                                 'gamma': gamma, 'n_features': n_feat},
-                                score, source='Grid'
-                            ))
+            for f in _grid_as_completed(futures):
+                try:
+                    combo_name, window, n_feat, gamma, median, seed_results = f.result()
+                except Exception as e:
+                    cn, w, nf, g = futures[f]
+                    print(f"    [FAYE worker FAILED] {cn:10s} w={w:3d} f={nf:2d} "
+                          f"g={g:.3f}: {type(e).__name__}: {e}")
+                    grid_rows.append({
+                        'combo': cn, 'window': w, 'n_features': nf, 'gamma': g,
+                        'apf': 0, 'return_pct': 0, 'trades': 0,
+                        'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
+                        'status': 'WORKER_FAILED',
+                    })
+                    per_eval_rows.append({
+                        'eval_order': key_to_idx[(cn, w, nf, round(g, 5))],
+                        'combo': cn, 'window': w, 'n_features': nf, 'gamma': g,
+                        'apf': 0, 'return_pct': 0, 'trades': 0,
+                        'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
+                        'status': 'WORKER_FAILED',
+                        'elapsed_min': round((time.time() - t_grid) / 60, 2),
+                    })
+                    eval_count += 1
+                    continue
 
-                        marker = ""
-                        if score > best_apf and trades >= MIN_GRID_TRADES:
-                            best_apf = score
-                            marker = " <-- BEST"
+                eval_count += 1
+                eval_n = key_to_idx[(combo_name, window, n_feat, round(gamma, 5))]
+                elapsed = (time.time() - t_grid) / 60
 
-                        # Progress: print every 60 evals + any new best
-                        if marker or eval_count % 60 == 0:
-                            elapsed = (time.time() - t_grid) / 60
-                            print(f"    [{eval_count:3d}/{n_grid}] {combo_name:10s} w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
-                                  f"apf={score:.3f} ret={ret:+.1f}% tr={trades}  ({elapsed:.1f}min){marker}")
+                combo = combo_name.split('+')
+
+                if median is None:
+                    grid_rows.append({
+                        'combo': combo_name, 'window': window,
+                        'n_features': n_feat, 'gamma': gamma,
+                        'apf': 0, 'return_pct': 0, 'trades': 0,
+                        'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
+                        'status': 'FAILED',
+                    })
+                    print(f"    [FAYE done {eval_n:3d}/{n_grid_actual}] {combo_name:10s} "
+                          f"w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
+                          f"FAILED                       ({elapsed:.1f}min)")
+                    per_eval_rows.append({
+                        'eval_order': eval_n, 'combo': combo_name, 'window': window,
+                        'n_features': n_feat, 'gamma': gamma,
+                        'apf': 0, 'return_pct': 0, 'trades': 0,
+                        'win_rate': 0, 'accuracy': 0, 'raw_pf': 0,
+                        'status': 'FAILED', 'elapsed_min': round(elapsed, 2),
+                    })
+                else:
+                    trades = median[6]
+                    score = _compute_optuna_score(median) if trades >= MIN_GRID_TRADES else 0.0
+                    ret = median[4]
+                    acc = median[2]
+                    win_rate = median[5]
+                    raw_pf = median[11]
+                    status = 'OK' if trades >= MIN_GRID_TRADES else f'LOW_TR({trades})'
+
+                    grid_rows.append({
+                        'combo': combo_name, 'window': window,
+                        'n_features': n_feat, 'gamma': gamma,
+                        'apf': round(score, 4), 'return_pct': round(ret, 2),
+                        'trades': trades, 'win_rate': round(win_rate, 2),
+                        'accuracy': round(acc, 4), 'raw_pf': round(raw_pf, 4),
+                        'status': status,
+                    })
+
+                    if trades >= MIN_GRID_TRADES:
+                        all_candidates.append(_FakeTrial(
+                            {'combo': combo_name, 'window': window,
+                             'gamma': gamma, 'n_features': n_feat},
+                            score, source='Grid'
+                        ))
+
+                    marker = ""
+                    if score > best_apf and trades >= MIN_GRID_TRADES:
+                        best_apf = score
+                        marker = " <-- BEST"
+
+                    print(f"    [FAYE done {eval_n:3d}/{n_grid_actual}] {combo_name:10s} "
+                          f"w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
+                          f"apf={score:.3f} ret={ret:+.1f}% tr={trades}  ({elapsed:.1f}min){marker}")
+
+                    # Per-eval CSV row with K=5 seed-by-seed breakdown
+                    row = {
+                        'eval_order': eval_n, 'combo': combo_name, 'window': window,
+                        'n_features': n_feat, 'gamma': gamma,
+                        'apf': round(score, 4), 'return_pct': round(ret, 2),
+                        'trades': trades, 'win_rate': round(win_rate, 2),
+                        'accuracy': round(acc, 4), 'raw_pf': round(raw_pf, 4),
+                        'status': status, 'elapsed_min': round(elapsed, 2),
+                    }
+                    for sidx, sr in enumerate(seed_results):
+                        if sr is None:
+                            row[f'seed{sidx+1}_apf'] = None
+                            row[f'seed{sidx+1}_ret'] = None
+                            row[f'seed{sidx+1}_tr'] = None
+                        else:
+                            s_tr = sr[6]
+                            s_apf = _compute_optuna_score(sr) if s_tr >= MIN_GRID_TRADES else 0.0
+                            row[f'seed{sidx+1}_apf'] = round(float(s_apf), 4)
+                            row[f'seed{sidx+1}_ret'] = round(float(sr[4]), 2)
+                            row[f'seed{sidx+1}_tr'] = int(s_tr)
+                    per_eval_rows.append(row)
+
+                # Periodic + final flush of per-eval CSV (crash-survivability)
+                if eval_count % 5 == 0 or eval_count == n_grid_actual:
+                    try:
+                        pd.DataFrame(per_eval_rows).to_csv(per_eval_csv, index=False)
+                    except Exception as e:
+                        print(f"  [FAYE] per-eval CSV flush warning: {e}")
 
         grid_elapsed = (time.time() - t_grid) / 60
 
@@ -9073,6 +9257,13 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
 
 
 if __name__ == '__main__':
+    # FAYE: freeze_support() required for Windows ProcessPool spawn workers
+    # (Mode D 8-worker dispatcher, Mode V parallel backtests, refine workers).
+    # Without it, spawned children would re-execute the __main__ body recursively
+    # and explode with infinite worker forks.
+    import multiprocessing as _mp
+    _mp.freeze_support()
+
     # Parse --refine-trials N (test-only override for hybrid refine).
     # Strip from sys.argv before main() so the engine doesn't choke on
     # the unknown flag.
