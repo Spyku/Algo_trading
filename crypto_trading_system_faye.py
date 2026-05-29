@@ -568,8 +568,13 @@ FEATURE_FLOOR_MIN_PYSR = 1
 MIN_CONFIDENCE = 75   # Minimum confidence % for strategy signals
 REPLAY_HOURS = 200
 REPLAY_HOURS_S = 400   # Mode S strategy selection — longer window for more trades
-DIAG_STEP = 36
+DIAG_STEP = 1   # FAYE: NEAR_LIVE default — predict EVERY hour, matches live trader cycle (was 36 in Ed)
 DIAG_WINDOWS = [72, 100, 150, 200]  # V1.2: min 72h — 48h also underperforms in live backtests
+HOLDOUT_STEP = 1  # FAYE: same hourly cadence for Mode V Step 3 holdout (was 12 in Ed)
+NEAR_LIVE_SIGNAL_MODE = 'ternary'  # FAYE default: K=5 votes → BUY/HOLD/SELL (was binary in Ed)
+NEAR_LIVE_NA_POLICY = 'mean_last_10'  # FAYE default: smooth NaN fill (was 'ffill' in Ed)
+NEAR_LIVE_RETURN_PROBAS = True  # Track K=5 prob averages for ternary tie-breaking
+NEAR_LIVE_HOLD_THRESHOLD = 0.0  # buy_ratio > 0.5 + hold_threshold → BUY; default 0 (any majority = BUY)
 MIN_COMBO_SIZE = 2   # minimum number of models in ensemble — solos removed (overfit, poor calibration)
 DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 EMBARGO_CANDLES_DEFAULT = 8  # gap between train/test — must be >= horizon to prevent label overlap leakage
@@ -4182,12 +4187,63 @@ REFINE_FEAT_RANGE = 5              # +/- around grid winner's features
 REFINE_WINDOW_RANGE = 20           # +/- around grid winner's window
 
 
+def _mean_last_10_fill(arr, context=None, k=10):
+    """FAYE NEAR_LIVE NaN policy: for each NaN cell in arr, replace with mean
+    of the K most-recent non-NaN values preceding it (column-wise).
+
+    Inlined from crypto_signal_core_nearlive.py (2026-05-29 FAYE consolidation).
+    Replaces ffill ("carry last value") with a smoothing average across the
+    last K observed daily/8h readings. Impact on backtests is near-zero because
+    dropna upstream usually clears NaN before this code path; matters for live
+    inference where the current hour's daily features are NaN before fill.
+
+    Parameters
+    ----------
+    arr : 2D numpy array (n_rows, n_cols) — NaN cells will be filled
+    context : Optional 2D numpy array — non-NaN values seed history for early rows
+    k : int — number of recent values to average (default 10)
+    """
+    if not np.isnan(arr).any():
+        return arr
+    out = arr.copy().astype(float)
+    n_rows, n_cols = out.shape
+    for col in range(n_cols):
+        if context is not None and context.size > 0:
+            ctx_col = context[:, col]
+            history = ctx_col[~np.isnan(ctx_col)].tolist()
+        else:
+            history = []
+        for row in range(n_rows):
+            v = out[row, col]
+            if np.isnan(v):
+                if history:
+                    out[row, col] = float(np.mean(history[-k:]))
+                else:
+                    out[row, col] = 0.0
+            else:
+                history.append(float(v))
+    return out
+
+
 def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                              step, model_factories, gamma=1.0, trial=None,
-                             horizon=PREDICTION_HORIZON):
-    """Walk-forward evaluation with optional Optuna pruning.
-    Same logic as _eval_one_config but reports intermediate scores for Hyperband.
-    Runs in the main process (not joblib worker) so models can use all cores."""
+                             horizon=PREDICTION_HORIZON,
+                             signal_mode=NEAR_LIVE_SIGNAL_MODE,
+                             na_policy=NEAR_LIVE_NA_POLICY,
+                             return_probas=NEAR_LIVE_RETURN_PROBAS,
+                             hold_threshold=NEAR_LIVE_HOLD_THRESHOLD):
+    """FAYE walk-forward evaluation. NEAR_LIVE defaults built in (no env var gating):
+      step=1, signal_mode='ternary' (BUY/HOLD/SELL via K-vote consensus),
+      na_policy='mean_last_10', embargo=horizon, return_probas=True.
+
+    signal_mode:
+      'binary' (Ed legacy): buy_ratio > 0.5 → BUY, else SELL.
+      'ternary' (FAYE default): buy_ratio > 0.5+hold_threshold → BUY,
+                                buy_ratio == 0 (unanimous no-buy) → SELL, else HOLD (no trade).
+    na_policy:
+      'skip' (Ed legacy): skip the eval step if any NaN.
+      'mean_last_10' (FAYE default): fill NaN with mean of last 10 column values.
+    """
     min_start = window + 50
     if n < min_start + 50:
         return None
@@ -4231,9 +4287,16 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
         if len(np.unique(y_train)) < 2:
             step_idx += 1
             continue
+
+        # FAYE NaN policy: apply mean_last_10 fill if requested; otherwise legacy skip.
         if np.isnan(X_train).any() or np.isnan(X_test).any():
-            step_idx += 1
-            continue
+            if na_policy == 'mean_last_10':
+                X_train = _mean_last_10_fill(X_train, context=None)
+                X_test = _mean_last_10_fill(X_test, context=X_train)
+            else:
+                # 'skip' (Ed legacy) — drop this eval step entirely
+                step_idx += 1
+                continue
 
         mean = X_train.mean(axis=0)
         std = X_train.std(axis=0)
@@ -4243,12 +4306,19 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
         sw = get_decay_weights(len(y_train), gamma)
 
         votes = []
+        probas = []
         for model_name in combo:
             try:
                 model = model_factories[model_name]()
                 model.fit(X_train_s, y_train, sample_weight=sw)
                 pred = model.predict(X_test_s)[0]
                 votes.append(pred)
+                if return_probas and hasattr(model, 'predict_proba'):
+                    try:
+                        proba = float(model.predict_proba(X_test_s)[0][1])
+                        probas.append(proba)
+                    except Exception:
+                        pass
             except Exception as e:
                 _log_fit_exception(f'_deku_eval_with_pruning/{model_name}', e)
                 continue
@@ -4256,8 +4326,25 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
             step_idx += 1
             continue
 
+        # FAYE signal aggregation: binary (Ed legacy) vs ternary (default).
         buy_ratio = sum(votes) / len(votes)
-        ensemble_pred = 1 if buy_ratio > 0.5 else 0
+        if signal_mode == 'ternary':
+            # K-vote consensus: BUY (strong) / SELL (unanimous-no) / HOLD (mixed)
+            if buy_ratio > 0.5 + hold_threshold:
+                ensemble_pred = 1  # BUY
+            elif buy_ratio == 0:
+                ensemble_pred = 0  # SELL
+            else:
+                # HOLD: mixed K-vote (some buy, some no-buy). No trade — skip
+                # portfolio update. Count toward total (we made a prediction)
+                # but not toward correct (HOLD has no ground-truth label).
+                total += 1
+                step_idx += 1
+                continue
+        else:
+            # 'binary' (Ed legacy)
+            ensemble_pred = 1 if buy_ratio > 0.5 else 0
+
         if ensemble_pred == y_true:
             correct += 1
         total += 1
@@ -4717,7 +4804,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                     fold_closes_test = closes_np_all[te_s:te_e]
                     n_fold_test = te_e - te_s
 
-                    HOLDOUT_STEP = 12
+                    HOLDOUT_STEP = 1  # FAYE: NEAR_LIVE default — hourly holdout (was 12 in Ed)
                     ho_result = _deku_eval_with_pruning(
                         fold_feat_test, fold_labels_test, fold_closes_test,
                         c_combo, c_window, n_fold_test,
