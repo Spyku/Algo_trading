@@ -24,7 +24,13 @@ import numpy as np
 from datetime import datetime, timedelta
 
 # Create output folder
-MACRO_DIR = 'data/macro_data'
+# Fix #11 (2026-05-29): resolve relative to script location, not CWD.
+# Workers spawned via ProcessPoolExecutor occasionally land in a different
+# CWD; the relative path 'data/macro_data' then resolves to the wrong place
+# and the worker reports "macro_data/ not found". Absolute paths via
+# __file__ bypass the CWD-sensitivity. See crypto_trading_system_ed.py Fix #11.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MACRO_DIR = os.path.join(_SCRIPT_DIR, 'data', 'macro_data')
 os.makedirs(MACRO_DIR, exist_ok=True)
 
 # Freshness threshold — skip re-download if file updated within this many seconds.

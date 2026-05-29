@@ -315,11 +315,26 @@ def _kill_orphan_workers():
 # Desktop G + Laptop G + Desktop H75 all running, same Drive-synced dir).
 # Set both env vars to a sibling dir name to redirect ALL G_narrow_d writes
 # (RESUME_DIR, PRODUCTION_CSV, REGIME_CONFIG_PATH, MODELS_DIR, CONFIG_DIR).
-G_MODELS_DIR_OVERRIDE = os.environ.get('G_NARROW_MODELS_DIR', 'models')
-G_CONFIG_DIR_OVERRIDE = os.environ.get('G_NARROW_CONFIG_DIR', 'config')
-if G_MODELS_DIR_OVERRIDE != 'models' or G_CONFIG_DIR_OVERRIDE != 'config':
+# Fix #11 (2026-05-29): resolve dir overrides absolute via _SCRIPT_DIR so
+# workers with wrong CWD don't write to garbage paths. Matches engine's
+# _resolve_dir behavior. Absolute env-var values pass through unchanged.
+_G_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _g_resolve_dir(env_var, default_name):
+    val = os.environ.get(env_var, default_name)
+    if not os.path.isabs(val):
+        val = os.path.join(_G_SCRIPT_DIR, val)
+    return val
+
+
+G_MODELS_DIR_OVERRIDE = _g_resolve_dir('G_NARROW_MODELS_DIR', 'models')
+G_CONFIG_DIR_OVERRIDE = _g_resolve_dir('G_NARROW_CONFIG_DIR', 'config')
+_G_MODELS_RAW = os.environ.get('G_NARROW_MODELS_DIR', 'models')
+_G_CONFIG_RAW = os.environ.get('G_NARROW_CONFIG_DIR', 'config')
+if _G_MODELS_RAW != 'models' or _G_CONFIG_RAW != 'config':
     print(f"[G_NARROW_D_ISO] output dirs redirected: "
-          f"models={G_MODELS_DIR_OVERRIDE} config={G_CONFIG_DIR_OVERRIDE}")
+          f"models={_G_MODELS_RAW} config={_G_CONFIG_RAW}")
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
@@ -431,9 +446,22 @@ HORIZON_LONG = 8                  # long horizon (parametric — change here to 
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
 PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 
-# Create output folders (keeps default data/ dir alive even if --data-dir points elsewhere)
-for _d in [DATA_DIR, MACRO_DIR, 'data', 'data/macro_data', 'charts', 'models', 'config']:
-    os.makedirs(_d, exist_ok=True)
+# Create output folders (keeps default dirs alive even if --data-dir points elsewhere)
+# Fix #11 (2026-05-29): use absolute paths so worker subprocess imports don't
+# crash with PermissionError when CWD lands in a write-protected location like
+# C:/Users. Same fix pattern as in crypto_trading_system_ed.py.
+for _d in [
+    DATA_DIR, MACRO_DIR,
+    os.path.join(_G_SCRIPT_DIR, 'data'),
+    os.path.join(_G_SCRIPT_DIR, 'data', 'macro_data'),
+    os.path.join(_G_SCRIPT_DIR, 'charts'),
+    os.path.join(_G_SCRIPT_DIR, 'models'),
+    os.path.join(_G_SCRIPT_DIR, 'config'),
+]:
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except (PermissionError, OSError):
+        pass  # worker subprocess with weird CWD/permissions — non-fatal
 TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY for LABEL generation (`2 * TRADING_FEE` break-even target)

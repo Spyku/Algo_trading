@@ -43,6 +43,13 @@ Outputs:
 import sys
 import os
 
+# Fix #11 (2026-05-29): Script-dir-relative path anchor used throughout for
+# default directory resolution. Defined here at the top of imports so it's
+# available everywhere — _resolve_dir() helper + the directory globals all
+# reference it. Workers spawned via ProcessPoolExecutor may land in a wrong
+# CWD on Windows; absolute paths via __file__ bypass that fragility.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ============================================================
 # SUPPRESS ALL WARNINGS (must be before other imports)
 # Must be set before ANY sklearn/joblib imports so child processes inherit it
@@ -291,11 +298,29 @@ def _kill_orphan_workers():
 # default paths (e.g., G on Laptop + H75 on Desktop, same Drive-synced dir).
 # Set both env vars to a sibling dir name to redirect ALL H_strict writes
 # (RESUME_DIR, PRODUCTION_CSV, REGIME_CONFIG_PATH, MODELS_DIR, CONFIG_DIR).
-H75_MODELS_DIR = os.environ.get('H_STRICT_MODELS_DIR', 'models')
-H75_CONFIG_DIR = os.environ.get('H_STRICT_CONFIG_DIR', 'config')
-if H75_MODELS_DIR != 'models' or H75_CONFIG_DIR != 'config':
+# Fix #11 cont. (2026-05-29): all directory paths resolve absolute via
+# _SCRIPT_DIR (defined above) when not env-overridden. If env-overridden
+# with a relative value (e.g. parallel_nearlive sets G_NARROW_MODELS_DIR=
+# 'models_g_desktop_nearlive'), we still resolve it relative to _SCRIPT_DIR
+# so workers with wrong CWD don't write to garbage paths. Absolute env
+# var values are passed through as-is. This keeps:
+#   - Desktop and Laptop both writing to G:\...\engine\<dir>\... (same Drive)
+#   - --no-persist and production both writing to same MODELS_DIR
+#     (the _noprod suffix is added by file-name, not by dir)
+#   - Workers (ProcessPool) writing to the same location as main process
+def _resolve_dir(env_var, default_name):
+    val = os.environ.get(env_var, default_name)
+    if not os.path.isabs(val):
+        val = os.path.join(_SCRIPT_DIR, val)
+    return val
+
+H75_MODELS_DIR = _resolve_dir('H_STRICT_MODELS_DIR', 'models')
+H75_CONFIG_DIR = _resolve_dir('H_STRICT_CONFIG_DIR', 'config')
+_H75_MODELS_RAW = os.environ.get('H_STRICT_MODELS_DIR', 'models')
+_H75_CONFIG_RAW = os.environ.get('H_STRICT_CONFIG_DIR', 'config')
+if _H75_MODELS_RAW != 'models' or _H75_CONFIG_RAW != 'config':
     print(f"[H_STRICT_FAMILY_ISO] output dirs redirected: "
-          f"models={H75_MODELS_DIR} config={H75_CONFIG_DIR}")
+          f"models={_H75_MODELS_RAW} config={_H75_CONFIG_RAW}")
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────
@@ -366,8 +391,19 @@ ACTIVE_FEATURE_SET = 'A'
 # Fix #10 (2026-04-24): data-dir is overridable via --data-dir CLI flag OR
 # ED_DATA_DIR env var. Matrix/research runners write their own copy to
 # data_matrix_<ts>/ and point here, so live trader's data/ is untouched.
-DATA_DIR = os.environ.get('ED_DATA_DIR', 'data')
-MACRO_DIR = os.environ.get('ED_MACRO_DIR', os.path.join(DATA_DIR, 'macro_data'))
+#
+# Fix #11 (2026-05-29): resolve default paths relative to the SCRIPT location,
+# not CWD. Workers spawned via ProcessPoolExecutor on Windows occasionally
+# land in a different CWD than the main process (observed at v3's
+# _refine_top_configs_3workers crash on 2026-05-29 08:09 — worker hit
+# `os.path.exists('data/macro_data') == False` and silently dropped all
+# macro features → subsequent dropna(subset=macro_features) raised KeyError
+# with 130+ column names, killed the whole HRST). Absolute paths bypass
+# the CWD-sensitivity entirely; env-var overrides still work normally.
+# _SCRIPT_DIR is defined at the very top of this file (line ~51) so it's
+# available to all directory resolutions below.
+DATA_DIR = _resolve_dir('ED_DATA_DIR', 'data')
+MACRO_DIR = _resolve_dir('ED_MACRO_DIR', os.path.join(DATA_DIR, 'macro_data'))
 
 _ASSET_DEFS = [
     # 2026-05-02: BNB added after Revolut X listing verified;
@@ -396,8 +432,14 @@ ASSETS = _build_assets_dict()
 
 def set_data_dir(new_dir):
     """Override the data directory. Must be called BEFORE any load_data /
-    build_all_features. Rebuilds ASSETS dict to pick up new paths."""
+    build_all_features. Rebuilds ASSETS dict to pick up new paths.
+
+    Fix #11 (2026-05-29): resolve relative new_dir against _SCRIPT_DIR so the
+    override works regardless of caller's CWD (matters for workers).
+    """
     global DATA_DIR, MACRO_DIR, ASSETS
+    if not os.path.isabs(new_dir):
+        new_dir = os.path.join(_SCRIPT_DIR, new_dir)
     DATA_DIR = new_dir
     MACRO_DIR = os.path.join(new_dir, 'macro_data')
     ASSETS = _build_assets_dict()
@@ -407,9 +449,25 @@ HORIZON_LONG = 8                  # long horizon (parametric — change here to 
 AVAILABLE_HORIZONS = [HORIZON_SHORT, HORIZON_LONG]
 PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 
-# Create output folders (keeps default data/ dir alive even if --data-dir points elsewhere)
-for _d in [DATA_DIR, MACRO_DIR, 'data', 'data/macro_data', 'charts', 'models', 'config']:
-    os.makedirs(_d, exist_ok=True)
+# Create output folders (keeps default dirs alive even if --data-dir points elsewhere)
+# Fix #11 cont. (2026-05-29): use absolute paths so module import doesn't crash
+# when CWD is wrong (e.g. ProcessPool workers landing in C:/Users → PermissionError
+# trying to create 'data' there). The script-dir-relative paths are the canonical
+# default locations regardless of where Python was launched from.
+for _d in [
+    DATA_DIR, MACRO_DIR,
+    os.path.join(_SCRIPT_DIR, 'data'),
+    os.path.join(_SCRIPT_DIR, 'data', 'macro_data'),
+    os.path.join(_SCRIPT_DIR, 'charts'),
+    os.path.join(_SCRIPT_DIR, 'models'),
+    os.path.join(_SCRIPT_DIR, 'config'),
+]:
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except (PermissionError, OSError):
+        # Worker subprocess with weird CWD/permissions — non-fatal at import.
+        # The main process already created these on its own import.
+        pass
 TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
 TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY for LABEL generation (`2 * TRADING_FEE` break-even target)
