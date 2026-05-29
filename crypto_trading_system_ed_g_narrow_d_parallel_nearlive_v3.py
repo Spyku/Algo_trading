@@ -353,7 +353,7 @@ class _ParallelGridDispatcher:
                 if median is None:
                     apf = ret = trades = win_rate = accuracy = raw_pf = 0
                     status = 'FAILED'
-                    print(f"    [{eval_n:3d}/{self.n_grid}] {combo_name:10s} "
+                    print(f"    [V3 done {eval_n:3d}/{self.n_grid}] {combo_name:10s} "
                           f"w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
                           f"FAILED                       ({elapsed:.1f}min)",
                           flush=True)
@@ -369,7 +369,11 @@ class _ParallelGridDispatcher:
                     if apf > self.best_apf and trades >= 2:
                         self.best_apf = apf
                         marker = " <-- BEST"
-                    print(f"    [{eval_n:3d}/{self.n_grid}] {combo_name:10s} "
+                    # Prefix "V3 done" distinguishes dispatcher's completion-order
+                    # output from the engine's own iteration-order [N/60] BEST
+                    # prints (the engine's NEW BEST line stays untouched in its
+                    # own format — two counters, two prefixes, no confusion).
+                    print(f"    [V3 done {eval_n:3d}/{self.n_grid}] {combo_name:10s} "
                           f"w={window:3d} f={n_feat:2d} g={gamma:.3f} | "
                           f"apf={apf:.3f} ret={ret:+.1f}% tr={trades}  "
                           f"({elapsed:.1f}min){marker}", flush=True)
