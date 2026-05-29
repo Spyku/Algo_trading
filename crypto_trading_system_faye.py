@@ -1,5 +1,5 @@
 """
-FAYE — ML Trading System (next-generation Ed, 2026-05-29)
+FAYE — ML Trading System (next-generation Ed, 2026-05-29 / 2026-05-30)
 ============================================================
 Standalone single-file evolution of the Ed engine with NEAR_LIVE_MODE
 behavior as the new default. Built by inlining the v3 architecture
@@ -10,6 +10,56 @@ ML trading system for BTC, ETH, XRP, SOL, LINK (5 assets post-2026-04-19 prune).
 130+ features -> walk-forward ML -> BUY/SELL/HOLD signals (ternary by default).
 Variable horizon per asset (5h, 6h, 7h, 8h, etc.) with regime-switching.
 
+──────────────────────────────────────────────────────────────────────
+ARCHITECTURE: monkey-patch genealogy → native consolidation
+──────────────────────────────────────────────────────────────────────
+The Ed v3 production stack (crypto_trading_system_ed_g_narrow_d_parallel_
+nearlive_v3.py) was a 4-layer monkey-patch chain that ran:
+
+  v3 → patches → parallel_nearlive → patches → g_narrow_d → patches → ed
+
+FAYE collapses the 4 layers into one file. Each previously-patched feature
+is now first-class code at its natural location. Verified by
+tools/smoke_test_faye.py (38 ✓ on green).
+
+What was inlined and from where:
+
+  P1  Identity rebrand                  (was Ed module renames)
+       FAYE_MODELS_DIR / FAYE_CONFIG_DIR / crypto_faye_production.csv /
+       regime_config_faye.json — isolated paths, no Ed file collisions.
+
+  P2  _mean_last_10_fill helper +       (was signal_core_nearlive.py)
+      NEAR_LIVE defaults in _deku_eval_with_pruning
+       step=1, signal_mode='ternary', na_policy='mean_last_10',
+       embargo=horizon, return_probas=True — no env-var gating, always on.
+
+  P3  K=5 multi-seed median ensemble    (was reliability_multi_seed.py
+                                          patch in g_narrow_d)
+       _deku_eval_with_pruning is now native K=5 wrap. Bare walk-forward
+       loop renamed to _deku_eval_with_pruning_inner. K5_SEEDS=[42..46].
+       Pruning only the first seed (median validity).
+
+  P4  3-worker hybrid GPU+CPU refine    (was parallel_nearlive patch)
+       _refine_top_configs is now the canonical hybrid 3-worker dispatcher.
+       Serial fallback preserved as _refine_top_configs_serial. No
+       _ENG_REFINE_TOP_CONFIGS_ORIG indirection.
+
+  P5a Mode V/S/T parallel rebinds       (was parallel_nearlive monkey-patch)
+       run_mode_v / s / t are now the canonical parallel versions.
+       Serial fallbacks: run_mode_v_serial / s_serial / t_serial.
+
+  P5b Mode D 8-worker grid dispatcher   (was v3 inspect-frame state capture)
+       Native ProcessPool dispatch inside run_mode_d_optuna — no frame
+       inspection, no ENGINE._get_deku_diagnostic_models hook, no
+       ENGINE._deku_eval_with_pruning re-routing. Per-eval CSV with K=5
+       seed-by-seed breakdown at models_faye/mode_d_full_*.csv.
+
+  P6  Smoke test                        (new)
+       tools/smoke_test_faye.py — 38-check verification (import, state,
+       canonical entry points, serial fallbacks, worker pickling, no
+       leftover monkey-patch names, K=5 wrap is native).
+
+──────────────────────────────────────────────────────────────────────
 NEAR_LIVE_MODE defaults (always on, no env-var gating):
   - step = 1  (predict every hour, matches live trader cycle — was step=36 in Ed)
   - signal_mode = 'ternary'  (K=5 vote-based BUY/HOLD/SELL — was binary in Ed)
@@ -17,12 +67,13 @@ NEAR_LIVE_MODE defaults (always on, no env-var gating):
   - embargo = horizon  (matches live trader's label-leak protection)
   - return_probas = True  (model probabilities tracked for ternary tie-breaking)
 
-Mode D outer-loop parallelization (inlined from v3 dispatcher):
-  - 8 ProcessPoolExecutor workers run the 60-eval grid in parallel
+Mode D outer-loop parallelization (native, no monkey-patch):
+  - MODE_D_OUTER_WORKERS=8 ProcessPoolExecutor workers run the grid
   - Each worker runs K=5 ThreadPool internally (5 multi-seed evals)
-  - 40 concurrent LGBM fits at peak vs 5 in pre-v3 architecture
+  - Net: 40 concurrent LGBM fits at peak vs 5 in pre-v3 architecture
+  - Per-eval CSV flushed every 5 evals (crash-survivable)
 
-Mode V Step 2 refine: 3-worker parallel Optuna refine (inlined from parallel_nearlive).
+Mode V Step 2 refine: 3-worker hybrid GPU+CPU refine (native).
 K=5 multi-seed denoising at every eval level. NO monkey-patches anywhere.
 
 Pipeline (all modes):
@@ -53,6 +104,7 @@ Env overrides:
   MODE_D_OUTER_WORKERS=8   (default 8; tune for hardware)
   FAYE_MODELS_DIR=...      (default 'models_faye/' relative to script)
   FAYE_CONFIG_DIR=...      (default 'config_faye/' relative to script)
+  RELIABILITY_K=5          (default 5; K=5 multi-seed denoising count)
 
 Outputs (all in FAYE-isolated directories — does NOT touch Ed's production files):
   models_faye/crypto_faye_production.csv    (winner per (asset, horizon))
@@ -67,6 +119,11 @@ Promotion to production (one-time, after FAYE validated):
   Copy-Item "config_faye\\regime_config_faye.json"   "config\\regime_config_ed.json"     -Force
   Copy-Item "models_faye\\eth_models_*.pkl"          "models\\" -Recurse -Force
   # Trader (crypto_revolut_ed_v2.py) picks up new winners on next hourly cycle, UNCHANGED.
+
+Verifying the consolidation:
+  python tools/smoke_test_faye.py
+  # Read-only, ~2 seconds, no Mode D triggered.
+  # Expected: SMOKE TEST: PASS (38 ✓).
 """
 
 import sys
