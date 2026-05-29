@@ -104,6 +104,15 @@ if not os.environ.get(_WARNINGS_SENTINEL):
 
 import time
 import warnings
+import multiprocessing as _mp_check
+
+# Worker-process guard (2026-05-29 night fix per user request): suppress
+# module-level banner prints in worker subprocesses. Workers re-import this
+# module on spawn (Windows spawn-method) and would print all the
+# [G_NARROW_D_*] banners — 3 copies during Mode V Step 2 refine dispatch
+# alone, more during the v3 outer pool. Spam was unreadable.
+# Same pattern as v3's _IS_MAIN_PROCESS gate.
+_PNL_IS_MAIN_PROCESS = _mp_check.current_process().name == 'MainProcess'
 
 # Layer 3: Python-level catch-all filter (in case PYTHONWARNINGS/-W get reset).
 warnings.filterwarnings("ignore")
@@ -188,22 +197,26 @@ _seed_regime_cfg = G.REGIME_CONFIG_PATH
 _noprod_regime_cfg = _seed_regime_cfg.replace('.json', '_noprod.json')
 if os.path.exists(_noprod_regime_cfg):
     _shutil.copyfile(_noprod_regime_cfg, _seed_regime_cfg)
-    print(f'[G_NARROW_D_PARALLEL] preserved prior run state: {_noprod_regime_cfg} -> {_seed_regime_cfg}', flush=True)
+    if _PNL_IS_MAIN_PROCESS:
+        print(f'[G_NARROW_D_PARALLEL] preserved prior run state: {_noprod_regime_cfg} -> {_seed_regime_cfg}', flush=True)
 elif not os.path.exists(_seed_regime_cfg):
     if os.path.exists(_live_regime_cfg):
         _shutil.copyfile(_live_regime_cfg, _seed_regime_cfg)
-        print(f'[G_NARROW_D_PARALLEL] seeded regime config: {_live_regime_cfg} -> {_seed_regime_cfg}', flush=True)
+        if _PNL_IS_MAIN_PROCESS:
+            print(f'[G_NARROW_D_PARALLEL] seeded regime config: {_live_regime_cfg} -> {_seed_regime_cfg}', flush=True)
     else:
-        print(f'[G_NARROW_D_PARALLEL] WARN: live regime config not found at {_live_regime_cfg} — Mode R/S/T may fail', flush=True)
+        if _PNL_IS_MAIN_PROCESS:
+            print(f'[G_NARROW_D_PARALLEL] WARN: live regime config not found at {_live_regime_cfg} — Mode R/S/T may fail', flush=True)
 
-print(f'[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G', flush=True)
-print(f'  combos={ENGINE.GRID_COMBOS}', flush=True)
-print(f'  windows={ENGINE.GRID_WINDOWS}', flush=True)
-print(f'  features={ENGINE.GRID_FEATURES}', flush=True)
-print(f'  gammas={ENGINE.GRID_GAMMAS}', flush=True)
-print(f'  n_features_range={ENGINE.N_FEATURES_RANGE}', flush=True)
-print(f'  models_dir={ENGINE.MODELS_DIR}', flush=True)
-print(f'  config_dir={ENGINE.CONFIG_DIR}', flush=True)
+if _PNL_IS_MAIN_PROCESS:
+    print(f'[G_NARROW_D_PARALLEL] FIX #0 applied: ENGINE.GRID_* + N_FEATURES_RANGE + output dirs <- G', flush=True)
+    print(f'  combos={ENGINE.GRID_COMBOS}', flush=True)
+    print(f'  windows={ENGINE.GRID_WINDOWS}', flush=True)
+    print(f'  features={ENGINE.GRID_FEATURES}', flush=True)
+    print(f'  gammas={ENGINE.GRID_GAMMAS}', flush=True)
+    print(f'  n_features_range={ENGINE.N_FEATURES_RANGE}', flush=True)
+    print(f'  models_dir={ENGINE.MODELS_DIR}', flush=True)
+    print(f'  config_dir={ENGINE.CONFIG_DIR}', flush=True)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -236,9 +249,10 @@ import crypto_trading_system_ed_step6_nearlive as ENGINE_NL  # noqa: E402
 # code path falls through to the ENGINE wrapper.
 G._G_ORIG_DEKU_EVAL = ENGINE_NL._H_ORIG_DEKU_EVAL  # primary patch — what _parallel_deku_eval_median_k actually calls
 ENGINE._H_ORIG_DEKU_EVAL = ENGINE_NL._H_ORIG_DEKU_EVAL  # defense-in-depth
-print(f'[G_NARROW_D_PARALLEL_NEARLIVE] patched G._G_ORIG_DEKU_EVAL + ENGINE._H_ORIG_DEKU_EVAL -> step6_nearlive inner _deku_eval_with_pruning', flush=True)
-print(f'  NEAR_LIVE_MODE env var honored inside step6_nearlive (na=mean_last_10, signal=ternary, step=1, embargo=horizon)', flush=True)
-print(f'  Off-by-default — set $env:NEAR_LIVE_MODE = "1" to activate', flush=True)
+if _PNL_IS_MAIN_PROCESS:
+    print(f'[G_NARROW_D_PARALLEL_NEARLIVE] patched G._G_ORIG_DEKU_EVAL + ENGINE._H_ORIG_DEKU_EVAL -> step6_nearlive inner _deku_eval_with_pruning', flush=True)
+    print(f'  NEAR_LIVE_MODE env var honored inside step6_nearlive (na=mean_last_10, signal=ternary, step=1, embargo=horizon)', flush=True)
+    print(f'  Off-by-default — set $env:NEAR_LIVE_MODE = "1" to activate', flush=True)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -602,12 +616,13 @@ ENGINE._refine_top_configs = _refine_top_configs_3workers
 # Banner — confirms patches landed for both parent and workers (workers
 # print their own banner when they re-import this module).
 # ────────────────────────────────────────────────────────────────────────
-print(f'[G_NARROW_D_PARALLEL] patches applied (machine={MACHINE}, N_JOBS_PARALLEL={N_JOBS_PARALLEL}):', flush=True)
-print(f'  #1 device routing: K=5 factories read G_PARALLEL_LGBM_DEVICE per worker (CPU default when K>1)', flush=True)
-print(f'  #2 parallel K=5:   {_PARALLEL_K} seeds via ThreadPoolExecutor per trial', flush=True)
-print(f'  #3 3-worker refine: configs submitted across max 3 workers', flush=True)
-print(f'  resolved budget:   {_N_OUTER_REFINE_WORKERS} outer × {_PARALLEL_K} inner × {_DEFAULT_LGBM_THREADS} LGBM-thread '
-      f'= {_N_OUTER_REFINE_WORKERS * _PARALLEL_K * _DEFAULT_LGBM_THREADS} OS threads (cap={N_JOBS_PARALLEL})', flush=True)
+if _PNL_IS_MAIN_PROCESS:
+    print(f'[G_NARROW_D_PARALLEL] patches applied (machine={MACHINE}, N_JOBS_PARALLEL={N_JOBS_PARALLEL}):', flush=True)
+    print(f'  #1 device routing: K=5 factories read G_PARALLEL_LGBM_DEVICE per worker (CPU default when K>1)', flush=True)
+    print(f'  #2 parallel K=5:   {_PARALLEL_K} seeds via ThreadPoolExecutor per trial', flush=True)
+    print(f'  #3 3-worker refine: configs submitted across max 3 workers', flush=True)
+    print(f'  resolved budget:   {_N_OUTER_REFINE_WORKERS} outer × {_PARALLEL_K} inner × {_DEFAULT_LGBM_THREADS} LGBM-thread '
+          f'= {_N_OUTER_REFINE_WORKERS * _PARALLEL_K * _DEFAULT_LGBM_THREADS} OS threads (cap={N_JOBS_PARALLEL})', flush=True)
 
 
 # ────────────────────────────────────────────────────────────────────────

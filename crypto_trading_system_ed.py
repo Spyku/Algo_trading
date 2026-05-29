@@ -50,6 +50,15 @@ import os
 # CWD on Windows; absolute paths via __file__ bypass that fragility.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Worker-process guard (2026-05-29 night): suppress module-level banner
+# prints in ProcessPoolExecutor worker subprocesses. Workers re-import this
+# module on spawn (Windows spawn-method); without this guard each worker
+# would print [H_STRICT_FAMILY_*] banners during Mode V Step 2 refine
+# dispatch (3 workers → 3 copies of every line). Same pattern as v3's
+# _IS_MAIN_PROCESS gate and parallel_nearlive's _PNL_IS_MAIN_PROCESS gate.
+import multiprocessing as _mp_check_e
+_E_IS_MAIN_PROCESS = _mp_check_e.current_process().name == 'MainProcess'
+
 # ============================================================
 # SUPPRESS ALL WARNINGS (must be before other imports)
 # Must be set before ANY sklearn/joblib imports so child processes inherit it
@@ -185,9 +194,11 @@ if _H_SNAPSHOT_DIR:
         return _h_orig_read_csv(filepath_or_buffer, *args, **kwargs)
 
     pd.read_csv = _h_redirected_read_csv
-    print(f'[H_STRICT_FAMILY_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_h_snapshot.name}/<file>')
+    if _E_IS_MAIN_PROCESS:
+        print(f'[H_STRICT_FAMILY_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_h_snapshot.name}/<file>')
 else:
-    print('[H_STRICT_FAMILY_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
+    if _E_IS_MAIN_PROCESS:
+        print('[H_STRICT_FAMILY_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
 
 import numpy as np
 from datetime import datetime, timedelta
@@ -9011,5 +9022,6 @@ def _h_deku_eval_median_k(features_np, labels_np, closes_np, combo, window, n,
 
 
 _deku_eval_with_pruning = _h_deku_eval_median_k
-print(f'[H_STRICT_FAMILY_K5] _deku_eval_with_pruning patched (K={_H_K} seeds={_H_SEEDS})')
-print(f'[H_STRICT_FAMILY] _diversity_key changed to (combo, w) — 1 V2 slot per (model_family, window) cluster')
+if _E_IS_MAIN_PROCESS:
+    print(f'[H_STRICT_FAMILY_K5] _deku_eval_with_pruning patched (K={_H_K} seeds={_H_SEEDS})')
+    print(f'[H_STRICT_FAMILY] _diversity_key changed to (combo, w) — 1 V2 slot per (model_family, window) cluster')

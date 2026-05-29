@@ -68,6 +68,13 @@ Outputs:
 
 import sys
 import os
+import multiprocessing as _mp_check
+
+# Worker-process guard (2026-05-29 night): suppress module-level banner
+# prints in worker subprocesses. Workers re-import this module on spawn
+# (Windows spawn-method) — without this guard, each worker prints all
+# the [G_NARROW_D_*] banners, causing severe spam during pool dispatch.
+_G_IS_MAIN_PROCESS = _mp_check.current_process().name == 'MainProcess'
 
 # ============================================================
 # SUPPRESS ALL WARNINGS (must be before other imports)
@@ -206,9 +213,11 @@ if _G_SNAPSHOT_DIR:
         return _g_orig_read_csv(filepath_or_buffer, *args, **kwargs)
 
     pd.read_csv = _g_redirected_read_csv
-    print(f'[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_g_snapshot.name}/<file>')
+    if _G_IS_MAIN_PROCESS:
+        print(f'[G_NARROW_D_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_g_snapshot.name}/<file>')
 else:
-    print('[G_NARROW_D_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
+    if _G_IS_MAIN_PROCESS:
+        print('[G_NARROW_D_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.parallel import Parallel, delayed
 # Latent-bug fix (2026-04-25 evening): RandomForestClassifier,
@@ -332,7 +341,7 @@ G_MODELS_DIR_OVERRIDE = _g_resolve_dir('G_NARROW_MODELS_DIR', 'models')
 G_CONFIG_DIR_OVERRIDE = _g_resolve_dir('G_NARROW_CONFIG_DIR', 'config')
 _G_MODELS_RAW = os.environ.get('G_NARROW_MODELS_DIR', 'models')
 _G_CONFIG_RAW = os.environ.get('G_NARROW_CONFIG_DIR', 'config')
-if _G_MODELS_RAW != 'models' or _G_CONFIG_RAW != 'config':
+if (_G_MODELS_RAW != 'models' or _G_CONFIG_RAW != 'config') and _G_IS_MAIN_PROCESS:
     print(f"[G_NARROW_D_ISO] output dirs redirected: "
           f"models={_G_MODELS_RAW} config={_G_CONFIG_RAW}")
 
@@ -8926,7 +8935,8 @@ def _g_deku_eval_median_k(features_np, labels_np, closes_np, combo, window, n,
 
 
 _deku_eval_with_pruning = _g_deku_eval_median_k
-print(f'[G_NARROW_D_K5] _deku_eval_with_pruning patched (K={_G_K} seeds={_G_SEEDS})')
+if _G_IS_MAIN_PROCESS:
+    print(f'[G_NARROW_D_K5] _deku_eval_with_pruning patched (K={_G_K} seeds={_G_SEEDS})')
 
 
 if __name__ == '__main__':
