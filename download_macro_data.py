@@ -94,8 +94,16 @@ def _dedup_preserve_history(df, freq='1h', subset=None):
         time_col = subset[0]
         if time_col not in df.columns:
             return df.drop_duplicates(subset=subset, keep='last')
-        times = pd.to_datetime(df[time_col], errors='coerce')
-        hist_mask = times < cutoff  # NaT comparisons → False, so NaT rows go to current
+        # Fix (2026-05-29): coerce time_col in-place. Without this, after
+        # `pd.concat([read_csv_existing, new_df])`, time_col holds mixed
+        # types (strings from CSV + Timestamps from new rows). sort_values
+        # then crashes with "'<' not supported between instances of
+        # 'Timestamp' and 'str'" — observed killing options_iv and orderbook
+        # downloads since 2026-05-27 (stale for 2 days). Coercing the column
+        # itself makes the subsequent sort_values pure-Timestamp.
+        df = df.copy()
+        df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
+        hist_mask = df[time_col] < cutoff  # NaT comparisons → False, NaT rows go to current
         hist = df.loc[hist_mask].drop_duplicates(subset=subset, keep='first')
         curr = df.loc[~hist_mask].drop_duplicates(subset=subset, keep='last')
         return pd.concat([hist, curr], ignore_index=True).sort_values(time_col).reset_index(drop=True)

@@ -248,15 +248,21 @@ class _ParallelGridDispatcher:
         self.pool = None
         self.futures = {}      # key -> Future
         self.config_order = []
+        self.key_to_idx = {}   # key -> pre-assigned idx (1..n_grid). Stable
+                               # numbering per config, immune to monitor-thread
+                               # race conditions that previously caused the
+                               # "[V3 done 1/60] same eval printed twice" bug
+                               # the user spotted on 2026-05-29.
         self.n_grid = 0
         self.dispatched = False
         self.t_start = None
         self.lock = threading.Lock()
-        self.eval_count = 0
         self.best_apf = 0.0
         self.csv_rows = []
         self.csv_path = None
         self.monitor_thread = None
+        self.printed_keys = set()  # idempotency: print each idx at most once,
+                                   # even if duplicate monitor threads race
 
     def reset_for_new_horizon(self, state):
         """Called by state-capture hook at start of each (asset, horizon)."""
@@ -270,12 +276,13 @@ class _ParallelGridDispatcher:
                 self.pool = None
             self.futures = {}
             self.config_order = []
+            self.key_to_idx = {}
             self.n_grid = 0
             self.dispatched = False
             self.t_start = None
-            self.eval_count = 0
             self.best_apf = 0.0
             self.csv_rows = []
+            self.printed_keys = set()
             asset = state['asset_name']
             horizon = state['horizon']
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -301,7 +308,13 @@ class _ParallelGridDispatcher:
         horizon = state['horizon']
 
         # Enumerate configs in the SAME order the engine iterates (lines 4461-4474)
+        # and ASSIGN A STABLE INDEX 1..N to each. The monitor thread will print
+        # using THIS pre-assigned idx (via key_to_idx lookup), not an
+        # incrementing counter. This fixes the "[V3 done 1/60] printed twice
+        # with different params" symptom from 2026-05-29: even if duplicate
+        # prints somehow happen, they're for the same config so they share idx.
         self.config_order = []
+        self.key_to_idx = {}
         for combo_name in ENGINE.GRID_COMBOS:
             for window in ENGINE.GRID_WINDOWS:
                 for n_feat in ENGINE.GRID_FEATURES:
@@ -310,6 +323,8 @@ class _ParallelGridDispatcher:
                     for gamma in ENGINE.GRID_GAMMAS:
                         self.config_order.append((combo_name, window, n_feat, gamma))
         self.n_grid = len(self.config_order)
+        for idx, (combo_name, window, n_feat, gamma) in enumerate(self.config_order, start=1):
+            self.key_to_idx[self._config_key(combo_name, window, n_feat, gamma)] = idx
 
         # Serialize arrays (single pickle, shared across workers' arg tuples)
         features_b = features_np.tobytes()
@@ -357,9 +372,16 @@ class _ParallelGridDispatcher:
                     continue
                 combo_name, window, n_feat, gamma, median, seed_results = res
 
+                # Use the pre-assigned stable index for THIS config. Same idx
+                # every time, regardless of completion order or duplicate
+                # monitor threads. Idempotency guard below ensures each idx
+                # prints at most ONCE even if a duplicate monitor races.
+                result_key = self._config_key(combo_name, window, n_feat, gamma)
+                eval_n = self.key_to_idx.get(result_key, 0)
                 with self.lock:
-                    self.eval_count += 1
-                    eval_n = self.eval_count
+                    if result_key in self.printed_keys:
+                        continue  # already reported by another monitor — skip
+                    self.printed_keys.add(result_key)
                 elapsed = (time.time() - self.t_start) / 60.0
 
                 if median is None:
@@ -390,7 +412,9 @@ class _ParallelGridDispatcher:
                           f"apf={apf:.3f} ret={ret:+.1f}% tr={trades}  "
                           f"({elapsed:.1f}min){marker}", flush=True)
 
-                # Full CSV row with K=5 seed breakdown
+                # Full CSV row with K=5 seed breakdown.
+                # 'eval_order' is the pre-assigned stable idx (config position
+                # in engine's iteration order), not arrival order.
                 row = {
                     'eval_order': eval_n,
                     'combo': combo_name,
@@ -420,8 +444,12 @@ class _ParallelGridDispatcher:
                 with self.lock:
                     self.csv_rows.append(row)
 
-                # Flush every 5 evals + final
-                if eval_n % 5 == 0 or eval_n == self.n_grid:
+                # Flush periodically + on completion. Use len(printed_keys)
+                # instead of eval_n since eval_n is the config's stable position
+                # (not how many we've processed).
+                with self.lock:
+                    done_count = len(self.printed_keys)
+                if done_count % 5 == 0 or done_count == self.n_grid:
                     self._flush_csv()
         except Exception as e:
             print(f"  [V3] monitor thread crashed: {e}\n{traceback.format_exc()}",
