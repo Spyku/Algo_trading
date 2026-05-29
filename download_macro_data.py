@@ -1679,7 +1679,31 @@ def download_kalshi_data():
 # ============================================================
 # MAIN
 # ============================================================
+def _wait_for_safe_download_window(safe_start_minute=6, max_wait=400):
+    """Avoid colliding with the live trader's hourly download cycle at xx:00.
+
+    Trader downloads typically run xx:00-xx:02. If current time is in the
+    xx:00 to xx:{safe_start_minute-1} window, sleep until xx:{safe_start_minute}.
+    This prevents concurrent CSV writes (orderbook_snapshots, derivatives_*,
+    macro_daily) from two processes corrupting each other's files.
+
+    Added 2026-05-29 after user observed v3 + trader could collide if launched
+    at xx:00 (risk small but non-zero — both processes append to the same CSVs).
+    """
+    now = datetime.now()
+    if now.minute >= safe_start_minute:
+        return
+    target_seconds_into_hour = safe_start_minute * 60
+    current_seconds_into_hour = now.minute * 60 + now.second
+    wait_seconds = max(1, target_seconds_into_hour - current_seconds_into_hour + 1)
+    wait_seconds = min(wait_seconds, max_wait)
+    print(f"  [SAFE-WINDOW] minute={now.minute:02d} — waiting {wait_seconds}s until xx:{safe_start_minute:02d} "
+          f"to avoid trader's hourly download collision", flush=True)
+    time.sleep(wait_seconds)
+
+
 def main(full=False):
+    _wait_for_safe_download_window()
     print("=" * 60)
     print("  MACRO & SENTIMENT DATA DOWNLOAD" + ("  [--full]" if full else ""))
     print("=" * 60)

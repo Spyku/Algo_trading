@@ -808,6 +808,20 @@ def download_asset(asset_name, update_only=True):
 
 
 def update_all_data(assets_list=None):
+    # Safe-window guard (added 2026-05-29): avoid the live trader's xx:00-xx:05
+    # hourly cycle to prevent concurrent CSV writes from corrupting derivatives,
+    # macro_daily, or OHLCV files. Trader downloads typically finish by xx:02-xx:03;
+    # we wait until xx:06 just to be safe.
+    import time as _t
+    from datetime import datetime as _dt
+    now = _dt.now()
+    if now.minute < 6:
+        wait_s = (6 * 60) - (now.minute * 60 + now.second) + 1
+        wait_s = max(1, min(wait_s, 400))
+        print(f"  [SAFE-WINDOW] minute={now.minute:02d} — waiting {wait_s}s until xx:06 "
+              f"to avoid trader's hourly download collision", flush=True)
+        _t.sleep(wait_s)
+
     if assets_list is None:
         assets_list = list(ASSETS.keys())
     print("\n" + "=" * 60)
