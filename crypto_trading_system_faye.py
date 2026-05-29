@@ -5096,7 +5096,7 @@ def _simulate_with_threshold(signals, conf_threshold):
     }
 
 
-def run_mode_v(assets_list, horizons=None, replay_hours=None):
+def run_mode_v_serial(assets_list, horizons=None, replay_hours=None):
     """
     Mode V: Live backtest + Optuna refine + final comparison.
     1. Backtest top 6 from Mode D at conf 70/80/90%
@@ -5619,7 +5619,7 @@ def _refine_top_configs_serial(asset, horizon, top3_for_refine, df_raw, df_clean
 # ============================================================
 # MODE S: REGIME CONFIDENCE OPTIMIZATION
 # ============================================================
-def run_mode_s(assets_list, horizons, args=None):
+def run_mode_s_serial(assets_list, horizons, args=None):
     """
     Ed Mode S — FULL JOINT SWEEP (V3 logic in production).
 
@@ -5846,7 +5846,7 @@ def run_mode_s(assets_list, horizons, args=None):
 # ============================================================
 # MODE T: THRESHOLD SWEEP (hold-until-profitable optimization)
 # ============================================================
-def run_mode_t(assets_list, args=None):
+def run_mode_t_serial(assets_list, args=None):
     """
     Mode T — Sweep min_sell_pnl_pct × max_hold_hours × shield on/off per regime.
 
@@ -7997,18 +7997,11 @@ Examples:
 # ║  used as fallbacks when there's only one item to dispatch.         ║
 # ╚════════════════════════════════════════════════════════════════════╝
 
-# Preserve the sequential implementations defined earlier. The parallel
-# entry points fall back to these when len(items) <= 1.
-# Refine has its own _refine_top_configs_serial (defined as such, not aliased);
-# the canonical _refine_top_configs is the hybrid 3-worker version.
-_ENG_RUN_MODE_S_SERIAL = run_mode_s
-_ENG_RUN_MODE_T_SERIAL = run_mode_t
-_ENG_RUN_MODE_V_SERIAL = run_mode_v
-
-# Legacy aliases — kept so any in-flight references in this module still resolve.
-_ENG_RUN_MODE_S_ORIG = _ENG_RUN_MODE_S_SERIAL
-_ENG_RUN_MODE_T_ORIG = _ENG_RUN_MODE_T_SERIAL
-_ENG_RUN_MODE_V_ORIG = _ENG_RUN_MODE_V_SERIAL
+# FAYE: serial implementations live as run_mode_v_serial / run_mode_s_serial /
+# run_mode_t_serial / _refine_top_configs_serial (defined natively as such).
+# Canonical entry points (run_mode_v / s / t / _refine_top_configs) are the
+# parallel/hybrid versions — no Ed v3 monkey-patch chain, no _ENG_*_ORIG dance.
+# Set hardware_config.PARALLEL_BACKTESTS=1 to force the serial fallback.
 
 
 # ──────────────────────────────────────────────────────────────
@@ -8138,7 +8131,7 @@ def _run_parallel_backtests(asset, horizon, items, replay_hours):
 # Parallel run_mode_v — sibling of engine.run_mode_v with Step 1
 # and Step 3 loops parallelized. Logic is byte-identical otherwise.
 # ──────────────────────────────────────────────────────────────
-def run_mode_v_parallel(assets_list, horizons=None, replay_hours=None):
+def run_mode_v(assets_list, horizons=None, replay_hours=None):
     """Parallel-Mode-V drop-in. Same outputs as engine.run_mode_v —
     same all_results dict, same production CSV row format, same summary
     table, same `production_models` list shape. Differs only in:
@@ -8667,7 +8660,7 @@ def _generate_signals_cached(prebuilt_cache):
         globals()['generate_signals'] = real
 
 
-def run_mode_s_parallel(assets_list, horizons, args=None):
+def run_mode_s(assets_list, horizons, args=None):
     """Drop-in replacement for engine.run_mode_s. Pre-builds per-horizon
     signals in parallel, then delegates to engine.run_mode_s with
     generate_signals patched to read from the cache. The engine's sweep
@@ -8702,7 +8695,7 @@ def run_mode_s_parallel(assets_list, horizons, args=None):
               "to engine.run_mode_s as-is")
         # IMPORTANT: call the captured original, not run_mode_s — the
         # latter is OURSELVES once __main__ has monkey-patched.
-        return _ENG_RUN_MODE_S_ORIG(assets_list, horizons, args)
+        return run_mode_s_serial(assets_list, horizons, args)
 
     # Build cache in parallel
     cache = _build_signals_cache_parallel(all_calls, PARALLEL_LGBM_DEVICE)
@@ -8710,10 +8703,10 @@ def run_mode_s_parallel(assets_list, horizons, args=None):
     # Delegate to engine — its sequential loop hits cache, returns instantly.
     # Use the captured original to avoid recursion via the monkey-patch.
     with _generate_signals_cached(cache):
-        return _ENG_RUN_MODE_S_ORIG(assets_list, horizons, args)
+        return run_mode_s_serial(assets_list, horizons, args)
 
 
-def run_mode_t_parallel(assets_list, args=None):
+def run_mode_t(assets_list, args=None):
     """Drop-in replacement for engine.run_mode_t. Pre-builds per-horizon
     signals in parallel using bull_h + bear_h from regime config, then
     delegates to engine.run_mode_t. The iterative T↔G convergence logic
@@ -8736,7 +8729,7 @@ def run_mode_t_parallel(assets_list, args=None):
         print(f"  [parallel] Cannot read regime config ({e}) — "
               "falling through to engine.run_mode_t as-is")
         # IMPORTANT: captured original, not run_mode_t (= ourselves)
-        return _ENG_RUN_MODE_T_ORIG(assets_list, args)
+        return run_mode_t_serial(assets_list, args)
 
     all_calls = []
     for asset in assets_list:
@@ -8751,12 +8744,12 @@ def run_mode_t_parallel(assets_list, args=None):
     if not all_calls:
         print("  [parallel] No signal calls predicted — falling through "
               "to engine.run_mode_t as-is")
-        return _ENG_RUN_MODE_T_ORIG(assets_list, args)
+        return run_mode_t_serial(assets_list, args)
 
     cache = _build_signals_cache_parallel(all_calls, PARALLEL_LGBM_DEVICE)
 
     with _generate_signals_cached(cache):
-        return _ENG_RUN_MODE_T_ORIG(assets_list, args)
+        return run_mode_t_serial(assets_list, args)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -9071,18 +9064,12 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
 
 
 # ──────────────────────────────────────────────────────────────
-# Bind parallel dispatch as the default for the public entry points.
-# Sequential implementations remain reachable as _ENG_*_SERIAL for the
-# fallback paths inside the parallel functions (single-item dispatch).
-# Done at module-import time so workers, the trader, and __main__ all
-# see the parallel versions through normal name resolution.
+# FAYE: all public entry points (run_mode_v / s / t / _refine_top_configs)
+# are already the canonical parallel/hybrid versions, defined natively above.
+# Serial fallbacks live as run_mode_v_serial / s_serial / t_serial /
+# _refine_top_configs_serial and are called directly by the parallel versions
+# when len(items) <= 1 or PARALLEL_BACKTESTS == 1. No monkey-patch rebinding.
 # ──────────────────────────────────────────────────────────────
-run_mode_v = run_mode_v_parallel
-run_mode_s = run_mode_s_parallel
-run_mode_t = run_mode_t_parallel
-# _refine_top_configs is already the canonical hybrid 3-worker version (defined
-# natively above) — no rebind needed. _refine_top_configs_serial is the
-# ≤1-config fallback called directly from inside _refine_top_configs.
 
 
 if __name__ == '__main__':
