@@ -5475,8 +5475,12 @@ def _backtest_one_config(asset, horizon, label, cfg, replay_hours=None):
     return result
 
 
-def _refine_top_configs(asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features):
-    """Run Optuna refine on top 3 live-validated configs. Returns list of refined config dicts."""
+def _refine_top_configs_serial(asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features):
+    """FAYE serial refine fallback: runs Optuna refine sequentially on each top-3 config.
+
+    Used by _refine_top_configs (the hybrid 3-worker canonical version) when
+    ≤1 config is being refined — parallel dispatch has no benefit for a single
+    config and adds spawn overhead. Returns list of refined config dicts."""
 
     MAX_DIAG_HOURS = 6 * 30 * 24
     df_full_r, all_cols_r = build_all_features(df_raw, asset_name=asset, horizon=horizon)
@@ -7995,16 +7999,16 @@ Examples:
 
 # Preserve the sequential implementations defined earlier. The parallel
 # entry points fall back to these when len(items) <= 1.
+# Refine has its own _refine_top_configs_serial (defined as such, not aliased);
+# the canonical _refine_top_configs is the hybrid 3-worker version.
 _ENG_RUN_MODE_S_SERIAL = run_mode_s
 _ENG_RUN_MODE_T_SERIAL = run_mode_t
 _ENG_RUN_MODE_V_SERIAL = run_mode_v
-_ENG_REFINE_TOP_CONFIGS_SERIAL = _refine_top_configs
 
 # Legacy aliases — kept so any in-flight references in this module still resolve.
 _ENG_RUN_MODE_S_ORIG = _ENG_RUN_MODE_S_SERIAL
 _ENG_RUN_MODE_T_ORIG = _ENG_RUN_MODE_T_SERIAL
 _ENG_RUN_MODE_V_ORIG = _ENG_RUN_MODE_V_SERIAL
-_ENG_REFINE_TOP_CONFIGS_ORIG = _ENG_REFINE_TOP_CONFIGS_SERIAL
 
 
 # ──────────────────────────────────────────────────────────────
@@ -8939,9 +8943,10 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     return cfg_idx, refined, buf.getvalue(), lgbm_device
 
 
-def _refine_top_configs_hybrid(asset, horizon, top3_for_refine, df_raw,
-                               df_clean, all_cols, ranked_features):
-    """Hybrid GPU+CPU refine dispatcher. Replaces engine._refine_top_configs.
+def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
+                        df_clean, all_cols, ranked_features):
+    """FAYE canonical refine: hybrid GPU+CPU 3-worker dispatcher (was a
+    monkey-patch in Ed v3, now first-class).
 
     Setup phase (build features_np / labels_np / closes_np) runs once in
     the main process, then 3 single-config refines are dispatched across
@@ -8951,16 +8956,18 @@ def _refine_top_configs_hybrid(asset, horizon, top3_for_refine, df_raw,
       - Whichever finishes first picks up config 2 with its assigned
         device → no GPU queue contention.
 
-    Falls back to engine._refine_top_configs (sequential GPU) for ≤1
-    config or if anything goes wrong during setup.
+    Each refine is its own Optuna study (own seed + own 50 trials), so no
+    TPE sampler quality loss vs sequential — unlike n_jobs=2 inside one
+    study, where parallel trials can't condition on each other's results.
+
+    Falls back to _refine_top_configs_serial (sequential GPU) for ≤1 config
+    or if anything goes wrong during setup. Direct call — no monkey-patch
+    backref needed.
     """
     if len(top3_for_refine) <= 1:
-        # IMPORTANT: captured original, not _refine_top_configs (=
-        # ourselves once __main__ has monkey-patched). Avoids infinite
-        # recursion when hybrid is active and called with ≤1 config.
-        return _ENG_REFINE_TOP_CONFIGS_ORIG(asset, horizon, top3_for_refine,
-                                             df_raw, df_clean, all_cols,
-                                             ranked_features)
+        return _refine_top_configs_serial(asset, horizon, top3_for_refine,
+                                          df_raw, df_clean, all_cols,
+                                          ranked_features)
 
     # ── Setup phase (replicated from engine._refine_top_configs) ──
     MAX_DIAG_HOURS = 6 * 30 * 24
@@ -9073,7 +9080,9 @@ def _refine_top_configs_hybrid(asset, horizon, top3_for_refine, df_raw,
 run_mode_v = run_mode_v_parallel
 run_mode_s = run_mode_s_parallel
 run_mode_t = run_mode_t_parallel
-_refine_top_configs = _refine_top_configs_hybrid
+# _refine_top_configs is already the canonical hybrid 3-worker version (defined
+# natively above) — no rebind needed. _refine_top_configs_serial is the
+# ≤1-config fallback called directly from inside _refine_top_configs.
 
 
 if __name__ == '__main__':
@@ -9092,10 +9101,13 @@ if __name__ == '__main__':
             sys.exit(2)
 
     print("=" * 80)
-    print(f"  CRYPTO TRADING SYSTEM ED — {MACHINE}")
+    print(f"  CRYPTO TRADING SYSTEM FAYE — {MACHINE}")
     print(f"  Parallel dispatch: {PARALLEL_BACKTESTS} workers, "
           f"LGBM={PARALLEL_LGBM_DEVICE} for parallel sections")
-    print("  Active paths: run_mode_v, run_mode_s, run_mode_t, _refine_top_configs")
+    print(f"  K=5 multi-seed median ensemble (seeds={K5_SEEDS}) — native, no monkey-patch")
+    print(f"  NEAR_LIVE defaults: step={DIAG_STEP}h, signal_mode={NEAR_LIVE_SIGNAL_MODE}, "
+          f"na_policy={NEAR_LIVE_NA_POLICY}")
+    print("  Active paths: run_mode_v, run_mode_s, run_mode_t, _refine_top_configs (hybrid 3-worker)")
     print("  (set hardware_config.PARALLEL_BACKTESTS=1 to fall back to sequential)")
     print("=" * 80)
 
