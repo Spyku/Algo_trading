@@ -143,7 +143,19 @@ def _capture_state_then_get_models():
     return _orig_get_models()
 
 
-ENGINE._get_deku_diagnostic_models = _capture_state_then_get_models
+# Worker-process guard: only the main process should apply the v3 dispatcher
+# monkey-patches (state capture + routed eval). Worker subprocesses re-import
+# this module on spawn (Windows ProcessPoolExecutor); without this guard they
+# would (a) re-print all the v3 banners (spam), (b) re-monkey-patch ENGINE
+# with hooks they never trigger, and (c) the state-capture's inspect-frame
+# call could blow up if a worker ever called _get_deku_diagnostic_models.
+# Workers only need parallel_nearlive's patches (G._G_ORIG_DEKU_EVAL), which
+# are already applied in PNL's module init — not v3's.
+import multiprocessing as _mp_check
+_IS_MAIN_PROCESS = _mp_check.current_process().name == 'MainProcess'
+
+if _IS_MAIN_PROCESS:
+    ENGINE._get_deku_diagnostic_models = _capture_state_then_get_models
 
 
 # ====================================================================
@@ -437,9 +449,15 @@ class _ParallelGridDispatcher:
         return median
 
 
-_dispatcher = _ParallelGridDispatcher(
-    max_workers=int(os.environ.get('MODE_D_OUTER_WORKERS', '8'))
-)
+# Dispatcher instance only matters in main process — workers bypass it entirely
+# (they call _G._G_ORIG_DEKU_EVAL directly). Worker subprocesses skip creating
+# a useless dispatcher with its own ProcessPool seed.
+if _IS_MAIN_PROCESS:
+    _dispatcher = _ParallelGridDispatcher(
+        max_workers=int(os.environ.get('MODE_D_OUTER_WORKERS', '8'))
+    )
+else:
+    _dispatcher = None  # workers don't use it; _v3_routed_deku_eval isn't patched in workers
 
 
 # ====================================================================
@@ -492,15 +510,19 @@ def _v3_routed_deku_eval(features_np, labels_np, closes_np, combo, window, n,
     )
 
 
-# Apply v3 routing patch to both ENGINE and G namespaces
-ENGINE._deku_eval_with_pruning = _v3_routed_deku_eval
-G._deku_eval_with_pruning = _v3_routed_deku_eval
+# Apply v3 routing patch + print banners — main process only.
+# Workers don't trigger _deku_eval_with_pruning (they call _G._G_ORIG_DEKU_EVAL
+# directly via the K=5 wrap), so they don't need the patch and shouldn't print
+# the banners. See _IS_MAIN_PROCESS check above for full rationale.
+if _IS_MAIN_PROCESS:
+    ENGINE._deku_eval_with_pruning = _v3_routed_deku_eval
+    G._deku_eval_with_pruning = _v3_routed_deku_eval
 
-print(f"\n[V3 PARALLEL_NEARLIVE] Mode D outer ProcessPool patched", flush=True)
-print(f"  max_workers={_dispatcher.max_workers} (env MODE_D_OUTER_WORKERS)", flush=True)
-print(f"  K=5 ThreadPool inside each worker - quality preserved", flush=True)
-print(f"  NO early-kill, NO grid reorder - identical algorithm to parallel_nearlive", flush=True)
-print(f"  Full per-eval CSV + console logging enabled", flush=True)
+    print(f"\n[V3 PARALLEL_NEARLIVE] Mode D outer ProcessPool patched", flush=True)
+    print(f"  max_workers={_dispatcher.max_workers} (env MODE_D_OUTER_WORKERS)", flush=True)
+    print(f"  K=5 ThreadPool inside each worker - quality preserved", flush=True)
+    print(f"  NO early-kill, NO grid reorder - identical algorithm to parallel_nearlive", flush=True)
+    print(f"  Full per-eval CSV + console logging enabled", flush=True)
 
 
 # ====================================================================
