@@ -389,6 +389,110 @@ def _kill_orphan_workers():
         pass  # non-critical — don't fail if cleanup fails
 
 
+def _hard_shutdown_pool(pool, label='pool', soft_timeout=15, hard_timeout=10):
+    """FAYE: bulletproof ProcessPoolExecutor shutdown.
+
+    v3 bug observed 2026-05-30: refine workers from 5h horizon stayed alive
+    for 12+ hours after `pool.shutdown(wait=True)` returned, because workers
+    were blocked in C-extension code (LGBM/sklearn native libs ignore the
+    Python signals that ProcessPoolExecutor's shutdown sends). The parent
+    proceeded to the next horizon while the leaked workers contended for
+    CPU with the new horizon's fresh workers — slowing 6h refine from
+    4h (5h's wall) to 7.5h+ (and counting at the time of the kill).
+
+    This helper enforces a strict three-phase shutdown:
+      1. shutdown(wait=False, cancel_futures=True) — non-blocking, cancels
+         any unsubmitted work; lets the pool know it's done.
+      2. Wait `soft_timeout` seconds, polling worker liveness. Workers that
+         finish their current task naturally are caught here.
+      3. For survivors: SIGTERM via os.kill(pid, signal.SIGTERM) — graceful.
+         Wait `hard_timeout` seconds.
+      4. For final survivors: hard kill via `taskkill /F /T /PID <pid>` on
+         Windows (the `/T` flag kills the whole tree, catching any grandchild
+         multiprocessing-spawn workers the doomed worker had spawned).
+
+    Workers PIDs are snapshotted from `pool._processes` BEFORE shutdown
+    starts, because that dict gets cleared during shutdown.
+    """
+    import signal as _signal
+    import subprocess as _subprocess
+    import time as _time
+
+    pids = []
+    try:
+        # ProcessPoolExecutor stores workers in _processes as {pid: Process}.
+        # Snapshot keys before shutdown clears them.
+        if hasattr(pool, '_processes') and pool._processes:
+            pids = list(pool._processes.keys())
+    except Exception:
+        pass
+
+    # Phase 1: ask nicely, cancel any pending work
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        # cancel_futures requires Python 3.9+; fallback for older venvs
+        pool.shutdown(wait=False)
+    except Exception:
+        pass
+
+    if not pids:
+        return  # no PIDs captured (pool never spawned workers) — done
+
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)  # signal 0 = liveness probe, no actual signal sent
+            return True
+        except OSError:
+            return False
+
+    # Phase 2: poll up to soft_timeout for natural exit
+    deadline = _time.time() + soft_timeout
+    while _time.time() < deadline:
+        survivors = [p for p in pids if _alive(p)]
+        if not survivors:
+            return
+        _time.sleep(0.5)
+
+    survivors = [p for p in pids if _alive(p)]
+    if not survivors:
+        return
+
+    # Phase 3: SIGTERM
+    print(f"  [{label}] {len(survivors)} worker(s) didn't exit after "
+          f"{soft_timeout}s — sending SIGTERM: {survivors}")
+    for pid in survivors:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except OSError:
+            pass
+
+    deadline = _time.time() + hard_timeout
+    while _time.time() < deadline:
+        survivors = [p for p in pids if _alive(p)]
+        if not survivors:
+            return
+        _time.sleep(0.5)
+
+    survivors = [p for p in pids if _alive(p)]
+    if not survivors:
+        return
+
+    # Phase 4: HARD KILL (Windows: taskkill /F /T /PID — also kills grandchildren)
+    print(f"  [{label}] {len(survivors)} worker(s) survived SIGTERM — hard-killing: {survivors}")
+    for pid in survivors:
+        try:
+            if os.name == 'nt':
+                _subprocess.run(
+                    ['taskkill', '/F', '/T', '/PID', str(pid)],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                os.kill(pid, _signal.SIGKILL)
+        except Exception:
+            pass
+
+
 # ── H_STRICT_FAMILY output isolation (added 2026-05-17) ─────────────────────
 # Default: production-shared 'models'/'config' dirs. Override via env vars to
 # isolate H_strict's writes from a concurrent G_narrow_d HRST writing to the
@@ -4915,7 +5019,14 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
               f"{MODE_D_OUTER_WORKERS} ProcessPool workers (K=5 ThreadPool inside each)")
         print(f"  [FAYE] per-eval CSV: {per_eval_csv}")
 
-        with _GridPool(max_workers=MODE_D_OUTER_WORKERS) as pool:
+        # FAYE 2026-05-30: was `with _GridPool(...) as pool:` — the implicit
+        # exit's pool.shutdown(wait=True) inherits the same v3 deadlock risk
+        # we observed (workers blocked in native LGBM ignore Python shutdown
+        # signals → pool.shutdown hangs or leaks workers). Manual try/finally
+        # + _hard_shutdown_pool guarantees the workers die even when they
+        # stop responding to the polite shutdown.
+        pool = _GridPool(max_workers=MODE_D_OUTER_WORKERS)
+        try:
             futures = {}
             for (combo_name, window, n_feat, gamma) in config_list:
                 args = (
@@ -5038,6 +5149,14 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                         pd.DataFrame(per_eval_rows).to_csv(per_eval_csv, index=False)
                     except Exception as e:
                         print(f"  [FAYE] per-eval CSV flush warning: {e}")
+        finally:
+            # FAYE 2026-05-30 hardening: never let ProcessPool workers outlive
+            # the dispatcher loop. Snapshots worker PIDs from pool._processes
+            # before shutdown, then escalates SIGTERM → taskkill /F /T if
+            # workers don't exit within timeouts. Prevents the v3 orphan-leak
+            # bug where Mode D workers from horizon N kept running into
+            # horizon N+1, contending for CPU with the new workers.
+            _hard_shutdown_pool(pool, label='mode-d-grid', soft_timeout=15, hard_timeout=10)
 
         grid_elapsed = (time.time() - t_grid) / 60
 
@@ -9289,7 +9408,13 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
                 )
                 futures[f2] = (next_idx, dev)
     finally:
-        pool.shutdown(wait=True)
+        # FAYE 2026-05-30: replaced plain pool.shutdown(wait=True) — the v3
+        # bug observed on the running Desktop HRST showed refine workers
+        # surviving the shutdown signal indefinitely (blocked in native LGBM
+        # code, ignored Python signals). Hard-kill survivors with taskkill
+        # /F /T so the next horizon's refine workers don't contend for CPU
+        # with leaked zombies.
+        _hard_shutdown_pool(pool, label='refine-hybrid', soft_timeout=15, hard_timeout=10)
 
     all_refined = [r for r in refined_list if r is not None]
     refine_elapsed = (time.time() - t_refine) / 60
