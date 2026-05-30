@@ -568,6 +568,32 @@ _FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye')
 # created FAYE_MODELS_DIR. Idempotent (exist_ok=True) so safe to repeat.
 os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
 os.makedirs(FAYE_CONFIG_DIR, exist_ok=True)
+
+# FAYE 2026-05-30: seed FAYE_CONFIG_DIR/regime_config_faye.json so Mode R/S
+# have a template to write into. Same pattern as parallel_nearlive lines 184-209.
+# Mode R's _apply_mode_r_to_config reads the source then rewrites it — without
+# a seed, Mode R/S/T crash with FileNotFoundError on the first run.
+#
+# Priority: if a prior --no-persist run left _noprod.json, promote it back
+# (engine's --no-persist code unconditionally shutil.copyfile's the live config
+# onto _noprod, which would otherwise WIPE Mode R/S's writes when Mode T is
+# launched as a separate command). Else seed from live `config/regime_config_ed.json`.
+import shutil as _faye_shutil
+_faye_seed_regime_cfg = os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json')
+_faye_noprod_regime_cfg = _faye_seed_regime_cfg.replace('.json', '_noprod.json')
+_faye_live_regime_cfg = os.path.join(_SCRIPT_DIR, 'config', 'regime_config_ed.json')
+if os.path.exists(_faye_noprod_regime_cfg):
+    _faye_shutil.copyfile(_faye_noprod_regime_cfg, _faye_seed_regime_cfg)
+    if _FAYE_IS_MAIN_PROCESS:
+        print(f"[FAYE_ISO] preserved prior --no-persist state: {_faye_noprod_regime_cfg} -> {_faye_seed_regime_cfg}")
+elif not os.path.exists(_faye_seed_regime_cfg):
+    if os.path.exists(_faye_live_regime_cfg):
+        _faye_shutil.copyfile(_faye_live_regime_cfg, _faye_seed_regime_cfg)
+        if _FAYE_IS_MAIN_PROCESS:
+            print(f"[FAYE_ISO] seeded regime config: {_faye_live_regime_cfg} -> {_faye_seed_regime_cfg}")
+    elif _FAYE_IS_MAIN_PROCESS:
+        print(f"[FAYE_ISO] WARN: live regime config not found at {_faye_live_regime_cfg} — Mode R/S/T may fail")
+
 if _FAYE_IS_MAIN_PROCESS:
     print(f"[FAYE_ISO] output dirs: models={FAYE_MODELS_DIR} config={FAYE_CONFIG_DIR}")
 
@@ -792,12 +818,17 @@ DEFAULT_GAMMA = 1.0  # no decay fallback — per-model gamma read from CSV
 EMBARGO_CANDLES_DEFAULT = 8  # gap between train/test — must be >= horizon to prevent label overlap leakage
 
 
-# Per-horizon feature ranges — short tighter to avoid overfitting, long keeps full range
+# Per-horizon feature ranges. FAYE 2026-05-30: matches g_narrow_d's narrow_nearlive
+# config (4, 100) for BOTH horizons. Engine had (4,40)/(4,80) — the cap was creating
+# the B-7h tied-APF trap. parallel_nearlive explicitly propagates G's (4,100) into
+# ENGINE.N_FEATURES_RANGE at module load (parallel_nearlive lines 161-165). Earlier
+# FAYE consolidation inherited engine's pre-patch (4,40)/(4,80) — wrong. Restored
+# post-patch (4,100) so Optuna refine can explore the wider feature space.
 N_FEATURES_RANGE = {
-    HORIZON_SHORT: (4, 40),   # short horizon: narrower (overfitting observed with 80+ features)
-    HORIZON_LONG:  (4, 80),   # long horizon: full range (kept 75 features and performed well)
+    HORIZON_SHORT: (4, 100),
+    HORIZON_LONG:  (4, 100),
 }
-N_FEATURES_RANGE_DEFAULT = (4, 80)  # fallback for unknown horizons
+N_FEATURES_RANGE_DEFAULT = (4, 100)  # fallback for unknown horizons
 
 # Optuna refine search spaces (continuous, ±window/±gamma/±features around Mode D winners)
 DOOHAN_GAMMA_MIN = 0.995
