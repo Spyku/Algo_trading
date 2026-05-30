@@ -561,6 +561,13 @@ FAYE_MODELS_DIR = _resolve_dir('FAYE_MODELS_DIR', 'models_faye')
 FAYE_CONFIG_DIR = _resolve_dir('FAYE_CONFIG_DIR', 'config_faye')
 _FAYE_MODELS_RAW = os.environ.get('FAYE_MODELS_DIR', 'models_faye')
 _FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye')
+# FAYE 2026-05-30 12:30: ensure both dirs exist before ANY writer touches them.
+# Bug surfaced on Mode D 6h launch 12:17: per-eval CSV flush failed with
+# "Cannot save file into a non-existent directory: '...\\models_faye'" because
+# Mode D dispatcher tried pd.DataFrame(...).to_csv() before any code path had
+# created FAYE_MODELS_DIR. Idempotent (exist_ok=True) so safe to repeat.
+os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
+os.makedirs(FAYE_CONFIG_DIR, exist_ok=True)
 if _FAYE_IS_MAIN_PROCESS:
     print(f"[FAYE_ISO] output dirs: models={FAYE_MODELS_DIR} config={FAYE_CONFIG_DIR}")
 
@@ -2281,17 +2288,23 @@ def _get_deku_diagnostic_models_seeded(seed):
     (defaults to 'cpu' for safety). When called from inside ProcessPool workers
     (Mode D 8-worker dispatcher × K=5 inner ThreadPool = 40 concurrent calls),
     'cpu' is the ONLY safe value — 40 concurrent GPU calls on a single RTX
-    queue would serialize and grind to near-zero throughput. v3 sets this
-    same env var in parallel_nearlive._device_aware_factories_seeded.
+    queue would serialize and grind to near-zero throughput.
 
-    The default 'cpu' matches v3's behavior. Set env to 'gpu' only when running
-    serially (e.g., the legacy refine fallback when ≤1 config). LGBM on CPU at
-    n_estimators=100/max_depth=4/train=250-rows is ~10x FASTER per-call than
-    GPU once you account for kernel launch + transfer overhead, and avoids
-    the contention bottleneck entirely.
+    FAYE 2026-05-30 12:30: ALSO cap LGBM num_threads via G_PARALLEL_LGBM_THREADS
+    env var (defaults to 1). Without this, LGBM defaults to physical core count
+    (24 on Desktop). With 8 ProcessPool × K=5 ThreadPool = 40 LGBM instances
+    EACH using 24 threads = 960 concurrent OS threads on 24 physical cores →
+    catastrophic oversubscription → ~2x per-eval slowdown (v3 took 5-7 min/eval,
+    FAYE without this cap took ~12 min/eval as observed on Mode D launch 12:17).
+    v3 / parallel_nearlive's _device_aware_factories_seeded sets this same cap.
+
+    The K=5 ThreadPool already gives 5x parallelism with effectively zero
+    overhead. Multiplying by intra-LGBM threads thrashes L1/L2 cache and adds
+    context-switch cost. 1 thread per LGBM is empirically optimal on Desktop.
     """
     from lightgbm import LGBMClassifier
     device = os.environ.get('G_PARALLEL_LGBM_DEVICE', 'cpu')
+    lgbm_threads = int(os.environ.get('G_PARALLEL_LGBM_THREADS', '1'))
     return {
         'RF':   lambda: RandomForestClassifier(n_estimators=100, max_depth=4, class_weight='balanced', random_state=seed, n_jobs=1),
         'GB':   lambda: GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=seed),
@@ -2299,7 +2312,8 @@ def _get_deku_diagnostic_models_seeded(seed):
                                        tree_method='hist', verbosity=0, n_jobs=1),
         'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=seed),
         'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
-                                        class_weight='balanced', verbose=-1, random_state=seed, device=device),
+                                        class_weight='balanced', verbose=-1, random_state=seed,
+                                        device=device, num_threads=lgbm_threads),
     }
 
 
