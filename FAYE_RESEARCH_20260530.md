@@ -383,6 +383,58 @@ Windows multiprocessing.spawn takes 5-15 sec per worker. 8 workers = 40-120 sec 
 
 ---
 
+## DIAGNOSTIC FINDING — Refine ignores `--replay` (2026-05-30, 21:30)
+
+After adding 3-layer diagnostic logging to refine workers (commits `a9cce99` + `df1b5e3`), running `DV ETH 7h --replay 528 --refine-trials 5` revealed a surprising but **NOT FAYE-introduced** behavior:
+
+**n_size = 2578** observed in refine, despite `--replay 528`.
+
+### Root cause
+
+`_refine_top_configs` at line 9681 hardcodes:
+```python
+MAX_DIAG_HOURS = 6 * 30 * 24  # = 4320h (6 months) — ignores --replay
+```
+
+Then it takes `df_full.tail(MAX_DIAG_HOURS)` and trains on the first 60% → `int(4320 × 0.60) = 2592`, minus dropna/sparse-filter loss → **2578**.
+
+### NOT a FAYE bug
+
+`crypto_trading_system_ed_g_narrow_d_parallel_nearlive.py:480` has the **exact same** `MAX_DIAG_HOURS = 6 * 30 * 24` hardcoded. FAYE faithfully replicates v3 chain behavior. This is **documented v3 design**, not a FAYE consolidation regression.
+
+### Why it surprised us
+
+Test mental model assumed `--replay 528` would shorten everything including refine. It does NOT. `--replay 528` affects:
+- Mode D screening: yes (uses `replay_hours or 60*24`)
+- Mode V Step 1 backtest: yes (uses `MODE_G_REPLAY_HOURS` or `--replay`)
+- **Mode V Step 2 refine: NO** (always 4320h hardcoded)
+- **Mode V Step 3 final backtest: NO** (also 4320h hardcoded at line 6127 in `_backtest_one_config`)
+
+### Implications for fast testing
+
+`--refine-trials 5` reduces trial count but each trial still runs walk-forward over 2578 iters × ~400ms = ~17 min wall. K=5 fan-out is parallel (verified — seeds complete within 5s of each other), so the per-trial wall time is dominated by ONE seed's wall × shared CPU contention.
+
+For **future fast tests**, options are:
+1. Accept ~80 min refine even on small `--replay` (current behavior)
+2. Add a `--refine-replay N` override that lowers `MAX_DIAG_HOURS` for testing only (deviation from v3, easy to add at line 9681)
+3. Skip refine entirely with a `--skip-refine` flag (no Mode V Step 2)
+
+User decision yet to be made — for now, accept the long refine and let validation complete.
+
+### K=5 parallelism CONFIRMED working
+
+Diagnostic logs show 5 seeds completing trials within 5 seconds of each other:
+```
+[21:14:08] cfg=0 seed=42 expected_iters=2383 elapsed=951.3s
+[21:14:10] cfg=0 seed=43 expected_iters=2383 elapsed=953.1s
+[21:14:10] cfg=0 seed=44 expected_iters=2383 elapsed=953.5s
+[21:14:13] cfg=0 seed=45 expected_iters=2383 elapsed=955.9s
+[21:14:13] cfg=0 seed=46 expected_iters=2383 elapsed=956.0s
+```
+Per-iter cost ≈ 400ms (K=5 threads × OMP/BLAS lock serialization) — matches expectations for K=5 fan-out on a shared process.
+
+---
+
 ## CONTACT POINTS / REFERENCES
 
 - **Repo**: https://github.com/Spyku/Algo_trading (branch: main)

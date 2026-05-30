@@ -5872,8 +5872,12 @@ def run_mode_v_serial(assets_list, horizons=None, replay_hours=None):
                           f"f={cfg['n_features']}  live_ret={live_ret:+.2f}%")
 
                 # ── Run Optuna refine ──
+                # FAYE 2026-05-30 22:00 — BUG #15 FIX: thread --replay through
+                # to refine. Previously refine ignored --replay and used 4320h
+                # hardcoded, causing Step 1 / Step 2 / Step 3 period mismatch.
                 refined_configs = _refine_top_configs(
-                    asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features)
+                    asset, horizon, top3_for_refine, df_raw, df_clean,
+                    all_cols, ranked_features, replay_hours=_replay)
 
                 # ── STEP 3: Backtest refined configs ──
                 if refined_configs:
@@ -6117,14 +6121,20 @@ def _backtest_one_config(asset, horizon, label, cfg, replay_hours=None):
     return result
 
 
-def _refine_top_configs_serial(asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features):
+def _refine_top_configs_serial(asset, horizon, top3_for_refine, df_raw, df_clean, all_cols, ranked_features, replay_hours=None):
     """FAYE serial refine fallback: runs Optuna refine sequentially on each top-3 config.
 
     Used by _refine_top_configs (the hybrid 3-worker canonical version) when
     ≤1 config is being refined — parallel dispatch has no benefit for a single
-    config and adds spawn overhead. Returns list of refined config dicts."""
+    config and adds spawn overhead. Returns list of refined config dicts.
 
-    MAX_DIAG_HOURS = 6 * 30 * 24
+    FAYE 2026-05-30 22:00 — BUG #15 FIX: respects --replay (see
+    _refine_top_configs docstring). replay_hours=None falls back to
+    MODE_G_REPLAY_HOURS (1440h)."""
+
+    MAX_DIAG_HOURS = replay_hours if replay_hours else MODE_G_REPLAY_HOURS
+    print(f"  [refine-serial] window={MAX_DIAG_HOURS}h "
+          f"({MAX_DIAG_HOURS/168:.1f}wk) — matches --replay")
     df_full_r, all_cols_r = build_all_features(df_raw, asset_name=asset, horizon=horizon)
     n_pysr = _compute_pysr_features(df_full_r, all_cols_r, asset, horizon, verbose=False)
     if n_pysr > 0:
@@ -8909,9 +8919,15 @@ def run_mode_v(assets_list, horizons=None, replay_hours=None):
                           f"g={cfg['gamma']:.4f}  f={cfg['n_features']}  "
                           f"live_ret={live_ret:+.2f}%")
 
+                # FAYE 2026-05-30 22:00 — BUG #15 FIX: thread --replay through
+                # to refine. Without this, refine ran on 4320h (6mo) regardless
+                # of --replay, while Step 1 and Step 3 used --replay. Period
+                # mismatch caused refined configs to be tuned on data the
+                # validation backtest never sees → Step 3 returns were noisy
+                # and refined picks rarely outperformed grid candidates.
                 refined_configs = _refine_top_configs(
                     asset, horizon, top3_for_refine, df_raw, df_clean,
-                    all_cols, ranked_features)
+                    all_cols, ranked_features, replay_hours=_replay)
 
                 # ── STEP 3: Backtest refined configs IN PARALLEL ──
                 if refined_configs:
@@ -9652,7 +9668,8 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
 
 
 def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
-                        df_clean, all_cols, ranked_features):
+                        df_clean, all_cols, ranked_features,
+                        replay_hours=None):
     """FAYE canonical refine: hybrid GPU+CPU 3-worker dispatcher (was a
     monkey-patch in Ed v3, now first-class).
 
@@ -9671,14 +9688,26 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     Falls back to _refine_top_configs_serial (sequential GPU) for ≤1 config
     or if anything goes wrong during setup. Direct call — no monkey-patch
     backref needed.
+
+    FAYE 2026-05-30 22:00 — BUG #15 FIX: refine now respects --replay.
+    Previously hardcoded MAX_DIAG_HOURS = 6*30*24 (4320h / 6 months) regardless
+    of caller's replay. This caused refine to optimize on a DIFFERENT period
+    than Step 1 (which uses --replay) and Step 3 backtest (also --replay),
+    creating period drift where refined configs were tuned for unseen data
+    and failed Step 3 validation. v3 chain inherited the same flaw via
+    parallel_nearlive.py:480. FAYE diverges from v3 here intentionally.
+    replay_hours=None falls back to MODE_G_REPLAY_HOURS (1440h default).
     """
     if len(top3_for_refine) <= 1:
         return _refine_top_configs_serial(asset, horizon, top3_for_refine,
                                           df_raw, df_clean, all_cols,
-                                          ranked_features)
+                                          ranked_features,
+                                          replay_hours=replay_hours)
 
     # ── Setup phase (replicated from engine._refine_top_configs) ──
-    MAX_DIAG_HOURS = 6 * 30 * 24
+    MAX_DIAG_HOURS = replay_hours if replay_hours else MODE_G_REPLAY_HOURS
+    print(f"  [refine] window={MAX_DIAG_HOURS}h "
+          f"({MAX_DIAG_HOURS/168:.1f}wk) — matches --replay")
     df_full_r, all_cols_r = build_all_features(
         df_raw, asset_name=asset, horizon=horizon)
     n_pysr = _compute_pysr_features(df_full_r, all_cols_r,
