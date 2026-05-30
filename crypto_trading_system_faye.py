@@ -488,11 +488,21 @@ def _hard_shutdown_pool(pool, label='pool', soft_timeout=15, hard_timeout=10):
         except OSError:
             return False
 
+    # FAYE 2026-05-30 13:00: announce the shutdown so user doesn't think the
+    # script is frozen during the 25s polling window. Without this print,
+    # there's no console activity between Mode D's last [FAYE done 60/60]
+    # and Mode V Step 1's first banner — user observed this and Ctrl+C'd
+    # thinking the run was hung. The shutdown wait is normal; the missing
+    # log line was the bug.
+    print(f"  [{label}] phase done, waiting up to {soft_timeout + hard_timeout}s "
+          f"for {len(pids)} worker(s) to exit cleanly...", flush=True)
+
     # Phase 2: poll up to soft_timeout for natural exit
     deadline = _time.time() + soft_timeout
     while _time.time() < deadline:
         survivors = [p for p in pids if _alive(p)]
         if not survivors:
+            print(f"  [{label}] all workers exited cleanly", flush=True)
             return
         _time.sleep(0.5)
 

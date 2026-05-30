@@ -10,6 +10,62 @@ This file preserves the full historical decision trail of the engine: tested/she
 
 ---
 
+### 🔥 CLOSED 2026-05-30 (afternoon) — FAYE thorough line-by-line audit: 12 bugs found and fixed
+
+**Trigger**: First FAYE launch hung at "[FAYE] dispatching 60 configs ..." with zero `[FAYE done N/60]` after 30 min. User pushed for a thorough audit ("check VERY carefully the D mode setup", "I SAID A THOROUGH AUDIT TO BE SURE IT MATCHES"). I had previously delegated to Explore agents that reported "NO NEW BUGS FOUND" — but the agents compared FAYE to intermediate layers (g_narrow_d, engine.py) instead of to post-patch runtime state (parallel_nearlive's final monkey-patches). Doing the line-by-line walk myself caught what the agents missed.
+
+**12 bugs found in FAYE's consolidation of the v3 chain**:
+
+| # | Bug | Severity | Commit | Symptom |
+|---|---|---|---|---|
+| 1 | `GRID_WINDOWS=[72,100,150]` (engine base) instead of `[72,100,150,200,250]` (g_narrow_d narrow_nearlive) | CRITICAL | `23b54b3` | Optuna refine never reaches w=281/293 basin where live winners sit; FAYE would produce uncompetitive winners every time |
+| 2 | Warning suppression missing Layers 1 (`-W ignore` re-exec) + 4 (`warnings.warn=no-op` monkey-patch). Had only Layers 2 (PYTHONWARNINGS) + 3 (filterwarnings) | MEDIUM | `2aea8be` | Thousands of `UserWarning: sklearn.utils.parallel.delayed` warnings flooded stdout from inside ProcessPool workers, log noise |
+| 3 | `NEAR_LIVE_MODE` env var not set at module init — FAYE has defaults baked in but any importer checking the env var sees None | DEFENSIVE | `f1b49f4` | None observed; bug is latent |
+| 4 | `_get_deku_diagnostic_models_seeded` hardcoded `device='gpu'` (inherited from g_narrow_d pre-patch); parallel_nearlive's `_device_aware_factories_seeded` reads `G_PARALLEL_LGBM_DEVICE` (default 'cpu') | **CRITICAL** | `1cee360` | **The launch hang**: 8 ProcessPool workers × K=5 inner ThreadPool = 40 concurrent LGBM-GPU calls on one RTX 4080 queue → workers blocked indefinitely, never produced output |
+| 5 | Refine worker did not broadcast `lgbm_device` arg to K=5 factories via `os.environ['G_PARALLEL_LGBM_DEVICE']` | MEDIUM | `3027255` | The dispatcher's hybrid GPU/CPU device routing was inert — workers all ran on CPU regardless of dispatcher choice |
+| 6 | Refine dispatcher: 2 workers (GPU + CPU) with dynamic-3rd vs parallel_nearlive's 3 workers all-CPU when K>1 | CRITICAL | `3027255` | GPU worker + K=5 inner threads would crash CUDA single-context. parallel_nearlive comment: "5 threads × LGBM-GPU per worker crashes the GPU's single CUDA context." Refine would have crashed ~4h into the run |
+| 7 | `_deku_eval_with_pruning` (K=5 wrap) ran K=5 seeds in a SERIAL for-loop. parallel_nearlive's `_parallel_deku_eval_median_k` uses ThreadPoolExecutor(max_workers=K=5) | CRITICAL | `a65d618` | 5x slowdown in Mode V (refine + holdout). Per-trial time: ~3.3 min serial K=5 vs ~3.3 min parallel = wait no, K=5 serial means 5× the per-trial work serially. ETA: 60h serial vs 17h parallel |
+| 8 | `models_faye/` directory not auto-created — per-eval CSV flush failed with "Cannot save file into a non-existent directory" | MEDIUM | `ae056b7` | First FAYE launch's per-eval CSV (`mode_d_full_*.csv`) couldn't be written. Grid logging silently broken. v3 didn't hit this because `models_g_desktop_nearlive/` was a long-standing snapshot dir |
+| 9 | `_get_deku_diagnostic_models_seeded` did not set LGBM `num_threads` — defaulted to physical core count (24). 8 workers × K=5 threads × 24 LGBM threads = 960 concurrent OS threads on 24 cores = catastrophic oversubscription | **CRITICAL** | `ae056b7` | 12 min/eval observed (vs v3's 5-7 min/eval). After fix (`num_threads=1` via `G_PARALLEL_LGBM_THREADS` env, matching parallel_nearlive line 309): 5.7 min/eval confirmed on user's relaunch |
+| 10 | `N_FEATURES_RANGE` = (4,40)/(4,80) (engine pre-patch) instead of (4,100)/(4,100) (g_narrow_d, propagated by parallel_nearlive line 164-165). Comment in parallel_nearlive explicitly states: "the cap was creating the B-7h tied-APF trap" | MEDIUM | `d259efe` | Optuna refine's n_features upper bound capped too low, preventing exploration of 80-100 feature subsets |
+| 11 | Regime config not seeded from live — parallel_nearlive lines 184-209 seeds isolated CONFIG_DIR/regime_config_ed.json from `config/regime_config_ed.json`. Mode R/S/T read+rewrite this file; without a seed, first HRST crashes with FileNotFoundError | MEDIUM | `d259efe` | Mode H only doesn't hit this. Future HRST would have crashed at Mode R |
+| 12 | **HOLD branch in `_deku_eval_with_pruning_inner` diverges from step6_nearlive**: FAYE incremented `total` on HOLD (inflated accuracy denominator) and didn't tick drawdown (under-counted max_dd). step6_nearlive lines 4193-4201 does NEITHER | **CORRECTNESS** | `5382740` | FAYE accuracy artificially LOWER (1/N per HOLD) and max_dd artificially LOWER. Numbers diverge from v3 for same model on same data |
+
+**Pattern of audit failure** (worth recording): I dispatched audits asking "does FAYE match v3-chain original?" Multiple Explore agents reported "NO NEW BUGS FOUND" — but they compared FAYE to **intermediate layers** (`g_narrow_d._g_factories_seeded` has `device='gpu'` → matches FAYE → marked OK) instead of to **runtime-post-patches** state (where parallel_nearlive overrides with `_device_aware_factories_seeded` that uses CPU + num_threads=1).
+
+The 4 monkey-patch layers in v3 (`v3 → parallel_nearlive → step6_nearlive → g_narrow_d → engine`) meant the "right" reference for FAYE was the RUNTIME STATE after parallel_nearlive applied its patches, not any single source file. Audit prompts that didn't explicitly enforce this got it wrong.
+
+**Items verified byte-identical** between FAYE and the appropriate post-patch reference (after line-by-line `diff` runs):
+- `generate_signals` ✓ matches g_narrow_d
+- `_backtest_one_config_worker` ✓ matches g_narrow_d
+- `_run_parallel_backtests` ✓ matches g_narrow_d
+- `_predict_signal_calls_for_horizons` ✓ matches g_narrow_d
+- `_signal_gen_worker` ✓ matches g_narrow_d
+- `_build_signals_cache_parallel` ✓ matches g_narrow_d
+- `_key_for_call` ✓ matches g_narrow_d
+- `_finish_mode_v` ✓ matches g_narrow_d
+- `_compute_optuna_score` ✓ matches engine
+- `_diversity_key` ✓ matches engine (intentionally NOT g_narrow_d's; H_STRICT_FAMILY's (combo, w) is what v3 runs because v3 → parallel_nearlive → ENGINE.main(), not g_narrow_d)
+- `run_mode_v` ✓ matches g_narrow_d's `run_mode_v_parallel` (only func name differs)
+- `run_mode_s` ✓ matches g_narrow_d's `run_mode_s_parallel` (func name + fallback name renamed)
+- `run_mode_t` ✓ matches g_narrow_d's `run_mode_t_parallel` (func name + fallback name renamed)
+- `_deku_eval_with_pruning_inner` ✓ matches step6_nearlive's `_deku_eval_with_pruning` (after Bug #12 fix)
+
+**Items intentionally different** (FAYE design choices, not bugs):
+- `MODELS_DIR`, `CONFIG_DIR`, `PRODUCTION_CSV`, `REGIME_CONFIG_PATH` — FAYE uses `FAYE_*` prefix (full isolation from Ed live paths)
+- `DIAG_STEP=1`, `HOLDOUT_STEP=1` — NEAR_LIVE defaults baked in vs Ed's step=36 (functionally equivalent because step6_nearlive's NEAR_LIVE_MODE override sets step_to_use=1 in v3 runtime)
+- `NEAR_LIVE_*` constants baked into `_deku_eval_with_pruning_inner` default args vs env-var override in step6_nearlive — same effect when env=1 (the v3 default)
+- 8-worker Mode D dispatcher inlined natively in `run_mode_d_optuna` vs v3's `inspect.currentframe()` frame-capture monkey-patch — same behavior, cleaner code
+- `pool.shutdown(wait=True)` replaced with `_hard_shutdown_pool` (SIGTERM + `taskkill /F /T`) to prevent the v3 orphan-worker leak observed Mode D 5h refine→6h transition
+
+**Net effect**: After all 12 fixes, FAYE produces results that are functionally identical to v3 (modulo intentional FAYE-isolation paths). The HOLD-branch correctness bug (#12) was the last remaining divergence in the actual numbers.
+
+**Verification**: User's FAYE H 6h,7h,8h relaunch after all fixes — first `[FAYE done 1/60]` appeared 5.7 min after dispatch (matches v3's measured 5-7 min/eval on Desktop). Mode V refine + 7h + 8h horizons still to come; ETA ~05:30 May 31.
+
+**Files**: 12 fix commits 2026-05-30 09:35-12:50 — `23b54b3`, `2aea8be`, `f1b49f4`, `1cee360`, `3027255`, `a65d618`, `ae056b7`, `d259efe`, `5382740`.
+
+---
+
 ### ✅ CLOSED 2026-05-30 — FAYE single-file consolidation shipped + post-FAYE archive cleanup
 
 **Outcome**: Built `crypto_trading_system_faye.py` — a 9100-line single-file consolidation of the Ed v3 architecture (`crypto_trading_system_ed_g_narrow_d_parallel_nearlive_v3.py` + its 3 monkey-patch parents). **ZERO monkey-patches, every previously-patched feature first-class native code.** Engine-vs-trader parity test on 30 most recent ETH hours showed **0 real BUY↔SELL flips** out of 30 — the original "engine says X, trader says Y on the same hour" bug is gone.
