@@ -9408,6 +9408,7 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     count from the parent.
     """
     import optuna
+    import time as _time_mod
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     # FAYE 2026-05-30 12:10: broadcast lgbm_device to K=5 seeded factories
@@ -9423,6 +9424,38 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     # (No effect on parent; each loky/pool worker has its own ALL_MODELS.)
     ALL_MODELS = _get_deku_models_with_device(lgbm_device)
     model_factories = _diagnostic_models_with_device(lgbm_device)
+
+    # FAYE 2026-05-30 19:30: diagnostic file logging for refine workers.
+    # Worker stdout is captured to an in-memory buffer (`buf` below) so the
+    # user sees ZERO console output during refine. To diagnose pace/hangs
+    # live, each worker writes a line-buffered log to:
+    #   models_faye/refine_progress_cfg<idx>_pid<PID>.log
+    # User can `Get-Content -Wait` to tail it in real time.
+    # Logging errors are swallowed so a disk issue can't crash refine.
+    _pid = os.getpid()
+    try:
+        _refine_log_path = os.path.join(
+            FAYE_MODELS_DIR,
+            f'refine_progress_cfg{cfg_idx}_pid{_pid}.log',
+        )
+        os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
+        # `buffering=1` = line-buffered: writes flush to disk on each \n
+        _refine_log = open(_refine_log_path, 'a', buffering=1, encoding='utf-8')
+    except Exception:
+        _refine_log = None  # silent fallback if FS unavailable
+
+    def _diag(msg):
+        """Write a timestamped line to the per-worker progress log."""
+        if _refine_log is None:
+            return
+        try:
+            ts = _time_mod.strftime('%H:%M:%S')
+            _refine_log.write(f'[{ts}] pid={_pid} cfg={cfg_idx} {msg}\n')
+        except Exception:
+            pass
+
+    _diag(f'=== refine worker START lgbm_device={lgbm_device} ===')
+    _worker_t0 = _time_mod.time()
 
     buf = io.StringIO()
     saved_out, saved_err = sys.stdout, sys.stderr
@@ -9444,6 +9477,9 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         feat_hi = min(base_feats + REFINE_FEAT_RANGE, len(ranked_features))
         win_lo = max(base_window - REFINE_WINDOW_RANGE, 24)
         win_hi = base_window + REFINE_WINDOW_RANGE
+
+        _diag(f'config: {combo_name} w={base_window} g={base_gamma:.4f} f={base_feats}')
+        _diag(f'ranges: gamma[{gamma_lo:.3f}-{gamma_hi:.3f}] feat[{feat_lo}-{feat_hi}] win[{win_lo}-{win_hi}] n_size={n_size}')
 
         print(f"\n  {'─'*60}")
         print(f"  Refining #{cfg_idx+1} (LGBM={lgbm_device}): {combo_name}  "
@@ -9468,6 +9504,8 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
             t_window = trial.suggest_int('window', win_lo, win_hi)
             t_gamma = trial.suggest_float('gamma', gamma_lo, gamma_hi)
             t_feats = trial.suggest_int('n_features', feat_lo, feat_hi)
+            _diag(f'trial {r_count[0]:3d}/{n_trials} START w={t_window} g={t_gamma:.4f} f={t_feats}')
+            _trial_t0 = _time_mod.time()
             sel_idx = _feature_floor_indices(ranked_features, t_feats)
             feat_np = features_np[:, sel_idx]
             result = _deku_eval_with_pruning(
@@ -9475,12 +9513,16 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
                 DIAG_STEP, model_factories, gamma=t_gamma, trial=None,
                 horizon=horizon
             )
+            _trial_dt = _time_mod.time() - _trial_t0
             if result is None:
+                _diag(f'trial {r_count[0]:3d}/{n_trials} END  ({_trial_dt:.1f}s) result=None')
                 return 0.0
             if result[6] < 8:
+                _diag(f'trial {r_count[0]:3d}/{n_trials} END  ({_trial_dt:.1f}s) trades<8 (got {result[6]})')
                 return 0.0
             score = _compute_optuna_score(result)
             ret = result[4]
+            _diag(f'trial {r_count[0]:3d}/{n_trials} END  ({_trial_dt:.1f}s) apf={score:.3f} ret={ret:+.1f}% tr={result[6]}')
             if score > best_refine_apf[0]:
                 best_refine_apf[0] = score
                 print(f"    #{r_count[0]:3d} NEW BEST: w={t_window} "
@@ -9513,6 +9555,13 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
             }
     finally:
         sys.stdout, sys.stderr = saved_out, saved_err
+        _total_dt = _time_mod.time() - _worker_t0
+        _diag(f'=== refine worker END total_wall={_total_dt:.1f}s ({_total_dt/60:.1f}min) refined={refined is not None} ===')
+        if _refine_log is not None:
+            try:
+                _refine_log.close()
+            except Exception:
+                pass
 
     return cfg_idx, refined, buf.getvalue(), lgbm_device
 
