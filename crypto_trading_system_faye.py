@@ -4682,10 +4682,17 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                              hold_threshold=NEAR_LIVE_HOLD_THRESHOLD):
     """FAYE K=5 multi-seed median ensemble (canonical entry point).
 
-    Runs _deku_eval_with_pruning_inner K=5 times with seeds [42..46] and returns
-    the result whose cum_return (tuple index 4) is the median across the K runs.
-    This denoises Optuna's TPE sampler against random_state luck and gives a
+    Runs _deku_eval_with_pruning_inner K=5 times CONCURRENTLY via a
+    ThreadPoolExecutor (max_workers=K=5) and returns the result whose
+    cum_return (tuple index 4) is the median across the K runs. This
+    denoises Optuna's TPE sampler against random_state luck and gives a
     more reliable signal for the K=5 candidate ranking.
+
+    FAYE 2026-05-30 12:30: previously the for-loop was SERIAL (consolidation
+    error). v3 / parallel_nearlive's `_parallel_deku_eval_median_k` always
+    used a ThreadPoolExecutor. The serial version was ~5x slower in Mode V
+    (refine + holdout) — caller waits for 5 sequential 600-iteration walks
+    instead of 1. Restored parallel behavior to match v3.
 
     Note on `model_factories`: this argument is accepted for signature
     compatibility with callers but IGNORED. The K=5 wrap always builds seeded
@@ -4693,25 +4700,33 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
     the K runs has a distinct random_state. Callers that need a different
     model family should call _deku_eval_with_pruning_inner directly with K=1.
 
-    Hyperband pruning: `trial` is forwarded to only the FIRST seed's inner
-    call. Pruning the other seeds mid-run would invalidate the median, so they
-    get trial=None (full walk-forward, no intermediate reporting).
+    Pruning is disabled in the K=5 wrap (trial=None for all seeds). With
+    parallel threads you can't selectively prune some and not others, and
+    pruning would invalidate the median anyway. Matches v3 exactly.
     """
-    results = []
-    for i, seed in enumerate(K5_SEEDS):
+    from concurrent.futures import ThreadPoolExecutor as _K5Pool, as_completed as _k5_as_completed
+
+    def _run_one_seed(seed):
         factories = _get_deku_diagnostic_models_seeded(seed)
-        r = _deku_eval_with_pruning_inner(
+        return _deku_eval_with_pruning_inner(
             features_np, labels_np, closes_np, combo, window, n,
-            step, factories, gamma=gamma,
-            trial=(trial if i == 0 else None),
-            horizon=horizon,
-            signal_mode=signal_mode,
-            na_policy=na_policy,
-            return_probas=return_probas,
-            hold_threshold=hold_threshold,
+            step, factories, gamma=gamma, trial=None, horizon=horizon,
+            signal_mode=signal_mode, na_policy=na_policy,
+            return_probas=return_probas, hold_threshold=hold_threshold,
         )
-        if r is not None:
-            results.append(r)
+
+    results = []
+    with _K5Pool(max_workers=K5_K) as pool:
+        futures = [pool.submit(_run_one_seed, s) for s in K5_SEEDS]
+        for f in _k5_as_completed(futures):
+            try:
+                r = f.result()
+                if r is not None:
+                    results.append(r)
+            except Exception:
+                # Match v3 behavior — silently skip failed seeds, only
+                # return None if NO seed succeeded.
+                pass
 
     if not results:
         return None
