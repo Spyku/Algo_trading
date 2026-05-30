@@ -10,6 +10,66 @@ This file preserves the full historical decision trail of the engine: tested/she
 
 ---
 
+### ✅ CLOSED 2026-05-30 — FAYE single-file consolidation shipped + post-FAYE archive cleanup
+
+**Outcome**: Built `crypto_trading_system_faye.py` — a 9100-line single-file consolidation of the Ed v3 architecture (`crypto_trading_system_ed_g_narrow_d_parallel_nearlive_v3.py` + its 3 monkey-patch parents). **ZERO monkey-patches, every previously-patched feature first-class native code.** Engine-vs-trader parity test on 30 most recent ETH hours showed **0 real BUY↔SELL flips** out of 30 — the original "engine says X, trader says Y on the same hour" bug is gone.
+
+**Architecture: the 4-layer monkey-patch chain → one file**:
+
+The Ed v3 production stack was:
+```
+v3 → ENGINE._get_deku_diagnostic_models hook + ENGINE._deku_eval_with_pruning routing dispatcher
+   → parallel_nearlive → _parallel_deku_eval_median_k K=5 wrap
+   → step6_nearlive → _H_ORIG_DEKU_EVAL near-live semantics
+   → g_narrow_d → _G_ORIG_DEKU_EVAL K=5 seeded factories
+   → ed (base)
+```
+
+FAYE collapses all 4 layers. Each previously-patched feature is now defined at its natural location with no module-load rebinding.
+
+**7-phase rollout, each phase its own commit + smoke check**:
+
+| Phase | Commit | What | What it replaces |
+|---|---|---|---|
+| P1 | `8c122ef` | FAYE identity: `FAYE_MODELS_DIR`, `FAYE_CONFIG_DIR`, `crypto_faye_production.csv`, `regime_config_faye.json` | Ed dir/file names (isolated from prod) |
+| P2 | `0883ea4` | `_mean_last_10_fill` helper + NEAR_LIVE defaults in `_deku_eval_with_pruning` (`step=1`, `signal_mode='ternary'`, `na_policy='mean_last_10'`, `embargo=horizon`, `return_probas=True`) | `crypto_signal_core_nearlive.py` helper + env-var gating |
+| P3 | `ff63d30` | Native K=5 multi-seed median ensemble: bare loop renamed `_deku_eval_with_pruning_inner`, new K=5 wrap is canonical `_deku_eval_with_pruning`; seeds=[42..46]; pruning only seed 1 (median validity) | g_narrow_d's `reliability_multi_seed.py` patch + module-load rebind |
+| P4 | `c878832` | 3-worker hybrid GPU+CPU refine inlined: hybrid is canonical `_refine_top_configs`, serial is `_refine_top_configs_serial` fallback for ≤1 config | parallel_nearlive's `_refine_top_configs_hybrid` + `_ENG_REFINE_TOP_CONFIGS_ORIG` indirection |
+| P5a | `d7f7744` | `run_mode_v/s/t_parallel` → `run_mode_v/s/t` canonical; serial as `*_serial` fallback; `_ENG_RUN_MODE_*_ORIG` chain deleted | parallel_nearlive's module-load rebind |
+| P5b | `bb0c6fe` | Native 8-worker Mode D grid dispatcher: builds 60 configs upfront, ProcessPool dispatch with K=5 ThreadPool inside each worker, per-eval CSV `mode_d_full_*.csv` with K=5 seed-by-seed breakdown, `freeze_support()` added | v3's `_capture_state_then_get_models` + `_v3_routed_deku_eval` + `_ParallelGridDispatcher` `inspect.currentframe()` hack |
+| P6 | `694d85f` | `tools/smoke_test_faye.py` — 38-check verification (import, state, canonical entry points, serial fallbacks, worker pickling, no leftover monkey-patch names, K=5 wrap is native) | (new — no equivalent before) |
+| P7 | `4ab34d5` | Module docstring "ARCHITECTURE: monkey-patch genealogy → native consolidation" block, RELIABILITY_K env note, smoke test pointer | (new — no equivalent before) |
+
+**Engine-vs-trader parity test result** (`tools/validate_core_against_signal_log.py --samples 30 --recent-only --cpu-lgbm`):
+- 30/30 hours evaluated, 0 errors, 0 crashes
+- **22/30 direct MATCH (73.3%)**, 8/30 DIFF (26.7%), avg confidence delta −1.98 (near-zero bias)
+- **Pattern analysis: 0/8 real BUY↔SELL flips** — all 8 DIFFs are HOLD-threshold boundary cases where one side's confidence happened to be above the trader's `min_confidence` (95% for bear) and the other below
+  - 5/8: live=HOLD (trader below 95% threshold) vs core=BUY/SELL (raw model direction)
+  - 3/8: core=HOLD (engine probability < 50%) vs live=BUY/SELL (trader hit threshold)
+- **Verdict: the engine and trader codepaths agree on direction every single time both produce one.** The original "bug between live trader and crypto trading" — engine computing one signal, trader computing a different one for the same hour — is gone.
+
+**Post-FAYE archive cleanup** (`ARCHIVED/2026-05-30_post_faye_cleanup/`, commit `1fce7f8`):
+
+Now that FAYE supersedes the variant scripts and their tools clusters, archived in three tiers:
+
+- **Tier A — engine root variants** (8 files): `crypto_trading_system_ed_cdar.py`, `_cvar.py`, `_cpcv.py`, `_robust.py`, `_h_strict_family.py`, `_noprod.py`, `_pre_macro_cache_fix_20260527_112231.py`, `_launch_h_strict_family.bat`. Each one had only doc/history references; the bits that survived (K=5, dedup by `(combo, w)`) are now native in FAYE.
+
+- **Tier B — variant-driving tools** (14 files): the test runners and HRST drivers that only existed to fire the Tier A variants. CDaR idea-test cluster (`test_c04_to_c08_runner.py`, `test_desktop_5ideas_runner.py`, `test_c05_c06_only.py`, `test_c32_to_c40_batch.py`), CVaR+CPCV cluster (`run_cvar_hrst_resumable.py`, `run_cpcv_hrst_resumable.py`, `run_c67_hrst_resumable.py`, `rerun_v2_full.py`), robust+reliability cluster (`run_reliability_test.py`, `run_reliability_hrst.py`), step6+h_strict_family cluster (`test_step6_regression.py`, `compare_h_b_prod_30d.py`, `smoke_test_path_resolution_matrix.py`), and the orphan `run_locked_detector_hrst.py`.
+
+- **Tier C — old model/config snapshot dirs** (14 dirs, ~440KB): `models_g_desktop/`, `_0524/`, `_0524_h75/`, `_0524_live_baseline/`, `_0525/`, `models_h75/`, `models_h75_wide_laptop/` + matching `config_*` siblings. Pre-`_nearlive` artifacts from the H75 / G_desktop / 0524 / 0525 runs.
+
+- Plus `CLAUDE_NEW.md` (stale May-19 draft of CLAUDE.md, never promoted) and `TODO_TEST.md` (tiny stale scratchpad) → `docs/`.
+
+**Engine root impact**: `.py` files at root 38 → 29; root dirs 35 → 21. `ARCHIVED/2026-05-30_post_faye_cleanup/INDEX.md` documents what was moved and where.
+
+**NOT archived** (still load-bearing): `crypto_trading_system_ed.py`, `_g_narrow_d.py`, `_g_narrow_d_parallel_nearlive.py`, `_g_narrow_d_parallel_nearlive_v3.py`, `_step6.py`, `_step6_nearlive.py`, `crypto_signal_core.py`, `crypto_signal_core_nearlive.py` — actively imported by the v3 chain that is still running on Desktop. Will be safe to archive AFTER FAYE replaces v3 in production.
+
+**Files**: FAYE consolidation commits `8c122ef` → `4ab34d5` (8 commits), archive cleanup `1fce7f8`. Parity test output `output/core_validation_20260530_015454.csv`. Smoke test `tools/smoke_test_faye.py` (38 ✓).
+
+**Next**: when current v3 HRST on Desktop finishes (~18:00 May 30) and trader is flat, swap v3's winners into Ed paths via Copy-Item (per the docstring recipe in FAYE), restart trader. **No FAYE promotion to production until v3 HRST done + trader flat + final smoke check.**
+
+---
+
 ### 🗄 ARCHIVED 2026-05-28/29 — v3 fork shipped + 4 superseded engine forks moved to `ARCHIVED/2026-05-28_v3_cleanup/`
 
 **Triggered by**: night-of 2026-05-28 dev session debugging the running NEAR_LIVE_MODE HRST (parallel_nearlive v2, started 2026-05-27 23:46). Multiple iterations of warning suppression + grid trim + phase-aware threading (then reverted as a measured regression) — resulted in the **v3 fork** committed `f688e0e` and the **archive cleanup** committed `b2dbe7a`.
