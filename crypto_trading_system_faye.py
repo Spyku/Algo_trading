@@ -9921,6 +9921,54 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
 # ──────────────────────────────────────────────────────────────
 
 
+def _faye_prevent_sleep():
+    """Prevent Windows system sleep while FAYE runs.
+
+    Long H/HRST runs are 6-19 hr — if the machine sleeps mid-refine the
+    workers pause and we lose hours of wall time (lessons from 2026-05-31
+    overnight: sleep stole ~18 min from a fresh run before the user woke it).
+    Allows display sleep (don't blind the user when they walk away), only
+    blocks system sleep.
+
+    Cross-platform safe: no-op on non-Windows. Best-effort: silent fail if
+    the SetThreadExecutionState API call doesn't return success.
+
+    Restores normal sleep behavior on process exit via atexit, so killing
+    FAYE doesn't leave the OS in "no sleep" state permanently.
+    """
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes as _ctypes
+        import atexit as _atexit
+        # Win32 constants
+        ES_CONTINUOUS = 0x80000000      # apply state until next call
+        ES_SYSTEM_REQUIRED = 0x00000001  # prevent system sleep
+        # NOTE: deliberately NOT setting ES_DISPLAY_REQUIRED — we don't want
+        # to keep the screen on, just stop the CPU from being suspended.
+        result = _ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        )
+        if result == 0:
+            print("  [sleep-guard] WARNING: SetThreadExecutionState returned 0 "
+                  "(API call may have failed silently)")
+            return
+        print("  [sleep-guard] system sleep DISABLED for this run "
+              "(display sleep still allowed, restored on exit)")
+
+        def _restore_sleep():
+            try:
+                _ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                print("  [sleep-guard] system sleep restored")
+            except Exception:
+                pass
+
+        _atexit.register(_restore_sleep)
+    except Exception as e:
+        print(f"  [sleep-guard] failed to install sleep guard: "
+              f"{type(e).__name__}: {e}")
+
+
 if __name__ == '__main__':
     # FAYE: freeze_support() required for Windows ProcessPool spawn workers
     # (Mode D 8-worker dispatcher, Mode V parallel backtests, refine workers).
@@ -9928,6 +9976,14 @@ if __name__ == '__main__':
     # and explode with infinite worker forks.
     import multiprocessing as _mp
     _mp.freeze_support()
+
+    # FAYE 2026-05-31: prevent Windows sleep so overnight H/HRST runs don't
+    # lose hours of wall time to suspend/resume. Restored on exit via atexit.
+    # No-op on non-Windows. Skip when running as a multiprocessing spawn
+    # child — only the top-level parent should install the guard (children
+    # inherit the OS-level execution state from the parent anyway).
+    if not _mp.parent_process():
+        _faye_prevent_sleep()
 
     # Parse --refine-trials N (test-only override for hybrid refine).
     # Strip from sys.argv before main() so the engine doesn't choke on
