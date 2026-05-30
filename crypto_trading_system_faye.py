@@ -9271,6 +9271,15 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    # FAYE 2026-05-30 12:10: broadcast lgbm_device to K=5 seeded factories
+    # via env var (matches parallel_nearlive._refine_one_with_device pattern).
+    # The K=5 wrap (_deku_eval_with_pruning) reads G_PARALLEL_LGBM_DEVICE per
+    # process when building its seeded factories — without this, the seeded
+    # factories default to 'cpu' regardless of the dispatcher's lgbm_device
+    # assignment, making the hybrid GPU+CPU routing inert.
+    # Per-process env so each worker is naturally isolated.
+    os.environ['G_PARALLEL_LGBM_DEVICE'] = lgbm_device
+
     # Override the production-model factory for THIS worker process.
     # (No effect on parent; each loky/pool worker has its own ALL_MODELS.)
     ALL_MODELS = _get_deku_models_with_device(lgbm_device)
@@ -9428,23 +9437,35 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     closes_np = closes_np_all[:f1_train_e]
     n_size = len(features_np)
 
-    print(f"\n  [refine-hybrid] dispatching {len(top3_for_refine)} configs "
-          f"across 2 workers (GPU + CPU); 3rd config dynamic")
+    # FAYE 2026-05-30 12:10 — match parallel_nearlive's _refine_top_configs_3workers:
+    # n_workers=3 (one per config), ALL-CPU devices by default (GPU + K=5 fan-out
+    # crashes CUDA context), submit all at once (no pending-queue), retry failed
+    # workers sequentially on the main process.
+    n_workers = min(3, len(top3_for_refine))
+
+    # When K=5 fan-out is active (K5_K > 1), 5 threads × LGBM-GPU per worker
+    # crashes the GPU's single CUDA context. With CPU we already get 5x
+    # parallelism from the seed fan-out, so GPU isn't needed on the outer
+    # worker. Override via G_FORCE_CPU_REFINE=0 if testing GPU path.
+    force_cpu = os.environ.get('G_FORCE_CPU_REFINE', '1') == '1'
+    if force_cpu and K5_K > 1:
+        initial_devices = ['cpu'] * n_workers
+    else:
+        initial_devices = (['gpu'] + ['cpu'] * (n_workers - 1))[:n_workers]
+
+    print(f"\n  [refine-3worker] dispatching {len(top3_for_refine)} configs "
+          f"across {n_workers} workers (devices={initial_devices}, "
+          f"K_parallel={K5_K})")
 
     t_refine = time.time()
-    pending_idx = list(range(len(top3_for_refine)))
     refined_list = [None] * len(top3_for_refine)
 
-    initial_devices = ['gpu', 'cpu']
-
-    pool = _PoolExec(max_workers=2)
+    pool = _PoolExec(max_workers=n_workers)
     futures = {}
     try:
-        # Submit initial 2 (one per device)
-        for dev in initial_devices:
-            if not pending_idx:
-                break
-            cfg_idx = pending_idx.pop(0)
+        # Submit ALL configs at once (one per worker)
+        for cfg_idx in range(len(top3_for_refine)):
+            dev = initial_devices[cfg_idx % n_workers]
             top_entry = top3_for_refine[cfg_idx]
             f = pool.submit(
                 _refine_one_config_worker, cfg_idx, top_entry, asset, horizon,
@@ -9453,7 +9474,6 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
             )
             futures[f] = (cfg_idx, dev)
 
-        # Drain + dynamic dispatch
         while futures:
             done = next(_as_completed(futures))
             cfg_idx, dev = futures.pop(done)
@@ -9463,35 +9483,54 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
                     sys.stdout.write(captured)
                     if not captured.endswith('\n'):
                         sys.stdout.write('\n')
+                    sys.stdout.flush()
                 refined_list[got_idx] = refined
             except Exception as e:
-                print(f"  [refine-hybrid] config #{cfg_idx+1} ({dev}) "
-                      f"FAILED with {type(e).__name__}: {e}")
-            # Submit next pending config on this freed device
-            if pending_idx:
-                next_idx = pending_idx.pop(0)
-                print(f"  [refine-hybrid] {dev.upper()} freed → "
-                      f"starting config #{next_idx+1} on {dev.upper()}")
-                top_entry = top3_for_refine[next_idx]
-                f2 = pool.submit(
-                    _refine_one_config_worker, next_idx, top_entry,
-                    asset, horizon, ranked_features_r,
-                    features_np, labels_np, closes_np, n_size, dev,
-                    _REFINE_TRIALS_OVERRIDE
-                )
-                futures[f2] = (next_idx, dev)
+                # A worker died — pool is now poisoned. Mark this config for
+                # sequential retry on the main process and continue draining
+                # the other workers' futures.
+                print(f"  [refine-3worker] config #{cfg_idx+1} ({dev}) "
+                      f"FAILED with {type(e).__name__}: {e}", flush=True)
+                refined_list[cfg_idx] = ('FAILED', cfg_idx, dev, top3_for_refine[cfg_idx])
     finally:
-        # FAYE 2026-05-30: replaced plain pool.shutdown(wait=True) — the v3
-        # bug observed on the running Desktop HRST showed refine workers
-        # surviving the shutdown signal indefinitely (blocked in native LGBM
-        # code, ignored Python signals). Hard-kill survivors with taskkill
-        # /F /T so the next horizon's refine workers don't contend for CPU
-        # with leaked zombies.
-        _hard_shutdown_pool(pool, label='refine-hybrid', soft_timeout=15, hard_timeout=10)
+        # FAYE 2026-05-30: replaced plain pool.shutdown(wait=True) — workers
+        # blocked in native LGBM ignore the Python signals shutdown sends,
+        # leaving zombies that contend for CPU with the next horizon's pool.
+        # _hard_shutdown_pool snapshots PIDs and SIGTERM → taskkill /F /T any
+        # survivors so the next horizon starts clean.
+        _hard_shutdown_pool(pool, label='refine-3worker', soft_timeout=15, hard_timeout=10)
 
-    all_refined = [r for r in refined_list if r is not None]
+    # Sequential retry for any failed configs (pool is poisoned after a
+    # BrokenProcessPool, so we run these in-process on the main thread).
+    failed_entries = [r for r in refined_list if isinstance(r, tuple) and r[0] == 'FAILED']
+    if failed_entries:
+        print(f"\n  [refine-3worker] retrying {len(failed_entries)} failed "
+              f"config(s) sequentially in main process", flush=True)
+        for tag, cfg_idx, dev, top_entry in failed_entries:
+            try:
+                os.environ['G_PARALLEL_LGBM_DEVICE'] = 'cpu'
+                got_idx, refined, captured, _dev_used = _refine_one_config_worker(
+                    cfg_idx, top_entry, asset, horizon, ranked_features_r,
+                    features_np, labels_np, closes_np, n_size, 'cpu',
+                    _REFINE_TRIALS_OVERRIDE,
+                )
+                if captured:
+                    sys.stdout.write(captured)
+                    sys.stdout.flush()
+                refined_list[got_idx] = refined
+            except Exception as e:
+                print(f"  [refine-3worker] sequential retry config #{cfg_idx+1} "
+                      f"ALSO FAILED with {type(e).__name__}: {e}", flush=True)
+                refined_list[cfg_idx] = None
+
+    # Filter out None (truly failed) AND any leftover FAILED tuples that
+    # didn't get a successful sequential retry.
+    all_refined = [r for r in refined_list
+                   if r is not None and not (isinstance(r, tuple) and r[0] == 'FAILED')]
     refine_elapsed = (time.time() - t_refine) / 60
-    print(f"\n  [Refine: {refine_elapsed:.1f} min] (hybrid GPU+CPU)")
+    print(f"\n  [Refine: {refine_elapsed:.1f} min] "
+          f"(3-worker parallel + K=5 thread fan-out, "
+          f"{len(all_refined)}/{len(top3_for_refine)} configs refined)")
 
     if all_refined:
         all_refined.sort(key=lambda x: -x['apf'])
