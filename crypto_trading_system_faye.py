@@ -4350,14 +4350,25 @@ GRID_COMBOS = [
     # if a future regime favors it (no evidence in current ETH data).
     # RF+GB, RF+LR, GB+LR dropped — always fail (0 valid results in V1.6/V1.7 tests)
 ]
-GRID_WINDOWS = [72, 100, 150]  # trimmed 2026-04-27 from [72,100,150,200,250,300].
-                                # 200/250/300 had 0/20 wins in last month — ETH 1h is
-                                # fast-moving, longer windows dilute recent signal.
-                                # Refine step extends ±20h, so can drift toward 170h.
-GRID_FEATURES = [10, 13, 17, 25]  # trimmed 2026-04-27 from [10,13,17,20,25,30].
-                                   # 20/30 had 0/20 wins. Sweet spot is 10-13 (60% of
-                                   # winners), 23-25 only when meta variants active.
-GRID_GAMMAS = [0.999, 0.997, 0.995]  # all 3 picked at meaningful rates — kept
+GRID_WINDOWS = [72, 100, 150, 200, 250]  # FAYE: g_narrow_d narrow_nearlive grid
+                                # (2026-05-27 evening trim from [72,100,150,200,250,300,350]).
+                                # 300/350 dropped as empirically dead in 0524/0525 runs (no
+                                # winners selected, just doubled grid time). The 200, 250
+                                # windows are CRITICAL — the live winners sit at w=281/293
+                                # (Optuna refine extends grid winners by ±20h, so 250 can
+                                # reach 270, and refining the w=200 candidate reaches the
+                                # ~280 basin). Earlier FAYE bug 2026-05-30 09:35: inherited
+                                # base Ed [72,100,150] which never reaches w=200+ basin,
+                                # would have produced uncompetitive winners. Fixed by
+                                # pulling g_narrow_d's narrow_nearlive grid override.
+GRID_FEATURES = [10, 15, 20]       # FAYE: g_narrow_d narrow_nearlive — wide spacing (gap
+                                   # of 5) so Mode V refine interpolates (12, 13, 17, 18).
+                                   # Was [10,13,17,25] in base Ed — denser but the refine
+                                   # was already filling 12/14/16/18 from the gap-3 base.
+GRID_GAMMAS = [0.999, 0.996]       # FAYE: g_narrow_d narrow_nearlive — wide spacing
+                                   # (gap 0.003) so refine interpolates (0.997, 0.998).
+                                   # Was [0.999, 0.997, 0.995] in base Ed; 0.995 was the
+                                   # lowest-yield gamma in last month, dropped.
 
 # Refine step: Optuna fine-tuning around top 3 live-validated configs
 REFINE_TOP_N = 3                   # how many configs to refine from Mode V
