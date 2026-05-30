@@ -5102,6 +5102,41 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
 
         print(f"  Optuna trains on fold 1: {n:,} rows | {N_HOLDOUT_FOLDS}-fold holdout ranking after")
 
+        # FAYE 2026-05-30: validate that fold 1's n covers the grid windows.
+        # Inner walk-forward requires n >= window + 100 (min_start = window + 50,
+        # plus 50 more rows for at least one eval step). If n is too small for
+        # a given grid window, every eval at that window returns None → status
+        # FAILED. If n is too small for ALL grid windows, Mode V Step 1 has
+        # zero valid candidates and downstream Mode V crashes.
+        #
+        # Common cause: --replay too small. With --replay 168 (1 week), df is
+        # 168 rows, dropna leaves ~165, fold 1 gets 60% = ~99 rows. n=99
+        # doesn't cover even w=72 (needs n>=172). Mode D would produce all
+        # FAILED rows.
+        _min_window = min(GRID_WINDOWS)
+        _max_window = max(GRID_WINDOWS)
+        _n_required_smallest = _min_window + 100
+        _n_required_largest = _max_window + 100
+        if n < _n_required_smallest:
+            print()
+            print("  " + "!" * 76)
+            print(f"  ! REPLAY TOO SHORT: fold-1 n={n} rows < {_n_required_smallest} "
+                  f"required for smallest grid window (w={_min_window}).")
+            print(f"  ! Every Mode D eval will return None / status FAILED.")
+            print(f"  ! Mode V will have zero valid candidates and likely crash.")
+            print(f"  ! Increase --replay so n_fold1 (~60% of replay) >= "
+                  f"{_n_required_largest} (all windows) or >= {_n_required_smallest} "
+                  f"(smallest window only).")
+            print(f"  ! Suggested minimum --replay = {int(_n_required_largest / 0.6) + 50} "
+                  f"(~{int(_n_required_largest / 0.6 / 24) + 2} days) for full grid; "
+                  f"{int(_n_required_smallest / 0.6) + 50} (~{int(_n_required_smallest / 0.6 / 24) + 2} days) for smallest window only.")
+            print("  " + "!" * 76)
+            print()
+        elif n < _n_required_largest:
+            print(f"  ⚠ PARTIAL GRID: fold-1 n={n} covers windows up to "
+                  f"w={n - 100} but not w={_max_window} (needs n>={_n_required_largest}). "
+                  f"Larger-window evals will FAIL.")
+
         # Per-horizon feature range
         feat_min, feat_max = N_FEATURES_RANGE.get(horizon, N_FEATURES_RANGE_DEFAULT)
         min_n_features = feat_min
