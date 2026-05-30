@@ -2275,8 +2275,23 @@ def _get_deku_diagnostic_models():
 def _get_deku_diagnostic_models_seeded(seed):
     """FAYE K=5 multi-seed denoising helper. Mirrors _get_deku_diagnostic_models()
     but with random_state=seed instead of 42. Used by _deku_eval_with_pruning to
-    run K=5 seeded walk-forward evals and return the median by cum_return."""
+    run K=5 seeded walk-forward evals and return the median by cum_return.
+
+    FAYE 2026-05-30 11:50: device is read from G_PARALLEL_LGBM_DEVICE env var
+    (defaults to 'cpu' for safety). When called from inside ProcessPool workers
+    (Mode D 8-worker dispatcher × K=5 inner ThreadPool = 40 concurrent calls),
+    'cpu' is the ONLY safe value — 40 concurrent GPU calls on a single RTX
+    queue would serialize and grind to near-zero throughput. v3 sets this
+    same env var in parallel_nearlive._device_aware_factories_seeded.
+
+    The default 'cpu' matches v3's behavior. Set env to 'gpu' only when running
+    serially (e.g., the legacy refine fallback when ≤1 config). LGBM on CPU at
+    n_estimators=100/max_depth=4/train=250-rows is ~10x FASTER per-call than
+    GPU once you account for kernel launch + transfer overhead, and avoids
+    the contention bottleneck entirely.
+    """
     from lightgbm import LGBMClassifier
+    device = os.environ.get('G_PARALLEL_LGBM_DEVICE', 'cpu')
     return {
         'RF':   lambda: RandomForestClassifier(n_estimators=100, max_depth=4, class_weight='balanced', random_state=seed, n_jobs=1),
         'GB':   lambda: GradientBoostingClassifier(n_estimators=100, max_depth=3, random_state=seed),
@@ -2284,7 +2299,7 @@ def _get_deku_diagnostic_models_seeded(seed):
                                        tree_method='hist', verbosity=0, n_jobs=1),
         'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=seed),
         'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
-                                        class_weight='balanced', verbose=-1, random_state=seed, device='gpu'),
+                                        class_weight='balanced', verbose=-1, random_state=seed, device=device),
     }
 
 
