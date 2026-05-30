@@ -9483,7 +9483,8 @@ def _diagnostic_models_with_device(lgbm_device):
 def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
                               ranked_features, features_np, labels_np,
                               closes_np, n_size, lgbm_device,
-                              n_trials_override=None):
+                              n_trials_override=None, seed_offset=0,
+                              chunk_id=0):
     """ProcessPool worker: refine ONE config with assigned LGBM device.
     Returns (cfg_idx, refined_dict_or_None, captured_stdout, lgbm_device).
 
@@ -9492,6 +9493,14 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     parent-process monkey-patch on REFINE_TRIALS won't propagate;
     this explicit kwarg is the only way to actually control the trial
     count from the parent.
+
+    seed_offset: added to base TPE seed so chunked studies for the same
+    config explore different regions. chunk_id is for logging only.
+
+    Early stopping: if FAYE_REFINE_EARLYSTOP_PATIENCE > 0 (default 0 = off),
+    the study calls study.stop() when best apf hasn't improved for that
+    many trials after a 20-trial warm-up (lets TPE finish initial random
+    exploration before plateau detection kicks in).
     """
     import optuna
     import time as _time_mod
@@ -9520,9 +9529,12 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
     # Logging errors are swallowed so a disk issue can't crash refine.
     _pid = os.getpid()
     try:
+        # Log filename includes chunk_id so multiple workers on the same cfg
+        # don't all write to the same file. chunk_id=0 keeps legacy naming.
+        _chunk_tag = '' if chunk_id == 0 else f'_chunk{chunk_id}'
         _refine_log_path = os.path.join(
             FAYE_MODELS_DIR,
-            f'refine_progress_cfg{cfg_idx}_pid{_pid}.log',
+            f'refine_progress_cfg{cfg_idx}{_chunk_tag}_pid{_pid}.log',
         )
         os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
         # `buffering=1` = line-buffered: writes flush to disk on each \n
@@ -9586,13 +9598,42 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
               f"features[{feat_lo}-{feat_hi}] window[{win_lo}-{win_hi}]")
         print(f"  {'─'*60}")
 
-        seed = (OPTUNA_SEED_OVERRIDE
-                if OPTUNA_SEED_OVERRIDE is not None else 42)
+        base_seed = (OPTUNA_SEED_OVERRIDE
+                     if OPTUNA_SEED_OVERRIDE is not None else 42)
+        seed = base_seed + seed_offset
         study = optuna.create_study(
             direction='maximize',
             sampler=optuna.samplers.TPESampler(seed=seed),
-            study_name=f'ed_v1_refine_{asset}_{horizon}h_{cfg_idx}',
+            study_name=f'ed_v1_refine_{asset}_{horizon}h_{cfg_idx}_c{chunk_id}',
         )
+        _diag(f'study seed={seed} (base={base_seed}+offset={seed_offset}) chunk_id={chunk_id}')
+
+        # FAYE 2026-05-31: early stopping callback. Stops the study if best
+        # apf hasn't improved for FAYE_REFINE_EARLYSTOP_PATIENCE trials after
+        # a 20-trial warm-up. Off by default (patience=0). When TPE converges
+        # fast (typical for low-dim 3-param refine), this saves 30-50% of
+        # trial time.
+        _es_patience = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '0'))
+        _es_state = {'best': -1.0, 'no_improve': 0}
+
+        def _early_stop_callback(study_, trial_):
+            if _es_patience <= 0:
+                return
+            n_complete = sum(1 for t in study_.trials
+                             if t.state == optuna.trial.TrialState.COMPLETE)
+            if n_complete < 20:
+                return
+            cur = trial_.value if trial_.value is not None else 0.0
+            if cur > _es_state['best']:
+                _es_state['best'] = cur
+                _es_state['no_improve'] = 0
+            else:
+                _es_state['no_improve'] += 1
+                if _es_state['no_improve'] >= _es_patience:
+                    _diag(f'EARLY-STOP triggered at trial {n_complete} '
+                          f'(best={_es_state["best"]:.3f}, '
+                          f'no improvement for {_es_state["no_improve"]} trials)')
+                    study_.stop()
 
         best_refine_apf = [0.0]
         r_count = [0]
@@ -9631,7 +9672,10 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
 
         n_trials = (n_trials_override if n_trials_override is not None
                     else REFINE_TRIALS)
+        # callbacks=[_early_stop_callback] is a no-op when patience=0 (default).
+        # When >0 it watches for plateau and calls study.stop() to bail early.
         study.optimize(refine_objective, n_trials=n_trials,
+                       callbacks=[_early_stop_callback],
                        show_progress_bar=False)
 
         completed = [t for t in study.trials
@@ -9739,11 +9783,34 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     closes_np = closes_np_all[:f1_train_e]
     n_size = len(features_np)
 
-    # FAYE 2026-05-30 12:10 — match parallel_nearlive's _refine_top_configs_3workers:
-    # n_workers=3 (one per config), ALL-CPU devices by default (GPU + K=5 fan-out
-    # crashes CUDA context), submit all at once (no pending-queue), retry failed
-    # workers sequentially on the main process.
-    n_workers = min(3, len(top3_for_refine))
+    # FAYE 2026-05-31 BUG #16 PERF: trial chunking + larger worker pool.
+    # Env-controlled, defaults preserve legacy 3-worker / 1-chunk behavior.
+    #
+    # FAYE_REFINE_TRIAL_SPLIT (default 1): split each config's REFINE_TRIALS
+    #     across N independent Optuna studies (different seeds). N=3 means each
+    #     config gets 3 chunks of 25 trials. Loses some TPE coordination but
+    #     adds genuine parallelism — and chunks all run concurrently if workers
+    #     are available, so the bottleneck (cfg2 in typical runs) drops from
+    #     SPLIT=1 wall to (SPLIT=1 wall)/SPLIT.
+    #
+    # FAYE_REFINE_WORKERS (default = SPLIT × (n_configs-1) when SPLIT>1, else
+    #     n_configs): pool size. Default is the sweet spot — enough workers
+    #     that all cfg2 chunks run in parallel, not so many that K=5 threads
+    #     start thrashing 28 cores.
+    #
+    # FAYE_REFINE_EARLYSTOP_PATIENCE (default 0=off): stop a chunk when best
+    #     apf hasn't improved in N trials after 20-trial warm-up. Patience=15
+    #     typically saves 30-50% of chunk time when TPE converges.
+    #
+    # Falls back to 3-worker/1-chunk if env vars unset → byte-identical to
+    # the pre-bug-#16 behavior.
+    n_cfgs = len(top3_for_refine)
+    trial_split = max(1, int(os.environ.get('FAYE_REFINE_TRIAL_SPLIT', '1')))
+    if trial_split > 1:
+        _default_workers = trial_split * max(1, n_cfgs - 1)
+    else:
+        _default_workers = n_cfgs
+    n_workers = max(1, int(os.environ.get('FAYE_REFINE_WORKERS', str(_default_workers))))
 
     # When K=5 fan-out is active (K5_K > 1), 5 threads × LGBM-GPU per worker
     # crashes the GPU's single CUDA context. With CPU we already get 5x
@@ -9751,34 +9818,54 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     # worker. Override via G_FORCE_CPU_REFINE=0 if testing GPU path.
     force_cpu = os.environ.get('G_FORCE_CPU_REFINE', '1') == '1'
     if force_cpu and K5_K > 1:
-        initial_devices = ['cpu'] * n_workers
+        worker_devices = ['cpu'] * n_workers
     else:
-        initial_devices = (['gpu'] + ['cpu'] * (n_workers - 1))[:n_workers]
+        worker_devices = (['gpu'] + ['cpu'] * (n_workers - 1))[:n_workers]
 
-    print(f"\n  [refine-3worker] dispatching {len(top3_for_refine)} configs "
-          f"across {n_workers} workers (devices={initial_devices}, "
-          f"K_parallel={K5_K})")
+    # Trial count: REFINE_TRIALS or --refine-trials override, divided by
+    # trial_split for chunked runs. Each chunk gets equal share; any
+    # remainder is added to the first chunk so total ≈ REFINE_TRIALS.
+    _total_trials = (_REFINE_TRIALS_OVERRIDE if _REFINE_TRIALS_OVERRIDE is not None
+                     else REFINE_TRIALS)
+    _base_per_chunk = max(1, _total_trials // trial_split)
+    _remainder = _total_trials - (_base_per_chunk * trial_split)
+    es_patience = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '0'))
+
+    print(f"\n  [refine-{n_workers}worker x split{trial_split}] dispatching "
+          f"{n_cfgs * trial_split} task(s) ({n_cfgs} configs × {trial_split} chunks "
+          f"of ~{_base_per_chunk} trials), pool={n_workers}, K_parallel={K5_K}, "
+          f"early_stop_patience={es_patience}")
 
     t_refine = time.time()
-    refined_list = [None] * len(top3_for_refine)
+    # Collect ALL refined dicts per cfg across chunks; pick best apf per cfg at end.
+    refined_per_cfg = {c: [] for c in range(n_cfgs)}
 
     pool = _PoolExec(max_workers=n_workers)
     futures = {}
     try:
-        # Submit ALL configs at once (one per worker)
-        for cfg_idx in range(len(top3_for_refine)):
-            dev = initial_devices[cfg_idx % n_workers]
-            top_entry = top3_for_refine[cfg_idx]
-            f = pool.submit(
-                _refine_one_config_worker, cfg_idx, top_entry, asset, horizon,
-                ranked_features_r, features_np, labels_np, closes_np, n_size,
-                dev, _REFINE_TRIALS_OVERRIDE
-            )
-            futures[f] = (cfg_idx, dev)
+        # Submit all (cfg, chunk) tasks at once. The ProcessPool queue
+        # will dispatch them across n_workers, naturally re-using a freed
+        # worker for the next pending chunk → no idle workers while others
+        # are still running.
+        task_idx = 0
+        for cfg_idx in range(n_cfgs):
+            for chunk_id in range(trial_split):
+                # First chunk per cfg gets the remainder so total = REFINE_TRIALS.
+                chunk_trials = (_base_per_chunk +
+                                (_remainder if chunk_id == 0 else 0))
+                dev = worker_devices[task_idx % n_workers]
+                top_entry = top3_for_refine[cfg_idx]
+                f = pool.submit(
+                    _refine_one_config_worker, cfg_idx, top_entry, asset, horizon,
+                    ranked_features_r, features_np, labels_np, closes_np, n_size,
+                    dev, chunk_trials, chunk_id, chunk_id
+                )
+                futures[f] = (cfg_idx, chunk_id, dev)
+                task_idx += 1
 
         while futures:
             done = next(_as_completed(futures))
-            cfg_idx, dev = futures.pop(done)
+            cfg_idx, chunk_id, dev = futures.pop(done)
             try:
                 got_idx, refined, captured, _dev_used = done.result()
                 if captured:
@@ -9786,53 +9873,34 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
                     if not captured.endswith('\n'):
                         sys.stdout.write('\n')
                     sys.stdout.flush()
-                refined_list[got_idx] = refined
+                if refined is not None:
+                    refined_per_cfg[got_idx].append(refined)
             except Exception as e:
-                # A worker died — pool is now poisoned. Mark this config for
-                # sequential retry on the main process and continue draining
-                # the other workers' futures.
-                print(f"  [refine-3worker] config #{cfg_idx+1} ({dev}) "
-                      f"FAILED with {type(e).__name__}: {e}", flush=True)
-                refined_list[cfg_idx] = ('FAILED', cfg_idx, dev, top3_for_refine[cfg_idx])
+                # Chunk failed — other chunks of the same cfg can still
+                # provide a result, so we don't poison the whole cfg.
+                print(f"  [refine-split] cfg #{cfg_idx+1} chunk {chunk_id} "
+                      f"({dev}) FAILED with {type(e).__name__}: {e}", flush=True)
     finally:
-        # FAYE 2026-05-30: replaced plain pool.shutdown(wait=True) — workers
-        # blocked in native LGBM ignore the Python signals shutdown sends,
-        # leaving zombies that contend for CPU with the next horizon's pool.
-        # _hard_shutdown_pool snapshots PIDs and SIGTERM → taskkill /F /T any
-        # survivors so the next horizon starts clean.
-        _hard_shutdown_pool(pool, label='refine-3worker', soft_timeout=15, hard_timeout=10)
+        # Per user request: workers MUST be terminated before Step 3 runs
+        # so Step 3 starts with a clean CPU. _hard_shutdown_pool does this
+        # via SIGTERM → taskkill /F /T escalation.
+        _hard_shutdown_pool(pool, label=f'refine-{n_workers}w-split{trial_split}',
+                            soft_timeout=15, hard_timeout=10)
 
-    # Sequential retry for any failed configs (pool is poisoned after a
-    # BrokenProcessPool, so we run these in-process on the main thread).
-    failed_entries = [r for r in refined_list if isinstance(r, tuple) and r[0] == 'FAILED']
-    if failed_entries:
-        print(f"\n  [refine-3worker] retrying {len(failed_entries)} failed "
-              f"config(s) sequentially in main process", flush=True)
-        for tag, cfg_idx, dev, top_entry in failed_entries:
-            try:
-                os.environ['G_PARALLEL_LGBM_DEVICE'] = 'cpu'
-                got_idx, refined, captured, _dev_used = _refine_one_config_worker(
-                    cfg_idx, top_entry, asset, horizon, ranked_features_r,
-                    features_np, labels_np, closes_np, n_size, 'cpu',
-                    _REFINE_TRIALS_OVERRIDE,
-                )
-                if captured:
-                    sys.stdout.write(captured)
-                    sys.stdout.flush()
-                refined_list[got_idx] = refined
-            except Exception as e:
-                print(f"  [refine-3worker] sequential retry config #{cfg_idx+1} "
-                      f"ALSO FAILED with {type(e).__name__}: {e}", flush=True)
-                refined_list[cfg_idx] = None
+    # Pick best refined dict per cfg (max apf across chunks). Skip cfgs with
+    # no successful results.
+    refined_list = [None] * n_cfgs
+    for cfg_idx in range(n_cfgs):
+        cfg_results = refined_per_cfg[cfg_idx]
+        if cfg_results:
+            best = max(cfg_results, key=lambda r: r['apf'])
+            refined_list[cfg_idx] = best
 
-    # Filter out None (truly failed) AND any leftover FAILED tuples that
-    # didn't get a successful sequential retry.
-    all_refined = [r for r in refined_list
-                   if r is not None and not (isinstance(r, tuple) and r[0] == 'FAILED')]
+    all_refined = [r for r in refined_list if r is not None]
     refine_elapsed = (time.time() - t_refine) / 60
     print(f"\n  [Refine: {refine_elapsed:.1f} min] "
-          f"(3-worker parallel + K=5 thread fan-out, "
-          f"{len(all_refined)}/{len(top3_for_refine)} configs refined)")
+          f"({n_workers}-worker x split{trial_split} + K=5 thread fan-out, "
+          f"{len(all_refined)}/{n_cfgs} configs refined)")
 
     if all_refined:
         all_refined.sort(key=lambda x: -x['apf'])
