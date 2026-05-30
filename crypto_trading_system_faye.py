@@ -4574,9 +4574,30 @@ def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, wind
       'skip' (Ed legacy): skip the eval step if any NaN.
       'mean_last_10' (FAYE default): fill NaN with mean of last 10 column values.
     """
+    # FAYE 2026-05-30 19:45: optional walk-forward progress log (refine only).
+    # Reads FAYE_REFINE_DIAG_LOG_PATH env var (set by _refine_one_config_worker).
+    # Logs progress every 25 iterations + on start/end. Near-zero overhead if
+    # env var unset (e.g., Mode D grid worker doesn't set it).
+    _inner_diag_path = os.environ.get('FAYE_REFINE_DIAG_LOG_PATH')
+    if _inner_diag_path:
+        import time as _t_inner
+        _inner_t0 = _t_inner.time()
+        def _inner_diag(msg):
+            try:
+                with open(_inner_diag_path, 'a', buffering=1, encoding='utf-8') as f:
+                    ts = _t_inner.strftime('%H:%M:%S')
+                    f.write(f'[{ts}] [inner] {msg}\n')
+            except Exception:
+                pass
+    else:
+        _inner_diag = lambda msg: None  # no-op when not in refine context
+
     min_start = window + 50
     if n < min_start + 50:
+        _inner_diag(f'EARLY RETURN: n={n} < min_start+50={min_start+50}')
         return None
+
+    _inner_diag(f'inner START combo={"+".join(combo)} w={window} n={n} step={step} expected_iters≈{(n-min_start)//step}')
 
     correct = 0
     total = 0
@@ -4715,6 +4736,13 @@ def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, wind
 
         step_idx += 1
 
+        # FAYE 2026-05-30 diagnostic: log walk-forward progress every 25 steps
+        # so refine log shows trial pace at sub-trial granularity. Only fires
+        # when FAYE_REFINE_DIAG_LOG_PATH env is set (refine context).
+        if _inner_diag_path and step_idx % 25 == 0:
+            _wall = _t_inner.time() - _inner_t0
+            _inner_diag(f'iter {step_idx} (wall {_wall:.1f}s) total={total} trades={trades} portfolio={portfolio:.4f}')
+
         # Hyperband pruning: report intermediate APF after warmup
         if trial is not None and step_idx >= DEKU_PRUNING_WARMUP:
             # Use cumulative return as intermediate metric (APF needs trades)
@@ -4758,6 +4786,10 @@ def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, wind
 
     adjusted_pf = raw_pf / bh_pf if raw_pf > 0 else 0.0
 
+    if _inner_diag_path:
+        _wall_total = _t_inner.time() - _inner_t0
+        _inner_diag(f'inner END   wall={_wall_total:.1f}s steps={step_idx} total={total} trades={trades} ret={cum_return:+.1f}% apf={adjusted_pf:.2f}')
+
     return ('+'.join(combo), window, accuracy, total, cum_return, win_rate,
             trades, total_gain, total_loss, max_dd * 100, adjusted_pf, raw_pf, bh_pf)
 
@@ -4794,15 +4826,50 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
     pruning would invalidate the median anyway. Matches v3 exactly.
     """
     from concurrent.futures import ThreadPoolExecutor as _K5Pool, as_completed as _k5_as_completed
+    import time as _t_mod
+    import threading as _th_mod
+
+    # FAYE 2026-05-30 19:40: optional diagnostic log to bypass refine workers'
+    # captured stdout. The env var is set by _refine_one_config_worker when
+    # the refine phase starts. Other callers (Mode D holdout, Mode V Step 1
+    # backtests) won't have it set, so they incur near-zero overhead.
+    _diag_path = os.environ.get('FAYE_REFINE_DIAG_LOG_PATH')
+    _wrap_t0 = _t_mod.time()
+    def _k5_diag(msg):
+        if not _diag_path:
+            return
+        try:
+            with open(_diag_path, 'a', buffering=1, encoding='utf-8') as f:
+                ts = _t_mod.strftime('%H:%M:%S')
+                f.write(f'[{ts}] [K5] {msg}\n')
+        except Exception:
+            pass
+
+    _k5_diag(f'K5 wrap START combo={"+".join(combo)} w={window} n={n} step={step} signal_mode={signal_mode}')
+
+    # Per-seed timing tracking
+    _seed_times = {}  # seed → (t_start, t_end)
+    _seed_times_lock = _th_mod.Lock()
 
     def _run_one_seed(seed):
+        with _seed_times_lock:
+            _seed_times[seed] = [_t_mod.time(), None]
+        _k5_diag(f'seed {seed} START')
         factories = _get_deku_diagnostic_models_seeded(seed)
-        return _deku_eval_with_pruning_inner(
+        r = _deku_eval_with_pruning_inner(
             features_np, labels_np, closes_np, combo, window, n,
             step, factories, gamma=gamma, trial=None, horizon=horizon,
             signal_mode=signal_mode, na_policy=na_policy,
             return_probas=return_probas, hold_threshold=hold_threshold,
         )
+        with _seed_times_lock:
+            _seed_times[seed][1] = _t_mod.time()
+            dt = _seed_times[seed][1] - _seed_times[seed][0]
+        if r is None:
+            _k5_diag(f'seed {seed} END   ({dt:.1f}s) result=None')
+        else:
+            _k5_diag(f'seed {seed} END   ({dt:.1f}s) ret={r[4]:+.1f}% tr={r[6]} apf={r[10]:.2f}')
+        return r
 
     results = []
     with _K5Pool(max_workers=K5_K) as pool:
@@ -4816,6 +4883,9 @@ def _deku_eval_with_pruning(features_np, labels_np, closes_np, combo, window, n,
                 # Match v3 behavior — silently skip failed seeds, only
                 # return None if NO seed succeeded.
                 pass
+
+    _wrap_dt = _t_mod.time() - _wrap_t0
+    _k5_diag(f'K5 wrap END   wall={_wrap_dt:.1f}s seeds_returned={len(results)}/{K5_K}')
 
     if not results:
         return None
@@ -9455,6 +9525,18 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
             pass
 
     _diag(f'=== refine worker START lgbm_device={lgbm_device} ===')
+    # System info for diagnostics
+    try:
+        import platform as _platform
+        _diag(f'python={_platform.python_version()} machine={_platform.machine()} cpu_count={os.cpu_count()}')
+        for _env_var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS',
+                          'G_PARALLEL_LGBM_DEVICE', 'G_PARALLEL_LGBM_THREADS', 'NEAR_LIVE_MODE'):
+            _diag(f'env {_env_var}={os.environ.get(_env_var, "<unset>")}')
+    except Exception:
+        pass
+    # Broadcast log path to K=5 wrap + inner so they can log too
+    if _refine_log is not None:
+        os.environ['FAYE_REFINE_DIAG_LOG_PATH'] = _refine_log_path
     _worker_t0 = _time_mod.time()
 
     buf = io.StringIO()
@@ -9557,6 +9639,9 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         sys.stdout, sys.stderr = saved_out, saved_err
         _total_dt = _time_mod.time() - _worker_t0
         _diag(f'=== refine worker END total_wall={_total_dt:.1f}s ({_total_dt/60:.1f}min) refined={refined is not None} ===')
+        # Unset the diag path env var so subsequent calls (in same worker if
+        # any) don't accidentally write to this worker's closed log file.
+        os.environ.pop('FAYE_REFINE_DIAG_LOG_PATH', None)
         if _refine_log is not None:
             try:
                 _refine_log.close()
