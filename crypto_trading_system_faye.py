@@ -129,6 +129,31 @@ Verifying the consolidation:
 import sys
 import os
 
+# ════════════════════════════════════════════════════════════════════════
+# FAYE 2026-05-30 09:50: 4-LAYER WARNING SUPPRESSION (LAYER 1 + 2 of 4)
+# ════════════════════════════════════════════════════════════════════════
+# Layer 1: re-exec with -W ignore so the Python interpreter ignores all
+#          warnings at the bytecode level. This is the only layer that
+#          catches sklearn warnings issued from C extension code that
+#          bypass Python's `warnings` module filters.
+# Layer 2: PYTHONWARNINGS=ignore env var, so all child processes spawned
+#          via ProcessPoolExecutor inherit the suppression. Without this
+#          the workers fire all sklearn warnings on import.
+#
+# Sentinel-gated to avoid an exec loop: first run sets the env var + flags
+# then os.execv replaces the process; second invocation sees the env var
+# is set and skips re-exec, proceeding with module body.
+#
+# Layers 3 + 4 (filterwarnings + warn=no-op monkey-patch) are applied a
+# few lines below, after the `import warnings` line. ALL 4 LAYERS NEEDED:
+# sklearn's `delayed should be used with Parallel` UserWarning bypasses
+# any single layer in practice (observed on FAYE launch 2026-05-30 09:41).
+_FAYE_WARNINGS_SENTINEL = '_FAYE_WARNINGS_BAKED'
+if not os.environ.get(_FAYE_WARNINGS_SENTINEL):
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    os.environ[_FAYE_WARNINGS_SENTINEL] = '1'
+    os.execv(sys.executable, [sys.executable, '-W', 'ignore'] + sys.argv)
+
 # Fix #11 (2026-05-29): Script-dir-relative path anchor used throughout for
 # default directory resolution. Defined here at the top of imports so it's
 # available everywhere — _resolve_dir() helper + the directory globals all
@@ -160,14 +185,24 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'
 os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import warnings
+# Layer 3: standard Python filterwarnings (catches most Python-level warnings)
 warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore')
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=DeprecationWarning)
-# Suppress sklearn parallel warnings specifically
 warnings.filterwarnings('ignore', message='.*sklearn.utils.parallel.*')
 warnings.filterwarnings('ignore', message='.*does not have valid feature names.*')
+# Layer 4: monkey-patch warnings.warn to a no-op. Catches the cases where
+# sklearn issues a warning that survives Layer 3 (e.g., the
+# `sklearn.utils.parallel.delayed should be used with Parallel` UserWarning
+# observed on FAYE launch 2026-05-30 09:41 — fired thousands of times despite
+# both PYTHONWARNINGS=ignore env and warnings.filterwarnings('ignore') being
+# set). With warn itself being a no-op, no warning emission is possible.
+# This is the inherited v3 / parallel_nearlive technique that the FAYE
+# consolidation accidentally dropped.
+warnings.warn = lambda *a, **k: None
+warnings.warn_explicit = lambda *a, **k: None
 
 import time
 import io
