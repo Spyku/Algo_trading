@@ -4631,10 +4631,20 @@ def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, wind
             elif buy_ratio == 0:
                 ensemble_pred = 0  # SELL
             else:
-                # HOLD: mixed K-vote (some buy, some no-buy). No trade — skip
-                # portfolio update. Count toward total (we made a prediction)
-                # but not toward correct (HOLD has no ground-truth label).
-                total += 1
+                # HOLD: mixed K-vote (some buy, some no-buy). No trade.
+                # FAYE 2026-05-30 12:50 — match step6_nearlive lines 4193-4201:
+                #   - DO NOT increment total (HOLD has no ground-truth comparison
+                #     so it shouldn't be in the accuracy denominator)
+                #   - DO tick drawdown (existing position can lose value during HOLD)
+                #   - skip portfolio update + step_idx += 1 + continue
+                # Earlier FAYE incremented total (artificially lowering accuracy)
+                # and skipped drawdown (artificially lowering max_dd) — both wrong.
+                current_val = portfolio * (price / entry_price) if in_position else portfolio
+                if current_val > peak:
+                    peak = current_val
+                dd = (peak - current_val) / peak
+                if dd > max_dd:
+                    max_dd = dd
                 step_idx += 1
                 continue
         else:
