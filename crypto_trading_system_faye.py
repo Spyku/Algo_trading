@@ -9784,28 +9784,29 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     n_size = len(features_np)
 
     # FAYE 2026-05-31 BUG #16 PERF: trial chunking + larger worker pool.
-    # Env-controlled, defaults preserve legacy 3-worker / 1-chunk behavior.
+    # Defaults to chunked/parallel/early-stop ON for every run. Env vars
+    # override if you need to fall back to legacy 3-worker behavior.
     #
-    # FAYE_REFINE_TRIAL_SPLIT (default 1): split each config's REFINE_TRIALS
-    #     across N independent Optuna studies (different seeds). N=3 means each
-    #     config gets 3 chunks of 25 trials. Loses some TPE coordination but
-    #     adds genuine parallelism — and chunks all run concurrently if workers
-    #     are available, so the bottleneck (cfg2 in typical runs) drops from
-    #     SPLIT=1 wall to (SPLIT=1 wall)/SPLIT.
+    # FAYE_REFINE_TRIAL_SPLIT (default 3): split each config's REFINE_TRIALS
+    #     across N independent Optuna studies (different seeds). N=3 means
+    #     each config gets 3 chunks of 25 trials. Loses some TPE coordination
+    #     but adds genuine parallelism — chunks all run concurrently if
+    #     workers are available, so the bottleneck (cfg2 in typical runs)
+    #     drops from full-budget wall to full-budget wall / SPLIT.
+    #     Set to 1 to disable chunking and restore the pre-bug-#16 behavior.
     #
     # FAYE_REFINE_WORKERS (default = SPLIT × (n_configs-1) when SPLIT>1, else
-    #     n_configs): pool size. Default is the sweet spot — enough workers
-    #     that all cfg2 chunks run in parallel, not so many that K=5 threads
-    #     start thrashing 28 cores.
+    #     n_configs): pool size. Default is the sweet spot on a 28-core box —
+    #     enough workers that all cfg2 chunks run in parallel, not so many
+    #     that K=5 fan-out threads start thrashing 28 cores. For SPLIT=3 and
+    #     3 configs, the default is 6 workers (30 threads on 28 cores).
     #
-    # FAYE_REFINE_EARLYSTOP_PATIENCE (default 0=off): stop a chunk when best
-    #     apf hasn't improved in N trials after 20-trial warm-up. Patience=15
-    #     typically saves 30-50% of chunk time when TPE converges.
-    #
-    # Falls back to 3-worker/1-chunk if env vars unset → byte-identical to
-    # the pre-bug-#16 behavior.
+    # FAYE_REFINE_EARLYSTOP_PATIENCE (default 15): stop a chunk when best
+    #     apf hasn't improved in N trials after 20-trial warm-up. Saves
+    #     30-50% of chunk time when TPE converges (typical for low-dim
+    #     3-param refine). Set to 0 to disable early stopping.
     n_cfgs = len(top3_for_refine)
-    trial_split = max(1, int(os.environ.get('FAYE_REFINE_TRIAL_SPLIT', '1')))
+    trial_split = max(1, int(os.environ.get('FAYE_REFINE_TRIAL_SPLIT', '3')))
     if trial_split > 1:
         _default_workers = trial_split * max(1, n_cfgs - 1)
     else:
@@ -9829,7 +9830,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
                      else REFINE_TRIALS)
     _base_per_chunk = max(1, _total_trials // trial_split)
     _remainder = _total_trials - (_base_per_chunk * trial_split)
-    es_patience = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '0'))
+    es_patience = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '15'))
 
     print(f"\n  [refine-{n_workers}worker x split{trial_split}] dispatching "
           f"{n_cfgs * trial_split} task(s) ({n_cfgs} configs × {trial_split} chunks "
