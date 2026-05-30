@@ -481,12 +481,36 @@ def _hard_shutdown_pool(pool, label='pool', soft_timeout=15, hard_timeout=10):
     if not pids:
         return  # no PIDs captured (pool never spawned workers) — done
 
-    def _alive(pid):
-        try:
-            os.kill(pid, 0)  # signal 0 = liveness probe, no actual signal sent
-            return True
-        except OSError:
-            return False
+    # FAYE 2026-05-30 17:00: CRITICAL bug fix. The previous `os.kill(pid, 0)`
+    # liveness check was correct on Linux but DESTRUCTIVE on Windows. Windows
+    # defines CTRL_C_EVENT = 0, and Python's os.kill on Windows maps signal 0
+    # to GenerateConsoleCtrlEvent(0, pid) → sends Ctrl+C to the entire console
+    # process group, INCLUDING the parent. Each polling iteration was firing
+    # Ctrl+C at the parent. Symptom: 30 min into FAYE H 6h run, Mode D's 60
+    # evals completed, this poll loop fired Ctrl+C, parent raised
+    # KeyboardInterrupt in _time.sleep(0.5), script died at line 497.
+    # Use OpenProcess+GetExitCodeProcess on Windows; os.kill(pid,0) on POSIX.
+    if os.name == 'nt':
+        import ctypes as _ctypes
+        _kernel32 = _ctypes.windll.kernel32
+        _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        _STILL_ACTIVE = 259
+
+        def _alive(pid):
+            handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            exit_code = _ctypes.c_ulong()
+            ok = _kernel32.GetExitCodeProcess(handle, _ctypes.byref(exit_code))
+            _kernel32.CloseHandle(handle)
+            return bool(ok) and exit_code.value == _STILL_ACTIVE
+    else:
+        def _alive(pid):
+            try:
+                os.kill(pid, 0)  # POSIX: signal 0 is a true no-op liveness probe
+                return True
+            except OSError:
+                return False
 
     # FAYE 2026-05-30 13:00: announce the shutdown so user doesn't think the
     # script is frozen during the 25s polling window. Without this print,
