@@ -151,6 +151,13 @@ import os
 _FAYE_WARNINGS_SENTINEL = '_FAYE_WARNINGS_BAKED'
 if not os.environ.get(_FAYE_WARNINGS_SENTINEL):
     os.environ['PYTHONWARNINGS'] = 'ignore'
+    # Defensive: parallel_nearlive + v3 set NEAR_LIVE_MODE='1' as the
+    # signal that step6_nearlive should run with near-live semantics
+    # (step=1, ternary, mean_last_10). FAYE has those baked in directly
+    # (no env-var gating) so it doesn't *use* this var, but any code that
+    # imports FAYE and reads NEAR_LIVE_MODE expects to see '1'. Setting it
+    # here so workers and importers inherit the expected value.
+    os.environ.setdefault('NEAR_LIVE_MODE', '1')
     os.environ[_FAYE_WARNINGS_SENTINEL] = '1'
     os.execv(sys.executable, [sys.executable, '-W', 'ignore'] + sys.argv)
 
@@ -4750,6 +4757,11 @@ def _faye_grid_worker(args):
     """
     import numpy as _np
     from concurrent.futures import ThreadPoolExecutor as _TPool, as_completed as _tas
+    # Defensive: workers should inherit NEAR_LIVE_MODE in case any code
+    # reads it. FAYE itself doesn't use it (hardcoded defaults) but
+    # matches the v3 worker pattern. setdefault is a no-op when already set.
+    import os as _os
+    _os.environ.setdefault('NEAR_LIVE_MODE', '1')
     # Workers re-import FAYE on spawn so all module-level state is fresh.
     # _SCRIPT_DIR + _FAYE_IS_MAIN_PROCESS guard banners against worker spam.
     import crypto_trading_system_faye as _F
