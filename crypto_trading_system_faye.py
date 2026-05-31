@@ -9617,19 +9617,40 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         _diag(f'study seed={seed} (base={base_seed}+offset={seed_offset}) chunk_id={chunk_id}')
 
         # FAYE 2026-05-31: early stopping callback. Stops the study if best
-        # apf hasn't improved for FAYE_REFINE_EARLYSTOP_PATIENCE trials after
-        # a 20-trial warm-up. Off by default (patience=0). When TPE converges
-        # fast (typical for low-dim 3-param refine), this saves 30-50% of
-        # trial time.
-        _es_patience = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '0'))
+        # apf hasn't improved for `patience` trials after warm-up.
+        #
+        # BUG #18 FIX (2026-05-31): warm-up and patience were hardcoded (20
+        # and env-var 15 respectively). With bug #16's default 25-trial
+        # chunks, the earliest possible trigger was trial 35 (20+15) > 25
+        # chunk size — callback was DORMANT for chunked refines. Now both
+        # scale with the chunk's actual trial budget:
+        #   warm-up  = max(5, n_trials // 4)              # 25% of budget, min 5
+        #   patience = min(env_patience, n_trials // 3)   # 33% of budget, capped
+        # so the callback can actually fire within small chunks.
+        #
+        # Examples:
+        #   n_trials=25 (chunked default): warm-up=6, patience=8 → trigger
+        #     possible from trial 14 onward (saves up to 11 trials)
+        #   n_trials=75 (legacy single study): warm-up=18, patience=15
+        #     → trigger possible from trial 33 (saves up to 42 trials)
+        #   n_trials=5 (--refine-trials 5 quick test): warm-up=5, patience=3
+        #     → trigger only if last 3 of 5 are flat (unlikely; preserves test)
+        _es_chunk_n_trials = (n_trials_override
+                              if n_trials_override is not None else REFINE_TRIALS)
+        _es_warm_up = max(5, _es_chunk_n_trials // 4)
+        _es_patience_env = int(os.environ.get('FAYE_REFINE_EARLYSTOP_PATIENCE', '15'))
+        _es_patience = (min(_es_patience_env, max(3, _es_chunk_n_trials // 3))
+                        if _es_patience_env > 0 else 0)
         _es_state = {'best': -1.0, 'no_improve': 0}
+        _diag(f'early-stop: budget={_es_chunk_n_trials} warm_up={_es_warm_up} '
+              f'patience={_es_patience} (env={_es_patience_env})')
 
         def _early_stop_callback(study_, trial_):
             if _es_patience <= 0:
                 return
             n_complete = sum(1 for t in study_.trials
                              if t.state == optuna.trial.TrialState.COMPLETE)
-            if n_complete < 20:
+            if n_complete < _es_warm_up:
                 return
             cur = trial_.value if trial_.value is not None else 0.0
             if cur > _es_state['best']:
@@ -9640,7 +9661,8 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
                 if _es_state['no_improve'] >= _es_patience:
                     _diag(f'EARLY-STOP triggered at trial {n_complete} '
                           f'(best={_es_state["best"]:.3f}, '
-                          f'no improvement for {_es_state["no_improve"]} trials)')
+                          f'no improvement for {_es_state["no_improve"]} trials, '
+                          f'budget was {_es_chunk_n_trials})')
                     study_.stop()
 
         best_refine_apf = [0.0]
