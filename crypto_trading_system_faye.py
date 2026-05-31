@@ -2437,7 +2437,10 @@ def _quick_score(df_features, feature_cols, window=ANALYSIS_WINDOW, step=ANALYSI
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        train_end = max(train_start, i - horizon)  # embargo: prevent label overlap leakage
+        # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets embargo A/B test
+        # force embargo=N. Default = horizon (honest backtest); 0 = match live.
+        _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
+        train_end = max(train_start, i - _embargo)  # embargo: prevent label overlap leakage (override-able)
         train    = df_features.iloc[train_start:train_end]
         test_row = df_features.iloc[i:i+1]
         X_train  = train[feature_cols]
@@ -2935,7 +2938,12 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
         train_start = max(0, i - window_size)
-        train_end = max(train_start, i - horizon)  # embargo: prevent label overlap leakage
+        # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets the embargo A/B
+        # test (tools/embargo_ab_test.py) force embargo=N instead of horizon.
+        # Default = horizon (original honest-backtest behavior). Set to 0 to
+        # match the live trader's no-embargo training cutoff.
+        _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
+        train_end = max(train_start, i - _embargo)  # embargo: prevent label overlap leakage (override-able)
         train = df_features.iloc[train_start:train_end]
         X_train = train[feature_cols]
         y_train = train['label'].values
@@ -3327,7 +3335,10 @@ def _eval_one_config(features_np, labels_np, closes_np, combo, window, n, step, 
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        train_end = max(train_start, i - pred_horizon)  # embargo: gap >= horizon to prevent label overlap leakage
+        # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets embargo A/B test
+        # force embargo=N. Default = pred_horizon (honest); 0 = match live.
+        _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', pred_horizon))
+        train_end = max(train_start, i - _embargo)  # embargo: gap >= horizon to prevent label overlap leakage (override-able)
         X_train = features_np[train_start:train_end]
         y_train = labels_np[train_start:train_end]
         X_test  = features_np[i:i+1]
@@ -4620,7 +4631,10 @@ def _deku_eval_with_pruning_inner(features_np, labels_np, closes_np, combo, wind
 
     for i in range(min_start, n, step):
         train_start = max(0, i - window)
-        train_end = max(train_start, i - horizon)  # embargo: gap >= horizon to prevent label overlap leakage
+        # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets embargo A/B test
+        # force embargo=N. Default = horizon (honest backtest); 0 = match live.
+        _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
+        train_end = max(train_start, i - _embargo)  # embargo: gap >= horizon to prevent label overlap leakage (override-able)
         X_train = features_np[train_start:train_end]
         y_train = labels_np[train_start:train_end]
         X_test = features_np[i:i+1]
