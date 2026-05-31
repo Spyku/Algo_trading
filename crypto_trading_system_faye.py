@@ -9484,7 +9484,7 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
                               ranked_features, features_np, labels_np,
                               closes_np, n_size, lgbm_device,
                               n_trials_override=None, seed_offset=0,
-                              chunk_id=0):
+                              chunk_id=0, n_chunks=1):
     """ProcessPool worker: refine ONE config with assigned LGBM device.
     Returns (cfg_idx, refined_dict_or_None, captured_stdout, lgbm_device).
 
@@ -9591,8 +9591,16 @@ def _refine_one_config_worker(cfg_idx, top_entry_pickle, asset, horizon,
         _diag(f'config: {combo_name} w={base_window} g={base_gamma:.4f} f={base_feats}')
         _diag(f'ranges: gamma[{gamma_lo:.3f}-{gamma_hi:.3f}] feat[{feat_lo}-{feat_hi}] win[{win_lo}-{win_hi}] n_size={n_size}')
 
+        # FAYE 2026-05-31: banner shows [chunk X/Y seed=Z] when chunking is
+        # active (n_chunks > 1) so multiple 'Refining #N' blocks in the same
+        # refine phase can be told apart in real-time output. Seed shown lets
+        # us correlate output lines with diagnostic logs.
+        _banner_seed = ((OPTUNA_SEED_OVERRIDE if OPTUNA_SEED_OVERRIDE is not None
+                         else 42) + seed_offset)
+        _chunk_banner = (f' [chunk {chunk_id+1}/{n_chunks}, seed={_banner_seed}]'
+                         if n_chunks > 1 else '')
         print(f"\n  {'─'*60}")
-        print(f"  Refining #{cfg_idx+1} (LGBM={lgbm_device}): {combo_name}  "
+        print(f"  Refining #{cfg_idx+1}{_chunk_banner} (LGBM={lgbm_device}): {combo_name}  "
               f"w={base_window}h  g={base_gamma:.4f}  f={base_feats}")
         print(f"  Ranges: gamma[{gamma_lo:.3f}-{gamma_hi:.3f}] "
               f"features[{feat_lo}-{feat_hi}] window[{win_lo}-{win_hi}]")
@@ -9859,7 +9867,7 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
                 f = pool.submit(
                     _refine_one_config_worker, cfg_idx, top_entry, asset, horizon,
                     ranked_features_r, features_np, labels_np, closes_np, n_size,
-                    dev, chunk_trials, chunk_id, chunk_id
+                    dev, chunk_trials, chunk_id, chunk_id, trial_split
                 )
                 futures[f] = (cfg_idx, chunk_id, dev)
                 task_idx += 1
