@@ -9815,8 +9815,17 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     #     3-param refine). Set to 0 to disable early stopping.
     n_cfgs = len(top3_for_refine)
     trial_split = max(1, int(os.environ.get('FAYE_REFINE_TRIAL_SPLIT', '3')))
+    # FAYE 2026-05-31 BUG #17 FIX: previous default `trial_split * (n_cfgs-1)`
+    # gave wrong answers when n_cfgs < 3. For Mode D outputs with only 2
+    # candidates passing to refine (observed on ETH 8h --replay 1440), the
+    # formula returned 3 workers instead of 6, halving parallelism for the
+    # entire horizon's refine. New formula: cap at 6 (the 28-core sweet
+    # spot — 6 workers × 5 K=5 threads = 30 threads, slight oversubscription
+    # that the OS handles well). For 9 tasks (3 cfgs × 3 chunks) → 6 workers
+    # = 2 waves. For 6 tasks (2 cfgs × 3 chunks) → 6 workers = 1 wave (all
+    # parallel). For SPLIT=1, n_workers = n_cfgs (no chunking case).
     if trial_split > 1:
-        _default_workers = trial_split * max(1, n_cfgs - 1)
+        _default_workers = min(trial_split * n_cfgs, 6)
     else:
         _default_workers = n_cfgs
     n_workers = max(1, int(os.environ.get('FAYE_REFINE_WORKERS', str(_default_workers))))
