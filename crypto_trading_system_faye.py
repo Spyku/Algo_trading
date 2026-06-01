@@ -114,11 +114,16 @@ Outputs (all in FAYE-isolated directories — does NOT touch Ed's production fil
   output/rally_cd_<asset>_*.csv             (Mode G sweep details)
   logs/ed_v1_*.log                          (auto-saved terminal output)
 
-Promotion to production (one-time, after FAYE validated):
+Promotion to production (one-time, after FAYE validated; trader flat — Rule 19):
+  python tools\\sanity_check.py        # GATE: must print "RESULT: CLEAN" before promoting
   Copy-Item "models_faye\\crypto_faye_production.csv" "models\\crypto_ed_production.csv" -Force
   Copy-Item "config_faye\\regime_config_faye.json"   "config\\regime_config_ed.json"     -Force
   Copy-Item "models_faye\\eth_models_*.pkl"          "models\\" -Recurse -Force
-  # Trader (crypto_revolut_ed_v2.py) picks up new winners on next hourly cycle, UNCHANGED.
+  Copy-Item "models_faye\\pysr_*.json"               "models\\" -Force   # lagged-discovered PySR
+  # ALSO mirror the daily-availability lag into crypto_trading_system_ed.py's
+  # build_all_features (DAILY_MERGE_LAG_DAYS=1 / ONCHAIN_MERGE_LAG_DAYS=2) THEN restart
+  # the trader — else live feeds non-lagged features to lagged-trained models (Rule 14).
+  # Trader (crypto_revolut_ed_v2.py) picks up new winners on next hourly cycle.
 
 Verifying the consolidation:
   python tools/smoke_test_faye.py
@@ -160,6 +165,23 @@ if not os.environ.get(_FAYE_WARNINGS_SENTINEL):
     os.environ.setdefault('NEAR_LIVE_MODE', '1')
     os.environ[_FAYE_WARNINGS_SENTINEL] = '1'
     os.execv(sys.executable, [sys.executable, '-W', 'ignore'] + sys.argv)
+
+# FAYE 2026-06-01: Force UTF-8 stdout/stderr on Windows so box-drawing chars
+# (─ │ → etc.) used in section banners render correctly regardless of the
+# console code page. Without this, cp1252 consoles display them as mojibake
+# (e.g., `─` becomes `ÔöÇ`). Linux/Mac default to UTF-8 already — Windows
+# guard avoids touching streams that don't need it.
+#
+# Uses sys.stdout.reconfigure() (Python 3.7+) which mutates the encoding in
+# place without replacing the wrapper object. Earlier attempt that wrapped
+# with a fresh TextIOWrapper broke downstream output (lost AFTER lines).
+# `errors='replace'` is belt-and-suspenders — never crash on an exotic char.
+if os.name == 'nt':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass  # best effort — don't break the script if streams aren't TextIO
 
 # Fix #11 (2026-05-29): Script-dir-relative path anchor used throughout for
 # default directory resolution. Defined here at the top of imports so it's
@@ -1609,6 +1631,27 @@ def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
     return features
 
 
+# Daily-source availability lag (days). Daily macro / cross-asset / fear-greed /
+# on-chain metrics are published AFTER the day they describe (on-chain ~1 day, often
+# ~midday the next day), but a same-date merge stamps day-D's value onto day-D's early
+# hours that did not exist live -> backtest clairvoyance. Diagnosed 2026-06-01 via a
+# real BUY->SELL flip on the 07:00 ETH signal (oc_mvrv_chg1d sign-flipped from +0.53%
+# to -0.59% once May 31 on-chain published at 14:01). Shifting the hour's merge key
+# back this many days makes each hour see only strictly-prior daily rows; the ffill
+# below then carries the last AVAILABLE prior row (robust to >1-day publish lag).
+# Mirror this in crypto_trading_system_ed.py's build_all_features ONLY at promotion
+# (after models are retrained on lagged features), else current live models hit a
+# feature mismatch.
+DAILY_MERGE_LAG_DAYS = 1
+# On-chain (CoinMetrics) publishes day D's metrics ~midday D+1 (observed: the May 31 row
+# was written 14:01 Jun 1), so a *morning* decision on day D only has data through D-2.
+# Lag on-chain deeper than the other daily families (via its own merge key) so the
+# backtest never reads an on-chain row that was not live-available at the decision hour.
+# 2 days is conservative-correct for every hour (afternoon decisions could use D-1, but a
+# uniform D-2 is never clairvoyant); the ffill below carries the last available prior row.
+ONCHAIN_MERGE_LAG_DAYS = 2
+
+
 def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, verbose=True, keep_label_nan_tail=False):
     df, base_cols = build_hourly_features(df_hourly, horizon=horizon, verbose=verbose, keep_label_nan_tail=keep_label_nan_tail)
     all_cols = list(base_cols)
@@ -1618,7 +1661,16 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         print(f"    macro_data/ not found -- technical features only")
         return df, all_cols
 
-    df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+    # ┌─ ADDING A NEW DATA SOURCE? Work the checklist in CLAUDE.md "Adding a New Data
+    # │  Source": 1/day -> merge on _merge_date (gets the lag below) · 24/day -> _merge_dt
+    # │  (no lag) · overwrite-safe download (Rule 22) · sparse -> quarantine 60d · mirror
+    # └─ into ed.py at promote · verify with: python tools/audit_feature_lag.py
+    #
+    # Lag daily-source merge key (see DAILY_MERGE_LAG_DAYS note above) so each hour
+    # only sees strictly-prior daily rows. Covers macro / fear-greed / cross-asset /
+    # on-chain at once; derivatives merge on _merge_dt (hourly, real-time) and are
+    # unaffected. PySR inherits this for free (computed after the merge).
+    df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=DAILY_MERGE_LAG_DAYS)
 
     macro_df = _load_macro_csv('macro_daily.csv')
     if macro_df is not None:
@@ -1656,16 +1708,20 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             all_cols.extend(new_cols)
             added += len(new_cols)
 
-    # On-chain features (daily — merge on date with ffill)
+    # On-chain features (daily — merge on date with ffill). Uses a DEEPER lag than the
+    # other daily families via its own merge key (_merge_date_oc / ONCHAIN_MERGE_LAG_DAYS),
+    # because on-chain publishes ~midday the next day (see ONCHAIN_MERGE_LAG_DAYS note).
     onchain_asset_map = {'BTC': 'btc', 'ETH': 'eth', 'XRP': 'xrp', 'SOL': 'sol', 'LINK': 'link', 'BNB': 'bnb'}
     oc_key = onchain_asset_map.get(asset_name)
     if oc_key is not None:
         oc_df = _load_macro_csv(f'onchain_{oc_key}.csv')
         if oc_df is not None:
             oc_feats = _compute_onchain_features(oc_df, prefix='oc_')
-            oc_feats['_merge_date'] = oc_feats.index.normalize()
-            df = df.merge(oc_feats, on='_merge_date', how='left')
-            new_cols = [c for c in oc_feats.columns if c != '_merge_date']
+            oc_feats['_merge_date_oc'] = oc_feats.index.normalize()
+            df['_merge_date_oc'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=ONCHAIN_MERGE_LAG_DAYS)
+            df = df.merge(oc_feats, on='_merge_date_oc', how='left')
+            df = df.drop(columns=['_merge_date_oc'], errors='ignore')
+            new_cols = [c for c in oc_feats.columns if c != '_merge_date_oc']
             all_cols.extend(new_cols)
             added += len(new_cols)
 
@@ -1770,7 +1826,8 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             if stable_df.index.tz is not None:
                 stable_df.index = stable_df.index.tz_localize(None)
             stable_df['_merge_date'] = stable_df.index.normalize()
-            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+            # Same daily-availability lag as the main merge (stablecoin mcap is daily too).
+            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=DAILY_MERGE_LAG_DAYS)
 
             stable_cols_added = 0
             if 'total_stable_mcap' in stable_df.columns:
@@ -1984,7 +2041,7 @@ def run_mode_f(restore=False, include_newborns=False, asset='ETH'):
     # 2) PySR formula references (union across all asset/horizon JSONs)
     pysr_features = set()
     pysr_count = 0
-    for pf in sorted(glob.glob(os.path.join(here, 'models', 'pysr_*.json'))):
+    for pf in sorted(glob.glob(os.path.join(FAYE_MODELS_DIR, 'pysr_*.json'))):
         try:
             with open(pf) as f:
                 j = json.load(f)
@@ -2208,7 +2265,7 @@ def _compute_pysr_features(df, all_cols, asset_name, horizon, verbose=True):
     Returns the number of PySR features successfully added."""
     import sympy
 
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    models_dir = FAYE_MODELS_DIR  # isolated: FAYE PySR lives in models_faye/, not live models/
     pysr_path = os.path.join(models_dir, f'pysr_{asset_name}_{horizon}h.json')
 
     if not os.path.exists(pysr_path):
@@ -2296,7 +2353,7 @@ def _check_pysr_leakage(features, asset, horizon):
     if not pysr_features:
         return True, "No PySR features"
 
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    models_dir = FAYE_MODELS_DIR  # isolated: FAYE PySR lives in models_faye/, not live models/
     pysr_path = os.path.join(models_dir, f'pysr_{asset}_{horizon}h.json')
 
     if not os.path.exists(pysr_path):
@@ -8254,7 +8311,7 @@ Usage: python crypto_trading_system_ed.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
   Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
 
 Modes:
-  P       PySR feature discovery (symbolic regression → models/pysr_*.json)
+  P       PySR feature discovery (symbolic regression → models_faye/pysr_*.json)
   D       Grid optimization (combo x window x gamma x features)
   V       Validate (top 6 from D → refine top 3 → pick best)
   DV      D then V
