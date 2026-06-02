@@ -4387,15 +4387,20 @@ def _promote_copy_faye_to_live(stage):
         os.replace(tmp, dst)
         return dst
 
-    # 1) regime config  -> config/regime_config_ed.json
+    # 1) regime config  -> config/regime_config_ed.json  (MANDATORY)
     cfg_src = stage.get('config_src')
-    if _atomic_copy(cfg_src, REGIME_CONFIG_FILE):
-        done.append(f"config: {os.path.basename(cfg_src)} -> {REGIME_CONFIG_FILE}")
+    if not cfg_src or not os.path.exists(cfg_src):
+        raise FileNotFoundError(f"staged regime config missing: {cfg_src!r}")
+    _atomic_copy(cfg_src, REGIME_CONFIG_FILE)
+    done.append(f"config: {os.path.basename(cfg_src)} -> {REGIME_CONFIG_FILE}")
 
-    # 2) model-spec CSV -> models/crypto_ed_production.csv
+    # 2) model-spec CSV -> models/crypto_ed_production.csv  (MANDATORY — keeps
+    #    config horizons and model specs consistent)
     csv_src = stage.get('models_csv_src')
-    if _atomic_copy(csv_src, MODELS_CSV):
-        done.append(f"models: {os.path.basename(csv_src)} -> {MODELS_CSV}")
+    if not csv_src or not os.path.exists(csv_src):
+        raise FileNotFoundError(f"staged model CSV missing: {csv_src!r}")
+    _atomic_copy(csv_src, MODELS_CSV)
+    done.append(f"models: {os.path.basename(csv_src)} -> {MODELS_CSV}")
 
     # 3) matching pysr formulas for every (asset,horizon) in the faye CSV.
     #    Trader retrains from spec, so formulas MUST match the promoted CSV rows.
