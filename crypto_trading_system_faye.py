@@ -8703,6 +8703,35 @@ Examples:
 
     print("\nDone!")
 
+    # ── Auto-promote staging (2026-06-02) ────────────────────────────────────
+    # A *persist* run (no --no-persist) of a regime-finalizing mode leaves a
+    # deployable winner in config_faye/regime_config_faye.json + models_faye/.
+    # Drop a marker so the LIVE trader copies it onto production on its next
+    # FLAT cycle (deferred-until-flat; see crypto_revolut_ed_v2._apply_pending_promotion).
+    # --no-persist runs write *_noprod.* and never drop the marker -> stay sandboxed.
+    _PROMOTE_MODES = {'RST', 'HRST', 'HRS', 'RS', 'DVRS', 'R', 'S', 'T', 'G'}
+    if '--no-persist' not in sys.argv and mode in _PROMOTE_MODES:
+        try:
+            import datetime as _dt
+            _marker = os.path.join(FAYE_CONFIG_DIR, 'promote_ready.json')
+            _payload = {
+                'ts': _dt.datetime.now().isoformat(timespec='seconds'),
+                'mode': mode,
+                'assets': assets_list,
+                'horizons': horizons,
+                'config_src': os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json'),
+                'models_csv_src': os.path.join(FAYE_MODELS_DIR, 'crypto_faye_production.csv'),
+                'models_dir_src': FAYE_MODELS_DIR,
+            }
+            _tmp = _marker + f'.{os.getpid()}.tmp'
+            with open(_tmp, 'w', encoding='utf-8') as _mf:
+                json.dump(_payload, _mf, indent=2)
+            os.replace(_tmp, _marker)
+            print(f"  [PROMOTE] staged winner for live promotion -> {_marker}")
+            print(f"  [PROMOTE] live trader applies it to production on its next FLAT cycle.")
+        except Exception as _e:
+            print(f"  [PROMOTE] WARN: could not write promote marker: {_e}")
+
 
 
 

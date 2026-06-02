@@ -28,6 +28,7 @@ import urllib.error
 import pandas as pd
 import numpy as np
 import threading
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -4358,6 +4359,124 @@ def _get_models_fingerprint(trading_cfg):
     return fp
 
 
+# ============================================================
+# AUTO-PROMOTE FAYE WINNER  (2026-06-02)
+# A persist FAYE run drops config_faye/promote_ready.json. We copy the staged
+# winner onto live production paths, but ONLY when every relevant asset is flat
+# (state=='cash'), so a config swap never lands mid-position. The trader retrains
+# from spec each cycle, so we copy regime config + model-spec CSV + matching
+# pysr_*.json (no .pkl) and keep them a consistent set.
+# ============================================================
+PROMOTE_MARKER = 'config_faye/promote_ready.json'
+_promote_defer_notified = False   # notify-once while deferred for a position
+
+
+def _promote_copy_faye_to_live(stage):
+    """Atomically copy the staged FAYE winner onto live production paths.
+    Returns a list of human-readable copy lines. Raises on copy failure so the
+    caller keeps the marker for retry and leaves live untouched."""
+    import shutil, csv as _csv
+    done = []
+
+    def _atomic_copy(src, dst):
+        if not src or not os.path.exists(src):
+            return None
+        os.makedirs(os.path.dirname(dst) or '.', exist_ok=True)
+        tmp = f"{dst}.{os.getpid()}.promote.tmp"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+        return dst
+
+    # 1) regime config  -> config/regime_config_ed.json
+    cfg_src = stage.get('config_src')
+    if _atomic_copy(cfg_src, REGIME_CONFIG_FILE):
+        done.append(f"config: {os.path.basename(cfg_src)} -> {REGIME_CONFIG_FILE}")
+
+    # 2) model-spec CSV -> models/crypto_ed_production.csv
+    csv_src = stage.get('models_csv_src')
+    if _atomic_copy(csv_src, MODELS_CSV):
+        done.append(f"models: {os.path.basename(csv_src)} -> {MODELS_CSV}")
+
+    # 3) matching pysr formulas for every (asset,horizon) in the faye CSV.
+    #    Trader retrains from spec, so formulas MUST match the promoted CSV rows.
+    models_src_dir = stage.get('models_dir_src') or os.path.dirname(csv_src or '')
+    live_models_dir = os.path.dirname(MODELS_CSV) or 'models'
+    pairs = set()
+    if csv_src and os.path.exists(csv_src):
+        with open(csv_src, encoding='utf-8') as f:
+            for row in _csv.DictReader(f):
+                a = (row.get('coin') or '').strip()
+                h = (row.get('horizon') or '').strip()
+                if a and h:
+                    pairs.add((a, h))
+    n_pysr = 0
+    for a, h in sorted(pairs):
+        fname = f"pysr_{a}_{h}h.json"
+        if _atomic_copy(os.path.join(models_src_dir, fname), os.path.join(live_models_dir, fname)):
+            n_pysr += 1
+    if n_pysr:
+        done.append(f"pysr: {n_pysr} formula file(s) -> {live_models_dir}/")
+    return done
+
+
+def _apply_pending_promotion(trading_cfg):
+    """If a FAYE persist run staged a winner (promote_ready.json) and every
+    relevant asset is flat, copy it onto production. Deferred (no-op + one
+    Telegram ping) while any asset is invested. Fail-safe: any error leaves the
+    live config untouched and keeps the marker for retry. Returns True if applied."""
+    global _promote_defer_notified
+    if not os.path.exists(PROMOTE_MARKER):
+        return False
+    try:
+        with open(PROMOTE_MARKER, encoding='utf-8') as f:
+            stage = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  [PROMOTE] marker unreadable ({e}); ignoring this cycle.")
+        return False
+
+    # Assets that must be flat: enabled live OR named in the staged winner.
+    relevant = {a for a, c in trading_cfg.items() if c.get('enabled')}
+    relevant |= set(stage.get('assets') or [])
+    invested = sorted(a for a in relevant if load_position(a).get('state') == 'invested')
+    if invested:
+        if not _promote_defer_notified:
+            try:
+                send_telegram("🕒 <b>Promotion deferred</b>\n"
+                              f"FAYE {stage.get('mode','?')} winner staged for "
+                              f"{', '.join(stage.get('assets') or []) or '?'}.\n"
+                              f"Holding {', '.join(invested)} — auto-applies on next flat cycle.")
+            except Exception:
+                pass
+            print(f"  [PROMOTE] deferred — in position: {invested}")
+            _promote_defer_notified = True
+        return False
+
+    # FLAT — promote atomically.
+    try:
+        applied = _promote_copy_faye_to_live(stage)
+    except Exception as e:
+        print(f"  [PROMOTE] FAILED ({e}); live config untouched, marker kept for retry.")
+        try:
+            send_telegram(f"⚠️ <b>Auto-promotion failed</b>\n{e}\nLive untouched; will retry next flat cycle.")
+        except Exception:
+            pass
+        return False
+
+    try:
+        os.remove(PROMOTE_MARKER)
+    except OSError:
+        pass
+    _promote_defer_notified = False
+    summary = "\n".join(applied) if applied else "(nothing to copy)"
+    print(f"  [PROMOTE] applied:\n  " + summary.replace("\n", "\n  "))
+    try:
+        send_telegram(f"✅ <b>Auto-promoted to production</b>\nFAYE {stage.get('mode','?')} winner "
+                      f"({', '.join(stage.get('assets') or []) or '?'}) is now live.\n{summary}")
+    except Exception:
+        pass
+    return True
+
+
 def run_all_once(trading_cfg, dry_run=False):
     """Sync positions, process all enabled assets."""
     import time as _tm_cycle
@@ -4369,6 +4488,14 @@ def run_all_once(trading_cfg, dry_run=False):
         'p2_duration_sec': None,
     }
 
+    # Auto-promote a staged FAYE winner if one is pending and we're flat (2026-06-02).
+    # Runs before reload so a just-promoted config takes effect this same cycle.
+    # Fully guarded: a promotion bug must never break a trading cycle.
+    if not dry_run:
+        try:
+            _apply_pending_promotion(trading_cfg)
+        except Exception as _pe:
+            print(f"  [PROMOTE] check failed, skipping ({_pe}); trading continues normally.")
     # Hot-reload trading config before each cycle
     _reload_trading_config(trading_cfg)
 
@@ -4675,6 +4802,55 @@ def _send_startup_telegram(trading_cfg):
     )
 
 
+# ── Daily live-sanity check (INFORMATIONAL ONLY — never disables/pauses trading) ──
+_SANITY_DATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'last_sanity_date.txt')
+
+
+def _run_sanity_and_alert():
+    """Run tools/sanity_check.py (shadow match-rate + engine-vs-trader parity) and
+    Telegram the result. INFORMATIONAL ONLY — never changes trading behaviour."""
+    import html
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        r = subprocess.run(
+            [sys.executable, os.path.join(here, 'tools', 'sanity_check.py'), '--samples', '30'],
+            cwd=here, capture_output=True, text=True, timeout=1800,
+        )
+        out = r.stdout or ''
+        keep = [ln.rstrip() for ln in out.splitlines()
+                if any(k in ln for k in ('SHADOW', 'ENGINE', 'REAL FLIP', 'RESULT', 'match'))]
+        verdict = 'CLEAN ✅' if r.returncode == 0 else 'NEEDS ATTENTION ⚠️'
+        body = '\n'.join(keep[-12:]) if keep else (out[-600:] or 'no output')
+        send_telegram(f"🩺 <b>Daily sanity check — {verdict}</b>\n<pre>{html.escape(body)}</pre>")
+    except subprocess.TimeoutExpired:
+        send_telegram("🩺 <b>Daily sanity check</b> — TIMEOUT (>30 min)")
+    except Exception as e:
+        send_telegram(f"🩺 <b>Daily sanity check ERROR</b>: {html.escape(str(e))}")
+
+
+def _maybe_run_daily_sanity():
+    """Once/day at >=08:30 local, launch the sanity check in a background thread
+    (parity ~15 min must NOT block the trading loop). De-duped across restarts via a
+    date file. Informational only — does not gate or pause anything."""
+    now = datetime.now()
+    if now.hour < 8 or (now.hour == 8 and now.minute < 30):
+        return
+    today = now.date().isoformat()
+    try:
+        if os.path.exists(_SANITY_DATE_FILE) and open(_SANITY_DATE_FILE).read().strip() == today:
+            return
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(_SANITY_DATE_FILE), exist_ok=True)
+        with open(_SANITY_DATE_FILE, 'w') as f:
+            f.write(today)
+    except Exception:
+        pass
+    print("  🩺 Launching daily sanity check (08:30) in background...")
+    threading.Thread(target=_run_sanity_and_alert, daemon=True).start()
+
+
 def run_loop(trading_cfg, dry_run=False):
     mode = "DRY RUN" if dry_run else "LIVE"
     assets_str = ", ".join(a for a, c in trading_cfg.items() if c.get('enabled'))
@@ -4821,6 +4997,9 @@ def run_loop(trading_cfg, dry_run=False):
                             if abs(ntp_off) > 500:
                                 _clock_offset_ms = ntp_off
                                 print(f"    🕐 Periodic clock sync: {ntp_off:+d}ms")
+
+                            # Daily live-sanity check at >=08:30 (informational; never blocks/pauses)
+                            _maybe_run_daily_sanity()
 
                             last_sync = time.time()
                         except Exception as e:
