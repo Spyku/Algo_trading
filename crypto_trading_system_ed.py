@@ -490,6 +490,17 @@ TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY 
 # comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
 BACKTEST_FEE_PER_LEG = 0.0005
 
+# Daily-source availability lag (mirrored from crypto_trading_system_faye 2026-06-04).
+# Daily prints (macro/fear-greed/cross-asset/stablecoin) aren't available until the
+# day closes, and on-chain publishes ~midday the NEXT day — so an hour may only see
+# strictly-prior daily rows, else the recompute leaks future data the live trader
+# never had. FAYE (training) already applies these; this mirrors them onto the ED
+# serving path (live trader + validator) so train == serve, no leakage. PySR inherits
+# the lag for free (computed after the merge). Hourly feeds (deriv_*/ob_*/iv_*/xa_*_lag)
+# merge on _merge_dt and are unaffected. Verify with: tools/audit_feature_lag.py
+DAILY_MERGE_LAG_DAYS = 1
+ONCHAIN_MERGE_LAG_DAYS = 2
+
 # ============================================================
 # Regime-detector search space (Mode R + Mode S)
 # ============================================================
@@ -1308,7 +1319,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         print(f"    macro_data/ not found -- technical features only")
         return df, all_cols
 
-    df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+    df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=DAILY_MERGE_LAG_DAYS)
 
     macro_df = _load_macro_csv('macro_daily.csv')
     if macro_df is not None:
@@ -1353,9 +1364,13 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         oc_df = _load_macro_csv(f'onchain_{oc_key}.csv')
         if oc_df is not None:
             oc_feats = _compute_onchain_features(oc_df, prefix='oc_')
-            oc_feats['_merge_date'] = oc_feats.index.normalize()
-            df = df.merge(oc_feats, on='_merge_date', how='left')
-            new_cols = [c for c in oc_feats.columns if c != '_merge_date']
+            # On-chain publishes ~midday the NEXT day -> own deeper lag (ONCHAIN_MERGE_LAG_DAYS)
+            # via a separate merge key, mirroring FAYE. (See lag note near BACKTEST_FEE_PER_LEG.)
+            oc_feats['_merge_date_oc'] = oc_feats.index.normalize()
+            df['_merge_date_oc'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=ONCHAIN_MERGE_LAG_DAYS)
+            df = df.merge(oc_feats, on='_merge_date_oc', how='left')
+            df = df.drop(columns=['_merge_date_oc'], errors='ignore')
+            new_cols = [c for c in oc_feats.columns if c != '_merge_date_oc']
             all_cols.extend(new_cols)
             added += len(new_cols)
 
@@ -1460,7 +1475,7 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
             if stable_df.index.tz is not None:
                 stable_df.index = stable_df.index.tz_localize(None)
             stable_df['_merge_date'] = stable_df.index.normalize()
-            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize()
+            df['_merge_date'] = pd.to_datetime(df['datetime']).dt.normalize() - pd.Timedelta(days=DAILY_MERGE_LAG_DAYS)
 
             stable_cols_added = 0
             if 'total_stable_mcap' in stable_df.columns:
