@@ -240,6 +240,10 @@ def main():
     parser.add_argument("--cpu-lgbm", action="store_true",
                         help="Force LGBM to use CPU device. Use to isolate GPU non-determinism "
                              "(different GPUs produce slightly different probabilities → flipped signals).")
+    parser.add_argument("--closed-bar-all", action="store_true",
+                        help="Force closed-bar inference (< hour_floor) for ALL sampled entries — "
+                             "simulate retroactively what the fix-#2 trader WOULD have signalled, "
+                             "even for hours the live trader logged with the forming bar.")
     args = parser.parse_args()
 
     print("=" * 70)
@@ -331,6 +335,9 @@ def main():
                     break  # first line = earliest = when the patched trader started
     except Exception:
         closed_bar_cutoff = None
+    if args.closed_bar_all:
+        closed_bar_cutoff = pd.Timestamp("2000-01-01")  # everything >= cutoff → closed bar
+        print("  --closed-bar-all: simulating the fix-#2 trader for ALL entries (closed bar < hour_floor)")
     if closed_bar_cutoff is not None:
         n_closed = int((sampled["timestamp"] >= closed_bar_cutoff).sum())
         print(f"  Closed-bar realignment: {n_closed}/{len(sampled)} entries >= {closed_bar_cutoff} UTC "
