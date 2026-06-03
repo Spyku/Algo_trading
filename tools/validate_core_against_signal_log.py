@@ -308,6 +308,34 @@ def main():
     sampled = sampled[sampled["timestamp"] >= earliest_usable].reset_index(drop=True)
     print(f"  After filtering for sufficient price history: {len(sampled)} samples")
 
+    # Closed-bar realignment (2026-06-03): after the trader's fix #2, live inference
+    # uses the last CLOSED bar (the bar that closed at the cycle hour), not the
+    # forming current-hour bar. So for entries logged on/after the fix, the core
+    # must infer on the bar BEFORE hour_floor (truncate < hour_floor); legacy
+    # entries used the forming bar (<= hour_floor). Self-calibrate the cutoff from
+    # the first inference_snapshots.jsonl entry (only the patched trader writes it),
+    # so we never hardcode a restart time and the transition is handled exactly.
+    closed_bar_cutoff = None
+    try:
+        snap_path = os.path.join("output", "inference_snapshots.jsonl")
+        if os.path.exists(snap_path):
+            with open(snap_path, encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if not _line:
+                        continue
+                    _la = pd.Timestamp(json.loads(_line).get("logged_at"))
+                    if _la.tzinfo is not None:
+                        _la = _la.tz_convert(None)  # -> naive UTC (signal_log is UTC)
+                    closed_bar_cutoff = _la
+                    break  # first line = earliest = when the patched trader started
+    except Exception:
+        closed_bar_cutoff = None
+    if closed_bar_cutoff is not None:
+        n_closed = int((sampled["timestamp"] >= closed_bar_cutoff).sum())
+        print(f"  Closed-bar realignment: {n_closed}/{len(sampled)} entries >= {closed_bar_cutoff} UTC "
+              f"use bar < hour_floor (rest use <= hour_floor)")
+
     # Run validation
     print(f"\n[4/4] Running {len(sampled)} replays (~10s each, ~{len(sampled) * 10 // 60} min total)...")
     results = []
@@ -319,8 +347,15 @@ def main():
         live_action = row["action"]
         live_conf = float(row["confidence"]) if pd.notna(row["confidence"]) else None
 
-        # Truncate price data to "as of" this hour
-        df_truncated = df_raw_full[df_raw_full["datetime"] <= hour_floor].copy()
+        # Truncate price data to the bar the live trader actually inferred on:
+        # closed bar (< hour_floor) for post-fix entries, forming bar (<= hour_floor)
+        # for legacy entries. See closed_bar_cutoff above.
+        if closed_bar_cutoff is not None and ts >= closed_bar_cutoff:
+            df_truncated = df_raw_full[df_raw_full["datetime"] < hour_floor].copy()
+            bar_mode = "closed"
+        else:
+            df_truncated = df_raw_full[df_raw_full["datetime"] <= hour_floor].copy()
+            bar_mode = "forming"
         if len(df_truncated) < 500:
             print(f"  [{idx + 1}/{len(sampled)}] {ts} SKIP (insufficient history)")
             n_error += 1
@@ -355,7 +390,7 @@ def main():
                 "regime": regime, "horizon_used": config["horizon"],
                 "live_action": live_action, "live_confidence": live_conf,
                 "core_action": None, "core_confidence": None,
-                "match": None, "conf_delta": None, "config_bucket": bucket,
+                "match": None, "conf_delta": None, "config_bucket": bucket, "bar_mode": bar_mode,
                 "error": core_result["error"], "elapsed_s": round(elapsed, 2),
             })
             continue
@@ -381,6 +416,7 @@ def main():
         results.append({
             "timestamp": str(ts), "hour_floor": str(hour_floor),
             "regime": regime, "horizon_used": config["horizon"], "config_bucket": bucket,
+            "bar_mode": bar_mode,
             "live_action": live_action, "live_confidence": live_conf,
             "core_action": core_gated, "core_action_raw": core_raw,
             "core_confidence": core_result["confidence"],
