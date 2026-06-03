@@ -34,3 +34,6 @@ btc_hourly_data.csv
 .tmp.driveupload/ 
 *.bak 
 logs/
+
+# past-dated data snapshots (research, large)
+data_asof_*/
