@@ -523,6 +523,12 @@ def load_best_config(asset_name, horizon=None):
 INFERENCE_SNAPSHOT_JSONL = os.path.join(os.path.dirname(__file__), 'output', 'inference_snapshots.jsonl')
 _INFERENCE_SNAPSHOT_MAX_BYTES = 50 * 1024 * 1024  # rotate to .1 past 50 MB
 
+# Fix #2 (2026-06-03): infer on the last FULLY-CLOSED hourly bar rather than the
+# still-forming current-hour candle (the OHLCV download keeps the in-progress bar
+# as the last row). On by default; set env USE_FORMING_BAR=1 to restore the old
+# forming-bar behavior.
+USE_CLOSED_BAR_FOR_INFERENCE = (os.environ.get('USE_FORMING_BAR') != '1')
+
 
 def _log_inference_snapshot(snapshot):
     """Append one inference snapshot (dict) as a JSON line. Swallows every error."""
@@ -698,6 +704,27 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         return None
 
     i = n - 1
+    # Fix #2 (2026-06-03): the OHLCV download keeps the CURRENT in-progress hourly
+    # candle as the last row (download_binance/yfinance do not drop it). The live
+    # cycle runs at xx:00:0x — seconds into the new hour — so df.iloc[-1] is a
+    # partial bar (≈open, partial high/low/volume and partial derived features).
+    # Inferring on it feeds the model half-formed inputs and is non-reproducible
+    # (a forming bar differs at live time vs later replay; a closed bar does not).
+    # Step back to the last fully-closed bar when the freshest row is still open.
+    if USE_CLOSED_BAR_FOR_INFERENCE and i >= 1:
+        # NB: use pandas for 'now' — generate_live_signal re-imports datetime/
+        # timezone function-locally below, so referencing them here would raise
+        # UnboundLocalError. pd is module-level and unshadowed.
+        try:
+            _last_dt = pd.to_datetime(df.iloc[i]['datetime'])
+            if _last_dt.tzinfo is None:
+                _last_dt = _last_dt.tz_localize('UTC')
+            if (_last_dt + pd.Timedelta(hours=1)) > pd.Timestamp.now(tz='UTC'):
+                i -= 1
+                if metrics_out is not None:
+                    metrics_out['used_closed_bar_stepback'] = True
+        except Exception:
+            pass
     row = df.iloc[i]
 
     # Staleness refusal — two checks, both refuse on fail:
