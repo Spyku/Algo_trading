@@ -15,7 +15,9 @@ For each sampled hour H:
   2. Determine regime via sma24>sma100 (live trader's detector)
   3. Pick horizon (bull=5h, bear=8h per current LIVE config)
   4. Run compute_signal_core() with that horizon's production config
-  5. Compare to signal_log entry at hour H
+  5. Apply the regime's min_confidence gate to the core signal (sub-threshold
+     directional calls → HOLD, matching the live trader's action mapping)
+  6. Compare to signal_log entry at hour H
 
 Caveat: data files have CURRENT values, not the values live trader saw at
 hour H. Where data has drifted, results will differ. For LIVE 5h features
@@ -192,6 +194,21 @@ def detect_regime_simple(df_truncated, detector_name="sma24>sma100"):
     return "bull" if sma24 > sma100 else "bear"
 
 
+def apply_confidence_gate(signal, confidence, min_conf):
+    """Replicate the live trader's min_confidence gate exactly (crypto_revolut_ed_v2
+    compute_asset_signal, Xh_only path):
+        SELL              -> SELL              (NEVER confidence-gated — exits pass through)
+        BUY, conf >= min  -> BUY
+        BUY, conf <  min  -> HOLD              (the "BUY(57%) -> HOLD [low_conf]" mapping)
+        HOLD              -> HOLD
+    compute_signal_core returns the UNGATED signal, so without this every sub-threshold
+    BUY registers as a false DIFF against live's gated HOLD. The gate is asymmetric:
+    only BUY is gated, never SELL."""
+    if signal == "BUY" and confidence is not None and min_conf is not None and confidence < float(min_conf):
+        return "HOLD"
+    return signal
+
+
 def live_horizons_from_row(row):
     """Horizons the live trader actually ran at this hour, read from signal_log's
     per-slot columns (h_1/h_2). Used to bucket each comparison:
@@ -255,6 +272,8 @@ def main():
         asset_cfg = json.load(f).get(args.asset, {})
     bull_h = asset_cfg.get("bull", {}).get("horizon")
     bear_h = asset_cfg.get("bear", {}).get("horizon")
+    bull_minconf = asset_cfg.get("bull", {}).get("min_confidence")
+    bear_minconf = asset_cfg.get("bear", {}).get("min_confidence")
     detector_name = asset_cfg.get("regime_detector", {}).get("params", {}).get("name", "sma24>sma100")
     if bull_h is None or bear_h is None:
         print(f"  ERROR: missing bull/bear horizon in {regime_path} for {args.asset}")
@@ -269,8 +288,8 @@ def main():
         print(f"  ERROR: missing bull({bull_h}h) or bear({bear_h}h) config for {args.asset} in production CSV")
         return
     print(f"  detector: {detector_name}")
-    print(f"  bull {bull_h}h config: w={cfg_bull['best_window']} {cfg_bull['best_combo']} γ={cfg_bull['gamma']}")
-    print(f"  bear {bear_h}h config: w={cfg_bear['best_window']} {cfg_bear['best_combo']} γ={cfg_bear['gamma']}")
+    print(f"  bull {bull_h}h config: w={cfg_bull['best_window']} {cfg_bull['best_combo']} γ={cfg_bull['gamma']} min_conf={bull_minconf}")
+    print(f"  bear {bear_h}h config: w={cfg_bear['best_window']} {cfg_bear['best_combo']} γ={cfg_bear['gamma']} min_conf={bear_minconf}")
 
     # Load full raw data
     print("\n[3/4] Loading hourly price data...")
@@ -341,7 +360,12 @@ def main():
             })
             continue
 
-        match = core_result["signal"] == live_action
+        # Gate the core signal with the same min_confidence the live trader applies,
+        # so we compare like-for-like (live `action` is already gated).
+        min_conf = bull_minconf if regime == "bull" else bear_minconf
+        core_raw = core_result["signal"]
+        core_gated = apply_confidence_gate(core_raw, core_result["confidence"], min_conf)
+        match = core_gated == live_action
         if match:
             n_match += 1
         else:
@@ -349,15 +373,17 @@ def main():
         delta = core_result["confidence"] - live_conf if live_conf is not None else None
 
         stale_tag = "  [STALE: live h={}]".format("/".join(map(str, sorted(live_hs)))) if bucket == "stale" else ""
+        gate_tag = f"→{core_gated}" if core_gated != core_raw else ""
         print(f"  [{idx + 1}/{len(sampled)}] {ts} {regime[:4]} h={config['horizon']} "
-              f"live={live_action}({live_conf}) core={core_result['signal']}({core_result['confidence']}) "
+              f"live={live_action}({live_conf}) core={core_raw}{gate_tag}({core_result['confidence']}) "
               f"{'MATCH' if match else 'DIFF'} ({elapsed:.1f}s){stale_tag}")
 
         results.append({
             "timestamp": str(ts), "hour_floor": str(hour_floor),
             "regime": regime, "horizon_used": config["horizon"], "config_bucket": bucket,
             "live_action": live_action, "live_confidence": live_conf,
-            "core_action": core_result["signal"], "core_confidence": core_result["confidence"],
+            "core_action": core_gated, "core_action_raw": core_raw,
+            "core_confidence": core_result["confidence"],
             "match": match, "conf_delta": round(delta, 2) if delta is not None else None,
             "n_features": core_result.get("n_features"),
             "n_train": core_result.get("n_train"),
