@@ -510,6 +510,39 @@ def load_best_config(asset_name, horizon=None):
 # ============================================================
 # GENERATE SINGLE SIGNAL
 # ============================================================
+# ---------------------------------------------------------------------------
+# Inference feature snapshot (2026-06-03)
+# ---------------------------------------------------------------------------
+# Forensic log of the EXACT feature vector + per-model probabilities used for
+# each live inference. Lets us diff a live signal against a later core recompute
+# and see WHICH feature value moved — the open question from the 2026-06-03 05:00
+# SELL(86.7) that flipped to BUY once the data settled. cycle_metrics.csv only
+# stores counts (n_features / NaN); this stores the values. JSONL (one object per
+# cycle) handles the variable per-horizon feature set cleanly. Append-only with
+# size-based rotation; NEVER raises — telemetry must not affect trading.
+INFERENCE_SNAPSHOT_JSONL = os.path.join(os.path.dirname(__file__), 'output', 'inference_snapshots.jsonl')
+_INFERENCE_SNAPSHOT_MAX_BYTES = 50 * 1024 * 1024  # rotate to .1 past 50 MB
+
+
+def _log_inference_snapshot(snapshot):
+    """Append one inference snapshot (dict) as a JSON line. Swallows every error."""
+    try:
+        path = INFERENCE_SNAPSHOT_JSONL
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > _INFERENCE_SNAPSHOT_MAX_BYTES:
+                bak = path + '.1'
+                if os.path.exists(bak):
+                    os.remove(bak)
+                os.rename(path, bak)
+        except Exception:
+            pass
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(snapshot, default=str) + '\n')
+    except Exception:
+        pass
+
+
 def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_out=None):
     """Generate one signal for (asset_name, config.horizon).
 
@@ -841,6 +874,32 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
     # Fix #3 (2026-04-24): store 2 decimals so pinned vs noise-around-same-int
     # is distinguishable. 85.3 >= 85 still holds so min_conf threshold unchanged.
     confidence = round(avg_proba * 100, 2) if signal != 'SELL' else round((1 - avg_proba) * 100, 2)
+
+    # Forensic snapshot (2026-06-03): persist the exact inference feature vector +
+    # per-model probabilities so a live signal can later be diffed against a core
+    # recompute to identify a transient-data-driven divergence. Telemetry-only.
+    if metrics_out is not None:
+        metrics_out['inference_row_dt'] = str(row['datetime'])
+    try:
+        _feat_vals = df.iloc[i][feature_cols]
+        _log_inference_snapshot({
+            'logged_at': datetime.now(timezone.utc).isoformat(),
+            'inference_row_dt': str(row['datetime']),
+            'asset': asset_name,
+            'horizon': int(horizon),
+            'models': model_names,
+            'window': int(window),
+            'gamma': float(gamma),
+            'signal': signal,
+            'confidence': float(confidence),
+            'buy_ratio': float(buy_ratio),
+            'avg_proba': float(avg_proba),
+            'probas': {model_names[k]: float(p) for k, p in enumerate(probas) if k < len(model_names)},
+            'close': float(row['close']) if pd.notna(row.get('close')) else None,
+            'features': {f: (float(_feat_vals[f]) if pd.notna(_feat_vals[f]) else None) for f in feature_cols},
+        })
+    except Exception:
+        pass
 
     # Use raw data (df_raw) for last 4h — df drops last `horizon` rows due to label shift
     last_4h = []
