@@ -5520,7 +5520,21 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         grid_csv_path = os.path.join('models', f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
-        df_grid.to_csv(grid_csv_path, index=False)
+        # Drive-sync hardening (2026-06-04): the engine lives on Google Drive, which
+        # briefly HIDES dirs during sync. A bare to_csv died here once, nuking a 7h
+        # grid (OSError: non-existent dir 'models'). Retry with makedirs; if it still
+        # fails, warn but DON'T crash — candidates are already in memory and Mode V
+        # proceeds without the (cosmetic) grid CSV.
+        for _att in range(6):
+            try:
+                os.makedirs(os.path.dirname(grid_csv_path) or '.', exist_ok=True)
+                df_grid.to_csv(grid_csv_path, index=False)
+                break
+            except OSError as _e:
+                if _att == 5:
+                    print(f"  [!] grid CSV save failed after retries ({_e}) — continuing")
+                else:
+                    time.sleep(min(2 ** _att, 10))
 
         # Sort candidates
         all_candidates.sort(key=lambda t: -t.value)
