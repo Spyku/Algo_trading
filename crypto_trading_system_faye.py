@@ -154,7 +154,13 @@ import os
 # sklearn's `delayed should be used with Parallel` UserWarning bypasses
 # any single layer in practice (observed on FAYE launch 2026-05-30 09:41).
 _FAYE_WARNINGS_SENTINEL = '_FAYE_WARNINGS_BAKED'
-if not os.environ.get(_FAYE_WARNINGS_SENTINEL):
+# FAYE_LIBRARY_MODE (2026-06-05): a consumer that imports faye purely for its
+# functions/constants (e.g. the live trader via crypto_live_trader_ed.py) sets
+# FAYE_LIBRARY_MODE=1. That skips the os.execv re-exec here (which would restart a
+# long-running process) and the run-as-main startup I/O further below (output-dir
+# creation + config_faye seeding + banners). All function/constant DEFINITIONS still
+# load normally — only the run-as-main side effects are suppressed.
+if not os.environ.get(_FAYE_WARNINGS_SENTINEL) and os.environ.get('FAYE_LIBRARY_MODE') != '1':
     os.environ['PYTHONWARNINGS'] = 'ignore'
     # Defensive: parallel_nearlive + v3 set NEAR_LIVE_MODE='1' as the
     # signal that step6_nearlive should run with near-live semantics
@@ -347,7 +353,7 @@ if _H_SNAPSHOT_DIR:
     if _FAYE_IS_MAIN_PROCESS:
         print(f'[FAYE_SNAPSHOT] pd.read_csv redirected: data/<file> -> {_h_snapshot.name}/<file>')
 else:
-    if _FAYE_IS_MAIN_PROCESS:
+    if _FAYE_IS_MAIN_PROCESS and os.environ.get('FAYE_LIBRARY_MODE') != '1':
         print('[FAYE_SNAPSHOT] V2_DATA_SNAPSHOT not set — reading from live data/')
 
 import numpy as np
@@ -617,41 +623,51 @@ FAYE_MODELS_DIR = _resolve_dir('FAYE_MODELS_DIR', 'models_faye')
 FAYE_CONFIG_DIR = _resolve_dir('FAYE_CONFIG_DIR', 'config_faye')
 _FAYE_MODELS_RAW = os.environ.get('FAYE_MODELS_DIR', 'models_faye')
 _FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye')
-# FAYE 2026-05-30 12:30: ensure both dirs exist before ANY writer touches them.
-# Bug surfaced on Mode D 6h launch 12:17: per-eval CSV flush failed with
-# "Cannot save file into a non-existent directory: '...\\models_faye'" because
-# Mode D dispatcher tried pd.DataFrame(...).to_csv() before any code path had
-# created FAYE_MODELS_DIR. Idempotent (exist_ok=True) so safe to repeat.
-os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
-os.makedirs(FAYE_CONFIG_DIR, exist_ok=True)
 
-# FAYE 2026-05-30: seed FAYE_CONFIG_DIR/regime_config_faye.json so Mode R/S
-# have a template to write into. Same pattern as parallel_nearlive lines 184-209.
-# Mode R's _apply_mode_r_to_config reads the source then rewrites it — without
-# a seed, Mode R/S/T crash with FileNotFoundError on the first run.
-#
-# Priority: if a prior --no-persist run left _noprod.json, promote it back
-# (engine's --no-persist code unconditionally shutil.copyfile's the live config
-# onto _noprod, which would otherwise WIPE Mode R/S's writes when Mode T is
-# launched as a separate command). Else seed from live `config/regime_config_ed.json`.
-import shutil as _faye_shutil
-_faye_seed_regime_cfg = os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json')
-_faye_noprod_regime_cfg = _faye_seed_regime_cfg.replace('.json', '_noprod.json')
-_faye_live_regime_cfg = os.path.join(_SCRIPT_DIR, 'config', 'regime_config_ed.json')
-if os.path.exists(_faye_noprod_regime_cfg):
-    _faye_shutil.copyfile(_faye_noprod_regime_cfg, _faye_seed_regime_cfg)
-    if _FAYE_IS_MAIN_PROCESS:
-        print(f"[FAYE_ISO] preserved prior --no-persist state: {_faye_noprod_regime_cfg} -> {_faye_seed_regime_cfg}")
-elif not os.path.exists(_faye_seed_regime_cfg):
-    if os.path.exists(_faye_live_regime_cfg):
-        _faye_shutil.copyfile(_faye_live_regime_cfg, _faye_seed_regime_cfg)
+# FAYE_LIBRARY_MODE (2026-06-05): set by a consumer that imports faye purely for its
+# functions/constants (the live trader via crypto_live_trader_ed.py). When on, the
+# run-as-main startup I/O below is skipped — no output-dir creation, no config_faye
+# seeding/copy, no banners. Function/constant DEFINITIONS are unaffected (they load
+# regardless), so the importer gets a clean, side-effect-free engine. Nothing else in
+# the repo sets this var, so faye's behavior when *run* as the engine is unchanged.
+_FAYE_LIBRARY_MODE = os.environ.get('FAYE_LIBRARY_MODE') == '1'
+
+if not _FAYE_LIBRARY_MODE:
+    # FAYE 2026-05-30 12:30: ensure both dirs exist before ANY writer touches them.
+    # Bug surfaced on Mode D 6h launch 12:17: per-eval CSV flush failed with
+    # "Cannot save file into a non-existent directory: '...\\models_faye'" because
+    # Mode D dispatcher tried pd.DataFrame(...).to_csv() before any code path had
+    # created FAYE_MODELS_DIR. Idempotent (exist_ok=True) so safe to repeat.
+    os.makedirs(FAYE_MODELS_DIR, exist_ok=True)
+    os.makedirs(FAYE_CONFIG_DIR, exist_ok=True)
+
+    # FAYE 2026-05-30: seed FAYE_CONFIG_DIR/regime_config_faye.json so Mode R/S
+    # have a template to write into. Same pattern as parallel_nearlive lines 184-209.
+    # Mode R's _apply_mode_r_to_config reads the source then rewrites it — without
+    # a seed, Mode R/S/T crash with FileNotFoundError on the first run.
+    #
+    # Priority: if a prior --no-persist run left _noprod.json, promote it back
+    # (engine's --no-persist code unconditionally shutil.copyfile's the live config
+    # onto _noprod, which would otherwise WIPE Mode R/S's writes when Mode T is
+    # launched as a separate command). Else seed from live `config/regime_config_ed.json`.
+    import shutil as _faye_shutil
+    _faye_seed_regime_cfg = os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json')
+    _faye_noprod_regime_cfg = _faye_seed_regime_cfg.replace('.json', '_noprod.json')
+    _faye_live_regime_cfg = os.path.join(_SCRIPT_DIR, 'config', 'regime_config_ed.json')
+    if os.path.exists(_faye_noprod_regime_cfg):
+        _faye_shutil.copyfile(_faye_noprod_regime_cfg, _faye_seed_regime_cfg)
         if _FAYE_IS_MAIN_PROCESS:
-            print(f"[FAYE_ISO] seeded regime config: {_faye_live_regime_cfg} -> {_faye_seed_regime_cfg}")
-    elif _FAYE_IS_MAIN_PROCESS:
-        print(f"[FAYE_ISO] WARN: live regime config not found at {_faye_live_regime_cfg} — Mode R/S/T may fail")
+            print(f"[FAYE_ISO] preserved prior --no-persist state: {_faye_noprod_regime_cfg} -> {_faye_seed_regime_cfg}")
+    elif not os.path.exists(_faye_seed_regime_cfg):
+        if os.path.exists(_faye_live_regime_cfg):
+            _faye_shutil.copyfile(_faye_live_regime_cfg, _faye_seed_regime_cfg)
+            if _FAYE_IS_MAIN_PROCESS:
+                print(f"[FAYE_ISO] seeded regime config: {_faye_live_regime_cfg} -> {_faye_seed_regime_cfg}")
+        elif _FAYE_IS_MAIN_PROCESS:
+            print(f"[FAYE_ISO] WARN: live regime config not found at {_faye_live_regime_cfg} — Mode R/S/T may fail")
 
-if _FAYE_IS_MAIN_PROCESS:
-    print(f"[FAYE_ISO] output dirs: models={FAYE_MODELS_DIR} config={FAYE_CONFIG_DIR}")
+    if _FAYE_IS_MAIN_PROCESS:
+        print(f"[FAYE_ISO] output dirs: models={FAYE_MODELS_DIR} config={FAYE_CONFIG_DIR}")
 
 
 # ── Resume / Checkpoint helpers ──────────────────────────────────────────────

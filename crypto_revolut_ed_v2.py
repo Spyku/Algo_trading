@@ -2541,13 +2541,12 @@ def _handle_status_command(with_charts=False):
             lines.append(f"  📊 {len(sells)} trades ({wins}W) ${total:+,.2f}")
         lines.append("")
 
-    # Balance summary
+    # Balance summary — USD only. Non-enabled coins (e.g. BTC dust / stale
+    # exchange entries) are intentionally NOT listed here: they showed a phantom
+    # BTC balance in the manual-buy / status view. Holdings of ENABLED assets are
+    # already surfaced per-asset above (lines ~2509-2516). 2026-06-05.
     usd_avail = balances.get('USD', {}).get('available', 0)
     lines.append(f"💵 USD: ${usd_avail:,.2f}")
-    other = [(c, b) for c, b in sorted(balances.items()) if c != 'USD' and b['total'] > 0 and c not in enabled_assets]
-    if other:
-        for c, b in other:
-            lines.append(f"  {c}: {b['available']:.6f}")
 
     send_telegram_with_buttons("\n".join(lines), _main_buttons())
 

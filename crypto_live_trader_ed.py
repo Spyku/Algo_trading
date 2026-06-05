@@ -2,7 +2,8 @@
 Crypto Live Trader (Ed) — Signal Generation for Ed Models
 =============================================================
 Signal generation library for the Ed live trader (crypto_revolut_ed_v2.py).
-Imports from crypto_trading_system_ed and reads models/crypto_ed_production.csv.
+Imports from crypto_trading_system_faye (library mode; was crypto_trading_system_ed
+until 2026-06-05 — functions proven byte-identical) and reads models/crypto_ed_production.csv.
 
 Not run directly — used as a module by crypto_revolut_ed_v2.py.
 """
@@ -44,7 +45,20 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 import warnings
 warnings.filterwarnings('ignore')
 
-from crypto_trading_system_ed import (
+# 2026-06-05: live inference engine moved crypto_trading_system_ed -> crypto_trading_system_faye
+# (the consolidated canonical engine). The imported functions/constants are PROVEN
+# byte-identical between the two (feature output max|Δ|=0 over 209 cols × 3 horizons;
+# build_all_features differs only in comments, _compute_pysr_features only in its models
+# dir). The two env vars below MUST be set before the import:
+#   FAYE_LIBRARY_MODE=1   -> faye imports quietly (no os.execv re-exec, no config_faye
+#                            seeding/copy, no banners). See faye Rule/guard 2026-06-05.
+#   FAYE_MODELS_DIR=models -> _compute_pysr_features reads LIVE PySR from models/, NOT
+#                            models_faye/ (which holds research PySR e.g. the 1-4h Mode P).
+os.environ.setdefault('FAYE_LIBRARY_MODE', '1')
+os.environ.setdefault('_FAYE_WARNINGS_BAKED', '1')  # belt-and-suspenders: also skips re-exec
+os.environ.setdefault('FAYE_MODELS_DIR', 'models')
+
+from crypto_trading_system_faye import (
     ASSETS, FEATURE_SET_A, FEATURE_SET_B,
     PREDICTION_HORIZON, ALL_MODELS,
     HORIZON_SHORT, HORIZON_LONG, AVAILABLE_HORIZONS,
@@ -963,7 +977,7 @@ def generate_regime_signal(asset, df_raw=None):
     Returns:
         dict with keys: signal, confidence, regime, active_horizon, active_config, price, etc.
     """
-    from crypto_trading_system_ed import load_data
+    from crypto_trading_system_faye import load_data  # 2026-06-05: engine ed->faye (see top import)
 
     if df_raw is None:
         df_raw = load_data(asset)

@@ -2,11 +2,15 @@
 
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
-## 📊 At-a-glance — active TODO dashboard (2026-05-31 — FAYE PROMOTED TO PRODUCTION)
+## 📊 At-a-glance — active TODO dashboard (2026-06-05)
 
 | Pri | Item | Where | Status |
 |---|---|---|---|
-| 📌 | **FAYE LIVE** (promoted 2026-05-31 14:22 CEST) — `tsmom_672h` detector / bull 6h@65% / bear 8h@65% / shields OFF / rally cooldowns ON (custom per-regime params) / min_sell_pnl_pct=0 / max_hold_hours=10 / maker orders ON. Models: ETH 6h/7h/8h RF+LGBM from FAYE H. Rollback in `archive/g_narrow_live_20260531_142202/`. | **Desktop** (always) | 🟢 running |
+| 📌 | **FAYE LIVE** (promoted 2026-05-31 14:22 CEST; **bear swapped 8h@65%→5h@80% on 2026-06-02 23:09**) — `tsmom_672h` detector / bull 6h@65% / **bear 5h@80%** / shields OFF / rally cooldowns ON (custom per-regime params) / min_sell_pnl_pct=0 / max_hold_hours=10 / maker orders ON. Models: ETH 5h/6h/7h/8h RF+LGBM from FAYE H. Rollback in `archive/g_narrow_live_20260531_142202/`. | **Desktop** (always) | 🟢 running |
+| 🔥 **P0 (0605)** | **Restart trader to load the shadow closed-bar fix** (`crypto_live_shadow.py:220`). Shadow match crashed 100%→48% Jun 3 because fix #2 (closed-bar) wasn't mirrored into the shadow monitor — proven 23/23 (+1h forming-vs-closed). Code fixed; the live number only recovers on trader restart. **After restart, confirm `config/shadow_signal_diff.csv` returns to ~100%.** NOT a model change, NOT a trading bug — monitor only. | **Desktop** | 🔧 FIX DONE, restart pending |
+| 🔥 **P0 (0605)** | **Verify ~0.078 BTC: real or phantom** — BTC position file has a malformed April SELL (price=0) that set `state:cash` without zeroing `base_amount=0.0785`. `get_balances()` only echoes the exchange, so the `/status` display fired on a real reported balance → **~$5k BTC may be untracked on Revolut X.** Run `python crypto_revolut_ed_v2.py --balance`. If ~0.078 BTC present → sell it; if 0 → zero the stale position file. (Display already fixed to hide non-enabled coins.) | **Desktop** | ⏳ pending --balance |
+| 🔵 **P1 (0605)** | **2mo vs 4mo HRST decision** — `python tools/compare_prod_vs_4mo.py` (running on Desktop). Production (bull 6h@65/bear 5h@80) vs 4mo-HRST (`ed_v1_20260604_075223`: bull 5h@70/bear 5h@65) over 720h+168h. Read 720h as signal, 168h as tiebreaker (~10-25 trades). Verdict decides whether future HRST uses 2mo or 4mo window. | **Desktop** (~45-90 min) | 🟢 running |
+| 🔵 **P1 (0605)** | **Embargo-sensitivity sweep on 1h (+4h)** to settle short-horizon viability — `FAYE_EMBARGO_OVERRIDE=4/8 python crypto_trading_system_faye.py D ETH 1h --replay 1440 --no-persist`. WR collapses with bigger embargo → leak/overfit (kill 1-3h); WR holds at embargo=8 → real edge. DV WR gradient: 1h 92-98% / 2h 88% / 3h 85% / **4h 76% (in-band, plausible)** / 5-8h 74-83%. 4h worth pursuing, 2-3h borderline, 1h inflated. | **Laptop** (after 2h DV frees it) | 📅 queued |
 | 🔥 **P0** | **Live WR/P&L monitor on new FAYE config** — first 1-3 days = sanity window, 2-4 weeks = real validation | **Desktop** (passive) | 🕐 STARTED 2026-05-31 14:22. Watch: signal cycle at next hourly tick using bull=6h+bear=8h (was 5h+8h); WR tracking close to Mode V Step 3 predictions (79-83%); total return tracking the +55%/+37%/+46% scale on similar period. **Rollback trigger**: live WR <60% over 7+ trades or persistent negative trades week 1 → revert to G_narrow archive. |
 | 🔥 **P0 (this week)** | **FAYE engine-vs-trader parity verification on the NEW config** — confirm trader produces identical signals to FAYE engine for ETH 6h+8h after the May 31 promotion | **Desktop** (~15 min) | 📅 BLOCKED on 24+ hours of trader signal_log accumulation (trader started 14:19, ETA ready ~14:00 June 1). Then run `python tools/validate_core_against_signal_log.py --samples 30 --recent-only --cpu-lgbm`. Acceptance: 0/N real BUY↔SELL flips (HOLD-threshold DIFFs OK). Failure modes to watch: (a) PySR feature drift — verify `optimal_features` columns in `models/crypto_ed_production.csv` only reference PySR features that exist in `models/pysr_ETH_{6,7,8}h.json`; (b) embargo handling — trader must NOT use embargo (no future labels in live), backtest uses `embargo=horizon`; (c) regime detector parity — trader's `tsmom_672h = log(close/close.shift(672))` must compute correctly from live data history (no gaps in the last 672h). **If divergence found**, treat current FAYE production as suspect, investigate before next promotion. Until verified, today's parity (May 30 G_narrow test, 0/8 flips) only proves the OLD config's parity, NOT the new FAYE picks. Step 6 engine refactor (P2 below) would formally unify backtest+live codepaths but is pending — until then, parity is by-construction-not-formally-proven. |
 | ✅ DONE 2026-05-31 | **FAYE promoted to production** (was P0 BLOCKED) | — | ✅ Promoted 14:22 CEST. Archive: `archive/g_narrow_live_20260531_142202/`. Trader hot-reloaded and picked up new config. Gates (a)+(c) deferred to post-promotion validation; gate (b) hard A/B remains queued in P3 as nice-to-have not blocker. |
@@ -16,11 +20,12 @@
 | ✅ DONE 2026-05-31 | **FAYE RST ETH 5h,6h,7h,8h --replay 1440 --no-persist** (evening, validation of LIVE config) | — | ✅ DONE 19:38 — Picked EXACTLY the same config currently LIVE: tsmom_672h × bull=6h@65% × bear=8h@65%, shields=OFF, rally_cd=ON, min_sell_pnl=0, max_hold=10h. Mode S top: **+70.18% / 88 trades / 84% WR** (B&H -5.38%, alpha +75.56pp). 5h/8h regime pairing was ranked outside top-10 (rank 11 for tsmom_672h × 5h/8h with +8.33% on 8 trades). **Conclusion**: adding 5h candidate did NOT shift the optimal regime — current LIVE FAYE config is validated against a wider candidate pool. Output in `models_faye/crypto_faye_production_noprod.csv` + `config_faye/regime_config_faye_noprod.json` (research files, not promoted). |
 | 🔥 **P0** | **Shadow mode continuous match-rate check** — primary live correctness gate | **Desktop** (passive observation) | 🕐 IN PROGRESS — every 1-2 days run the match-rate query; any drop below ~99% = NEW bug to investigate. |
 | ✅ CLOSED 2026-05-30 | **Counterfactual backtest on wider window** — superseded by engine-vs-trader parity test | — | ✅ CLOSED — original goal was statistical proof of macro_cache fix's economic impact. Yesterday's parity test (`tools/validate_core_against_signal_log.py --samples 30 --recent-only`) gave a more direct answer: 22/30 direct MATCH, **0/8 real BUY↔SELL flips**, all DIFFs HOLD-threshold boundary cases. Engine and trader codepaths agree on direction whenever both produce one. Wider counterfactual would only re-measure what the parity test already confirmed. Live WR/P&L monitor continues to validate economic impact in real time. |
-| 🔥 **P1** | **Embargo A/B test** (`tools/embargo_ab_test.py --mode=both`) | **Laptop** (~2.5h) | 📅 NEXT — quantifies contribution of embargo (divergence #1 of the original TODO 0526 "4 semantic differences") to backtest-vs-live gap. Now actionable as scoping for Step 6 refactor. |
-| 🔥 **P1** | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | **Desktop** (~6h, off-hours) | 📅 PENDING — Desktop is free between trader cycles. Newly relevant post-cache-fix: with fresh derivatives features now flowing, this could swing differently than pre-fix expectation. |
-| 📋 **P2** | **Step 6 engine refactor** (`docs/STEP_6_ENGINE_REFACTOR.md`) — make backtest call `compute_signal_core()` so HRST results predict live | **Laptop** (~1.5 calendar days + 12h compute) | 📋 DESIGNED — implementation pending. After this, backtest WR projection will be realistic (likely 65-75%, not 85%). Required before next promotion. |
+| ✅ **DONE 0531** | **Embargo A/B test** (`tools/embargo_ab_test.py --mode=both`) | **Laptop** | ✅ DONE 2026-05-31 — same ETH models, Mode T: embargo=horizon **REF +69.09%** vs embargo=0 **REF +174.20%** = **+105pp leakage lever**. +174% is leakage-inflated (embargo=0 in a *backtest* reintroduces label-overlap leakage), NOT a live target. Confirms embargo essential in backtest/selection + live correctly uses NONE (Rule 9) + embargo is NOT the live-vs-backtest gap source → Step 6 still warranted. See detail section below. |
+| 🔵 **P1 IN PROGRESS** | **Daily-data availability lag fix** (5th live-vs-backtest divergence; see [[project_daily_data_lag_fix]] memory) — daily features were same-date-merged → backtest clairvoyance; diagnosed 2026-06-01 via the 07:00 ETH parity flip (`oc_mvrv_chg1d` +0.53%→−0.59% once May-31 on-chain published ~14:01). **FIXED in FAYE**: `DAILY_MERGE_LAG_DAYS=1` (on-chain `ONCHAIN_MERGE_LAG_DAYS=2`); PySR decoupled ed→faye + isolated to `models_faye/`; verified 202 cols / 0 violations. **Cascade pending**: PySR 5/6/7/8h all discovered ✓ → `DV ETH 6h,8h` on lagged feats → `RST` validate → **promote: MUST mirror lag into `crypto_trading_system_ed.py` build_all_features + `copy models_faye\pysr_*.json models\`, trader flat, else live drift (Rule 14)**. ed.py deliberately NOT lagged until then. **Lagged-parity check**: `validate_core_against_signal_log.py --engine faye` added; watcher auto-runs it when DV 8h rewrites the 8h config (does the 07:00 flip resolve under the lag?). | **Desktop** | 🔵 PySR 5/6/7/8h all discovered (lagged, historical). NEXT: `DV ETH 6h` + `DV ETH 8h`. Lagged-parity replay auto-queued (bg watcher). |
+| 🔥 **P1** | **TODO 0519B-G1** — `deriv_oi_*` re-enable A/B test | **Desktop** (~6h, off-hours) | 📅 **PARKED until ~2026-06-25** — OI data starts 2026-04-26 (~36 days as of 06-01, near-complete hourly). Needs 60 days for full 2-month (`--replay 1440`) coverage → un-park 2026-06-25. LGBM-NaN-safe to run earlier but OI signal too thin <60d (treat a null result as "still thin," not dead). Keep parked; run when 2 months of OI exist. |
+| ✅ **IMPL DONE (FAYE)** / ⚠️ near-live ≠ exact | **Step 6 engine refactor** — make backtest match live semantics so HRST predicts live | — | ✅ **SEMANTICS implemented natively in FAYE NEAR_LIVE_MODE** ([crypto_trading_system_faye.py:863-869](crypto_trading_system_faye.py#L863), always-on): `step=1`, `signal_mode=ternary`, `na_policy=mean_last_10`, `return_probas=True`. So FAYE HRST WR is far closer to live than ed.py's inflated ~85%. **BUT backtest ≠ live bit-identically — 2 residuals remain:** (1) `na_policy=mean_last_10` vs live `ffill` ("near-equivalent," not identical); (2) backtest keeps `embargo=horizon` (correct, anti-leakage) while live uses NONE → backtest model trains on `horizon` fewer recent rows than live, so its WR is a close PROXY, not an exact predictor — and no refactor removes this (removing backtest embargo = re-introduce leakage). Empirically the `--engine faye` parity match is ~73-87%, **not 100%** — that gap IS the residual. **VERDICT 2026-06-02: ACCEPTED, do not reopen** — embargo is *theoretically unfixable* (López de Prado purge/embargo is definitional to leakage-free OOS eval; live correctly omits it) AND *conservative* (live's fresher window only helps → backtest WR is a lower bound); na_policy is negligible (NaN rare at the frontier). Old `docs/STEP_6_ENGINE_REFACTOR.md` was the legacy ed.py plan. |
 | 📋 **P2** | **Re-run HRST on refactored engine** to get realistic backtest WR | **Desktop** (one HRST, ~7h) | ⏸ BLOCKED — depends on Step 6 done |
-| 📋 **P2** | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | **Desktop** (~6h) | 📋 SCHEDULED ~2026-06-18; depends on G1 outcome |
+| 📋 **P2** | **TODO 0519B-G2** — orderbook + IV re-enable A/B test | **Desktop** (~6h) | 📋 **READY ~2026-06-18** — orderbook+IV start 2026-04-19 (~43 days as of 06-01, ~85% hourly density), so 60 days lands 2026-06-18 — a week BEFORE G1 (06-25). "Depends on G1 outcome" is a soft prior, NOT a data block: can run G2 standalone 06-18, or batch with G1 after 06-25 and use G1's result to decide. |
 | 📋 **P2** | **Verify feature importances stable** after cache fix — re-run Mode V importance ranking, compare to pre-fix | **Laptop** (~30 min) | 📋 OPTIONAL — sanity check that the same features still rank high once they actually vary across time |
 | 🚀 P3 | **Continuous macro archeology** — capture daily snapshots so future PIT validation has clean coverage | **Desktop** (cron, 5 min/day) | 📅 NEW — set up nightly `python tools/drive_archeology.py --preset all` so the next time we need PIT, drift is bounded |
 | 🚀 P3 **AFTER FAYE IN PROD** | **Counterfactual: ffill vs mean_last_10 on trader's actual May 1-28 hours** — measure exact signal-flip count, not estimate | **Desktop or Laptop** (~1-2h dev + ~15-30 min run) | 📅 DEFERRED 2026-05-29 — analytical estimate was 5-15 hours of 723 (1-3%) would emit different action under mean_last_10; net economic impact estimated ±0.5-1.5pp/month (in noise range). Exact count needs full counterfactual: bypass engine's auto-ffill, build features WITH NaN intact for each hour, call `compute_signal_core` with both `na_policy='ffill'` and `na_policy='mean_last_10'`, run trader's actual model, diff predictions. Existing `tools/counterfactual_backtest.py` is the framework but is built for cache-bug testing, not fill-policy testing — needs adaptation. Outputs: exact flip count, signal-distance histogram, per-action breakdown (BUY/HOLD/SELL transitions). Only run AFTER FAYE in production so we have validated mean_last_10 behavior to compare against. |
@@ -29,11 +34,23 @@
 | 🚀 P3 | **P6** — C15 meta-labeling SOL/BTC | blocked (assets shelved, ~6h) | open |
 | 🚀 P3 | **IDEA QUEUE Tier A** — Untested clean (C13-narrow, C54, C55, C58, C59) | research backlog | 5 items open |
 | 🚀 P3 | **IDEA QUEUE Tier B** — V3-lit C60-C82 (16 of 23 patcher-ready) | research backlog | 23 items open |
-| 📋 **P2** | **Validate FAYE bug #16 perf patch HARD A/B** — soft validation DONE 2026-05-31 (chunks find variance, max-aggregation works), hard A/B still pending | **Desktop or Laptop** (~3-4h for one horizon) | 📅 PENDING — recipe: `$env:FAYE_REFINE_TRIAL_SPLIT=1; $env:FAYE_REFINE_EARLYSTOP_PATIENCE=0; python crypto_trading_system_faye.py V ETH 6h --replay 1440`. Compare Step 3 winner to today's H output (6h: w=150 RF+LGBM g=0.996 f=15 +55.30%). Acceptance: within ±2pp return + same combo/window region. Run when Desktop is idle (after RST done). **Promotion blocked on this passing.** Optimization further (queue items): re-dispatch unused workers on a TPE-shared study via RDB storage so chunks share TPE history (recovers sample efficiency); make WORKERS auto-scale by `cpu_count()` not hardcoded sweet-spot for 28-core. |
+| ✅ **DONE 0601** | **Validate FAYE bug #16 perf patch HARD A/B** — soft validation DONE 2026-05-31; **hard A/B DONE 2026-06-01** | **Desktop** | ✅ **PASS 2026-06-01 11:07** — legacy refine (`FAYE_REFINE_TRIAL_SPLIT=1` + `EARLYSTOP_PATIENCE=0`) on ETH 6h --replay 1440 --no-persist (ran ~23:06 May 31 → 11:07 Jun 1, ~12h — legacy is slow w/o chunking). Result: legacy winner **XGB+LGBM w=150 γ=0.996 20f → 55.24%** vs chunked H winner **RF+LGBM w=150 γ=0.996 15f → +55.30%** = **Δ0.06pp, IDENTICAL window (150) + gamma (0.996)** → PASS on ±2pp criterion. Combo/feature differ (plateau has multiple ~equivalent optima ~55.2-55.3%); chunked refine did NOT degrade quality (marginally higher). **Promotion gate CLEARED + live 6h pick reassured.** Log `logs/ed_v1_20260531_230612.log`; output `models_faye/crypto_faye_production_noprod.csv`. Queue (optimization, not blocking): TPE-shared study via RDB storage so chunks share history; auto-scale WORKERS by `cpu_count()`. |
 | 🚀 P3 | **Verify trade count for 6h winner at best_conf** — the +55.3% return at WR=79.3% might be from very few trades at a high conf threshold (small-sample cherry-pick from Step 3's 6-conf scan [65/70/75/80/85/90]) | **Desktop or Laptop** (~5-15 min) | 📅 NEXT — re-run single backtest of the production winner cfg, expose per-conf trade counts. If best_conf was 85% or 90% with only 5-10 trades, +55.3% is statistically weak. Easier alternative: search the H run's terminal scrollback for "OVERALL BEST: ... → ETH 6h" line — it prints conf and trade count there. |
 | 🚀 P3 | **Investigate 8h Mode D survivor count** — only 2 candidates survived 3-fold rolling holdout vs 10 for 6h. **NOT A BUG**, identified as data-driven: 8h labels noisier → models less confident → 0-trade holdout filter prunes most candidates | **Desktop or Laptop** (~30 min) | 📅 LOW — could (a) lower holdout conf threshold for harder horizons, or (b) loosen 0-trade filter to "0 trades only if ALL 3 folds 0". Either is a behavior change that needs care. Not blocking. |
 | ⚪ P4 | **TODO 0519C** — CPCV HRST diagnostic | trigger-based re-run | available, no plan |
 | ⚪ P4 | **Kalshi** — prediction-market data integration | needs API key + impl | backlog |
+
+### Recently CLOSED (2026-06-05)
+
+| Item | Status |
+|---|---|
+| **Engine-vs-trader parity (the old P0)** | ✅ DONE — 96.7% (29/30) on GPU, avg conf delta −0.93 (was 90% / −5.71 on CPU). GPU is the right device (Rule 24). 1 DIFF = recent unsettled hour, 0 BUY↔SELL flips. |
+| **Shadow-monitor closed-bar bug** | ✅ FIXED in code — `crypto_live_shadow.py:220` mirrors fix #2. Root cause: fix #2 closed-bar applied to live, not shadow → +1h forming-vs-closed (23/23). Live number pending trader restart (P0 above). NOT a model change. |
+| **GPU cross-machine determinism probe** | ✅ DONE — Laptop==Desktop bit-identical (`RF=0.51463784 LGBM=0.05573897`). Device decision: use GPU for sanity, drop `--cpu-lgbm` (Rule 24, TODO0604.md). |
+| **Training-window data-revision** | ✅ CONFIRMED (was hypothesis) — 0/15 inference-row drift but probas differ ⟹ training rows revised (deriv/on-chain backfill). Revision-flipped hours are PERMANENT reproduction mismatches; 100% live-replay not achievable without PIT snapshots. The ~3% sanity residual is this, not a leak. |
+| **Bear-config doc drift** | ✅ CORRECTED — live is bull 6h@65/bear 5h@80 (user-confirmed intended); LIVE STATE fixed in TODO+CLAUDE. Bear-swap backtests were on un-lagged engine → re-confirm on lagged engine (open, low pri). |
+| **1-4h DV + leak analysis** | ✅ ANALYZED — WR gradient 1h 92-98%/2h 88%/3h 85%/4h 76%/5-8h 74-83%. Embargo protects all horizons equally (user was right); gradient is the inflation signature. 4h plausible, 2-3h borderline, 1h inflated. Decision gated on embargo sweep (P1 above). |
+| **Trader BTC-display bug** | ✅ DISPLAY FIXED — `/status` no longer lists non-enabled coins (`crypto_revolut_ed_v2.py:2544`). Real-vs-phantom BTC check still pending (P0 above). |
 
 ### Recently CLOSED (2026-05-31)
 
@@ -93,38 +110,40 @@
 
 ---
 
-## 📌 LIVE STATE — G_narrow models on H75 engine (promoted 2026-05-21 21:56 CEST)
+## 📌 LIVE STATE — FAYE models (promoted 2026-05-31 14:22 CEST)
 
-**Engine** (since 2026-05-18 H75; macro_cache mtime fix patched 2026-05-27 11:22): `crypto_trading_system_ed.py` — H_STRICT_FAMILY merge (K=5 multi-seed + REFINE_TRIALS=75 + strict `(combo, w)` dedup) + mtime-aware `_load_macro_csv` (lines 1077-1110). Pre-fix snapshot: `crypto_trading_system_ed_pre_macro_cache_fix_20260527_112231.py`.
+**Engine**: live trader (`crypto_revolut_ed_v2.py` → `crypto_live_trader_ed.py`) is UNCHANGED — inference still runs through `compute_signal_core()` in `crypto_trading_system_ed.py` (macro_cache mtime fix from 2026-05-27 intact). The live MODELS + regime config were *generated* by `crypto_trading_system_faye.py` (FAYE H + RST run 2026-05-31, with bugs #15–18 fixed) and spliced into `models/crypto_ed_production.csv` + `config/regime_config_ed.json`.
 
-**Models + regime config** (swapped 2026-05-21 21:56 from H75-fresh to G_narrow_d's HRST output; G_fresh "promote" on 2026-05-22 19:51 was content-identical and effectively no-op for ETH 5h/8h):
-- Detector: `sma24>sma100` (unchanged across all 3 promotions)
-- Bull = **5h@65%** RF+LGBM w=281 γ=0.9981 12f (G_narrow_d May 20-21 Desktop refine winner)
-- Bear = **8h@65%** RF+LGBM w=293 γ=0.9990 16f (G_narrow_d May 20-21 Desktop refine winner)
+**Models + regime config** (FAYE H/RST output promoted 2026-05-31 14:22; **bear horizon+conf changed 2026-06-02 23:09** — see note below):
+- Detector: **`tsmom_672h`** (named) — CHANGED from `sma24>sma100`
+- Bull = **6h@65%** RF+LGBM w=150 γ=0.996 15f (FAYE H winner +55.30% / WR 79.3%) — was 5h pre-FAYE
+- Bear = **5h@80%** RF+LGBM w=150 γ=0.999 15f (FAYE H 5h winner +41.93% / WR 79.7%, Grid) — **CHANGED 2026-06-02 from 8h@65%** (RF+LGBM w=155 γ=0.9997 11f). 5h-standalone backtested better on the recent month (Jun-3 `am1_prod_recentmonth.csv`: 5h +39.31% vs 8h +31.96%); bear conf raised 65%→80%. Backtest drivers: commits `f580d36` (NEW 5h@80 vs OLD 8h@65), `af1c0d5` (recent-month a-m1). Confirmed intended by user 2026-06-04.
 - Shields OFF (both regimes)
-- **Rally cooldown ON** (both regimes — REVERTED 2026-05-27 13:18 to Mode T optimal recommendation, after May 23 22:21 manual-OFF intermezzo). Bull: rr8h≥2.0 OR rr14h≥6.0 cd=6h. Bear: rr10h≥5.5 OR rr12h≥2.0 cd=8h.
-- min_sell_pnl=0%, max_hold=10h, max_position_usd=$14,300
+- **Rally cooldown ON** (both regimes). Bull: rr8h≥2.0% OR rr14h≥6.0% cd=6h. Bear: rr10h≥5.5% OR rr12h≥2.0% cd=8h.
+- min_sell_pnl=0%, max_hold=10h, max_position_usd=$14,300, maker orders ON
 
 **Asset universe**: ETH live; BTC/SOL/LINK/BNB `enabled: false`; XRP removed from trader data pipeline 2026-05-23 (silent-crash mitigation).
+
+**Promotion source**: FAYE H + RST ETH 6h/7h/8h --replay 1440 on 2026-05-31. Mode R picked `tsmom_672h × 6h/8h` (REF +72.75%/+76.05%, B&H +61.88%); Mode S optimized confs to 65%/65%; Mode T converged shields OFF + rally cooldowns + min_sell_pnl=0 + max_hold=10h. A wider 5h-inclusive RST (research, `--no-persist`, not promoted) re-confirmed the 6h/8h regime pair *at that time*; the bear was subsequently moved to **5h@80%** on 2026-06-02 (see Bear note above). **Parity verified on the new config 2026-06-04 22:06**: `validate_core_against_signal_log.py` → 25/30 = 83.3% current-config match, 0 errors, **0 real BUY↔SELL flips** (5 DIFFs all HOLD-threshold boundary cases). The 5h FAYE winner (+41.93%) is now the LIVE bear model and sits in `models/crypto_ed_production.csv` as the 5h row.
 
 **Rollback ladder (one-command each, hot-reloads within 5 min):**
 
 ```powershell
-# One level back — to G_fresh / H75-fresh promote state (live 2026-05-20 09:04 → 2026-05-21 21:56)
-# Note: pre_G_narrow snapshot captures H75-fresh state exactly
+# One level back — to G_narrow (sma24>sma100 / bull 5h / bear 8h; live 2026-05-21 → 2026-05-31, the config FAYE replaced)
+copy archive\g_narrow_live_20260531_142202\regime_config_ed.json    config\regime_config_ed.json
+copy archive\g_narrow_live_20260531_142202\crypto_ed_production.csv  models\crypto_ed_production.csv
+
+# Two levels back — to pre-G_narrow / H75-fresh promote state (live 2026-05-20 09:04 → 2026-05-21 21:56)
 copy config\regime_config_ed_pre_G_narrow_20260521.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_G_narrow_20260521.csv models\crypto_ed_production.csv
 
-# Two levels back — to H75-snapshot (live 2026-05-18 22:02 → 2026-05-20 09:04)
+# Three levels back — to H75-snapshot (live 2026-05-18 22:02 → 2026-05-20 09:04)
 copy config\regime_config_ed_pre_H75fresh_20260520.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_H75fresh_20260520.csv models\crypto_ed_production.csv
 
-# Three levels back — to pre-H75 baseline (live before 2026-05-18)
+# Four levels back — to pre-H75 baseline (live before 2026-05-18)
 copy config\regime_config_ed_pre_H75_20260518.json    config\regime_config_ed.json
 copy models\crypto_ed_production_pre_H75_20260518.csv models\crypto_ed_production.csv
-# Optional engine-layer rollback (only if reverting to the pre-H_STRICT_FAMILY engine):
-# Note: pre-H75 snapshot archived 2026-05-28 — fetch from ARCHIVED/2026-05-28_v3_cleanup/
-copy ARCHIVED\2026-05-28_v3_cleanup\crypto_trading_system_ed_pre_H75_20260518.py     crypto_trading_system_ed.py
 ```
 
 **Promotion source**: Desktop G_narrow_d HRST run 2026-05-20 11:05 → 2026-05-21 10:28 (wall ~23h 22m, log `logs/ed_v1_20260520_110556.log`). Mode T REF +89.14% (converged iter 2, no STRICT rally-cooldown winner).
@@ -404,13 +423,30 @@ Decision gate on completion:
 
 ---
 
-## 🔥 Embargo A/B test (Laptop, ~2.5h)
+## ✅ Embargo A/B test — DONE 2026-05-31
 
 **Search anchor**: `TODO-0526-EMBARGO-AB`
 
-**Command**: `python tools/embargo_ab_test.py --mode=both`
+**Command**: `python tools/embargo_ab_test.py --mode=both` (Laptop)
 
-Quantifies the contribution of embargo (divergence #1 of the original TODO 0526 "4 semantic differences") to the backtest-vs-live gap. Informs Step 6 refactor scoping. Not blocking anything in production. Run when Laptop has 2.5h of capacity.
+**Result** (ETH Mode T, replay=1440h, identical models 6h RF+LGBM w=150 15f γ=0.996 / 8h RF+LGBM w=155 11f γ=0.9997 — only embargo varied):
+
+| Training cutoff | H1 | H2 | REF |
+|---|---|---|---|
+| `i − horizon` (embargo, honest backtest) | +12.00% | +50.31% | **+69.09%** |
+| `i − 0` (no embargo, live-equivalent cutoff) | +49.46% | +82.06% | **+174.20%** |
+
+**+105pp gap from embargo alone.** Interpretation: the +174.20% is **leakage-inflated** — setting `embargo=0` in a *backtest* reintroduces label-overlap leakage (training rows in the last `horizon` hours carry labels that peek into the test window). It is NOT a live target. The honest, live-realistic number is the embargo'd **+69.09%**. Conclusions:
+1. **Keep embargo in backtest/selection** (Mode D/V/H/T, HRST) — it is essential; the +105pp is the size of the leakage it removes.
+2. **Live trader correctly uses NO embargo** (`train_end = i`, all data) — Critical Rule 9 / [[feedback_no_live_embargo]]. Nothing changes there.
+3. **Embargo is NOT the source of the live-vs-backtest gap** (that was the macro_cache bug + signal-path semantics, TODO 0526/0527) → **Step 6 refactor still warranted** for an honest live projection (you cannot get one by flipping embargo off — that leaks).
+
+**Output**: `output/embargo_ab_20260531_171552/` (report.md, baseline/no_embargo subprocess logs + signal CSVs).
+
+**Two harness bugs found + fixed** (`tools/embargo_ab_test.py`):
+- Windows `os.execv` re-exec in FAYE spawns a *detached* child and the launcher process exits in 0.2s → `subprocess.run` captured nothing (parsed 0 signals). Fixed by pre-setting `_FAYE_WARNINGS_BAKED=1` in the subprocess env so FAYE skips the re-exec and runs in-process. **General gotcha: any harness that subprocess-launches `crypto_trading_system_faye.py` and waits on it needs this env var on Windows.**
+- Error-path verdict defaulted `match_rate` None→100, printing "EMBARGO HAS MINIMAL EFFECT" (backwards) → now prints **INCONCLUSIVE**.
+- Match-rate itself remains uncomputable by design (harness parses only every-50th signal-cache line; embargo shifts the walk-forward grid +5h so samples never align). **Use Mode T REF as the comparison metric**, not the harness match rate. (Phase times 4.9h vs 25min were laptop sleep during standalone Mode T, not compute.)
 
 ---
 

@@ -217,9 +217,23 @@ def shadow_compare(
         X_train = df_train.iloc[train_start:][feature_cols].values
         y_train = df_train.iloc[train_start:]["label"].values
 
-        # Inference row: live trader uses the freshest row of df (which has all rows,
-        # including the label-NaN tail)
+        # Inference row: replicate the live trader EXACTLY, INCLUDING Fix #2
+        # (2026-06-03) closed-bar step-back. Before Fix #2 the live trader inferred on
+        # the freshest (often forming) bar — which this module mirrored. Fix #2 changed
+        # generate_live_signal to step back to the last fully-CLOSED bar when df.iloc[-1]
+        # is still open, but this shadow path was NOT updated, so it kept inferring on the
+        # forming bar -> shadow match crashed 100% -> ~50% on 2026-06-03. Mirror of
+        # crypto_live_trader_ed.py:706-727. 2026-06-05.
         i = len(df) - 1
+        if getattr(_live_trader, "USE_CLOSED_BAR_FOR_INFERENCE", True) and i >= 1:
+            try:
+                _last_dt = pd.to_datetime(df.iloc[i]["datetime"])
+                if _last_dt.tzinfo is None:
+                    _last_dt = _last_dt.tz_localize("UTC")
+                if (_last_dt + pd.Timedelta(hours=1)) > pd.Timestamp.now(tz="UTC"):
+                    i -= 1
+            except Exception:
+                pass
         X_test = df.iloc[i : i + 1][feature_cols].values
         row["inference_row_dt"] = str(df.iloc[i].get("datetime", ""))
         row["n_train"] = len(y_train)
