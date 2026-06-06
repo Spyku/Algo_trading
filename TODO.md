@@ -40,6 +40,12 @@
 | ⚪ P4 | **TODO 0519C** — CPCV HRST diagnostic | trigger-based re-run | available, no plan |
 | ⚪ P4 | **Kalshi** — prediction-market data integration | needs API key + impl | backlog |
 
+### Recently CLOSED (2026-06-06)
+
+| Item | Status |
+|---|---|
+| **PySR merge created a functional duplicate** (`models/pysr_ETH_*.json`) | ✅ ROOT CAUSE FIXED + proven inert. `merge_pysr_old_new.py` (run 2026-05-28/29) appended all 5 NEW formulas blindly → the `xa_nasdaq_relstr5d − logret_120h` formula got re-discovered by NEW and stacked next to OLD: **5h pysr_2≡pysr_8 r=1.0000**, 6h r=0.9980, 7h r=0.9993 (8h clean). **Diagnostic verdict: INERT** — that signal ranks #80–117/194, never near the top-15 cut; removing pysr_8 changes the live top-15 by **0 features** on both 5h+6h; neither live model even references pysr_2/8. So **no live impact, no retrain needed.** **FIX**: rewrote `merge_pysr_old_new.py` with value-based dedup (sympy.sympify→lambdify eval on real data, drop NEW with \|corr\|≥0.95 vs any kept; report-only by default; reads the true `_pre_*_old_only` backup as OLD so re-runs don't double-merge). Verified report-only catches all 3 dups (5h→9, 6h→9, 7h→9, 8h→10); live files untouched. **DEFERRED (not urgent, dup is inert)**: (a) actually removing the dup from LIVE needs `--apply` + an HRST retrain — applying renumbers slots and `pysr_9` (live-referenced) would shift meaning (Rule 14), so only do it inside a clean PySR regen with trader flat; (b) **`models/` vs `models_faye/` slot-name collision** — same `pysr_N` names hold *different* formulas (live reads `models/`, FAYE defaults `models_faye/`); a future FAYE PySR-using winner promoted to live without aligning dirs would silently change feature meaning → reconcile both dirs to one canonical deduped set at the next regen. |
+
 ### Recently CLOSED (2026-06-05)
 
 | Item | Status |
