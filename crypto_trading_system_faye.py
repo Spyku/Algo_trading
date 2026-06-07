@@ -1348,6 +1348,29 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, k
     df['volatility_48h'] = df['logret_1h'].rolling(48).std()
     df['vol_ratio_12_48'] = df['volatility_12h'] / (df['volatility_48h'] + 1e-10)
 
+    # ===== Added 2026-06-08 (feattest DV: picked 5/5 of D candidates) =====
+    # vol-of-vol (turbulence) + KAMA(10) adaptive trend (Kaufman efficiency ratio).
+    # All price-derived, BACKWARD-looking (rolling) / recursive-FORWARD (kama) -> CAUSAL,
+    # 0h lag (point-in-time hourly market data), NO leak, NO daily/24h lag, NO candle issue.
+    _vov12 = df['logret_1h'].rolling(12).std()
+    df['vol_of_vol_8h'] = _vov12.rolling(8).std()
+    df['vol_of_vol_24h'] = _vov12.rolling(24).std()
+    _kc = df['close'].values
+    _kn = len(_kc)
+    _kama = np.zeros(_kn)
+    if _kn > 0:
+        _w = min(10, _kn)
+        _kama[:_w] = _kc[:_w]
+        _kad = np.abs(np.diff(_kc, prepend=_kc[0]))
+        _kfast, _kslow = 2.0 / 3, 2.0 / 31
+        for _i in range(10, _kn):
+            _dir = abs(_kc[_i] - _kc[_i - 10])
+            _v = _kad[_i - 9:_i + 1].sum()
+            _er = _dir / _v if _v > 0 else 0.0
+            _sc = (_er * (_kfast - _kslow) + _kslow) ** 2
+            _kama[_i] = _kama[_i - 1] + _sc * (_kc[_i] - _kama[_i - 1])
+    df['kama_10'] = _kama
+
     if df['volume'].sum() == 0 or df['volume'].isna().all():
         df['volume_ratio_h'] = 1.0
     else:
@@ -1438,6 +1461,7 @@ def build_hourly_features(df_hourly, horizon=PREDICTION_HORIZON, verbose=True, k
         'rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
         'atr_pct_14h', 'intraday_range',
         'volatility_12h', 'volatility_48h', 'vol_ratio_12_48',
+        'vol_of_vol_8h', 'vol_of_vol_24h', 'kama_10',
         'volume_ratio_h', 'vvr_12h',
         'gk_volatility_14h', 'gk_volatility_48h',
         'adx_14h', 'plus_di_14h', 'minus_di_14h',
@@ -1771,9 +1795,10 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
         # Create feature versions (no underscore = enters feature matrix)
         df['deriv_funding_rate'] = df['_funding_rate']
         df['deriv_funding_chg1d'] = df['deriv_funding_rate'].diff(24) * 100  # 24h change
+        df['deriv_funding_chg3d'] = df['deriv_funding_rate'].diff(72) * 100  # NEW 2026-06-08 — 3-day funding momentum (backward diff, 0h lag; same lag profile as chg1d)
         df['deriv_funding_zscore'] = (df['deriv_funding_rate'] - df['deriv_funding_rate'].rolling(168, min_periods=24).mean()) / \
                                      (df['deriv_funding_rate'].rolling(168, min_periods=24).std() + 1e-10)
-        for col in ['deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_zscore']:
+        for col in ['deriv_funding_rate', 'deriv_funding_chg1d', 'deriv_funding_chg3d', 'deriv_funding_zscore']:
             if col not in all_cols:
                 all_cols.append(col)
     else:
@@ -1819,7 +1844,9 @@ def build_all_features(df_hourly, asset_name='BTC', horizon=PREDICTION_HORIZON, 
                 df['deriv_basis_chg1d'] = df['deriv_basis'].diff(24)
                 df['deriv_basis_zscore'] = (df['deriv_basis'] - df['deriv_basis'].rolling(168, min_periods=24).mean()) / \
                                            (df['deriv_basis'].rolling(168, min_periods=24).std() + 1e-10)
-                for col in ['deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore']:
+                df['deriv_basis_zscore72'] = (df['deriv_basis'] - df['deriv_basis'].rolling(72, min_periods=24).mean()) / \
+                                             (df['deriv_basis'].rolling(72, min_periods=24).std() + 1e-10)  # NEW 2026-06-08 — faster basis regime (backward rolling, 0h lag)
+                for col in ['deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore', 'deriv_basis_zscore72']:
                     if col not in all_cols:
                         all_cols.append(col)
                         basis_cols_added += 1
@@ -1993,6 +2020,9 @@ NEWBORN_FEATURES = {
     'deriv_basis', 'deriv_basis_chg1d', 'deriv_basis_zscore',
     'xa_btc_lag1h', 'xa_btc_lag2h', 'xa_btc_lag3h',
     'xa_eth_lag1h', 'xa_eth_lag2h', 'xa_eth_lag3h',
+    # 2026-06-08: vol-of-vol + KAMA adaptive trend + funding/basis momentum (feattest DV; all 0h lag, causal)
+    'vol_of_vol_8h', 'vol_of_vol_24h', 'kama_10',
+    'deriv_funding_chg3d', 'deriv_basis_zscore72',
 }
 
 _PYSR_BUILTINS = {
