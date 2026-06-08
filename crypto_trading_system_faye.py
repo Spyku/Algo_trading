@@ -5628,7 +5628,23 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
                   f"{t.params['gamma']:7.4f}  {t.params['n_features']:5d}  {src:>7s}{marker}")
 
         # ── 3-FOLD ROLLING HOLDOUT: re-evaluate top candidates on unseen data ──
-        candidates = completed_trials[:20]
+        # Family-dedup the holdout pool (2026-06-08): keep only the best (highest-APF)
+        # trial per (combo, window) cluster, then take the top 10 FAMILIES — instead of the
+        # raw top-20, which crowds the holdout with gamma/feature near-duplicates of one
+        # family (e.g. 5x RF+LGBM 250h) and starves other combos/windows of slots.
+        # completed_trials is sorted best-first, so the first hit per family is its best.
+        # Same (combo, w) key as the post-holdout _diversity_key below; this just applies it
+        # earlier so the holdout itself tests diverse candidates (and runs ~2x faster).
+        _holdout_fam_seen = set()
+        candidates = []
+        for _t in completed_trials:
+            _fam = (_t.params['combo'], _t.params['window'])
+            if _fam in _holdout_fam_seen:
+                continue
+            _holdout_fam_seen.add(_fam)
+            candidates.append(_t)
+            if len(candidates) >= 10:
+                break
         N_CANDIDATES = len(candidates)
 
         print(f"\n  {'='*70}")
