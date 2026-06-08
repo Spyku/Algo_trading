@@ -4595,6 +4595,14 @@ DEKU_PRUNING_WARMUP = 8  # minimum walk-forward steps before pruning kicks in
 GRID_COMBOS = [
     'RF+LGBM',    # workhorse — 18/20 wins in last month's ABCDE matrix
     'XGB+LGBM',   # XGB partner — 2/20 wins (kept as safety; some 7h cases prefer it)
+    'GB+LGBM',    # added 2026-06-08: model-combo re-test (tools/model_combo_retest_desktop.py,
+                  # ETH 6h w150 17feat g0.997 6mo step=36) ranked LGBM+GB the #1 combo of all 25
+                  # (singles+pairs+triples): +15.8% ret / APF 2.06 / tight seed spread, beating
+                  # both prod pairs. Overturns the old "GB partner always fails" verdict.
+                  # CAVEAT: step=36 fast-screen — re-confirm at step=1 + a 2nd window. NOTE: GB
+                  # (sklearn GradientBoosting) is ~10x slower to fit than LGBM, so GB-combo evals
+                  # are the Mode D bottleneck, and if GB+LGBM reaches the top-3 refine, Mode V is
+                  # slower too.
     # 'RF+XGB' dropped 2026-04-27: 0/20 wins across last month's ABCDE matrix.
     # Was kept previously as third tree ensemble option but never picked. Re-add
     # if a future regime favors it (no evidence in current ETH data).
