@@ -2420,6 +2420,25 @@ def _check_pysr_leakage(features, asset, horizon):
 # ============================================================
 # MODELS — Deku adds XGBoost (5 base models, 26 ensemble combos)
 # ============================================================
+def _lgbm_hyperparam_overrides():
+    """Default-safe LGBM hyperparameter overrides via env vars (added 2026-06-08).
+
+    Lets a backtest (tools/bt_lgbm_tune_8h.py) test LGBM regularization tweaks
+    through the REAL engine model path (generate_signals -> ALL_MODELS['LGBM']).
+    Defaults reproduce the historical hardcoded values EXACTLY — learning_rate=0.05,
+    max_depth=4, and LightGBM's own defaults for min_child_samples(20)/reg_lambda(0)
+    — so with the env vars UNSET this is a zero-behavior-change no-op for production,
+    HRST, and Mode D/V. Read at model-construction time (inside the lambda), so a
+    single backtest process can flip params between arms by setting os.environ.
+    """
+    return dict(
+        learning_rate=float(os.environ.get('LGBM_LR', 0.05)),
+        max_depth=int(os.environ.get('LGBM_MAX_DEPTH', 4)),
+        min_child_samples=int(os.environ.get('LGBM_MIN_CHILD', 20)),
+        reg_lambda=float(os.environ.get('LGBM_REG_LAMBDA', 0)),
+    )
+
+
 def _get_deku_models():
     """Production models with XGBoost added."""
     from lightgbm import LGBMClassifier
@@ -2429,8 +2448,8 @@ def _get_deku_models():
         'XGB':  lambda: XGBClassifier(n_estimators=300, max_depth=3, learning_rate=0.05, random_state=42,
                                        tree_method='hist', verbosity=0, n_jobs=1),
         'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42),
-        'LGBM': lambda: LGBMClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
-                                        class_weight='balanced', verbose=-1, random_state=42, device='gpu'),
+        'LGBM': lambda: LGBMClassifier(n_estimators=300, class_weight='balanced', verbose=-1,
+                                        random_state=42, device='gpu', **_lgbm_hyperparam_overrides()),
     }
 
 def _get_deku_diagnostic_models():
@@ -2442,8 +2461,8 @@ def _get_deku_diagnostic_models():
         'XGB':  lambda: XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=42,
                                        tree_method='hist', verbosity=0, n_jobs=1),
         'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42),
-        'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
-                                        class_weight='balanced', verbose=-1, random_state=42, device='gpu'),
+        'LGBM': lambda: LGBMClassifier(n_estimators=100, class_weight='balanced', verbose=-1,
+                                        random_state=42, device='gpu', **_lgbm_hyperparam_overrides()),
     }
 
 
@@ -2479,9 +2498,9 @@ def _get_deku_diagnostic_models_seeded(seed):
         'XGB':  lambda: XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.05, random_state=seed,
                                        tree_method='hist', verbosity=0, n_jobs=1),
         'LR':   lambda: LogisticRegression(max_iter=1000, class_weight='balanced', random_state=seed),
-        'LGBM': lambda: LGBMClassifier(n_estimators=100, max_depth=4, learning_rate=0.05,
-                                        class_weight='balanced', verbose=-1, random_state=seed,
-                                        device=device, num_threads=lgbm_threads),
+        'LGBM': lambda: LGBMClassifier(n_estimators=100, class_weight='balanced', verbose=-1,
+                                        random_state=seed, device=device, num_threads=lgbm_threads,
+                                        **_lgbm_hyperparam_overrides()),
     }
 
 
