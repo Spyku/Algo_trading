@@ -153,7 +153,10 @@ def main():
 
     window, gamma, prod_feats = prod_ctx()
     df_raw = F.load_data(ASSET)
-    df, all_cols = F._build_features(df_raw, ASSET, feature_override=None, horizon=HORIZON)
+    # Full universe: _build_features(override=None) returns the engine's 18-feature
+    # DEFAULT active list, not the universe. Replicate its internals to get all ~189.
+    df, all_cols = F.build_all_features(df_raw, asset_name=ASSET, horizon=HORIZON)
+    F._compute_pysr_features(df, all_cols, ASSET, HORIZON, verbose=False)
     close = df["close"].values
     dt = pd.to_datetime(df["datetime"]).values
     bull = (np.log(df["close"] / df["close"].shift(672)) > 0).values
