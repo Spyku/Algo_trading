@@ -1,6 +1,6 @@
 # ARCHIVED_LOG.md — Audit trail of tested/shelved decisions
 
-This file preserves the full historical decision trail of the engine: tested/shelved/promoted research items, the canonical idea scoreboard (C01-C82), MERGED TOPICS (closed research arcs), and per-day batch closures. Split out of TODO.md on 2026-05-19 to keep TODO.md focused on active work only.
+This file preserves the full historical decision trail of the engine: tested/shelved/promoted research items, the canonical idea scoreboard (C01-C86), MERGED TOPICS (closed research arcs), and per-day batch closures. Split out of TODO.md on 2026-05-19 to keep TODO.md focused on active work only.
 
 **This file is reference material — append-only.** Don't edit closed entries; if a new piece of evidence overturns a verdict, add a new entry that references the old one rather than rewriting history.
 
@@ -9,6 +9,15 @@ This file preserves the full historical decision trail of the engine: tested/she
 - [TODO.md](TODO.md) — active work only
 
 ---
+
+### 🔬 CLOSED 2026-06-10 — Strategy-class diversification: 3 orthogonal strategies tested, 1 promoted to paper
+
+After exhausting every lever on the **directional** ETH model (features, model tuning, decision layer, target/label — each fails the gated sim), pivoted to **orthogonal strategy classes** that don't depend on directional prediction. Thorough crypto-quant landscape research → 3 classes backtested:
+- **Basis / funding carry = WINNER** — delta-neutral (long spot + short perp, harvest 8h funding). ETH Sharpe 15-24 frictionless (~4.8 net per lit), APY +6.17%, maxDD 1.97%, funding +81% of periods, **uncorrelated** to the directional sleeve. → promoted to **paper-trading** on Desktop (`tools/funding_carry_eth.py`, FREE Binance public data, live since 2026-06-10 21:39 UTC).
+- **Stat-arb ETH-BTC = DEAD** — −100%, Sharpe −3 to −6; the pair trends (dominance regimes) more than it mean-reverts (spread ADF p≈0.05).
+- **Cross-sectional momentum = WEAK / SHELVED** — best Sharpe 0.73 @14d, but 6-coin universe too thin (lit uses ~50); revive on a ~30-50 coin universe.
+
+Also closed: **trend-scanning label (LdP) = DEAD** (−8.64pp gated, same family as C20). Catalogued below as **C83** (carry, active-paper) / **C84** (stat-arb, dead) / **C85** (xsec momentum, shelved) / **C86** (trend-scanning label, dead). Full narrative: [TODO.md](TODO.md) "Logged 2026-06-10". The carry-sleeve note for CLAUDE.md stays deferred until the paper run validates net-of-frictions.
 
 ### 🔥 CLOSED 2026-06-05 — Shadow-monitor closed-bar bug, GPU device decision, data-revision confirmation, 1-4h DV leak analysis, BTC display fix
 
@@ -407,7 +416,7 @@ copy models\crypto_ed_production_pre_H75fresh_20260520.csv models\crypto_ed_prod
 
 ### 🚫 IDEA QUEUE drop-list (closed/shipped IDEA QUEUE items — quick lookup, 2026-05-19 audit)
 
-Curated subset of the canonical scoreboard (C01-C82): only the IDs that lived briefly on the active IDEA QUEUE in TODO.md before being closed. Quick lookup so future audits don't re-add already-closed items. For the full per-CID scoreboard with evidence and revival conditions, see "CANONICAL IDEAS SCOREBOARD" below.
+Curated subset of the canonical scoreboard (C01-C86): only the IDs that lived briefly on the active IDEA QUEUE in TODO.md before being closed. Quick lookup so future audits don't re-add already-closed items. For the full per-CID scoreboard with evidence and revival conditions, see "CANONICAL IDEAS SCOREBOARD" below.
 
 **Trigger for an item to land here**:
 - Tested on fixed harness → DEAD / MARGINAL below +5pp ship threshold
@@ -2315,7 +2324,7 @@ The "every feature-addition fails" claim is now WEAKER — at least 9 of those f
 | ~~C31~~ | Funding rate momentum / acceleration | **DEAD** | Tested 2026-05-04; Δ−5.25 avg APF |
 | C32 | Liquidation cascade event features | proposed | Binance liquidation feed; not currently downloaded |
 | C33 | Bid-ask spread compression z-score | proposed | Distinct from quarantined raw spread_bps |
-| C34 | ETH-BTC cointegration residual | proposed | Engle-Granger residual, distinct from lead-lag |
+| C34 | ETH-BTC cointegration residual | proposed (feature) | Engle-Granger residual, distinct from lead-lag. **Standalone pairs-trading-strategy variant tested 2026-06-10 → C84 DEAD** (−100%, pair trends not mean-reverts). |
 | C35 | Wavelet multi-scale decomposition | proposed | `pywavelets`, 3-4 scale coefficients |
 | C36 | News/social sentiment polarity (CryptoPanic + Santiment) | proposed | Polarity, not event volume (different from C28 GDELT) |
 | C37 | Stablecoin issuance velocity | proposed | First difference of mcap (level was C28-class dead) |
@@ -2409,6 +2418,17 @@ Old ideas already tested + DEAD on prior engine, NO retest needed: C17 fracdiff,
 | C80 | Mutual Information Decay | #39 | ~2h | MI between returns at increasing lags |
 | C81 | DCCA Detrended Cross-Correlation | #40 | ~3h | Scale-dependent correlation between assets |
 | C82 | Hilbert Transform Dominant Cycle | #42 | ~3h | Adaptive oscillator parameter extraction |
+
+### 📋 STRATEGY-CLASS DIVERSIFICATION C83-C86 (added 2026-06-10)
+
+A **different axis** from C01-C82 (which are feature / model / label / detector tweaks to the **directional** ETH model). After every directional lever was exhausted (each fails the gated sim — the model's selectivity + high-conf gate + slow features IS the edge), the 2026-06-10 pivot was to test **orthogonal strategy CLASSES** that don't rely on directional prediction. Thorough crypto-quant landscape research → 3 classes backtested + 1 promoted to paper. Full narrative in [TODO.md](TODO.md) "Logged 2026-06-10". Tools: `tools/bt_basis_carry.py`, `tools/bt_statarb_eth_btc.py`, `tools/bt_xsec_momentum.py`, `tools/bt_trend_scanning_8h.py`, paper bot `tools/funding_carry_eth.py`.
+
+| CID | Idea | Status | Evidence / revival condition |
+|---|---|---|---|
+| **C83** | **Basis / funding carry** (delta-neutral: long spot + short perp, harvest 8h funding) | 🟢 **ACTIVE — PAPER** (the winner) | ETH always-on (unleveraged, frictionless): **Sharpe 15.08, APY +6.17%, maxDD 1.97%, funding +81% of periods**; BTC Sharpe 23.8 / LINK 24.1 / XRP 13.5; SOL/BNB weak (BNB +funding only 18% → reverse carry). Lit net-Sharpe ~4.8 (frictionless inflates the headline) — still far above the directional Sharpe AND **uncorrelated**. Paper bot `tools/funding_carry_eth.py` live on Desktop since 2026-06-10 21:39 UTC (FREE Binance public data, restart-safe, single-instance lock). **NOT a scoreboard "close" — live status in [TODO.md](TODO.md).** NEXT: ~2-4wk forward record (ideally spanning a +funding stretch) → perp-venue decision → Phase-2 live build. |
+| **C84** | **Stat-arb ETH-BTC pairs trading** (rolling cointegration hedge ratio + z-score entry/exit on the spread) | 🔴 **DEAD** | `tools/bt_statarb_eth_btc.py`: **−100%, Sharpe −3 to −6, WR 39-49%** across configs. Spread ADF p≈0.05 (borderline) — ETH/BTC **trends** (dominance regimes) more than it mean-reverts. Distinct angle from **C34** (cointegration residual as a *feature*, also negative Δ−3.96): both the feature-angle and the standalone-strategy-angle of ETH-BTC cointegration are dead on the current engine/data. (Crude per-bar sizing, but the sign is robust.) No revival path. |
+| **C85** | **Cross-sectional momentum** (rank a coin universe by trailing return, long top / short bottom) | ⚪ **SHELVED** | `tools/bt_xsec_momentum.py`, 6-coin universe (ETH/BTC/SOL/LINK/XRP/BNB): best **Sharpe 0.73 @14d lookback** (matches the academic 2-4wk crypto-momentum finding), APY +34% but **maxDD 36-63%**; most configs negative. **Universe too thin** — the literature uses ~50 coins; 6 can't diversify the idiosyncratic risk. **Revival condition: rebuild on a ~30-50 coin universe** (needs hourly data for the wider set) before judging. |
+| **C86** | **Trend-scanning label** (López de Prado AFML — label = sign of the most-significant forward t-stat trend, variable lookahead) | 🔴 **DEAD** | `tools/bt_trend_scanning_8h.py` (ETH 8h, gated 60d): **−8.64pp** vs the fee-aware label (more trades 89 vs 80, lower WR 58 vs 68). The permissive target dilutes the model's selectivity — same failure family as **C20** (triple-barrier as training label, DEAD): both replace the fee-aware label and both lose because selectivity (high-conf gate + fee-aware target) IS the edge. No revival path; the fee-aware label is confirmed well-matched. |
 
 #### Recommended priority order (FULL — combining C01-C82 untested + proposed)
 
