@@ -2586,6 +2586,7 @@ def _handle_help_command():
         "/gate [ASSET] [bull|bear] [on|off|clear] — Rally-cooldown gate\n\n"
         "<b>Operations</b>\n"
         "/sync — Force-sync positions from exchange\n"
+        "/sanity — Live-correctness check (shadow + snapshot; add 'full' for parity)\n"
         "/reload — Force-refresh all data feeds (bypass freshness)\n"
         "/pause /resume — Pause or resume signals\n"
         "/stop — Stop the trader\n\n"
@@ -2596,7 +2597,8 @@ def _handle_help_command():
 
 def _handle_reload_command(trading_cfg):
     """Force-refresh every data source, bypassing freshness windows.
-    Triggered by the 🔄 Reload Telegram button — used to recover when a stale
+    Triggered by the /reload Telegram command (formerly the 🔄 Reload button, now
+    replaced by 🩺 Sanity on the keyboard) — used to recover when a stale
     feed (Drive sync glitch, missed download) is blocking signals or hot-reload
     preflight. Runs on the Telegram thread; does NOT trigger a signal cycle —
     the next scheduled cycle (or hot-reload) will pick up the fresh data.
@@ -3420,7 +3422,7 @@ def _main_buttons(trading_cfg=None):
     gate_bull_cmd = f"/gate {active_asset} bull {'off' if gate_bull else 'on'}" if active_asset else "/gate"
     gate_bear_cmd = f"/gate {active_asset} bear {'off' if gate_bear else 'on'}" if active_asset else "/gate"
     return [
-        [('📊 Status', '/status'), ('🔄 Reload', '/reload')],
+        [('📊 Status', '/status'), ('🩺 Sanity', '/sanity')],
         [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
         [(shield_bull_label, '/hold bull'), (shield_bear_label, '/hold bear')],
         [(gate_bull_label, gate_bull_cmd), (gate_bear_label, gate_bear_cmd)],
@@ -3430,7 +3432,7 @@ def _main_buttons(trading_cfg=None):
 
 # Legacy static fallback (kept for code paths that import it)
 MAIN_BUTTONS = [
-    [('📊 Status', '/status'), ('🔄 Reload', '/reload')],
+    [('📊 Status', '/status'), ('🩺 Sanity', '/sanity')],
     [('🔵 Buy', '/buy'), ('🔴 Sell', '/sell')],
     [('🛡 Shield', '/hold'), ('⚙️ Setup', '/setup')],
 ]
@@ -4162,6 +4164,8 @@ def _dispatch_telegram_message(msg, trading_cfg):
         send_telegram("🔄 <b>Synced</b>")
     elif cmd == '/reload':
         _handle_reload_command(trading_cfg)
+    elif cmd == '/sanity' or cmd.startswith('/sanity '):
+        _handle_sanity_command(msg)
     elif cmd == '/buy' or cmd.startswith('/buy '):
         _handle_manual_buy_command(msg, trading_cfg)
     elif cmd == '/sell' or cmd.startswith('/sell '):
@@ -4810,26 +4814,49 @@ def _send_startup_telegram(trading_cfg):
 _SANITY_DATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'last_sanity_date.txt')
 
 
-def _run_sanity_and_alert():
-    """Run tools/sanity_check.py (shadow match-rate + engine-vs-trader parity) and
-    Telegram the result. INFORMATIONAL ONLY — never changes trading behaviour."""
+def _run_sanity_and_alert(quick=False, label='Daily sanity check'):
+    """Run tools/sanity_check.py (shadow + snapshot replay [+ parity]) and Telegram
+    the result. INFORMATIONAL ONLY — never changes trading behaviour.
+      quick=True  -> deterministic checks only (shadow + snapshot, ~instant); skips
+                     the ~15-min parity. Used by the on-demand 🩺 Sanity button.
+      quick=False -> full check incl. the informational parity (daily 08:30 run).
+    Must be called on a BACKGROUND thread (the full check takes ~15 min)."""
     import html
     try:
         here = os.path.dirname(os.path.abspath(__file__))
-        r = subprocess.run(
-            [sys.executable, os.path.join(here, 'tools', 'sanity_check.py'), '--samples', '30'],
-            cwd=here, capture_output=True, text=True, timeout=1800,
-        )
+        argv = [sys.executable, os.path.join(here, 'tools', 'sanity_check.py')]
+        argv += ['--quick'] if quick else ['--samples', '30']
+        r = subprocess.run(argv, cwd=here, capture_output=True, text=True,
+                           timeout=300 if quick else 1800)
         out = r.stdout or ''
         keep = [ln.rstrip() for ln in out.splitlines()
-                if any(k in ln for k in ('SHADOW', 'ENGINE', 'REAL FLIP', 'RESULT', 'match'))]
+                if any(k in ln for k in ('SHADOW', 'SNAPSHOT', 'ENGINE', 'REAL FLIP', 'RESULT', 'match'))]
         verdict = 'CLEAN ✅' if r.returncode == 0 else 'NEEDS ATTENTION ⚠️'
         body = '\n'.join(keep[-12:]) if keep else (out[-600:] or 'no output')
-        send_telegram(f"🩺 <b>Daily sanity check — {verdict}</b>\n<pre>{html.escape(body)}</pre>")
+        send_telegram(f"🩺 <b>{label} — {verdict}</b>\n<pre>{html.escape(body)}</pre>")
     except subprocess.TimeoutExpired:
-        send_telegram("🩺 <b>Daily sanity check</b> — TIMEOUT (>30 min)")
+        send_telegram(f"🩺 <b>{label}</b> — TIMEOUT (>{5 if quick else 30} min)")
     except Exception as e:
-        send_telegram(f"🩺 <b>Daily sanity check ERROR</b>: {html.escape(str(e))}")
+        send_telegram(f"🩺 <b>{label} ERROR</b>: {html.escape(str(e))}")
+
+
+def _handle_sanity_command(msg=''):
+    """🩺 Sanity Telegram button (/sanity) — runs the live-sanity check on a
+    BACKGROUND thread (never blocks the command loop, unlike the old /reload which
+    ran its full download synchronously) and Telegrams the result. Informational
+    only — never gates trading.
+      /sanity       -> quick deterministic checks (shadow + snapshot, ~instant)
+      /sanity full  -> full check incl. the ~15-min informational parity
+    """
+    full = 'full' in (msg or '').lower()
+    if full:
+        send_telegram("🩺 <b>Running FULL sanity check…</b>\nshadow + snapshot now; parity follows (~15 min).")
+    else:
+        send_telegram("🩺 <b>Running sanity check…</b> (shadow + snapshot replay)")
+    threading.Thread(
+        target=lambda: _run_sanity_and_alert(quick=not full, label='Sanity check'),
+        daemon=True,
+    ).start()
 
 
 def _maybe_run_daily_sanity():
@@ -4880,7 +4907,7 @@ def run_loop(trading_cfg, dry_run=False):
             maker_str = "MAKER" if cfg.get('use_maker_orders') else "TAKER"
             print(f"  {asset}: {det_label} | bull={bull_cfg.get('horizon','?')}h@{bull_cfg.get('min_confidence','?')}% "
                   f"| bear={bear_cfg.get('horizon','?')}h@{bear_cfg.get('min_confidence','?')}% | {auto} | {tp_str} | {maker_str} | {pos['state'].upper()}")
-    print(f"  Telegram: /help /status /reload /chart /setup /sync /pause /resume /stop (+ buy/sell/hold via buttons)")
+    print(f"  Telegram: /help /status /sanity /reload /chart /setup /sync /pause /resume /stop (+ buy/sell/hold via buttons)")
     print(f"  Hot-reload: every 5 min (config + models + positions)")
     print(f"{'='*60}")
 

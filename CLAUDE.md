@@ -218,7 +218,7 @@ python tools/backtest_regime_master.py --no-combos              # single-horizon
 python tools/backtest_regime_master.py --asset ETH              # test other assets
 ```
 
-**Telegram commands (Ed V2 trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/conf` `/config` `/setup` `/help` `/chart BTC` `/regime` (show current bull/bear state per asset) `/gate [ASSET on\|off\|clear]` (V7 rally-cooldown gate)
+**Telegram commands (Ed V2 trader):** `/stop` `/status` `/pause` `/resume` `/balance` `/sync` `/sanity` (on-demand live-correctness check — shadow + snapshot replay, runs in a background thread; `/sanity full` adds the ~15-min informational parity; replaces the old 🔄 Reload button on the main keyboard) `/conf` `/config` `/setup` `/help` `/chart BTC` `/regime` (show current bull/bear state per asset) `/gate [ASSET on\|off\|clear]` (V7 rally-cooldown gate)
 
 **Telegram commands (Optimizer bot):** `/optimize` (interactive menu) `/queue` `/cancel` `/status` `/results` `/help` `/stop`
 
