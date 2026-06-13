@@ -934,6 +934,26 @@ PRODUCTION_CSV = f'{FAYE_MODELS_DIR}/crypto_faye_production.csv'
 REGIME_CONFIG_PATH = f'{FAYE_CONFIG_DIR}/regime_config_faye.json'
 
 
+def _drive_retry(fn, what="drive write", attempts=6, base_delay=0.5):
+    """Retry a filesystem op through a TRANSIENT Google Drive dropout. The engine
+    lives on a Drive File Stream virtual device (G:) that sporadically vanishes
+    mid-run — observed as WinError 433 'a device which does not exist was specified',
+    [Errno 22] EINVAL, or a dir briefly going invisible — especially around sleep/wake
+    or a Drive remount. A single such blink during a write was killing whole HRST runs
+    (e.g. Mode T/G's rally-cooldown CSV dump, 2026-06-13). Retry with exponential
+    backoff (~31s total: 0.5,1,2,4,8,16); only re-raise if the device never returns,
+    in which case the .bat / HRST restart loop takes over."""
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except OSError as e:
+            last = e
+            time.sleep(base_delay * (2 ** i))
+    print(f"  [drive] {what} failed after {attempts} retries ({last}) — Drive device did not recover")
+    raise last
+
+
 def _ensure_parent_dir(path):
     """Re-create parent dir if Google Drive sync briefly hid it. The engine
     lives on a synced drive and `models/`, `config/`, `data/` have all been
@@ -943,7 +963,7 @@ def _ensure_parent_dir(path):
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         try:
-            os.makedirs(parent, exist_ok=True)
+            _drive_retry(lambda: os.makedirs(parent, exist_ok=True), f"makedirs {parent}")
         except OSError:
             pass  # next-line write will surface a clearer error
 
@@ -951,23 +971,30 @@ def _ensure_parent_dir(path):
 def _atomic_write_json(path, data):
     """Write JSON atomically: temp file + os.replace, so a crash mid-write can't
     corrupt the target. Tmp path includes PID so two concurrent HRST/trader
-    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit)."""
+    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit).
+    Retries through transient Drive-device dropouts (_drive_retry)."""
     _ensure_parent_dir(path)
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, 'w') as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+
+    def _w():
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    _drive_retry(_w, f"write {path}")
 
 
 def _atomic_write_csv(df, path, **to_csv_kwargs):
     """Write a DataFrame to CSV atomically: temp file + os.replace. Protects live
     trader / other readers from seeing partial writes if the process crashes
     mid-write. Tmp path includes PID so two concurrent writers don't race on the
-    same tmp file."""
+    same tmp file. Retries through transient Drive-device dropouts (_drive_retry)."""
     _ensure_parent_dir(path)
     tmp = f"{path}.{os.getpid()}.tmp"
-    df.to_csv(tmp, **to_csv_kwargs)
-    os.replace(tmp, path)
+
+    def _w():
+        df.to_csv(tmp, **to_csv_kwargs)
+        os.replace(tmp, path)
+    _drive_retry(_w, f"write {path}")
 
 
 # Session-scoped seen-exception cache — suppresses duplicate error logs from
@@ -5586,7 +5613,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # flag (used by tools/test_14_ideas.py to keep idea-tagged grid CSVs
         # separate from the untagged baseline that Mode V/H read on next run).
         _tag = f"_{GRID_TAG_SUFFIX}" if GRID_TAG_SUFFIX else ""
-        grid_csv_path = os.path.join('models', f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')
+        grid_csv_path = os.path.join(FAYE_MODELS_DIR, f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')  # 2026-06-12: was 'models' (escaped FAYE isolation -> wrote into live models/)
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         # Drive-sync hardening (2026-06-04): the engine lives on Google Drive, which
@@ -7987,10 +8014,12 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
     df['plateau_score'] = plateau
 
-    os.makedirs('output', exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = f'output/rally_cd_{asset}_{ts}.csv'
-    df.to_csv(out_path, index=False)
+    # Drive-hardened (2026-06-13): was raw makedirs+to_csv — died on WinError 433
+    # (Drive device vanished mid-write) and nuked the whole Mode T/G run after the
+    # 54s sweep had already finished. _atomic_write_csv retries through the blink.
+    _atomic_write_csv(df, out_path, index=False)
     print(f"  {asset} | wrote {out_path}")
 
     strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
