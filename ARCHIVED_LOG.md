@@ -1,6 +1,6 @@
 # ARCHIVED_LOG.md — Audit trail of tested/shelved decisions
 
-This file preserves the full historical decision trail of the engine: tested/shelved/promoted research items, the canonical idea scoreboard (C01-C86), MERGED TOPICS (closed research arcs), and per-day batch closures. Split out of TODO.md on 2026-05-19 to keep TODO.md focused on active work only.
+This file preserves the full historical decision trail of the engine: tested/shelved/promoted research items, the canonical idea scoreboard (C01-C87), MERGED TOPICS (closed research arcs), and per-day batch closures. Split out of TODO.md on 2026-05-19 to keep TODO.md focused on active work only.
 
 **This file is reference material — append-only.** Don't edit closed entries; if a new piece of evidence overturns a verdict, add a new entry that references the old one rather than rewriting history.
 
@@ -9,6 +9,30 @@ This file preserves the full historical decision trail of the engine: tested/she
 - [TODO.md](TODO.md) — active work only
 
 ---
+
+### ✅ CLOSED 2026-06-13 — Label-threshold (fee-aware) recalibration: WASH across all arms → KEEP 0.22%. [C87]
+
+**Hypothesis (owner):** maker execution now costs ~0 (realized round-trip on recent live ETH ≈ 0%), so the fee-aware label's `2×TRADING_FEE = 0.22%` "worth-it" bar may be too conservative — skipping small moves that are actually profitable. Lower it to capture them?
+
+**Method:** FAYE Mode D ETH 5,6,7,8h `--replay 960 --no-persist`, 3 arms (`--label-threshold` 0.0022 / 0.0010 / 0.0005), all pinned to the **frozen snapshot** `data/_v2_snapshot_ablation_20260613_112045` (zero drift — every arm reads identical data; satisfies the owner's "same data, clear answer" requirement). Robust metric: top-5-median `return_pct` among ≥20-trade configs per horizon (NOT noisy top-1-APF). Tool: `tools/test_label_threshold_ab.py`.
+
+| H | BASE 0.0022 | LT0010 0.0010 | LT0005 0.0005 |
+|---|---|---|---|
+| 5h | 4.55% | +2.38pp | +3.98pp |
+| 6h | 6.81% | −2.83pp | −1.89pp |
+| 7h | 3.01% | +0.22pp | +0.97pp |
+| 8h | 8.16% | −1.03pp | −3.68pp |
+| **Agg** | — | **−0.31pp** | **−0.15pp** |
+
+**Verdict: WASH — KEEP `2×TRADING_FEE = 0.22%`.** Both lower thresholds are mildly *negative* in aggregate with mixed per-horizon signs (5h/7h like a lower bar, 6h/8h dislike it) = noise within the ±3pp refine band. Lowering the label does what's expected mechanically (more trades: 5h 30→32-34, 6h 26→27-37) but the extra sub-0.22% moves net to ~zero — not reliably profitable even at a 0.05% bar. **Decisive: don't touch the label threshold.** Dovetails with the same-day `conf_sweep` (`tools/conf_sweep.py`): the directional edge lives in the **inference confidence gate** (65/65 = the empirical optimum on the live models), NOT in relabeling small moves at train time. Extends the "every directional lever fails the gated sim" pattern from features/model/decision to the **label** axis. Catalogued **C87**.
+
+### 🔇 CLOSED 2026-06-12 — Feature-scout batch C61/C62/C67/C75: NO SIGNAL (screen-noise) + v3_lit harness fixes
+
+Tested the 4 highest-prior **queued** features (from the 2026-06-11 feature-scout) via `tools/test_v3_lit_batch_C60_to_C82.py` (Mode D ETH 5,6,7,8h `--replay 1440 --no-persist`, top-APF delta vs baseline). **All effectively NO SIGNAL — none promoted.**
+- **C61 vol-of-vol → MOOT/CLOSED.** `vol_of_vol_8h` + `vol_of_vol_24h` are **already native engine features** ([crypto_trading_system_ed.py:1018](crypto_trading_system_ed.py#L1018)); the patcher crashed on the duplicate. The C60-C82 queue mislabeled it untested — it's been live all along.
+- **C62 DXY-accel / C67 Connors-RSI / C75 stablecoin-supply-ratio → SCREEN-NOISE, not promoted.** Valid recompute vs a freshly-rebuilt baseline: top-1 APF Δ C62 +4.16 / C67 +8.12 / C75 +6.51 — BUT every "PASS" rode on ONE horizon's overfit APF outlier (C62 8h=**28.6**, C67 6h=**31.3** vs realistic 1-3) with other horizons NEGATIVE; C75 collapsed to **+1.10** on the robust top-5; per-horizon deltas swung **+20 to −5**. No clean, consistent signal — consistent with the feature-add family being exhausted (0 real PASS).
+- **HARNESS BUGS found + fixed (the first run's "4/4 PASS" was a false positive):** (1) `refresh_baselines()` ran all horizons as ONE cmd → engine only ran the LAST (8h) → 5/6/7h baselines stale → patched "beat" a stale baseline (fixed: per-horizon loop); (2) patchers crashed on native-duplicate feature names (fixed: template dedups `feature_cols`). **LESSON: the top-1-APF screen is structurally too noisy for feature screening** (MIN_TRADES=8 lets a few-trade overfit config inflate APF to ~30 and dominate top-1) → filter configs to ≥~20 trades and/or score top-5-*median*, and ALWAYS confirm any non-DEAD via the full regime+conf-gate+shield gated sim. Noted in the harness header.
+- This run also surfaced (separately) the **live-config drift incident** (config silently moved to bull/bear 8h gates-off on June-8) — see the FAYE LIVE row in [TODO.md](TODO.md).
 
 ### 🔬 CLOSED 2026-06-10 — Strategy-class diversification: 3 orthogonal strategies tested, 1 promoted to paper
 

@@ -619,10 +619,14 @@ def _resolve_dir(env_var, default_name):
         val = os.path.join(_SCRIPT_DIR, val)
     return val
 
-FAYE_MODELS_DIR = _resolve_dir('FAYE_MODELS_DIR', 'models_faye')
-FAYE_CONFIG_DIR = _resolve_dir('FAYE_CONFIG_DIR', 'config_faye')
-_FAYE_MODELS_RAW = os.environ.get('FAYE_MODELS_DIR', 'models_faye')
-_FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye')
+# GREN (FX engine) ISOLATION: default outputs to models_gren/ + config_gren/ and read the
+# GREN_* env vars (NOT FAYE_*) so a Gren run can NEVER write crypto production, and a stray
+# FAYE_MODELS_DIR set for the crypto mock/ablation can't redirect Gren. Python var names kept
+# as FAYE_MODELS_DIR (used throughout) — only the env-var name + default changed.
+FAYE_MODELS_DIR = _resolve_dir('GREN_MODELS_DIR', 'models_gren')
+FAYE_CONFIG_DIR = _resolve_dir('GREN_CONFIG_DIR', 'config_gren')
+_FAYE_MODELS_RAW = os.environ.get('GREN_MODELS_DIR', 'models_gren')
+_FAYE_CONFIG_RAW = os.environ.get('GREN_CONFIG_DIR', 'config_gren')
 
 # FAYE_LIBRARY_MODE (2026-06-05): set by a consumer that imports faye purely for its
 # functions/constants (the live trader via crypto_live_trader_ed.py). When on, the
@@ -753,17 +757,10 @@ DATA_DIR = _resolve_dir('ED_DATA_DIR', 'data')
 MACRO_DIR = _resolve_dir('ED_MACRO_DIR', os.path.join(DATA_DIR, 'macro_data'))
 
 _ASSET_DEFS = [
-    # 2026-05-02: BNB added after Revolut X listing verified;
-    # DOGE/ADA/AVAX/DOT remain pruned (weak priors, no diversification).
-    ('BTC',   'binance',  'BTC/USDT',  'btc_hourly_data.csv',  '2017-08-01T00:00:00Z'),
-    ('ETH',   'binance',  'ETH/USDT',  'eth_hourly_data.csv',  '2017-08-01T00:00:00Z'),
-    ('XRP',   'binance',  'XRP/USDT',  'xrp_hourly_data.csv',  '2018-05-01T00:00:00Z'),
-    ('SOL',   'binance',  'SOL/USDT',  'sol_hourly_data.csv',  '2020-08-01T00:00:00Z'),
-    ('LINK',  'binance',  'LINK/USDT', 'link_hourly_data.csv', '2019-01-01T00:00:00Z'),
-    ('BNB',   'binance',  'BNB/USDT',  'bnb_hourly_data.csv',  '2017-12-01T00:00:00Z'),
-    ('SMI',   'yfinance', '^SSMI',     'smi_hourly_data.csv',  None),
-    ('DAX',   'yfinance', '^GDAXI',    'dax_hourly_data.csv',  None),
-    ('CAC40', 'yfinance', '^FCHI',     'cac40_hourly_data.csv', None),
+    # GREN FX engine — major pairs. EURUSD downloaded (yfinance bootstrap, ~2.8yr); add more
+    # majors + switch to OANDA/IBKR for deep history once the first directional read validates.
+    # Crypto/index assets removed — Gren is FX-only (no accidental crypto run).
+    ('EURUSD', 'yfinance', 'EURUSD=X', 'eurusd_hourly_data.csv', None),
 ]
 
 def _build_assets_dict():
@@ -815,8 +812,8 @@ for _d in [
         # Worker subprocess with weird CWD/permissions — non-fatal at import.
         # The main process already created these on its own import.
         pass
-TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
-SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
+TRADING_FEE_BASE = 0.00003  # GREN FX: ~0.3 bps/leg IBKR spot-FX commission (was 0.0009 Revolut X)
+SLIPPAGE = 0.00003          # GREN FX: ~0.3 bps/leg spread (EURUSD ~0.1-0.6 pip) (was 0.0002)
 TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY for LABEL generation (`2 * TRADING_FEE` break-even target)
 
 # Backtest simulations use a more realistic blend: live trader is maker-first
@@ -824,7 +821,7 @@ TRADING_FEE = TRADING_FEE_BASE + SLIPPAGE  # 0.11% taker+slippage — used ONLY 
 # 5 bps/leg = 3× safety margin for periods when maker success degrades.
 # Applied uniformly across Mode D/V/R/S/T/G backtest sims so relative policy
 # comparisons stay consistent. See feedback_backtest_fees_matter.md in memory.
-BACKTEST_FEE_PER_LEG = 0.0005
+BACKTEST_FEE_PER_LEG = 0.00006  # GREN FX: ~0.6 bps/leg, ~0.012% round-trip (was 0.0005 = 5 bps crypto)
 
 # ============================================================
 # Regime-detector search space (Mode R + Mode S)
@@ -916,7 +913,7 @@ OPTUNA_METRIC = 'apf'
 VALID_METRICS = {'apf', 'rawpf', 'calmar', 'return', 'rpf_sqrt'}
 
 # Label mode: 'fee_aware' = label=1 when return > 2×fee (no lookahead bias)
-LABEL_MODE = 'fee_aware'
+LABEL_MODE = 'median'  # GREN FX: median auto-scales to FX's tiny hourly moves (the crypto fee_aware 0.22% bar ≈ a full FX *day* → labels would be ~all-zero)
 # Label threshold override (research/one-off). None = use LABEL_MODE default (2×fee=0.22%).
 # When set (via --label-threshold X), label=1 iff future_return > X. E.g., 0.01 = target ≥1% moves.
 LABEL_THRESHOLD_PCT = None
@@ -8374,6 +8371,14 @@ def main():
     # -> LIVE TRADER (models/crypto_ed_production.csv / config/regime_config_ed.json),
     # then exits. Standalone: `python crypto_trading_system_faye.py --promote`.
     if '--promote' in sys.argv:
+        # GREN SAFETY (2026-06-14): --promote is DISABLED in the FX engine. The inherited
+        # logic copies models_gren -> the CRYPTO LIVE TRADER (models/crypto_ed_production.csv /
+        # config/regime_config_ed.json), which would put FX models on the crypto trader.
+        # FX promotion targets a separate Gren/IBKR path (not built). Hard-abort before any copy.
+        print("\n  [GREN] --promote is DISABLED in the FX engine — it would overwrite the CRYPTO")
+        print("  live trader (models/crypto_ed_production.csv / config/regime_config_ed.json).")
+        print("  FX promotion is a separate Gren/IBKR path (not built yet). Aborting, nothing copied.")
+        return
         import shutil
         _faye_csv = os.path.join(FAYE_MODELS_DIR, 'crypto_faye_production.csv')
         _faye_cfg = os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json')

@@ -37,8 +37,12 @@ import pandas as pd
 # Add engine to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from crypto_trading_system_ed import (
-    load_data, build_all_features, PREDICTION_HORIZON
+# PySR discovery is bound to FAYE (current production engine), NOT the legacy ed engine.
+# FAYE's build_all_features applies the daily-availability lag (DAILY_MERGE_LAG_DAYS), so
+# PySR expressions are discovered on lagged features — matching how FAYE backtests and
+# (post-promotion) live evaluate them. Decoupled from crypto_trading_system_ed 2026-06-01.
+from crypto_trading_system_faye import (
+    load_data, build_all_features, PREDICTION_HORIZON, FAYE_MODELS_DIR
 )
 
 MAX_DIAG_HOURS = 6 * 30 * 24  # 4320 hours = 6 months (same cap as Mode D)
@@ -46,8 +50,8 @@ MAX_DIAG_HOURS = 6 * 30 * 24  # 4320 hours = 6 months (same cap as Mode D)
 
 def _prepare_data(asset, horizon, load_data_fn=None, build_features_fn=None):
     """Load data and prepare X, y, all_cols for PySR discovery.
-    Optional load_data_fn / build_features_fn let callers (ed15) inject their own
-    pipelines — defaults to ed.py's hourly ones for backward compat.
+    Optional load_data_fn / build_features_fn let callers inject their own
+    pipelines — defaults to FAYE's hourly ones (lagged daily features).
     Returns (X, y, all_cols, pysr_rows) or (None, None, None, 0) on error."""
 
     _load = load_data_fn if load_data_fn is not None else load_data
@@ -70,13 +74,13 @@ def _prepare_data(asset, horizon, load_data_fn=None, build_features_fn=None):
     # Short-history features (GDELT: ~3 months; OI: ~30 days; orderbook/IV: accumulating;
     # stablecoins: 1 year) would kill the historical window via dropna. Fill NaN with 0
     # so PySR can still use the full 12-month window — PySR will see 0 for periods before
-    # coverage starts. Matches the sparse-feature exemption in crypto_trading_system_ed.py.
+    # coverage starts. Matches the sparse-feature exemption in crypto_trading_system_faye.py.
     sparse_prefixes = ('gp_', 'deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
     sparse_cols = [c for c in all_cols if c.startswith(sparse_prefixes)]
 
     # Trim to ~13 months before NaN detection: pre-2022 bars have no macro, which
     # would mark m_*/xa_* cols as wrongly sparse.
-    from crypto_trading_system_ed import SPARSE_NAN_THRESHOLD
+    from crypto_trading_system_faye import SPARSE_NAN_THRESHOLD
     if len(df_full) > MAX_DIAG_HOURS * 2 + 1000:
         df_full = df_full.tail(MAX_DIAG_HOURS * 2 + 1000).reset_index(drop=True)
 
@@ -418,14 +422,17 @@ def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
 
 
 def save_results(asset, horizon, results, all_cols, pysr_rows=0,
-                 name_prefix='', horizon_suffix='h'):
+                 name_prefix='', horizon_suffix='h', out_dir=None):
     """Save discovered expressions to JSON and human-readable report.
 
     Args:
         name_prefix: Optional prefix for output filenames (e.g., 'ed15_' → pysr_ed15_BTC_5p.json)
         horizon_suffix: 'h' (default, ed hourly) or 'p' (ed15 periods)
+        out_dir: Output directory. Defaults to FAYE_MODELS_DIR (models_faye/) so
+            lagged-discovered PySR does NOT overwrite the live models/pysr_*.json that
+            the deployed ed.py trader reads — promote to models/ explicitly later.
     """
-    models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    models_dir = out_dir if out_dir is not None else FAYE_MODELS_DIR
     os.makedirs(models_dir, exist_ok=True)
 
     json_path = os.path.join(models_dir, f'pysr_{name_prefix}{asset}_{horizon}{horizon_suffix}.json')
@@ -479,7 +486,7 @@ def main():
         _, all_cols = build_all_features(df_raw, asset_name=args.asset, horizon=horizon, verbose=False)
         save_results(args.asset, horizon, results, all_cols, pysr_rows=pysr_rows)
         print(f"\n  Done! Now run Mode DV to test these features:")
-        print(f"  python crypto_trading_system_ed.py DV {args.asset} {horizon}h")
+        print(f"  python crypto_trading_system_faye.py DV {args.asset} {horizon}h")
     else:
         print("\n  No useful expressions found. Try increasing --iterations.")
 

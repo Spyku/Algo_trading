@@ -106,6 +106,17 @@ def run_subprocess(mode, out_dir, log_path):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONWARNINGS"] = "ignore:X does not have valid feature names:UserWarning"
 
+    # FAYE re-execs itself with `python -W ignore` via os.execv (warning
+    # suppression, gated by the _FAYE_WARNINGS_BAKED sentinel). On Windows
+    # os.execv does NOT replace the process — it spawns a DETACHED child and
+    # the original process exits immediately (code 0). subprocess.run() then
+    # returns in ~0.2s having captured only the 2 early setup lines, while the
+    # real ~70 min Mode T run continues orphaned and uncaptured (parse → 0
+    # signals). Pre-setting the sentinel makes FAYE skip the re-exec and run
+    # the work in-process, so subprocess.run waits for it and captures stdout.
+    # Warning-suppression layers 2-4 inside FAYE still apply.
+    env["_FAYE_WARNINGS_BAKED"] = "1"
+
     if Path(SNAPSHOT_DIR).exists():
         env["V2_DATA_SNAPSHOT"] = SNAPSHOT_DIR
         print(f"  Using snapshot: {SNAPSHOT_DIR}")
@@ -319,9 +330,18 @@ def main():
             f.write(f"- Match rate: **{d.get('match_rate_pct')}%**\n")
             f.write(f"- Avg |Δ confidence|: {d.get('avg_abs_conf_delta')}\n")
             f.write(f"- Max |Δ confidence|: {d.get('max_abs_conf_delta')}\n\n")
-            mr = d.get("match_rate_pct", 100)
+            mr = d.get("match_rate_pct")
             if mr is None:
-                pass
+                # No common (timestamp, horizon) keys — diff could not be computed.
+                # Do NOT default to 100 (that falsely reads as "minimal effect").
+                # The embargo shift moves the walk-forward eval grid, so the
+                # every-50th sampled signal lines never align between runs.
+                f.write("### Verdict\n\n**INCONCLUSIVE** — match rate could not be computed "
+                        "(no common (timestamp, horizon) keys between the two runs).\n")
+                f.write("The embargo change shifts the walk-forward evaluation grid, so the "
+                        "sparsely-sampled signal lines never align. Compare the **Mode T REF** "
+                        "returns in the two subprocess logs instead "
+                        "(`grep 'baselines V0' *_subprocess.log`).\n")
             elif mr >= 95:
                 f.write("### Verdict\n\n**EMBARGO HAS MINIMAL EFFECT** — match rate ≥95%.\n")
                 f.write("Embargo asymmetry is NOT a major source of LIVE-vs-BACKTEST divergence.\n")

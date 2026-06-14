@@ -2586,7 +2586,7 @@ def _handle_help_command():
         "/gate [ASSET] [bull|bear] [on|off|clear] — Rally-cooldown gate\n\n"
         "<b>Operations</b>\n"
         "/sync — Force-sync positions from exchange\n"
-        "/sanity — Live-correctness check (shadow + snapshot; add 'full' for parity)\n"
+        "/sanity — Full live-correctness check (shadow + snapshot + engine, ~15 min; 'quick' to skip the engine re-run)\n"
         "/reload — Force-refresh all data feeds (bypass freshness)\n"
         "/pause /resume — Pause or resume signals\n"
         "/stop — Stop the trader\n\n"
@@ -4371,6 +4371,12 @@ def _get_models_fingerprint(trading_cfg):
 # pysr_*.json (no .pkl) and keep them a consistent set.
 # ============================================================
 PROMOTE_MARKER = 'config_faye/promote_ready.json'
+# DISABLED 2026-06-13: the auto-promote fired on a STALE path-based marker when the trader
+# went flat at 03:00 — by then config_faye/regime_config_faye.json had been overwritten by a
+# later HRST, so it promoted a frankenstein (HRST config + June-8 staging models). The marker
+# references PATHS, not snapshots, so deferred-until-flat promotion copies whatever those paths
+# contain AT promote time, not at stage time. Off until staging is snapshot-based. Manual only.
+AUTO_PROMOTE_FAYE_ENABLED = False
 _promote_defer_notified = False   # notify-once while deferred for a position
 
 
@@ -4433,6 +4439,8 @@ def _apply_pending_promotion(trading_cfg):
     Telegram ping) while any asset is invested. Fail-safe: any error leaves the
     live config untouched and keeps the marker for retry. Returns True if applied."""
     global _promote_defer_notified
+    if not AUTO_PROMOTE_FAYE_ENABLED:
+        return False   # disabled 2026-06-13 — see AUTO_PROMOTE_FAYE_ENABLED note above
     if not os.path.exists(PROMOTE_MARKER):
         return False
     try:
@@ -4814,55 +4822,102 @@ def _send_startup_telegram(trading_cfg):
 _SANITY_DATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'last_sanity_date.txt')
 
 
-def _run_sanity_and_alert(quick=False, label='Daily sanity check'):
-    """Run tools/sanity_check.py (shadow + snapshot replay [+ parity]) and Telegram
-    the result. INFORMATIONAL ONLY — never changes trading behaviour.
-      quick=True  -> deterministic checks only (shadow + snapshot, ~instant); skips
-                     the ~15-min parity. Used by the on-demand 🩺 Sanity button.
-      quick=False -> full check incl. the informational parity (daily 08:30 run).
+def _tg_send_get_id(text, parse_mode='HTML'):
+    """sendMessage and return its message_id (so the result can editMessageText it
+    later → one self-updating message instead of ack+result). None on failure."""
+    token = TELEGRAM_CONFIG.get('token', ''); chat_id = TELEGRAM_CONFIG.get('chat_id', '')
+    if not token or not chat_id:
+        send_telegram(text, parse_mode); return None
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = json.dumps({'chat_id': chat_id, 'text': text, 'parse_mode': parse_mode}).encode('utf-8')
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
+            r = json.loads(resp.read().decode())
+            return (r.get('result') or {}).get('message_id') if r.get('ok') else None
+    except Exception:
+        return None
+
+
+def _tg_edit(message_id, text, parse_mode='HTML'):
+    """editMessageText an existing message in place. Returns True on success."""
+    token = TELEGRAM_CONFIG.get('token', ''); chat_id = TELEGRAM_CONFIG.get('chat_id', '')
+    if not (token and chat_id and message_id):
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{token}/editMessageText"
+        payload = json.dumps({'chat_id': chat_id, 'message_id': message_id,
+                              'text': text, 'parse_mode': parse_mode}).encode('utf-8')
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=10, context=_ssl_ctx) as resp:
+            return json.loads(resp.read().decode()).get('ok', False)
+    except Exception:
+        return False
+
+
+def _run_sanity_and_alert(quick=False, label='Daily sanity check', edit_id=None):
+    """Run tools/sanity_check.py (shadow + snapshot replay + engine-vs-trader parity)
+    and Telegram the result. INFORMATIONAL ONLY — never changes trading.
+      quick=False (default) -> FULL check incl. the engine-vs-trader PARITY. Used by
+                     BOTH the 08:30 daily AND the on-demand /sanity button so they
+                     check the SAME thing.
+      quick=True  -> deterministic-only (shadow + snapshot), no engine re-run (/sanity quick).
+    edit_id: if set, the result EDITS that 'Running…' message (ONE self-updating
+             message, not ack+result). Daily passes None -> one fresh message.
+    NOTE: the [3] parity is the ONLY piece that actually RE-RUNS the engine; it
+    rebuilds features from current data so its numbers are non-reproducible run-to-run
+    — the VERDICT is driven by the deterministic shadow + snapshot, so daily↔manual
+    verdicts match even though the parity line may differ.
     Must be called on a BACKGROUND thread (the full check takes ~15 min)."""
     import html
     try:
         here = os.path.dirname(os.path.abspath(__file__))
         argv = [sys.executable, os.path.join(here, 'tools', 'sanity_check.py')]
         argv += ['--quick'] if quick else ['--samples', '30']
+        # force UTF-8 child I/O + replace any stray bytes — sanity_check.py prints
+        # cp1252 em-dashes (0x97) on Windows which otherwise crash the text=True
+        # decode → empty 'no output' body. (bug found 2026-06-12.)
         r = subprocess.run(argv, cwd=here, capture_output=True, text=True,
+                           encoding='utf-8', errors='replace',
+                           env=dict(os.environ, PYTHONUTF8='1', PYTHONIOENCODING='utf-8'),
                            timeout=300 if quick else 1800)
         out = r.stdout or ''
         keep = [ln.rstrip() for ln in out.splitlines()
                 if any(k in ln for k in ('SHADOW', 'SNAPSHOT', 'ENGINE', 'REAL FLIP', 'RESULT', 'match'))]
         verdict = 'CLEAN ✅' if r.returncode == 0 else 'NEEDS ATTENTION ⚠️'
         body = '\n'.join(keep[-12:]) if keep else (out[-600:] or 'no output')
-        send_telegram(f"🩺 <b>{label} — {verdict}</b>\n<pre>{html.escape(body)}</pre>")
+        out_msg = f"🩺 <b>{label} — {verdict}</b>\n<pre>{html.escape(body)}</pre>"
     except subprocess.TimeoutExpired:
-        send_telegram(f"🩺 <b>{label}</b> — TIMEOUT (>{5 if quick else 30} min)")
+        out_msg = f"🩺 <b>{label}</b> — TIMEOUT (>{5 if quick else 30} min)"
     except Exception as e:
-        send_telegram(f"🩺 <b>{label} ERROR</b>: {html.escape(str(e))}")
+        out_msg = f"🩺 <b>{label} ERROR</b>: {html.escape(str(e))}"
+    if not (edit_id and _tg_edit(edit_id, out_msg)):
+        send_telegram(out_msg)   # fresh send (daily), or fallback if the edit failed
 
 
 def _handle_sanity_command(msg=''):
-    """🩺 Sanity Telegram button (/sanity) — runs the live-sanity check on a
-    BACKGROUND thread (never blocks the command loop, unlike the old /reload which
-    ran its full download synchronously) and Telegrams the result. Informational
-    only — never gates trading.
-      /sanity       -> quick deterministic checks (shadow + snapshot, ~instant)
-      /sanity full  -> full check incl. the ~15-min informational parity
+    """🩺 Sanity Telegram button (/sanity) — runs the SAME full check as the 08:30
+    daily (shadow + snapshot + engine-vs-trader parity) on a background thread, in a
+    SINGLE self-updating message (one prompt — fixes the ack+result double). Runs on a
+    background thread so it never blocks the command loop. Informational only.
+      /sanity        -> full check incl. the engine re-run (~15 min)  [matches the daily]
+      /sanity quick  -> deterministic-only shadow + snapshot (~instant)
     """
-    full = 'full' in (msg or '').lower()
-    if full:
-        send_telegram("🩺 <b>Running FULL sanity check…</b>\nshadow + snapshot now; parity follows (~15 min).")
-    else:
-        send_telegram("🩺 <b>Running sanity check…</b> (shadow + snapshot replay)")
+    quick = 'quick' in (msg or '').lower()
+    running = ("🩺 <b>Running sanity check…</b> (shadow + snapshot, ~instant)" if quick
+               else "🩺 <b>Running sanity check…</b> (shadow + snapshot + engine, ~15 min)")
+    mid = _tg_send_get_id(running)   # the ONE message; the result edits it in place
     threading.Thread(
-        target=lambda: _run_sanity_and_alert(quick=not full, label='Sanity check'),
+        target=lambda: _run_sanity_and_alert(quick=quick, label='Sanity check', edit_id=mid),
         daemon=True,
     ).start()
 
 
 def _maybe_run_daily_sanity():
-    """Once/day at >=08:30 local, launch the sanity check in a background thread
-    (parity ~15 min must NOT block the trading loop). De-duped across restarts via a
-    date file. Informational only — does not gate or pause anything."""
+    """Once/day at >=08:30 local, launch the FULL sanity check (shadow + snapshot +
+    engine-vs-trader parity) in a background thread. quick=False so it checks the
+    SAME thing as the on-demand /sanity button (parity / engine re-run included).
+    De-duped across restarts via a date file. Informational only — does not gate."""
     now = datetime.now()
     if now.hour < 8 or (now.hour == 8 and now.minute < 30):
         return
@@ -4878,8 +4933,9 @@ def _maybe_run_daily_sanity():
             f.write(today)
     except Exception:
         pass
-    print("  🩺 Launching daily sanity check (08:30) in background...")
-    threading.Thread(target=_run_sanity_and_alert, daemon=True).start()
+    print("  🩺 Launching daily sanity check (08:30, full incl engine) in background...")
+    threading.Thread(target=lambda: _run_sanity_and_alert(quick=False, label='Daily sanity check'),
+                     daemon=True).start()
 
 
 def run_loop(trading_cfg, dry_run=False):

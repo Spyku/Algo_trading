@@ -619,10 +619,31 @@ def _resolve_dir(env_var, default_name):
         val = os.path.join(_SCRIPT_DIR, val)
     return val
 
-FAYE_MODELS_DIR = _resolve_dir('FAYE_MODELS_DIR', 'models_faye')
-FAYE_CONFIG_DIR = _resolve_dir('FAYE_CONFIG_DIR', 'config_faye')
-_FAYE_MODELS_RAW = os.environ.get('FAYE_MODELS_DIR', 'models_faye')
-_FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye')
+FAYE_MODELS_DIR = _resolve_dir('FAYE_MODELS_DIR', 'models_faye_mock')   # MOCK: isolated default
+FAYE_CONFIG_DIR = _resolve_dir('FAYE_CONFIG_DIR', 'config_faye_mock')   # MOCK: isolated default
+_FAYE_MODELS_RAW = os.environ.get('FAYE_MODELS_DIR', 'models_faye_mock')
+_FAYE_CONFIG_RAW = os.environ.get('FAYE_CONFIG_DIR', 'config_faye_mock')
+
+# ════════ MOCK SAFETY GUARD (fail-closed) — crypto_trading_system_faye_mock.py ════════
+# MUST run BEFORE any makedirs / config-seeding / write below. A literal mock copy must
+# NEVER touch production. Abort unless FAYE_MODELS_DIR + FAYE_CONFIG_DIR (and any
+# MOCK_DISABLED_PATH) are *_mock paths. PRODUCTION_CSV/REGIME_CONFIG_PATH derive from
+# these f-strings → transitively covered. This is the earliest safe insertion point
+# (right after the two source dirs are resolved, before the makedirs loop + FAYE_ISO seed).
+def _mock_guard():
+    _bad = []
+    for _name, _p in (('FAYE_MODELS_DIR', FAYE_MODELS_DIR), ('FAYE_CONFIG_DIR', FAYE_CONFIG_DIR)):
+        if 'mock' not in os.path.normpath(str(_p)).replace('\\', '/').lower():
+            _bad.append(f"{_name}={_p!r}")
+    _dp = os.environ.get('MOCK_DISABLED_PATH', '')
+    if _dp and 'mock' not in _dp.replace('\\', '/').lower():
+        _bad.append(f"MOCK_DISABLED_PATH={_dp!r}")
+    if _bad:
+        sys.stderr.write("\n*** MOCK GUARD ABORT — output path(s) NOT isolated:\n  " + "\n  ".join(_bad)
+                         + "\n*** Refusing to run; set FAYE_MODELS_DIR/FAYE_CONFIG_DIR to *_mock dirs.\n")
+        raise SystemExit(99)
+_mock_guard()
+# ════════════════════════════════════════════════════════════════════════════════════
 
 # FAYE_LIBRARY_MODE (2026-06-05): set by a consumer that imports faye purely for its
 # functions/constants (the live trader via crypto_live_trader_ed.py). When on, the
@@ -801,19 +822,15 @@ PREDICTION_HORIZON = HORIZON_SHORT  # default horizon
 # when CWD is wrong (e.g. ProcessPool workers landing in C:/Users → PermissionError
 # trying to create 'data' there). The script-dir-relative paths are the canonical
 # default locations regardless of where Python was launched from.
-for _d in [
-    DATA_DIR, MACRO_DIR,
-    os.path.join(_SCRIPT_DIR, 'data'),
-    os.path.join(_SCRIPT_DIR, 'data', 'macro_data'),
-    os.path.join(_SCRIPT_DIR, 'charts'),
-    os.path.join(_SCRIPT_DIR, 'models'),
-    os.path.join(_SCRIPT_DIR, 'config'),
-]:
+# MOCK: create ONLY isolated output dirs. The original loop also did
+# os.makedirs on the SHARED 'models'/'config'/'data'/'data/macro_data' literals
+# (no-op when they exist, but a *_SCRIPT_DIR-relative touch of production paths) —
+# removed entirely. Shared data/ is read-only here (--no-data-update) and already
+# exists; FAYE output goes to the guarded *_mock dirs only.
+for _d in [FAYE_MODELS_DIR, FAYE_CONFIG_DIR, os.path.join(_SCRIPT_DIR, 'mock_960')]:
     try:
         os.makedirs(_d, exist_ok=True)
     except (PermissionError, OSError):
-        # Worker subprocess with weird CWD/permissions — non-fatal at import.
-        # The main process already created these on its own import.
         pass
 TRADING_FEE_BASE = 0.0009  # 0.09% Revolut X taker fee (worst-case, pure-taker reality)
 SLIPPAGE = 0.0002          # 0.02% estimated slippage (market impact, spread)
@@ -932,26 +949,11 @@ MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
 PRODUCTION_CSV = f'{FAYE_MODELS_DIR}/crypto_faye_production.csv'
 REGIME_CONFIG_PATH = f'{FAYE_CONFIG_DIR}/regime_config_faye.json'
-
-
-def _drive_retry(fn, what="drive write", attempts=6, base_delay=0.5):
-    """Retry a filesystem op through a TRANSIENT Google Drive dropout. The engine
-    lives on a Drive File Stream virtual device (G:) that sporadically vanishes
-    mid-run — observed as WinError 433 'a device which does not exist was specified',
-    [Errno 22] EINVAL, or a dir briefly going invisible — especially around sleep/wake
-    or a Drive remount. A single such blink during a write was killing whole HRST runs
-    (e.g. Mode T/G's rally-cooldown CSV dump, 2026-06-13). Retry with exponential
-    backoff (~31s total: 0.5,1,2,4,8,16); only re-raise if the device never returns,
-    in which case the .bat / HRST restart loop takes over."""
-    last = None
-    for i in range(attempts):
-        try:
-            return fn()
-        except OSError as e:
-            last = e
-            time.sleep(base_delay * (2 ** i))
-    print(f"  [drive] {what} failed after {attempts} retries ({last}) — Drive device did not recover")
-    raise last
+# MOCK: derived from the already-guarded FAYE_MODELS_DIR/FAYE_CONFIG_DIR (guard above,
+# right after dir resolution) → both contain 'mock'. Belt-and-suspenders re-assert:
+assert 'mock' in PRODUCTION_CSV.replace('\\', '/').lower() and \
+       'mock' in REGIME_CONFIG_PATH.replace('\\', '/').lower(), \
+       f"MOCK GUARD: derived prod paths not isolated: {PRODUCTION_CSV} / {REGIME_CONFIG_PATH}"
 
 
 def _ensure_parent_dir(path):
@@ -963,7 +965,7 @@ def _ensure_parent_dir(path):
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
         try:
-            _drive_retry(lambda: os.makedirs(parent, exist_ok=True), f"makedirs {parent}")
+            os.makedirs(parent, exist_ok=True)
         except OSError:
             pass  # next-line write will surface a clearer error
 
@@ -971,30 +973,23 @@ def _ensure_parent_dir(path):
 def _atomic_write_json(path, data):
     """Write JSON atomically: temp file + os.replace, so a crash mid-write can't
     corrupt the target. Tmp path includes PID so two concurrent HRST/trader
-    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit).
-    Retries through transient Drive-device dropouts (_drive_retry)."""
+    processes don't collide on the same `.tmp` file (Fix from 2026-04-24 re-audit)."""
     _ensure_parent_dir(path)
     tmp = f"{path}.{os.getpid()}.tmp"
-
-    def _w():
-        with open(tmp, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    _drive_retry(_w, f"write {path}")
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 
 def _atomic_write_csv(df, path, **to_csv_kwargs):
     """Write a DataFrame to CSV atomically: temp file + os.replace. Protects live
     trader / other readers from seeing partial writes if the process crashes
     mid-write. Tmp path includes PID so two concurrent writers don't race on the
-    same tmp file. Retries through transient Drive-device dropouts (_drive_retry)."""
+    same tmp file."""
     _ensure_parent_dir(path)
     tmp = f"{path}.{os.getpid()}.tmp"
-
-    def _w():
-        df.to_csv(tmp, **to_csv_kwargs)
-        os.replace(tmp, path)
-    _drive_retry(_w, f"write {path}")
+    df.to_csv(tmp, **to_csv_kwargs)
+    os.replace(tmp, path)
 
 
 # Session-scoped seen-exception cache — suppresses duplicate error logs from
@@ -2072,7 +2067,7 @@ def run_mode_f(restore=False, include_newborns=False, asset='ETH'):
     import re
     import glob
     here = os.path.dirname(os.path.abspath(__file__))
-    cfg_path = os.path.join(here, 'config', 'disabled_features.json')
+    cfg_path = os.path.join(here, 'config_faye_mock', 'disabled_features.json')  # MOCK: never shared config/
 
     # Load current config to preserve _note + enabled flag
     existing_cfg = {}
@@ -2203,7 +2198,9 @@ def _load_disabled_features():
     - always_disabled_exact: structurally-broken features (e.g. short history).
       Applied REGARDLESS of enabled flag."""
     global _DISABLED_FEATURES_CACHE, _DISABLED_FEATURES_MTIME
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'disabled_features.json')
+    # MOCK: read the per-arm A/B config (MOCK_DISABLED_PATH), never the shared config/.
+    path = os.environ.get('MOCK_DISABLED_PATH') or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'mock_960', 'disabled_features_OFF.json')
     if not os.path.exists(path):
         return set(), [], False, set()
     mtime = os.path.getmtime(path)
@@ -5613,7 +5610,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
         # flag (used by tools/test_14_ideas.py to keep idea-tagged grid CSVs
         # separate from the untagged baseline that Mode V/H read on next run).
         _tag = f"_{GRID_TAG_SUFFIX}" if GRID_TAG_SUFFIX else ""
-        grid_csv_path = os.path.join(FAYE_MODELS_DIR, f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')  # 2026-06-12: was 'models' (escaped FAYE isolation -> wrote into live models/)
+        grid_csv_path = os.path.join(FAYE_MODELS_DIR, f'crypto_ed_grid_{asset_name}_{horizon}h{_tag}.csv')  # MOCK: was 'models' (LIVE dir!)
         df_grid = pd.DataFrame(grid_rows)
         df_grid = df_grid.sort_values('apf', ascending=False).reset_index(drop=True)
         # Drive-sync hardening (2026-06-04): the engine lives on Google Drive, which
@@ -8014,12 +8011,10 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
     df['plateau_score'] = plateau
 
+    os.makedirs('output', exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = f'output/rally_cd_{asset}_{ts}.csv'
-    # Drive-hardened (2026-06-13): was raw makedirs+to_csv — died on WinError 433
-    # (Drive device vanished mid-write) and nuked the whole Mode T/G run after the
-    # 54s sweep had already finished. _atomic_write_csv retries through the blink.
-    _atomic_write_csv(df, out_path, index=False)
+    df.to_csv(out_path, index=False)
     print(f"  {asset} | wrote {out_path}")
 
     strict = df[df['beats_3of3'] & (df['plateau_score'] >= PLATEAU_THR)]
@@ -8321,32 +8316,20 @@ def main():
             print(f"  [data-dir] active: {DATA_DIR} (macro: {MACRO_DIR})")
             break
 
-    # Parse --no-persist / --noprod / --no-persist-keep (research: redirect production +
-    # regime writes to *_noprod.* files; the LIVE trader files are never touched here).
-    #   --no-persist       reseed _noprod from live EACH run (A/B: every variant starts
-    #                      from a fresh live baseline; tools/ab_matrix_runner.py then
-    #                      copies the output aside to a tagged _noprod_<variant>.* file).
-    #   --no-persist-keep  use existing _noprod AS-IS (caller pre-staged variant data,
-    #                      e.g. tools/ab_matrix_retune_t.py).
-    #   --noprod           PERSISTENT session (2026-06-13): seed _noprod from live ONLY
-    #                      when it doesn't exist yet, otherwise REUSE it. Every mode then
-    #                      accumulates in _noprod across separate commands
-    #                      (HRST --noprod -> RST --noprod -> ...). No reseed = no clobber.
-    #                      Ship it to live with `--promote`. Replaces the old reseed
-    #                      footgun that silently lost an overnight run.
-    _noprod_session = '--noprod' in sys.argv
-    if '--no-persist' in sys.argv or _noprod_session:
+    # Parse --no-persist (research: do NOT touch production CSV or regime_config_faye.json)
+    # Redirects both writes to *_noprod.* files seeded with current contents.
+    # Safe to run alongside live trader.
+    #
+    # --no-persist-keep (companion flag): don't reseed _noprod.* from live prod.
+    # Use this when the caller has pre-staged _noprod.* with specific variant
+    # contents (e.g. tools/ab_matrix_retune_t.py swaps variant tagged files in).
+    # Without this, --no-persist would OVERWRITE the pre-staged variant data.
+    if '--no-persist' in sys.argv:
         import shutil
         keep_existing = '--no-persist-keep' in sys.argv
         np_prod_csv = PRODUCTION_CSV.replace('.csv', '_noprod.csv')
         np_config = REGIME_CONFIG_PATH.replace('.json', '_noprod.json')
-        if _noprod_session:
-            # persistent: seed from live ONLY on first use (when _noprod is absent)
-            if not os.path.exists(np_prod_csv) and os.path.exists(PRODUCTION_CSV):
-                shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
-            if not os.path.exists(np_config) and os.path.exists(REGIME_CONFIG_PATH):
-                shutil.copyfile(REGIME_CONFIG_PATH, np_config)
-        elif not keep_existing:
+        if not keep_existing:
             if os.path.exists(PRODUCTION_CSV):
                 shutil.copyfile(PRODUCTION_CSV, np_prod_csv)
             if os.path.exists(REGIME_CONFIG_PATH):
@@ -8355,10 +8338,7 @@ def main():
         REGIME_CONFIG_PATH = np_config
         print()
         print("  " + "*" * 76)
-        if _noprod_session:
-            print("  * --noprod ACTIVE (persistent session): live production NOT modified")
-            print("  * Reads + writes the _noprod files below; reuse across commands, ship with --promote.")
-        elif keep_existing:
+        if keep_existing:
             print("  * --no-persist-keep ACTIVE: using pre-staged _noprod files AS-IS")
         else:
             print("  * --no-persist ACTIVE: production files are NOT modified")
@@ -8368,41 +8348,6 @@ def main():
         print("  * Safe to run alongside live trader.")
         print("  " + "*" * 76)
         print()
-
-    # Parse --promote (2026-06-13): ship a finished --noprod session to LIVE.
-    # Copies _noprod -> faye live (crypto_faye_production.csv / regime_config_faye.json)
-    # -> LIVE TRADER (models/crypto_ed_production.csv / config/regime_config_ed.json),
-    # then exits. Standalone: `python crypto_trading_system_faye.py --promote`.
-    if '--promote' in sys.argv:
-        import shutil
-        _faye_csv = os.path.join(FAYE_MODELS_DIR, 'crypto_faye_production.csv')
-        _faye_cfg = os.path.join(FAYE_CONFIG_DIR, 'regime_config_faye.json')
-        _np_csv = _faye_csv.replace('.csv', '_noprod.csv')
-        _np_cfg = _faye_cfg.replace('.json', '_noprod.json')
-        _trader_csv = os.path.join(_SCRIPT_DIR, 'models', 'crypto_ed_production.csv')
-        _trader_cfg = os.path.join(_SCRIPT_DIR, 'config', 'regime_config_ed.json')
-        _missing = [os.path.basename(p) for p in (_np_csv, _np_cfg) if not os.path.exists(p)]
-        if _missing:
-            print(f"\n  [promote] ABORT: nothing to promote — missing _noprod file(s): {_missing}")
-            print(f"  Run a --noprod session first (e.g. `HRST ETH 5h,6h,7h,8h --noprod`).")
-            return
-        print("\n  " + "=" * 76)
-        print("  PROMOTE  _noprod  ->  faye live  ->  LIVE TRADER")
-        print("  " + "=" * 76)
-        for _src, _dst, _lbl in (
-            (_np_csv,   _faye_csv,   "faye production      (models_faye/crypto_faye_production.csv)"),
-            (_np_cfg,   _faye_cfg,   "faye regime config   (config_faye/regime_config_faye.json)"),
-            (_faye_csv, _trader_csv, "TRADER production    (models/crypto_ed_production.csv)"),
-            (_faye_cfg, _trader_cfg, "TRADER regime config (config/regime_config_ed.json)"),
-        ):
-            _drive_retry(lambda s=_src, d=_dst: shutil.copyfile(s, d), f"promote -> {_dst}")
-            print(f"    promoted {_lbl}")
-        print("  " + "=" * 76)
-        print("  *** WARNING: the LIVE TRADER config was just overwritten. Ensure the trader")
-        print("  *** was FLAT (no open position) before promoting — a mid-trade swap mismatches")
-        print("  *** entry/exit legs. The trader picks up the new files on its next cycle.")
-        print("  " + "=" * 76)
-        return
 
     # Parse --meta-filter P (research A/B: train secondary LGBM, filter BUYs).
     # Enforces --no-persist: never writes meta-filtered results to real production.

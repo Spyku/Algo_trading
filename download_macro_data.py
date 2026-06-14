@@ -13,6 +13,12 @@ Sources:
 
 Usage:
   python download_macro_data.py
+
+Adding a new download? See CLAUDE.md "Adding a New Data Source — Checklist".
+KEY GOTCHAS: (1) overwrite-safe — route writes through _dedup_preserve_history /
+_merge_preserve_history (Rule 22), never a bare to_csv after a full-history pull;
+(2) note the cadence (1/day vs hourly) + publish lag — the FEATURE side in
+build_all_features must merge daily on _merge_date (lagged) vs hourly on _merge_dt.
 """
 
 import os

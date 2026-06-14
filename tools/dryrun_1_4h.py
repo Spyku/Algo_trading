@@ -53,6 +53,20 @@ SPEC_OVERRIDE = {}                          # e.g. {1: dict(combo=['RF','LGBM'],
 DEFAULT_SPEC = dict(combo=["RF", "LGBM"], window=150, gamma=0.999, n=15)
 os.makedirs(OUTDIR, exist_ok=True)
 
+try:
+    from zoneinfo import ZoneInfo
+    LOCAL_TZ = ZoneInfo("Europe/Zurich")   # Critical Rule 4: show Alex's local time, not UTC
+except Exception:
+    LOCAL_TZ = None
+
+
+def _stamps():
+    """(utc_str, local_str). UTC goes to the CSV (canonical); local to the console (your clock)."""
+    now = datetime.now(timezone.utc)
+    utc_s = now.strftime("%Y-%m-%d %H:%M:%S")
+    local_s = (now.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if LOCAL_TZ else utc_s + " UTC")
+    return utc_s, local_s
+
 
 def _keep_awake():
     """Prevent Windows sleep / Modern Standby for the life of the dry run (mirror of FAYE
@@ -179,16 +193,16 @@ def log_row(h, ts, bar_dt, px, sig, conf, action, pnl):
 
 
 def cycle(cyc_i):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ts, ts_local = _stamps()   # ts (UTC) -> CSV; ts_local (Europe/Zurich) -> console
     try:
         LT.download_asset(ASSET, update_only=True)
     except Exception:
         pass
     df_raw = LT.load_data(ASSET)
     if df_raw is None:
-        print(f"  [{ts}] no data — skip")
+        print(f"  [{ts_local}] no data — skip")
         return
-    line = [f"[{ts}] DRY-RUN cycle {cyc_i}"]
+    line = [f"[{ts_local}] DRY-RUN cycle {cyc_i}"]
     for h in HORIZONS:
         try:
             f, cols = build(h, df_raw)

@@ -53,6 +53,22 @@ elif MACHINE == 'YOGA':
 else:  # LAPTOP
     PYSR_PARALLEL_RUNS = 3   # 16 GB RAM — 3 × ~2.5 GB Julia ≈ 7.5 GB peak
 
+# --- FAYE Mode-D grid + Mode-V refine worker counts (per-machine, 2026-06-03) ---
+# Each FAYE outer worker spawns a K=5 inner ThreadPool, so concurrent fits ≈ workers×5.
+# FAYE's built-in defaults are the Desktop's 8/6, which oversubscribe the laptop
+# (8×5 = 40 threads on 16 cores → thrash; a 2-horizon DV took ~13h). Set per-machine
+# defaults via env so the FAYE engine picks them up WITHOUT being modified — it already
+# reads MODE_D_OUTER_WORKERS / FAYE_REFINE_WORKERS from env. setdefault → an explicit
+# env var still wins. Validated 2026-06-02 (autoscale copy ran 3-worker cleanly on the
+# laptop). Only FAYE reads these; other engines ignore them.
+if MACHINE == 'LAPTOP':
+    os.environ.setdefault('MODE_D_OUTER_WORKERS', '3')   # 3×5 = 15 on 16 cores
+    os.environ.setdefault('FAYE_REFINE_WORKERS', '3')
+elif MACHINE == 'YOGA':
+    os.environ.setdefault('MODE_D_OUTER_WORKERS', '2')   # CPU-only, keep tight
+    os.environ.setdefault('FAYE_REFINE_WORKERS', '2')
+# DESKTOP: no override — FAYE keeps its built-in 8/6 (validated, "works well").
+
 # --- Model Definitions ---
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression

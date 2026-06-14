@@ -116,14 +116,14 @@ def main():
     args = ap.parse_args()
 
     print("=" * 64)
-    print("  LIVE SANITY CHECK — shadow + snapshot replay (deterministic) + parity (info)")
+    print("  LIVE SANITY CHECK | [1] engine-vs-trader LIVE + [2] snapshot (deterministic) + [3] engine offline re-run (info)")
     print("=" * 64)
 
     bad = False
 
     # [1] SHADOW — deterministic, drives verdict
     s_status, s_msg = shadow_check()
-    print(f"\n[1] SHADOW match-rate : {s_status}")
+    print(f"\n[1] ENGINE-vs-TRADER live (shadow) : {s_status}")
     print(f"    {s_msg}")
     if s_status == "FAIL":
         bad = True
@@ -138,10 +138,10 @@ def main():
     # [3] ENGINE-vs-TRADER parity — INFORMATIONAL ONLY. Non-reproducible (data revision +
     #     shifting tail-N window); real flips are listed but do NOT set the verdict.
     if args.quick:
-        print("\n[3] PARITY (info)     : SKIPPED (--quick)")
+        print("\n[3] ENGINE re-run offline : SKIPPED (--quick; [1] above is the live engine-vs-trader check)")
     else:
         p_status, p_msg, flips = parity_check(args.samples)
-        print(f"\n[3] ENGINE-vs-TRADER  : {p_status}  (informational — non-reproducible offline re-run)")
+        print(f"\n[3] ENGINE-vs-TRADER offline : {p_status}  (re-runs the engine over the last N hours; informational, non-reproducible)")
         print(f"    {p_msg}")
         for fl in flips:
             print(f"      REAL FLIP (likely data-revision artifact): {fl}")
