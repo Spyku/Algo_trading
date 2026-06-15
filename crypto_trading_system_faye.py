@@ -295,12 +295,22 @@ class _TeeWriter:
             except (OSError, ValueError):
                 pass
 
+import re  # P0-0613: TOP-LEVEL (was absent) — the re.sub in the routed-log block below would
+           # otherwise NameError at import, killing every engine run AND disabling the shadow (Rule 23).
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
-os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"ed_v1_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
-_log_fh = open(_log_path, 'w', encoding='utf-8')
-sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
-sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
+# P0-0613: ONLY the directly-run engine opens + redirects stdout to a log. Gated OUT for:
+#   - the live trader (imports faye with FAYE_LIBRARY_MODE=1) -> no stdout hijack, keeps its own log
+#   - ProcessPool/loky workers (not the main process)        -> no empty per-worker log turds
+# Engine logs route to logs/hrst/faye_<argv-tag>_<ts>.log.
+if _FAYE_IS_MAIN_PROCESS and os.environ.get('FAYE_LIBRARY_MODE') != '1':
+    _HRST_LOG_DIR = os.path.join(_LOG_DIR, 'hrst')
+    os.makedirs(_HRST_LOG_DIR, exist_ok=True)
+    _argv_tag = re.sub(r'[^A-Za-z0-9]+', '_',
+                       '_'.join(a for a in sys.argv[1:] if not a.startswith('-'))).strip('_')[:40] or 'run'
+    _log_path = os.path.join(_HRST_LOG_DIR, f"faye_{_argv_tag}_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+    _log_fh = open(_log_path, 'w', encoding='utf-8')
+    sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
+    sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
 
 
 @contextlib.contextmanager
@@ -840,7 +850,7 @@ BACKTEST_FEE_PER_LEG = 0.0005
 # To re-enable the full set for a quarterly detector-rediscovery run, edit
 # this set or wrap the filter site in `_build_regime_indicators_and_detectors`
 # with a CLI flag.
-ENABLED_DETECTORS = {'tsmom_672h', 'sma24>sma100'}
+ENABLED_DETECTORS = {'tsmom_672h', 'sma168>sma480', 'sma48>sma100', 'tsmom_168h', 'price>sma72', 'vol_calm'}  # 2026-06-15: detector-dedup keepers (calm tsmom_672h/sma168>sma480 -> medium sma48>sma100 -> nervous tsmom_168h/price>sma72) + vol_calm (volatility regime, highest WR, distinct behavior); sma24>sma100 dropped (redundant w/ sma48>sma100)
 # Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
 # Used for A/B testing so all matrix variants see the same data snapshot.
 NO_DATA_UPDATE = False
@@ -7422,6 +7432,7 @@ def _build_regime_indicators_and_detectors(asset):
 
     # Time-Series Momentum (Liu & Tsyvinski 2021 RFS crypto replication)
     df_ind['tsmom_672h'] = np.log(df_ind['close'] / df_ind['close'].shift(672))
+    df_ind['tsmom_168h'] = np.log(df_ind['close'] / df_ind['close'].shift(168))
 
     ind = df_ind.to_dict('index')
 
@@ -7435,10 +7446,12 @@ def _build_regime_indicators_and_detectors(asset):
 
     _all_detectors = {
         'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
+        'sma48>sma100':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma100']),
         'sma168>sma480':  lambda dt: safe(dt, lambda r: r['sma168'] > r['sma480']),
         'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
         'vol_calm':       lambda dt: safe(dt, lambda r: r['vol_24h_deseason'] < r['vol_24h_deseason_q70']),
         'tsmom_672h':     lambda dt: safe(dt, lambda r: r['tsmom_672h'] > 0),
+        'tsmom_168h':     lambda dt: safe(dt, lambda r: r['tsmom_168h'] > 0),
     }
     # Filter to ENABLED_DETECTORS (trimmed 5→2 on 2026-04-30 for HRST consistency).
     # Keep ALL lambda definitions above so live trader can still evaluate any
@@ -10142,6 +10155,17 @@ def _refine_top_configs(asset, horizon, top3_for_refine, df_raw,
     # Collect ALL refined dicts per cfg across chunks; pick best apf per cfg at end.
     refined_per_cfg = {c: [] for c in range(n_cfgs)}
 
+    # FIX (2026-06-14, P1-0613): kill any live loky reusable-executor (from STEP 1's joblib
+    # backtests) BEFORE opening this fresh ProcessPool. On Windows a live loky pool + a new
+    # ProcessPoolExecutor (whose workers re-import faye) deadlocks at as_completed — the
+    # standalone Mode-V hang. HRST avoids it (its Mode-D ProcessPool cleans up first).
+    # Mirror of the shutdowns at faye.py:3619 / 3720 / 10331.
+    try:
+        from joblib.externals.loky import get_reusable_executor
+        get_reusable_executor().shutdown(wait=True, kill_workers=True)
+    except Exception:
+        pass
+
     pool = _PoolExec(max_workers=n_workers)
     futures = {}
     try:
@@ -10270,6 +10294,63 @@ def _faye_prevent_sleep():
               f"{type(e).__name__}: {e}")
 
 
+# ── FAYE 2026-06-14: same-machine single-instance guard ──────────────────────
+# Refuses a 2nd engine run for the same (asset, output-dir) on THIS machine — the
+# BTC double-launch incident (two identical HRSTs interleaving + colliding on
+# models_faye/). MACHINE-LOCAL: the lock lives in this machine's temp dir, NOT the
+# Drive-synced engine folder, so the OTHER machine never sees it → desktop+laptop
+# parallel runs of DIFFERENT assets are unaffected. OS-level exclusive lock held for
+# the process lifetime → auto-released on exit/crash (no heartbeat, no stale-lock).
+# FAIL-OPEN on any setup error: a bug in the guard must never block a legitimate run.
+_FAYE_INSTANCE_LOCKS = []
+
+def _faye_close_quietly(fh):
+    try: fh.close()
+    except Exception: pass
+
+def _faye_rm_quietly(path):
+    try: os.remove(path)
+    except Exception: pass
+
+def _acquire_machine_lock(asset, models_dir):
+    try:
+        import tempfile, hashlib, atexit
+        key = f"{asset}_{hashlib.md5(os.path.abspath(models_dir).encode()).hexdigest()[:8]}"
+        lock_path = os.path.join(tempfile.gettempdir(), f"faye_engine_{key}.lock")
+        fh = open(lock_path, 'a+')
+    except Exception:
+        return  # fail-open: never block a legit run on a lock-setup error
+    locked, have_locker = False, True
+    try:
+        import msvcrt
+        try:
+            fh.seek(0); msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1); locked = True
+        except OSError:
+            locked = False
+    except ImportError:
+        try:
+            import fcntl
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB); locked = True
+            except OSError:
+                locked = False
+        except ImportError:
+            have_locker = False  # no OS file-locker available → fail-open
+    if not locked and have_locker:
+        _faye_close_quietly(fh)
+        sys.stderr.write(
+            f"\n*** FAYE LOCK — another engine run for asset={asset} (-> {models_dir}) is already "
+            f"active on THIS machine.\n*** Refusing to double-launch. (Machine-local guard; the OTHER "
+            f"machine is unaffected — parallel runs of DIFFERENT assets are fine.)\n")
+        raise SystemExit(99)
+    _FAYE_INSTANCE_LOCKS.append(fh)  # keep the handle alive for the process lifetime
+    try:
+        import atexit
+        atexit.register(lambda: (_faye_close_quietly(fh), _faye_rm_quietly(lock_path)))
+    except Exception:
+        pass
+
+
 if __name__ == '__main__':
     # FAYE: freeze_support() required for Windows ProcessPool spawn workers
     # (Mode D 8-worker dispatcher, Mode V parallel backtests, refine workers).
@@ -10299,6 +10380,18 @@ if __name__ == '__main__':
         except (ValueError, IndexError):
             print(f"  --refine-trials must be an integer (e.g. --refine-trials 5)")
             sys.exit(2)
+
+    # FAYE 2026-06-14: same-machine single-instance guard (per asset + output dir) — refuses a
+    # duplicate engine run on THIS machine (the BTC double-launch). Machine-local, so the other
+    # machine's parallel runs of different assets are unaffected. Only the top-level parent locks.
+    if not _mp.parent_process():
+        try:
+            _known_assets = {str(k).upper() for k in ASSETS}
+            _run_assets = [a for a in sys.argv[1:] if a.upper() in _known_assets]
+        except Exception:
+            _run_assets = []
+        for _a in _run_assets:
+            _acquire_machine_lock(_a.upper(), FAYE_MODELS_DIR)
 
     print("=" * 80)
     print(f"  CRYPTO TRADING SYSTEM FAYE — {MACHINE}")

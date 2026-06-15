@@ -139,12 +139,21 @@ class _TeeWriter:
             except (OSError, ValueError):
                 pass
 
+import re  # P0-0613: TOP-LEVEL — the re.sub in the routed-log block would otherwise NameError at
+           # import, disabling the shadow (crypto_live_shadow.py) that imports this module (Rule 23).
 _LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
-os.makedirs(_LOG_DIR, exist_ok=True)
-_log_path = os.path.join(_LOG_DIR, f"ed_v1_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
-_log_fh = open(_log_path, 'w', encoding='utf-8')
-sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
-sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
+# P0-0613: ONLY when ed is run directly as the engine (NOT imported by crypto_live_shadow.py or by
+# ProcessPool workers) does it open + redirect stdout — else it hijacks the shadow's stdout + spawns
+# empty per-import turds. Direct-run logs route to logs/hrst/ed_<argv-tag>_<ts>.log.
+if __name__ == '__main__':
+    _HRST_LOG_DIR = os.path.join(_LOG_DIR, 'hrst')
+    os.makedirs(_HRST_LOG_DIR, exist_ok=True)
+    _argv_tag = re.sub(r'[^A-Za-z0-9]+', '_',
+                       '_'.join(a for a in sys.argv[1:] if not a.startswith('-'))).strip('_')[:40] or 'run'
+    _log_path = os.path.join(_HRST_LOG_DIR, f"ed_{_argv_tag}_{_dt_log.now().strftime('%Y%m%d_%H%M%S')}.log")
+    _log_fh = open(_log_path, 'w', encoding='utf-8')
+    sys.stdout = _TeeWriter(sys.__stdout__, _log_fh)
+    sys.stderr = _TeeWriter(sys.__stderr__, _log_fh)
 
 
 @contextlib.contextmanager
@@ -515,7 +524,7 @@ ONCHAIN_MERGE_LAG_DAYS = 2
 # To re-enable the full set for a quarterly detector-rediscovery run, edit
 # this set or wrap the filter site in `_build_regime_indicators_and_detectors`
 # with a CLI flag.
-ENABLED_DETECTORS = {'tsmom_672h', 'sma24>sma100'}
+ENABLED_DETECTORS = {'tsmom_672h', 'sma168>sma480', 'sma48>sma100', 'tsmom_168h', 'price>sma72', 'vol_calm'}  # 2026-06-15: detector-dedup keepers (calm tsmom_672h/sma168>sma480 -> medium sma48>sma100 -> nervous tsmom_168h/price>sma72) + vol_calm (volatility regime, highest WR, distinct behavior); sma24>sma100 dropped (redundant w/ sma48>sma100)
 # Set via --no-data-update CLI flag. When True, HRST skips macro + OHLCV downloads.
 # Used for A/B testing so all matrix variants see the same data snapshot.
 NO_DATA_UPDATE = False
@@ -6443,6 +6452,7 @@ def _build_regime_indicators_and_detectors(asset):
 
     # Time-Series Momentum (Liu & Tsyvinski 2021 RFS crypto replication)
     df_ind['tsmom_672h'] = np.log(df_ind['close'] / df_ind['close'].shift(672))
+    df_ind['tsmom_168h'] = np.log(df_ind['close'] / df_ind['close'].shift(168))
 
     ind = df_ind.to_dict('index')
 
@@ -6456,10 +6466,12 @@ def _build_regime_indicators_and_detectors(asset):
 
     _all_detectors = {
         'sma24>sma100':   lambda dt: safe(dt, lambda r: r['sma24'] > r['sma100']),
+        'sma48>sma100':   lambda dt: safe(dt, lambda r: r['sma48'] > r['sma100']),
         'sma168>sma480':  lambda dt: safe(dt, lambda r: r['sma168'] > r['sma480']),
         'price>sma72':    lambda dt: safe(dt, lambda r: r['close'] > r['sma72']),
         'vol_calm':       lambda dt: safe(dt, lambda r: r['vol_24h_deseason'] < r['vol_24h_deseason_q70']),
         'tsmom_672h':     lambda dt: safe(dt, lambda r: r['tsmom_672h'] > 0),
+        'tsmom_168h':     lambda dt: safe(dt, lambda r: r['tsmom_168h'] > 0),
     }
     # Filter to ENABLED_DETECTORS (trimmed 5→2 on 2026-04-30 for HRST consistency).
     # Keep ALL lambda definitions above so live trader can still evaluate any

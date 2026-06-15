@@ -12,7 +12,8 @@ if exist "C:\algo_trading\venv\Scripts\python.exe" (
 :loop
 set "ts=%date:~6,4%%date:~3,2%%date:~0,2%_%time:~0,2%%time:~3,2%%time:~6,2%"
 set "ts=%ts: =0%"
-set "logfile=%~dp0logs\ed_v2_%ts%.log"
+if not exist "%~dp0logs\trader" mkdir "%~dp0logs\trader"
+set "logfile=%~dp0logs\trader\ed_v2_%ts%.log"
 echo [%date% %time%] Starting Ed V2 trader (maker orders)...
 echo [%date% %time%] Log: %logfile%
 "%PYTHON%" "%~dp0tools\tee_launcher.py" "%logfile%" "%PYTHON%" -u "%~dp0crypto_revolut_ed_v2.py" --loop

@@ -151,7 +151,7 @@ def init_runtime_log():
         return _RUNTIME_LOG_FILE.name
     try:
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+        log_dir = os.path.join(os.path.dirname(__file__), 'logs', 'trader')  # P0-0613: route trader runtime log
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f'ed_runtime_{ts}.log')
         _RUNTIME_LOG_FILE = open(log_path, 'a', encoding='utf-8', buffering=1)
@@ -303,7 +303,7 @@ def _evaluate_detector(det_type, params, df, asset):
 def _evaluate_named_detector(name, df):
     """Evaluate a named detector. Must mirror the dict in
     crypto_trading_system_ed.py::_build_regime_indicators_and_detectors.
-    Supported names: sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h.
+    Supported names: sma24>sma100, sma48>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h, tsmom_168h.
 
     Return convention (Fix #2 2026-04-24):
         True  = bull
@@ -324,6 +324,10 @@ def _evaluate_named_detector(name, df):
         if name == 'sma24>sma100':
             if len(df) < 110: return True  # cold-start
             return df['close'].rolling(24).mean().iloc[-1] > df['close'].rolling(100).mean().iloc[-1]
+
+        if name == 'sma48>sma100':
+            if len(df) < 110: return True  # cold-start
+            return df['close'].rolling(48).mean().iloc[-1] > df['close'].rolling(100).mean().iloc[-1]
 
         if name == 'sma168>sma480':
             if len(df) < 490: return True
@@ -355,11 +359,15 @@ def _evaluate_named_detector(name, df):
             if len(df) < 680: return True
             return _np.log(df['close'].iloc[-1] / df['close'].iloc[-672]) > 0
 
+        if name == 'tsmom_168h':
+            if len(df) < 176: return True
+            return _np.log(df['close'].iloc[-1] / df['close'].iloc[-168]) > 0
+
         # Unknown name = typo in config = real error
         print(f"  [!!] Unknown named detector: '{name}' — REFUSING to trade")
         _rate_limited_telegram_lt(
             f'regime_named_unknown_{name}',
-            f"🚨 Unknown regime detector name '{name}' — refusing to trade. Valid: sma24>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h.",
+            f"🚨 Unknown regime detector name '{name}' — refusing to trade. Valid: sma24>sma100, sma48>sma100, sma168>sma480, price>sma72, vol_calm, tsmom_672h, tsmom_168h.",
         )
         return None
     except Exception as e:
