@@ -38,6 +38,7 @@ def indicators():
     X=pd.DataFrame(index=df.index)
     X['close']=c; X['sma48']=c.rolling(48).mean(); X['sma100']=c.rolling(100).mean(); X['sma72']=c.rolling(72).mean()
     X['hurst']=np.log(c).rolling(HURST_WIN).apply(_hurst_rs, raw=True)
+    X['tsmom672']=np.log(c/c.shift(672))
     return X.to_dict('index')
 
 def simulate(dts, s8, s5, is_bull, bullC, bearC):
@@ -73,7 +74,10 @@ def main():
         return bool(g(dt,'sma48')>g(dt,'sma100'))
     def det_price72(dt):
         return bool(g(dt,'close')>g(dt,'sma72'))
+    def det_tsmom(dt):   # tsmom_672h (LIVE production detector)
+        v=g(dt,'tsmom672'); return bool(v>0) if v==v else True
     configs=[
+        ('tsmom_672h LIVE (8h@80/5h@70)',           det_tsmom, 80, 70),
         ('sma48>sma100 & hurst>0.5 (combo, 90/65)', det_combo, 90, 65),
         ('sma48>sma100 (single, 90/65)',            det_sma48, 90, 65),
         ('price>sma72 (single, 70/65)',             det_price72, 70, 65),

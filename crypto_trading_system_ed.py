@@ -5742,7 +5742,7 @@ def run_mode_t(assets_list, args=None):
     # converged prior HRST) collapses the per-iter search from 84 combos to
     # just 4 (bull/bear shield on/off). Numeric jitter disappears;
     # oscillation, if it happens, is now a REAL structural-instability signal.
-    THRESHOLDS = [0.5]
+    THRESHOLDS = [0.0]  # 2026-06-16: was 0.5 (the "sweet spot" noted above) — overridden to 0. Live runs min_sell_pnl=0; the 0.5 default kept silently overwriting it in HRST outputs (misleading).
     FAILSAFE_HOURS = [10]
 
     df_models = pd.read_csv(PRODUCTION_CSV)
@@ -6860,7 +6860,7 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         bear_shield = bool(asset_cfg.get('bear', {}).get('hold_shield', True))
         bull_conf = float(asset_cfg.get('bull', {}).get('min_confidence', 75.0))
         bear_conf = float(asset_cfg.get('bear', {}).get('min_confidence', 65.0))
-        min_sell_pnl = float(asset_cfg.get('min_sell_pnl_pct', 0.5))  # already percent
+        min_sell_pnl = float(asset_cfg.get('min_sell_pnl_pct', 0.0))  # already percent (2026-06-16: default 0.5->0)
         max_hold = int(asset_cfg.get('max_hold_hours', 10))
         # Quick-release default OFF — opt-in only (see 2026-04-19 evaluation)
         qr_cfg = asset_cfg.get('shield_quick_release', {})
