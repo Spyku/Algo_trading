@@ -8,7 +8,7 @@ Automated ML trading system for **crypto** (ETH live; BTC, SOL, LINK, XRP standb
 
 ## Current production state
 
-> ⚠️ **SUPERSEDED 2026-06-09** — production moved to the **FAYE** engine (promoted 2026-05-31). ETH now runs **bull 8h@65% (shield OFF) / bear 8h@70% (shield ON)**, detector `tsmom_672h`, RF+LGBM w169 γ0.9998 24f (both regimes), rally-cd OFF, min_sell 0.5%, maker ON — see [TODO.md](TODO.md) `📌 LIVE STATE` (single source of truth). GB+LGBM was trialed 2026-06-08/09 and **rejected** (lost the real-engine backtest to RF+LGBM). The 2026-05-27 snapshot below is **historical** (pre-FAYE).
+> ⚠️ **SUPERSEDED — current live (2026-06-16):** detector **`sma48>sma100`** (swapped from `tsmom_672h`, which was too slow on sharp reversals — missed the 06-15 rally), **bull 8h@90% shield ON / bear 5h@65% shield OFF**, rally-cd ON, min_sell 0, maker ON. `ENABLED_DETECTORS` expanded 2→6 after a 45-detector dedup audit. See [TODO.md](TODO.md) `📌 LIVE STATE` (single source of truth) for full config + rollback. **Everything below this line is historical** (the engine moved to **FAYE** on 2026-05-31; live inference now runs `compute_signal_core()` in `crypto_trading_system_faye.py`).
 
 ### Historical snapshot (2026-05-27, pre-FAYE)
 
