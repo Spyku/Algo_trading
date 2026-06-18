@@ -51,14 +51,30 @@ def shadow_check():
     d = pd.read_csv(f)
     if "match" not in d.columns or len(d) == 0:
         return "WARN", "shadow file empty / no 'match' column"
-    m = _truthy(d["match"])
-    rate = m.mean()                          # all-time — context only (fixed historical
-                                             # episodes drag this down forever)
-    recent = m.tail(SHADOW_RECENT_N)
-    recent_rate = recent.mean()              # verdict driver — is the trader correct NOW
+    recent = d.tail(SHADOW_RECENT_N)
     age_h = (time.time() - os.path.getmtime(f)) / 3600
-    msg = (f"recent-{len(recent)} {recent_rate*100:.1f}% match (verdict) | "
-           f"all-time {int(m.sum())}/{len(m)} = {rate*100:.1f}% | file age {age_h:.1f}h")
+    # ALERT-GAP FIX (2026-06-18): a shadow that can't even RUN (shadow_error set, e.g.
+    # 'import_failed') is the MONITOR being DOWN — categorically different from a real
+    # BUY/SELL mismatch. Previously errored rows had a blank 'match' → counted as False
+    # → looked like a generic "0% match"; a fully-down monitor went unnamed (the 2.5-day
+    # import_failed outage that fired no clear alert). Now we detect + NAME it explicitly.
+    err = (recent["shadow_error"].astype(str).str.strip()
+           if "shadow_error" in recent.columns else pd.Series([""] * len(recent)))
+    errored = err.ne("") & err.str.lower().ne("nan")
+    n_err = int(errored.sum())
+    valid = recent[~errored.values]
+    if n_err >= max(1, int(len(recent) * 0.5)) or len(valid) == 0:
+        top = err[errored].value_counts()
+        top_err = top.index[0] if len(top) else "?"
+        return "FAIL", (f"SHADOW DOWN (monitor not running) - {n_err}/{len(recent)} recent rows "
+                        f"errored ['{top_err}']. RESTART the trader. This is the MONITOR, not a "
+                        f"confirmed trader bug - see [2] SNAPSHOT REPLAY for the live signal path. "
+                        f"file age {age_h:.1f}h")
+    m_valid = _truthy(valid["match"])
+    recent_rate = m_valid.mean() if len(m_valid) else 0.0  # verdict driver (valid rows only)
+    m_all = _truthy(d["match"]); rate = m_all.mean()        # all-time context
+    msg = (f"recent-valid {len(m_valid)} {recent_rate*100:.1f}% match (verdict) | "
+           f"{n_err} errored | all-time {int(m_all.sum())}/{len(m_all)} = {rate*100:.1f}% | file age {age_h:.1f}h")
     status = "PASS" if recent_rate >= SHADOW_MIN else "FAIL"
     if age_h > 6:
         msg += "  [!] stale — trader may not be writing"

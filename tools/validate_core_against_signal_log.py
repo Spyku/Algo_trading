@@ -69,6 +69,10 @@ for v in ("V2_DATA_SNAPSHOT", "H_STRICT_MODELS_DIR", "H_STRICT_CONFIG_DIR",
         print(f"  [warning] env var {v}={os.environ[v]!r} — UNSET to avoid data redirect", flush=True)
         del os.environ[v]
 
+# Mirror the LIVE trader: faye reads pysr from models/ (FAYE_MODELS_DIR=models, set by
+# crypto_live_trader_ed). Must be set BEFORE faye is imported (MODELS_DIR is bound at import).
+os.environ.setdefault("FAYE_MODELS_DIR", "models")
+
 
 def _load_with_imports(engine_name="ed"):
     """Import everything lazily so any import error has a clear message.
@@ -234,7 +238,7 @@ def main():
     parser.add_argument("--recent-only", action="store_true",
                         help="Sample only the most recent N hours (default: random sample across all)")
     parser.add_argument("--asset", default="ETH")
-    parser.add_argument("--engine", default="ed", choices=["ed", "faye"],
+    parser.add_argument("--engine", default="faye", choices=["ed", "faye"],
                         help="Engine whose build_all_features/PySR + production config to use. "
                              "'faye' = lagged FAYE engine + models_faye/ config (tests the daily-lag fix).")
     parser.add_argument("--cpu-lgbm", action="store_true",
@@ -266,12 +270,13 @@ def main():
     print(f"  signal_log: {len(sig_log)} {args.asset} entries from {sig_log['timestamp'].min()} to {sig_log['timestamp'].max()}")
 
     # Read bull/bear horizons + regime detector from the config — NOT hardcoded.
-    # (Was hardcoded 5h/8h + sma24>sma100, which broke when FAYE promoted bull=6h + tsmom_672h.)
-    # --engine faye reads the isolated FAYE config + production CSV (lagged models).
-    if args.engine == "faye":
-        regime_path, prod_csv = "config_faye/regime_config_faye.json", "models_faye/crypto_faye_production.csv"
-    else:
-        regime_path, prod_csv = "config/regime_config_ed.json", "models/crypto_ed_production.csv"
+    # 2026-06-18 FIX: the LIVE trader serves with the faye ENGINE + the LIVE config/models
+    # (config/regime_config_ed.json + models/) — NOT config_faye/models_faye. config_faye is
+    # isolated FAYE *staging* and had gone STALE here (tsmom_672h / bull 6h vs live sma48>sma100
+    # / bull 8h), so --engine faye ran the wrong detector+horizon → every row [STALE: live h=8]
+    # → INCONCLUSIVE. Both engines now read the LIVE config; --engine ONLY selects the compute
+    # path. (Was: --engine faye read the isolated staging — obsolete since the daily-lag arc closed.)
+    regime_path, prod_csv = "config/regime_config_ed.json", "models/crypto_ed_production.csv"
     with open(regime_path) as f:
         asset_cfg = json.load(f).get(args.asset, {})
     bull_h = asset_cfg.get("bull", {}).get("horizon")

@@ -7951,26 +7951,33 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
     print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
           f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
 
-    pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
-    total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
-    print(f"  {asset} | sweeping {total:,} configs ...")
+    # SINGLE-GATE SWEEP (2026-06-16): the rally-cooldown is now a SINGLE-window
+    # condition `rr[h] >= t`, NOT the old 2-window `rr[h_s]>=t_s OR rr[h_l]>=t_l`
+    # double. Idea-1 study (tools/test_gate_simplicity.py) showed only ONE leg ever
+    # earns its keep; the 2nd leg was dead weight or net-harmful. The 5-key config
+    # schema is preserved for trader-compat by writing the disabled long leg as
+    # h_long=h_short / t_long_pct=DEAD_TL (the same never-fires sentinel the V0
+    # baseline above already uses) — so the produced gate is single but the trader's
+    # _update_rally_cooldown and every downstream consumer stay unchanged.
+    DEAD_TL = 9999.0
+    total = sum(len(thr_for(h)) for h in HORIZONS) * len(CD_GRID)
+    print(f"  {asset} | sweeping {total:,} single-gate configs ...")
 
     rows = []
     t0 = time.time()
-    for h_s, h_l in pairs:
-        for t_s in thr_for(h_s):
-            for t_l in thr_for(h_l):
-                for cd in CD_GRID:
-                    r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    rows.append(dict(
-                        h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
-                        pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
-                        dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
-                        tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
-                        sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
-                    ))
+    for h in HORIZONS:
+        for t in thr_for(h):
+            for cd in CD_GRID:
+                r1 = simulate(sigs_h1, rr_h1, h, h, t, DEAD_TL, cd, asset_cfg)
+                r2 = simulate(sigs_h2, rr_h2, h, h, t, DEAD_TL, cd, asset_cfg)
+                rR = simulate(sigs_ref, rr_ref, h, h, t, DEAD_TL, cd, asset_cfg)
+                rows.append(dict(
+                    h_short=h, h_long=h, t_short=t, t_long=DEAD_TL, cd=cd,
+                    pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
+                    dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
+                    tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
+                    sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
+                ))
     print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
 
     df = pd.DataFrame(rows)
@@ -7989,40 +7996,32 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
                    float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
     beats3 = df['beats_3of3'].values
 
-    def nb_idx(hs, hl, ts, tl, cd, dim, step):
+    # Single-gate plateau: only 3 live dims (h, t, cd). h_long/t_long are inert
+    # (h_long==h_short, t_long==DEAD_TL) so they are not perturbed. Neighbor keys
+    # mirror the stored 5-tuple shape (h, h, t, DEAD_TL, cd).
+    def nb_idx(hs, ts, cd, dim, step):
         if dim == 'hs':
             i = h_idx[hs] + step
             if not (0 <= i < len(HORIZONS)): return None
             new = HORIZONS[i]
-            if new >= hl: return None
-            key = (new, hl, ts, tl, cd)
-        elif dim == 'hl':
-            i = h_idx[hl] + step
-            if not (0 <= i < len(HORIZONS)): return None
-            new = HORIZONS[i]
-            if new <= hs or tl not in thr_for(new): return None
-            key = (hs, new, ts, tl, cd)
+            if ts not in thr_for(new): return None
+            key = (new, new, ts, DEAD_TL, cd)
         elif dim == 'ts':
             new = round(ts + 0.5 * step, 2)
             if new not in thr_for(hs): return None
-            key = (hs, hl, new, tl, cd)
-        elif dim == 'tl':
-            new = round(tl + 0.5 * step, 2)
-            if new not in thr_for(hl): return None
-            key = (hs, hl, ts, new, cd)
+            key = (hs, hs, new, DEAD_TL, cd)
         elif dim == 'cd':
             i = cd_idx[cd] + step
             if not (0 <= i < len(CD_GRID)): return None
-            key = (hs, hl, ts, tl, CD_GRID[i])
+            key = (hs, hs, ts, DEAD_TL, CD_GRID[i])
         return key_to_idx.get(key)
 
     plateau = np.zeros(len(df))
     for i, r in df.iterrows():
         nbrs = []
-        for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
+        for dim in ('hs', 'ts', 'cd'):
             for step in (-1, 1):
-                j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
-                           float(r['t_long']), int(r['cd']), dim, step)
+                j = nb_idx(int(r['h_short']), float(r['t_short']), int(r['cd']), dim, step)
                 if j is not None: nbrs.append(j)
         plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
     df['plateau_score'] = plateau
@@ -8043,7 +8042,7 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         print(f"  {asset} | NO STRICT WINNER — config not modified.")
         return None
 
-    cols = ['h_short','h_long','t_short','t_long','cd',
+    cols = ['h_short','t_short','cd',
             'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_recent','score_dd_aware','plateau_score']
     print(f"  {asset} | top 5 STRICT:")
     print(strict[cols].head(5).to_string(index=False,
@@ -8051,8 +8050,8 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
                       if c.startswith(('pnl_','score_','plateau','worst'))}))
 
     win = strict.iloc[0]
-    print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
-          f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
+    print(f"\n  {asset} WINNER (single gate): rr{int(win['h_short'])}h>={win['t_short']}%, "
+          f"cd={int(win['cd'])}h")
 
     winner_dict = {
         'enabled': True,
@@ -8155,7 +8154,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'RST', 'T', 'G', 'F'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'RST', 'T', 'G', 'F', 'C'}
 
     # ── CLI shortcuts (added 2026-05-02) ─────────────────────────────
     # `--<integer>` → `--replay <integer>` (e.g. --1440 ≡ --replay 1440)
@@ -8225,6 +8224,16 @@ def main():
                 flag_top = int(sys.argv[i + 1])
             except ValueError:
                 pass
+
+    # Parse --chal-config / --chal-models (Mode C: override the challenger paths;
+    # default = config_faye/regime_config_faye.json + FAYE_MODELS_DIR/crypto_faye_production.csv)
+    flag_chal_config = ''
+    flag_chal_models = ''
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--chal-config' and i < len(sys.argv) - 1:
+            flag_chal_config = sys.argv[i + 1]
+        elif a == '--chal-models' and i < len(sys.argv) - 1:
+            flag_chal_models = sys.argv[i + 1]
 
     # Parse --rank recent|balanced (Mode G tiebreak), default 'recent'
     flag_rank = 'recent'
@@ -8840,6 +8849,15 @@ Examples:
         _r_args.replay = flag_replay
         _r_args.max_iter = flag_max_iter
         run_mode_t(assets_list, _r_args)
+    elif mode == 'C':
+        # Mode C ("Choice") — promotion gate: cross-window + hysteresis comparison
+        # of the LIVE production config vs the LAST-COMPUTED FAYE config. Report-only.
+        class _Args: pass
+        _r_args = _Args()
+        _r_args.replay = flag_replay
+        _r_args.chal_config = flag_chal_config
+        _r_args.chal_models = flag_chal_models
+        run_mode_c(assets_list, _r_args)
     elif mode == 'F':
         run_mode_f(
             restore=flag_restore,
@@ -8883,9 +8901,11 @@ Examples:
     # deployable winner in config_faye/regime_config_faye.json + models_faye/.
     # Drop a marker so the LIVE trader copies it onto production on its next
     # FLAT cycle (deferred-until-flat; see crypto_revolut_ed_v2._apply_pending_promotion).
-    # --no-persist runs write *_noprod.* and never drop the marker -> stay sandboxed.
+    # --no-persist AND --noprod runs write *_noprod.* and must NEVER drop the marker
+    # -> stay fully sandboxed (2026-06-16: --noprod was missing from this gate, so a
+    # research --noprod run still staged a promote pointing at stale live faye files).
     _PROMOTE_MODES = {'RST', 'HRST', 'HRS', 'RS', 'DVRS', 'R', 'S', 'T', 'G'}
-    if '--no-persist' not in sys.argv and mode in _PROMOTE_MODES:
+    if '--no-persist' not in sys.argv and '--noprod' not in sys.argv and mode in _PROMOTE_MODES:
         try:
             import datetime as _dt
             _marker = os.path.join(FAYE_CONFIG_DIR, 'promote_ready.json')
@@ -10349,6 +10369,203 @@ def _acquire_machine_lock(asset, models_dir):
         atexit.register(lambda: (_faye_close_quietly(fh), _faye_rm_quietly(lock_path)))
     except Exception:
         pass
+
+
+# ============================================================
+# MODE C ("Choice") — promotion gate (added 2026-06-17, native, additive).
+# Cross-window + hysteresis comparison of the LIVE production config (incumbent)
+# vs the LAST-COMPUTED FAYE config (challenger). Report-only: never writes live.
+# Reuses generate_signals + _build_regime_indicators_and_detectors; touches no
+# existing code path (cannot affect Mode T / generate_signals / the trader import).
+# ============================================================
+def _modec_sim(tagged, bull_min_pnl, bear_min_pnl, max_hold_h, bull_gate, bear_gate):
+    """Single-pool regime-switched backtest for Mode C. Faithful mirror of the nested
+    _sim_regime_switched in run_mode_t_serial (which can't be reused directly — it
+    closes over Mode-T-local QR vars). Quick-release omitted (opt-in, default OFF in
+    production). $1000 pool compounds through regime flips; per-regime conf gate +
+    shield (min_pnl) + rally-cooldown. gate = (h_s,h_l,t_s,t_l,cd_h) or None.
+    KEEP IN SYNC with _sim_regime_switched; consolidate when Mode-T is refactored."""
+    cash, held, in_pos, entry_px = 1000.0, 0.0, False, 0.0
+    trade_log = []; hold_since = 0; bull_cd = bear_cd = 0
+    closes = np.array([float(s['close']) for s in tagged])
+
+    def _rr(h):
+        out = np.full(len(closes), np.nan)
+        if h and h < len(closes):
+            out[h:] = (closes[h:] / closes[:-h] - 1.0) * 100.0
+        return out
+
+    bh_s = bh_l = 0; bt_s = bt_l = 0.0; bcd = 0; b_rs = b_rl = None
+    if bull_gate is not None:
+        bh_s, bh_l, bt_s, bt_l, bcd = bull_gate; b_rs = _rr(bh_s); b_rl = _rr(bh_l)
+    rh_s = rh_l = 0; rt_s = rt_l = 0.0; rcd = 0; r_rs = r_rl = None
+    if bear_gate is not None:
+        rh_s, rh_l, rt_s, rt_l, rcd = bear_gate; r_rs = _rr(rh_s); r_rl = _rr(rh_l)
+
+    for i, s in enumerate(tagged):
+        price = s['close']; regime = s.get('regime', 'bull')
+        conf_thr = float(s.get('conf_threshold', 0))
+        min_pnl = bull_min_pnl if regime == 'bull' else bear_min_pnl
+        if in_pos:
+            hold_since += 1
+        if bcd > 0:
+            rs = b_rs[i] if not np.isnan(b_rs[i]) else 0; rl = b_rl[i] if not np.isnan(b_rl[i]) else 0
+            if rs >= bt_s or rl >= bt_l:
+                bull_cd = max(bull_cd, bcd)
+        if rcd > 0:
+            rs = r_rs[i] if not np.isnan(r_rs[i]) else 0; rl = r_rl[i] if not np.isnan(r_rl[i]) else 0
+            if rs >= rt_s or rl >= rt_l:
+                bear_cd = max(bear_cd, rcd)
+        active_cd = bull_cd if regime == 'bull' else bear_cd
+        if s['signal'] == 'BUY' and s['confidence'] >= conf_thr and not in_pos:
+            if active_cd <= 0:
+                held = cash * (1 - BACKTEST_FEE_PER_LEG) / price
+                cash = 0; in_pos = True; entry_px = price; hold_since = 0
+        elif s['signal'] == 'SELL' and in_pos:
+            cur = (price / entry_px - 1) * 100
+            if min_pnl <= 0 or cur >= min_pnl or hold_since >= max_hold_h:
+                cash = held * price * (1 - BACKTEST_FEE_PER_LEG)
+                trade_log.append(cur); held = 0; in_pos = False; hold_since = 0
+        if bull_cd > 0: bull_cd -= 1
+        if bear_cd > 0: bear_cd -= 1
+
+    final = cash if not in_pos else held * tagged[-1]['close']
+    if in_pos:
+        trade_log.append((tagged[-1]['close'] / entry_px - 1) * 100)
+    ret = (final / 1000.0 - 1) * 100
+    wins = sum(1 for t in trade_log if t > 0)
+    wr = (wins / len(trade_log) * 100) if trade_log else 0
+    return ret, len(trade_log), wr
+
+
+def run_mode_c(assets_list, args=None):
+    """Mode C ('Choice') — promotion gate. Backtests BOTH the LIVE config (incumbent)
+    and the LAST-COMPUTED FAYE config (challenger) — detector + horizons + confs +
+    gates + models — across rolling 720h windows over --replay, and reports
+    PROMOTE / HOLD by a downside-weighted hysteresis rule. Report-only: never writes
+    live. Override challenger via --chal-config / --chal-models."""
+    import json, math
+    replay = int(getattr(args, 'replay', 0)) or 2880
+    WIN_H, STEP_H, HYST_MARGIN, MIN_ROBUST_WINDOWS = 720, 240, 5.0, 5
+    inc_cfg, inc_csv = 'config/regime_config_ed.json', 'models/crypto_ed_production.csv'
+    chal_cfg = getattr(args, 'chal_config', '') or f'{FAYE_CONFIG_DIR}/regime_config_faye.json'
+    chal_csv = getattr(args, 'chal_models', '') or f'{FAYE_MODELS_DIR}/crypto_faye_production.csv'
+
+    def _load_spec(cfg_path, csv_path, asset):
+        cfg = json.load(open(cfg_path))[asset]
+        df = pd.read_csv(csv_path)
+        spec = dict(detector=cfg['regime_detector']['params']['name'],
+                    min_sell=float(cfg.get('min_sell_pnl_pct', 0)),
+                    max_hold=int(cfg.get('max_hold_hours', 10)))
+        for reg in ('bull', 'bear'):
+            b = cfg[reg]; h = int(b['horizon']); rc = b.get('rally_cooldown') or {}
+            gate = ((int(rc['h_short']), int(rc['h_long']), float(rc['t_short_pct']),
+                     float(rc['t_long_pct']), int(rc['cd_hours'])) if rc.get('enabled') else None)
+            rows = df[(df['coin'] == asset) & (df['horizon'] == h)].sort_values('combined_score', ascending=False)
+            if len(rows) == 0:
+                raise ValueError(f"no {asset} {h}h model row in {csv_path}")
+            r = rows.iloc[0]
+            feats = r['optimal_features'].split(',') if pd.notna(r.get('optimal_features')) else None
+            spec[reg] = dict(h=h, conf=float(b['min_confidence']), shield=bool(b.get('hold_shield')),
+                             gate=gate, combo=str(r['models']), window=int(r['best_window']),
+                             gamma=float(r.get('gamma', 1.0)), features=feats)
+        return spec
+
+    def _mkey(m):
+        return (m['combo'], m['window'], round(m['gamma'], 6), m['h'], tuple(m['features'] or []))
+
+    for asset in assets_list:
+        print("=" * 80)
+        print(f"  MODE C (Choice) — promotion gate | {asset} | replay={replay}h")
+        print(f"  incumbent : {inc_cfg} + {inc_csv}")
+        print(f"  challenger: {chal_cfg} + {chal_csv}")
+        print("=" * 80)
+        try:
+            inc = _load_spec(inc_cfg, inc_csv, asset)
+            chal = _load_spec(chal_cfg, chal_csv, asset)
+        except Exception as e:
+            print(f"  {asset}: cannot load configs — {e}\n  -> ABORT (no decision).")
+            continue
+
+        ind, detectors = _build_regime_indicators_and_detectors(asset)
+        bad = [nm for nm, sp in (('incumbent', inc), ('challenger', chal)) if sp['detector'] not in detectors]
+        if bad:
+            print(f"  {asset}: detector not in ENABLED_DETECTORS for {bad} "
+                  f"(inc={inc['detector']} chal={chal['detector']}) -> cannot evaluate. ABORT.")
+            continue
+
+        # Generate signals for every UNIQUE model across both configs (dedup shared models).
+        need = {}
+        for sp in (inc, chal):
+            for reg in ('bull', 'bear'):
+                need[_mkey(sp[reg])] = sp[reg]
+        sigcache = {}
+        for key, m in need.items():
+            with _suppress_stderr():
+                sigs = generate_signals(asset, m['combo'].split('+'), m['window'], replay,
+                                        feature_override=m['features'], horizon=m['h'], gamma=m['gamma'])
+            sigcache[key] = {pd.Timestamp(s['datetime']): s for s in sigs}
+            print(f"  generated {m['combo']} w{m['window']} g{m['gamma']} h{m['h']}: {len(sigcache[key])} sigs")
+
+        common = None
+        for d in sigcache.values():
+            common = set(d) if common is None else (common & set(d))
+        dts = sorted(common); N = len(dts)
+        if N < WIN_H + 1:
+            print(f"  {asset}: only {N} common bars (< {WIN_H}) — not enough for a window. ABORT."); continue
+        wins = [(s, s + WIN_H) for s in range(0, N - WIN_H + 1, STEP_H)]
+
+        def _xwin(sp):
+            detfn = detectors[sp['detector']]; bs = sigcache[_mkey(sp['bull'])]; rs = sigcache[_mkey(sp['bear'])]
+            rets = []
+            for a, b in wins:
+                tagged = []
+                for dt in dts[a:b]:
+                    is_bull = bool(detfn(dt))
+                    s = (bs if is_bull else rs).get(dt)
+                    if s is None:
+                        continue
+                    tagged.append(dict(close=float(s['close']), signal=s['signal'],
+                                       confidence=float(s['confidence']),
+                                       regime='bull' if is_bull else 'bear',
+                                       conf_threshold=sp['bull']['conf'] if is_bull else sp['bear']['conf']))
+                bmp = sp['min_sell'] if sp['bull']['shield'] else 0.0
+                rmp = sp['min_sell'] if sp['bear']['shield'] else 0.0
+                r, _, _ = _modec_sim(tagged, bmp, rmp, sp['max_hold'], sp['bull']['gate'], sp['bear']['gate'])
+                rets.append(r)
+            bull_pct = 100.0 * sum(1 for dt in dts if bool(detfn(dt))) / max(1, N)
+            return rets, bull_pct
+
+        inc_w, inc_bp = _xwin(inc); chal_w, chal_bp = _xwin(chal)
+
+        def _st(w):
+            return dict(median=float(np.median(w)), worst=float(min(w)), std=float(np.std(w)),
+                        pos=sum(1 for x in w if x > 0))
+        si, sc = _st(inc_w), _st(chal_w)
+        nwin = len(wins); need_w = math.ceil(2 * nwin / 3)
+        beats = sum(1 for a, b in zip(chal_w, inc_w) if a > b)
+        inc_dn, chal_dn = si['median'] + si['worst'], sc['median'] + sc['worst']
+        margin = chal_dn - inc_dn
+
+        print(f"\n  span {dts[0]} -> {dts[-1]} ({N} bars) | {nwin} rolling {WIN_H}h windows (step {STEP_H}h)")
+        print(f"  incumbent : det={inc['detector']} ({inc_bp:.0f}% bull) | bull {inc['bull']['h']}h@{inc['bull']['conf']:.0f} w{inc['bull']['window']} / bear {inc['bear']['h']}h@{inc['bear']['conf']:.0f} w{inc['bear']['window']}")
+        print(f"  challenger: det={chal['detector']} ({chal_bp:.0f}% bull) | bull {chal['bull']['h']}h@{chal['bull']['conf']:.0f} w{chal['bull']['window']} / bear {chal['bear']['h']}h@{chal['bear']['conf']:.0f} w{chal['bear']['window']}")
+        print(f"\n  {'':<12}{'median':>8}{'worst':>8}{'std':>7}{'pos':>8}{'med+worst':>11}")
+        print(f"  {'incumbent':<12}{si['median']:>+7.1f}%{si['worst']:>+7.1f}%{si['std']:>6.1f}{si['pos']:>5}/{nwin}{inc_dn:>+10.1f}")
+        print(f"  {'challenger':<12}{sc['median']:>+7.1f}%{sc['worst']:>+7.1f}%{sc['std']:>6.1f}{sc['pos']:>5}/{nwin}{chal_dn:>+10.1f}")
+        print(f"  challenger beats incumbent in {beats}/{nwin} windows | margin (med+worst) {margin:+.1f}pp")
+        enough = nwin >= MIN_ROBUST_WINDOWS
+        promote = enough and (beats >= need_w) and (margin >= HYST_MARGIN)
+        print(f"\n  HYSTERESIS: PROMOTE iff >={MIN_ROBUST_WINDOWS} windows AND challenger beats incumbent in >={need_w}/{nwin} AND margin >= +{HYST_MARGIN:.0f}pp (downside-weighted med+worst)")
+        if not enough:
+            print(f"  ⚠️  only {nwin} window(s) (< {MIN_ROBUST_WINDOWS}) — NOT robust. A single recent window over-fits; rerun with a longer --replay (>= 2880 for ~9 windows).")
+        if promote:
+            print(f"  >>> VERDICT: PROMOTE — challenger is robustly better across windows.")
+        elif not enough:
+            print(f"  >>> VERDICT: HOLD (insufficient windows — verdict not robust; default to keeping the incumbent).")
+        else:
+            print(f"  >>> VERDICT: HOLD — keep the live (incumbent) config; challenger does not clear the bar.")
+        print(f"  (report-only: no config written. If PROMOTE, copy challenger -> live manually with the trader FLAT, Rule 19.)")
 
 
 if __name__ == '__main__':

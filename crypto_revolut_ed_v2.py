@@ -1461,6 +1461,24 @@ def _set_gate_enabled(cfg_asset, regime_label, enabled):
                 block['rally_cooldown']['enabled'] = enabled
 
 
+def _wipe_cooldown_timer(asset):
+    """Clear any active rally-cooldown timer for an asset's position. Used when a gate
+    is turned fully OFF, so 'off' means off — no lingering timer. Locked + safe no-op."""
+    try:
+        lk = _get_asset_trade_lock(asset)
+        if not lk.acquire(timeout=2.0):
+            return
+        try:
+            pos = load_position(asset)
+            if pos.get('rally_cooldown_until'):
+                pos['rally_cooldown_until'] = ''
+                save_position(asset, pos)
+        finally:
+            lk.release()
+    except Exception:
+        pass
+
+
 def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
     """Trigger detection — must run EVERY tick, regardless of position state.
     Scans the last cd_hours bars so rallies that fired while the engine was
@@ -1483,6 +1501,16 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
         dt_series = dt_series.dt.tz_convert('UTC')
     bar_times = dt_series.values  # numpy array of tz-aware Timestamps
     now = datetime.now(timezone.utc)
+    # Manual-clear suppression: /gate clear stamps rally_cd_cleared_at so the catch-up
+    # scan below won't re-arm the just-cleared rally — only a FRESH rally (triggering
+    # AFTER the stamp) re-arms. The gate stays on for future rallies.
+    cleared_at = None
+    _ca = position.get('rally_cd_cleared_at', '')
+    if _ca:
+        try:
+            cleared_at = datetime.fromisoformat(_ca.replace('Z', '+00:00'))
+        except Exception:
+            cleared_at = None
 
     # Current-window values (returned for logging)
     rs = (closes[-1] / closes[-1 - h_s] - 1.0) * 100.0
@@ -1505,6 +1533,8 @@ def _update_rally_cooldown(asset, df_raw, position, rc_cfg):
             trigger_time = pd.Timestamp(bar_times[end_idx]).to_pydatetime()
             if trigger_time.tzinfo is None:
                 trigger_time = trigger_time.replace(tzinfo=timezone.utc)
+            if cleared_at is not None and trigger_time <= cleared_at:
+                continue  # user cleared this rally via /gate clear — don't re-arm it
             implied_until = trigger_time + timedelta(hours=cd_h)
             if implied_until > now and (best_until is None or implied_until > best_until):
                 best_until = implied_until
@@ -2569,9 +2599,26 @@ _paused_flag = [False]  # mutable container for thread-safe access
 # ---- Simple command handlers ----
 
 
-def _handle_help_command():
-    """Send list of available commands."""
-    send_telegram_with_buttons(
+def _current_setup_text(trading_cfg):
+    """One-glance summary of the LIVE config per enabled asset, so you can always see
+    the actual setup (detector, per-regime horizon/conf/shield/gate, shield thresholds)
+    even after toggling buttons."""
+    lines = ["<b>📋 Current setup</b> (live)"]
+    for a, cfg in (trading_cfg or {}).items():
+        if not cfg.get('enabled'):
+            continue
+        det = ((cfg.get('regime_detector') or {}).get('params') or {}).get('name', '?')
+        b = cfg.get('bull', {}) or {}; r = cfg.get('bear', {}) or {}
+        bg = b.get('rally_cooldown') or {}; rg = r.get('rally_cooldown') or {}
+        lines.append(f"<b>{a}</b> · {det} · min_sell {cfg.get('min_sell_pnl_pct')}% · max_hold {cfg.get('max_hold_hours')}h")
+        lines.append(f"  bull {b.get('horizon')}h@{b.get('min_confidence')}% · shield {'ON' if b.get('hold_shield') else 'OFF'} · gate {'ON' if bg.get('enabled') else 'OFF'}")
+        lines.append(f"  bear {r.get('horizon')}h@{r.get('min_confidence')}% · shield {'ON' if r.get('hold_shield') else 'OFF'} · gate {'ON' if rg.get('enabled') else 'OFF'}")
+    return "\n".join(lines)
+
+
+def _handle_help_command(trading_cfg=None):
+    """Send list of available commands + the current live setup."""
+    txt = (
         "📱 <b>Commands</b>\n\n"
         "<b>Status</b>\n"
         "/status — Positions, P&amp;L, balance, regime\n"
@@ -2590,9 +2637,11 @@ def _handle_help_command():
         "/reload — Force-refresh all data feeds (bypass freshness)\n"
         "/pause /resume — Pause or resume signals\n"
         "/stop — Stop the trader\n\n"
-        "💡 Buy/Sell/Shield also available via main buttons.",
-        _main_buttons()
+        "💡 Buy/Sell/Shield also available via main buttons."
     )
+    if trading_cfg:
+        txt += "\n\n" + _current_setup_text(trading_cfg)
+    send_telegram_with_buttons(txt, _main_buttons())
 
 
 def _handle_reload_command(trading_cfg):
@@ -4055,8 +4104,11 @@ def _handle_gate_command(msg, trading_cfg):
         on = parts[1].lower() == 'on'
         for a in enabled:
             _set_gate_enabled(trading_cfg[a], None, on)
+            if not on:
+                _wipe_cooldown_timer(a)   # off = also clear any active timer
         save_trading_config(trading_cfg)
-        send_telegram(f"🚦 Gate {'ON' if on else 'OFF'} for: {', '.join(enabled)}")
+        send_telegram(f"🚦 Gate {'ON' if on else 'OFF'} for: {', '.join(enabled)}"
+                      + ("" if on else " (timers cleared)"))
         _show_status(); return
 
     # /gate ASSET [regime] on|off|clear
@@ -4078,8 +4130,11 @@ def _handle_gate_command(msg, trading_cfg):
         action = parts[2].lower()
         if action in ('on', 'off'):
             _set_gate_enabled(trading_cfg[asset], None, action == 'on')
+            if action == 'off':
+                _wipe_cooldown_timer(asset)   # off = also clear any active timer
             save_trading_config(trading_cfg)
-            send_telegram(f"🚦 {asset} gate {action.upper()} (both regimes)")
+            send_telegram(f"🚦 {asset} gate {action.upper()} (both regimes)"
+                          + ("" if action == 'on' else " — timer cleared"))
             _show_status(); return
         if action == 'clear':
             # M-07 fix + N-05 hardening (2026-04-25): timed acquire so a
@@ -4092,15 +4147,17 @@ def _handle_gate_command(msg, trading_cfg):
             try:
                 pos = load_position(asset)
                 had_cooldown = bool(pos.get('rally_cooldown_until'))
-                if had_cooldown:
-                    pos['rally_cooldown_until'] = ''
-                    save_position(asset, pos)
+                pos['rally_cooldown_until'] = ''
+                # Stamp clear time so the catch-up scan won't re-arm THIS rally
+                # (only a fresh rally after now re-arms; gate stays on for the future).
+                pos['rally_cd_cleared_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                save_position(asset, pos)
             finally:
                 _lk.release()
             if had_cooldown:
-                send_telegram(f"🧹 {asset} cooldown window cleared (one-time override)")
+                send_telegram(f"🧹 {asset} cooldown cleared — won't re-arm from this rally (gate stays on for future rallies)")
             else:
-                send_telegram(f"ℹ️ {asset} has no active cooldown")
+                send_telegram(f"ℹ️ {asset} had no active cooldown (re-arm from the current rally now suppressed)")
             _show_status(); return
 
     send_telegram("Usage: /gate | /gate on|off | /gate ETH on|off|clear | /gate ETH bull|bear on|off")
@@ -4182,7 +4239,7 @@ def _dispatch_telegram_message(msg, trading_cfg):
     elif cmd == '/gate' or cmd.startswith('/gate '):
         _handle_gate_command(msg, trading_cfg)
     elif cmd == '/help':
-        _handle_help_command()
+        _handle_help_command(trading_cfg)
 
 
 _telegram_recent_cmds = {}  # cmd_str -> last_dispatch_ts (M-16b dedup)

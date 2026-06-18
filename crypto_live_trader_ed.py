@@ -140,6 +140,16 @@ class _TeeStream:
                 s.flush()
             except Exception:
                 pass
+    def reconfigure(self, *args, **kwargs):
+        # ed.py:383 / faye call sys.stdout.reconfigure(encoding='utf-8') at IMPORT.
+        # Without this proxy the call AttributeErrors under the tee, which silently
+        # broke the shadow's `import crypto_trading_system_ed` (import_failed since
+        # 2026-06-15 — ed.py is imported ONLY by the shadow, not the live path).
+        for s in self.streams:
+            try:
+                s.reconfigure(*args, **kwargs)
+            except Exception:
+                pass
 
 _RUNTIME_LOG_FILE = None
 
