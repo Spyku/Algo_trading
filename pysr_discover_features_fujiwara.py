@@ -1,0 +1,497 @@
+"""
+PySR Feature Discovery — Offline symbolic regression for Doohan
+================================================================
+Discovers compact mathematical formulas from HISTORICAL data (months 12→6 ago)
+that capture nonlinear feature interactions. Uses a data window that does NOT
+overlap with Mode D's last-6-month evaluation window, preventing leakage.
+
+Usage:
+  pip install pysr sympy          # first time only (auto-installs Julia)
+  python pysr_discover_features.py BTC 6h
+  python pysr_discover_features.py BTC 6h --top 5
+  python pysr_discover_features.py BTC 6h --iterations 100
+
+Output:
+  models/pysr_BTC_6h.json         — discovered expressions + metadata
+  models/pysr_BTC_6h_report.txt   — human-readable summary
+
+Runtime: ~30-120 min depending on iterations and hardware.
+
+Anti-leakage design:
+  Mode D uses the LAST 6 months (4320h) for grid evaluation.
+  PySR uses the PREVIOUS 6 months (months 12→6 ago) for formula discovery.
+  Zero data overlap → PySR coefficients cannot inflate Mode D backtest results.
+"""
+
+import sys
+import os
+import json
+import time
+import argparse
+import warnings
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import pandas as pd
+
+# Add engine to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# PySR discovery is bound to FAYE (current production engine), NOT the legacy ed engine.
+# FAYE's build_all_features applies the daily-availability lag (DAILY_MERGE_LAG_DAYS), so
+# PySR expressions are discovered on lagged features — matching how FAYE backtests and
+# (post-promotion) live evaluate them. Decoupled from crypto_trading_system_ed 2026-06-01.
+# ─── FUJIWARA FORK-LOCAL DISCOVERY — CHINESE WALL ───────────────────────────
+# This is a self-contained copy of pysr_discover_features.py for the sub-hourly
+# Fujiwara forks. It imports NO engine module (never crypto_trading_system_faye
+# or _ed) so it CANNOT touch production. The caller
+# (crypto_trading_system_fujiwara_*.py::run_mode_p) INJECTS everything:
+#   load_data_fn / build_features_fn  -> the fork's sub-hourly pipeline
+#   out_dir                            -> the fork's models dir
+#   max_diag_hours                     -> 6-month window in CANDLE units
+#                                         (6*30*24 * PERIODS_PER_HOUR)
+# The shared pysr_discover_features.py (used by faye/production) is untouched.
+SPARSE_NAN_THRESHOLD = 0.70  # inlined from faye (was imported); production value
+
+MAX_DIAG_HOURS = 6 * 30 * 24  # default fallback in CANDLE units; fork overrides via max_diag_hours
+
+
+def _prepare_data(asset, horizon, load_data_fn=None, build_features_fn=None,
+                  max_diag_hours=None):
+    """Load data and prepare X, y, all_cols for PySR discovery.
+    FORK-LOCAL: load_data_fn / build_features_fn are REQUIRED (no engine default),
+    and max_diag_hours sets the historical-window cap in CANDLE units.
+    Returns (X, y, all_cols, pysr_rows) or (None, None, None, 0) on error."""
+
+    if load_data_fn is None or build_features_fn is None:
+        raise ValueError("fork-local _prepare_data requires load_data_fn + build_features_fn "
+                         "(Chinese wall: no engine fallback)")
+    _load = load_data_fn
+    _build = build_features_fn
+    MDH = max_diag_hours if max_diag_hours is not None else MAX_DIAG_HOURS
+
+    print(f"\n  Loading data for {asset}...")
+    df_raw = _load(asset)
+    if df_raw is None:
+        print(f"  ERROR: No data for {asset}")
+        return None, None, None, 0
+
+    df_full, all_cols = _build(df_raw, asset_name=asset, horizon=horizon)
+
+    # Exclude any existing pysr_* columns — discovery must use only base features
+    pysr_cols = [c for c in all_cols if c.startswith('pysr_')]
+    if pysr_cols:
+        all_cols = [c for c in all_cols if not c.startswith('pysr_')]
+        print(f"  Excluded {len(pysr_cols)} existing PySR columns from inputs")
+
+    # Short-history features (GDELT: ~3 months; OI: ~30 days; orderbook/IV: accumulating;
+    # stablecoins: 1 year) would kill the historical window via dropna. Fill NaN with 0
+    # so PySR can still use the full 12-month window — PySR will see 0 for periods before
+    # coverage starts. Matches the sparse-feature exemption in crypto_trading_system_faye.py.
+    sparse_prefixes = ('gp_', 'deriv_oi_', 'ob_', 'avg_iv', 'iv_skew', 'stable_mcap_', 'whale_')
+    sparse_cols = [c for c in all_cols if c.startswith(sparse_prefixes)]
+
+    # Trim to ~13 months before NaN detection: pre-2022 bars have no macro, which
+    # would mark m_*/xa_* cols as wrongly sparse.
+    # Pre-tail before dropna to exclude ancient (pre-macro) rows from sparse-detection.
+    # FORK: use a generous MDH*3 buffer — sub-hourly dropna (warmup + lag tail) can drop
+    # ~15%+, and we still need >= 2*MDH CLEAN rows for the 12-month historical split.
+    if len(df_full) > MDH * 3:
+        df_full = df_full.tail(MDH * 3).reset_index(drop=True)
+
+    # Auto-detect any additional sparse cols (e.g. spread_bps, xa_btc_lag*) that
+    # aren't in the prefix list but are still too NaN-heavy to safely dropna on.
+    nan_pct = df_full[all_cols].isna().mean()
+    auto_sparse = [c for c in all_cols if nan_pct[c] > SPARSE_NAN_THRESHOLD and c not in sparse_cols]
+    all_sparse = list(set(sparse_cols + auto_sparse))
+    if all_sparse:
+        for sc in all_sparse:
+            df_full[sc] = df_full[sc].fillna(0.0)
+        auto_tag = f" ({len(auto_sparse)} auto-detected)" if auto_sparse else ""
+        print(f"  Sparse features: {len(all_sparse)} columns filled NaN->0 (short history){auto_tag}")
+
+    df_clean = df_full.dropna(subset=all_cols + ['label']).reset_index(drop=True)
+
+    # Anti-leakage: use the 6 months BEFORE Mode D's window (months 12→6 ago)
+    total_needed = MDH * 2  # 12 months required (candle units)
+    if len(df_clean) < total_needed:
+        print(f"  ERROR: Not enough data ({len(df_clean)} rows).")
+        print(f"  Need at least {total_needed} rows (6 months for Mode D + 6 months for PySR).")
+        return None, None, None, 0
+
+    df_pysr = df_clean.iloc[-total_needed:-MDH].reset_index(drop=True)
+
+    print(f"  Total data: {len(df_clean)} rows, {len(all_cols)} features")
+    print(f"  PySR window: {len(df_pysr)} rows (historical, BEFORE Mode D's 6-month window)")
+    print(f"  Mode D window: last {MDH} rows (excluded from PySR)")
+
+    X = df_pysr[all_cols].values.astype(np.float32)
+    y = df_pysr['label'].values.astype(np.float32)
+
+    # Remove any remaining NaN/Inf
+    valid_mask = np.isfinite(X).all(axis=1) & np.isfinite(y)
+    X = X[valid_mask]
+    y = y[valid_mask]
+
+    print(f"  Training set: {len(X)} rows (from {len(df_pysr)}-row historical window)")
+    print(f"  Label distribution: {y.sum():.0f} BUY ({y.mean()*100:.1f}%) / {len(y)-y.sum():.0f} SELL")
+
+    # Subsample if too large (PySR is O(n²) in some operations)
+    max_samples = 3000
+    if len(X) > max_samples:
+        rng = np.random.RandomState(42)
+        idx = rng.choice(len(X), max_samples, replace=False)
+        idx.sort()
+        X = X[idx]
+        y = y[idx]
+        print(f"  Subsampled to {max_samples} rows for tractability")
+
+    return X, y, all_cols, len(X)
+
+
+def _run_single_pysr(X, y, all_cols, feature_subset, seed, iterations, run_label,
+                     progress=True, verbosity=1):
+    """Run a single PySR instance on a feature subset. Returns list of result dicts.
+
+    progress: forwarded to PySRRegressor. Default True (interactive dashboard
+    + 'Press q + enter' prompt — fine when only one PySR runs at a time).
+    Parallel callers (crypto_trading_system_ed_parallel_p.py) pass False to
+    disable the interactive prompt entirely — multiple workers sharing the
+    parent's stdin would otherwise deadlock waiting for keypresses.
+
+    verbosity: forwarded to PySRRegressor. Default 1 (live equation-search
+    prints). Parallel callers pass 0 to suppress the OS-level stdin poll —
+    Julia opens stdin at the file-handle level, bypassing Python's
+    sys.stdin, so closing sys.stdin in the worker isn't enough on its own.
+    verbosity=0 disables the polling code path entirely.
+    """
+    from pysr import PySRRegressor
+
+    # Select feature subset columns
+    col_indices = [all_cols.index(c) for c in feature_subset]
+    X_sub = X[:, col_indices]
+
+    print(f"\n  ── Run {run_label}: {len(feature_subset)} features, seed={seed} ──")
+    t0 = time.time()
+
+    model = PySRRegressor(
+        niterations=iterations,
+        populations=40,           # more islands for diversity
+        population_size=100,      # larger populations
+        binary_operators=["+", "-", "*", "/"],
+        unary_operators=["log", "abs", "sqrt", "tanh"],
+        maxsize=25,
+        maxdepth=8,
+        parsimony=0.002,
+        ncycles_per_iteration=300,
+        weight_optimize=0.001,
+        adaptive_parsimony_scaling=100.0,
+        fraction_replaced=0.0001,       # low migration → islands stay distinct
+        fraction_replaced_hof=0.01,     # less hall-of-fame dominance
+        tournament_selection_n=6,       # softer selection pressure
+        tournament_selection_p=0.72,    # allow weaker novel expressions to survive
+        elementwise_loss="loss(prediction, target) = (prediction - target)^2",
+        random_state=seed,
+        deterministic=True,
+        procs=0,
+        parallelism="serial",
+        temp_equation_file=False,
+        # output_directory: redirect PySR's per-run checkpoint dirs from
+        # the default 'outputs/' (auto-created at cwd) into 'output/' so all
+        # research output lives in ONE folder instead of two near-identically
+        # named ones. Engine's own writes (rally_cd_*.csv, meta_*.csv,
+        # ERRORS_INBOX.md) already use 'output/' (singular) — see grep
+        # confirmation 2026-05-02.
+        output_directory='output',
+        verbosity=verbosity,
+        progress=progress,
+    )
+
+    model.fit(X_sub, y, variable_names=feature_subset)
+    elapsed = (time.time() - t0) / 60
+    print(f"  Run {run_label} completed in {elapsed:.1f} min")
+
+    equations = model.equations_
+    if equations is None or len(equations) == 0:
+        return []
+
+    equations = equations.sort_values('score', ascending=False)
+
+    results = []
+    for _, row in equations.head(10).iterrows():
+        if row['complexity'] <= 2:
+            continue
+        results.append({
+            'equation': str(row['equation']),
+            'sympy_format': str(row['sympy_format']) if 'sympy_format' in row else str(row['equation']),
+            'complexity': int(row['complexity']),
+            'loss': float(row['loss']),
+            'score': float(row['score']),
+            'lambda_format': str(row['lambda_format']) if 'lambda_format' in row else None,
+            'run': run_label,
+        })
+
+    print(f"  Run {run_label}: {len(results)} candidate expressions")
+    return results
+
+
+def _dedup_by_correlation(results, X, all_cols, n_top, max_corr):
+    """Keep top n_top expressions with pairwise correlation < max_corr."""
+    import sympy
+
+    if len(results) <= 1:
+        return results
+
+    # Evaluate all expressions
+    evaluated = []
+    for r in results:
+        try:
+            sym_expr = sympy.sympify(r.get('sympy_format', r['equation']))
+            sym_vars = list(sym_expr.free_symbols)
+            missing = [str(s) for s in sym_vars if str(s) not in all_cols]
+            if missing:
+                evaluated.append((r, None))
+                continue
+            func = sympy.lambdify(sym_vars, sym_expr, modules=['numpy'])
+            args = [X[:, all_cols.index(str(s))] for s in sym_vars]
+            vals = func(*args)
+            vals = np.where(np.isfinite(vals), vals, 0.0)
+            evaluated.append((r, vals))
+        except Exception:
+            evaluated.append((r, None))
+
+    # Sort by loss (lower = better fit)
+    evaluated.sort(key=lambda x: x[0]['loss'])
+
+    kept = []
+    kept_vals = []
+    for r, v in evaluated:
+        if v is None:
+            if len(kept) < n_top:
+                kept.append(r)
+                kept_vals.append(None)
+            continue
+
+        too_similar = False
+        for kv in kept_vals:
+            if kv is None:
+                continue
+            if np.std(v) < 1e-10 or np.std(kv) < 1e-10:
+                continue
+            corr = abs(np.corrcoef(v, kv)[0, 1])
+            if corr > max_corr:
+                too_similar = True
+                break
+
+        if too_similar:
+            print(f"    SKIP (corr>{max_corr:.1f}): [{r.get('run','')}] {r['equation'][:60]}")
+        else:
+            kept.append(r)
+            kept_vals.append(v)
+
+        if len(kept) >= n_top:
+            break
+
+    return kept
+
+
+# ── Feature group definitions for multi-run diversity ──
+FEATURE_GROUPS = {
+    'momentum': ['logret_1h', 'logret_2h', 'logret_3h', 'logret_4h', 'logret_5h',
+                  'logret_6h', 'logret_7h', 'logret_8h', 'logret_12h', 'logret_24h',
+                  'logret_48h', 'logret_72h', 'logret_120h', 'logret_240h',
+                  'price_velocity_1h', 'price_velocity_4h', 'price_accel_1h',
+                  'price_accel_4h', 'price_accel_12h', 'price_accel_24h', 'price_jerk_1h'],
+    'volatility': ['volatility_12h', 'volatility_48h', 'vol_ratio_12_48', 'volume_ratio_h',
+                   'vvr_12h', 'gk_volatility_14h', 'gk_volatility_48h', 'atr_pct_14h',
+                   'intraday_range', 'adx_14h', 'plus_di_14h', 'minus_di_14h'],
+    'mean_reversion': ['rsi_14h', 'stoch_k_14h', 'bb_position_20h', 'zscore_50h',
+                       'price_to_sma20h', 'price_to_sma50h', 'price_to_sma100h',
+                       'sma20_to_sma50h', 'spread_24h_4h', 'spread_48h_4h',
+                       'spread_120h_8h', 'spread_240h_24h', 'spread_48h_12h', 'spread_120h_12h'],
+    'macro': [],       # filled dynamically from m_* columns
+    'cross_asset': [], # filled dynamically from xa_* columns
+    'sentiment': [],   # filled dynamically from fg_*, vix_*, gp_* columns
+    'temporal': ['hour_sin', 'hour_cos', 'dow_sin', 'dow_cos'],
+}
+
+
+def discover_features(asset, horizon, n_top=5, iterations=100, populations=30,
+                      max_corr=0.7, n_runs=4,
+                      load_data_fn=None, build_features_fn=None,
+                      horizon_suffix='h', max_diag_hours=None):
+    """Run PySR symbolic regression with multiple diverse runs.
+
+    Each run uses a different feature subset to force structurally different
+    expressions. Results are pooled and deduplicated by output correlation.
+
+    Args:
+        asset: Asset name (e.g., 'BTC')
+        horizon: Prediction horizon (in 'h' units for ed, 'p' units for ed15)
+        n_top: Number of top expressions to save
+        iterations: PySR iterations per run
+        populations: Number of populations (ignored, uses 40 internally)
+        max_corr: Maximum pairwise correlation between kept expressions
+        n_runs: Number of independent PySR runs with different feature subsets
+        load_data_fn: Override data loader (default = ed.py's hourly load_data)
+        build_features_fn: Override feature builder (default = ed.py's hourly build_all_features)
+        horizon_suffix: Display suffix for horizon ('h' or 'p'), cosmetic only
+
+    Returns:
+        Tuple of (results_list, pysr_rows)
+    """
+    print(f"\n{'='*70}")
+    print(f"  PySR FEATURE DISCOVERY: {asset} {horizon}{horizon_suffix}")
+    print(f"  {n_runs} diverse runs × {iterations} iterations | Top: {n_top} | max_corr: {max_corr}")
+    print(f"{'='*70}")
+
+    X, y, all_cols, pysr_rows = _prepare_data(asset, horizon,
+                                              load_data_fn=load_data_fn,
+                                              build_features_fn=build_features_fn,
+                                              max_diag_hours=max_diag_hours)
+    if X is None:
+        return [], 0
+
+    # Build feature subsets for each run — each run sees a different mix
+    # Fill dynamic groups from actual columns
+    macro_cols = [c for c in all_cols if c.startswith('m_')]
+    xa_cols = [c for c in all_cols if c.startswith('xa_')]
+    sent_cols = [c for c in all_cols if c.startswith(('fg_', 'vix_', 'gp_'))]
+
+    # Filter group definitions to only include columns that exist
+    groups = {}
+    for name, cols in FEATURE_GROUPS.items():
+        if name == 'macro':
+            groups[name] = macro_cols
+        elif name == 'cross_asset':
+            groups[name] = xa_cols
+        elif name == 'sentiment':
+            groups[name] = sent_cols
+        else:
+            groups[name] = [c for c in cols if c in all_cols]
+
+    # Define run configurations: each run gets 2-3 groups → different feature perspective
+    run_configs = [
+        ('A_mom+xa',     ['momentum', 'cross_asset', 'temporal']),
+        ('B_vol+macro',  ['volatility', 'macro', 'temporal']),
+        ('C_mr+sent',    ['mean_reversion', 'sentiment', 'temporal']),
+        ('D_full_light', ['momentum', 'volatility', 'mean_reversion']),  # no external data
+    ]
+
+    # Add extra runs if requested
+    extra_configs = [
+        ('E_xa+sent',    ['cross_asset', 'sentiment', 'momentum']),
+        ('F_macro+vol',  ['macro', 'volatility', 'mean_reversion']),
+        ('G_all',        list(groups.keys())),  # full feature set as control
+    ]
+    while len(run_configs) < n_runs and extra_configs:
+        run_configs.append(extra_configs.pop(0))
+
+    run_configs = run_configs[:n_runs]
+
+    # Execute runs
+    all_results = []
+    t0_total = time.time()
+
+    for i, (label, group_names) in enumerate(run_configs):
+        subset = []
+        for gn in group_names:
+            subset.extend(groups.get(gn, []))
+        subset = list(dict.fromkeys(subset))  # dedupe preserving order
+
+        if len(subset) < 5:
+            print(f"\n  SKIP run {label}: only {len(subset)} features")
+            continue
+
+        seed = 42 + i * 17  # different seed per run
+        run_results = _run_single_pysr(X, y, all_cols, subset, seed, iterations, label)
+        all_results.extend(run_results)
+
+    elapsed_total = (time.time() - t0_total) / 60
+    print(f"\n  {'='*70}")
+    print(f"  ALL RUNS COMPLETE: {len(all_results)} candidate expressions in {elapsed_total:.1f} min")
+    print(f"  {'='*70}")
+
+    if not all_results:
+        print("  No expressions found!")
+        return [], 0
+
+    # Print all candidates before dedup
+    print(f"\n  {'#':>3} | {'Run':<14} | {'Score':>8} | {'Loss':>10} | {'Cplx':>4} | Expression")
+    print(f"  {'─'*90}")
+    all_results.sort(key=lambda r: r['loss'])
+    for i, r in enumerate(all_results[:30], 1):
+        print(f"  {i:>3} | {r.get('run','?'):<14} | {r['score']:>8.4f} | {r['loss']:>10.6f} | {r['complexity']:>4} | {r['equation'][:50]}")
+
+    # Dedup across all runs
+    results = _dedup_by_correlation(all_results, X, all_cols, n_top, max_corr)
+
+    print(f"\n  FINAL: {len(results)} diverse expressions kept (from {len(all_results)} candidates)")
+    for i, r in enumerate(results, 1):
+        print(f"    #{i} [{r.get('run','')}] loss={r['loss']:.4f}: {r['equation'][:70]}")
+
+    # Remove 'run' key from results before saving
+    for r in results:
+        r.pop('run', None)
+
+    return results, pysr_rows
+
+
+def save_results(asset, horizon, results, all_cols, pysr_rows=0,
+                 name_prefix='', horizon_suffix='h', out_dir=None):
+    """Save discovered expressions to JSON and human-readable report.
+
+    Args:
+        name_prefix: Optional prefix for output filenames (e.g., 'ed15_' → pysr_ed15_BTC_5p.json)
+        horizon_suffix: 'h' (default, ed hourly) or 'p' (ed15 periods)
+        out_dir: Output directory. Defaults to FAYE_MODELS_DIR (models_faye/) so
+            lagged-discovered PySR does NOT overwrite the live models/pysr_*.json that
+            the deployed ed.py trader reads — promote to models/ explicitly later.
+    """
+    if out_dir is None:
+        raise ValueError("fork-local save_results requires out_dir (Chinese wall: "
+                         "no FAYE_MODELS_DIR fallback)")
+    models_dir = out_dir
+    os.makedirs(models_dir, exist_ok=True)
+
+    json_path = os.path.join(models_dir, f'pysr_{name_prefix}{asset}_{horizon}{horizon_suffix}.json')
+    report_path = os.path.join(models_dir, f'pysr_{name_prefix}{asset}_{horizon}{horizon_suffix}_report.txt')
+
+    output = {
+        'asset': asset,
+        'horizon': horizon,
+        'discovered_at': time.strftime('%Y-%m-%d %H:%M'),
+        'discovery_method': 'historical',
+        'pysr_data_rows': pysr_rows,
+        'n_expressions': len(results),
+        'feature_names': all_cols,
+        'expressions': results,
+    }
+
+    with open(json_path, 'w') as f:
+        json.dump(output, f, indent=2)
+    print(f"  Saved: {json_path}")
+
+    with open(report_path, 'w') as f:
+        f.write(f"PySR Feature Discovery: {asset} {horizon}h\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"Date: {output['discovered_at']}\n\n")
+        for i, expr in enumerate(results, 1):
+            f.write(f"#{i}: {expr['equation']}\n")
+            f.write(f"    Score: {expr['score']:.4f}  Loss: {expr['loss']:.6f}  Complexity: {expr['complexity']}\n\n")
+    print(f"  Saved: {report_path}")
+
+
+def main():
+    # FORK-LOCAL: this module is engine-agnostic by design (no load_data /
+    # build_all_features import). It is NOT runnable as a standalone CLI — it must
+    # be driven by crypto_trading_system_fujiwara_*.py::run_mode_p, which injects
+    # the fork's load_data_fn / build_features_fn / out_dir / max_diag_hours.
+    raise SystemExit(
+        "pysr_discover_features_fujiwara is a library for the Fujiwara forks.\n"
+        "Run PySR via:  python crypto_trading_system_fujiwara_15.py P ETH 5,6,7,8h\n"
+        "           or: python crypto_trading_system_fujiwara_30.py P ETH 5,6,7,8h")
+
+
+if __name__ == '__main__':
+    main()

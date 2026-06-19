@@ -26,7 +26,8 @@ description: >
 
 ## PySR per timeframe (F6 + leakage)
 - Discover on the fork's OWN data (inject the fork's `load_data`/`build_all_features`), candle-scaled 6-month historical window, written to the fork dir.
-- **Distinct filenames per timeframe** — `pysr_ETH_5h.json` (hourly) vs `pysr_ETH_5p_15m.json` vs `pysr_ETH_5p_30m.json`. No collision, no confusion. Update BOTH write and read sites.
+- **Distinct filenames per timeframe** — `pysr_ETH_5h.json` (hourly) vs `pysr_ETH_5p_15m.json` vs `pysr_ETH_5p_30m.json`. No collision. Update BOTH write and read sites.
+- **Distinct COLUMN labels per timeframe** — the feature columns are tagged too: `pysr_1_15`/`pysr_2_15` (15m), `pysr_1_30` (30m); hourly stays `pysr_1`. Set in `_compute_pysr_features` (`col_name = f'pysr_{i+1}_{CANDLE_MINUTES}'`). They still `startswith('pysr_')` so the feature-floor / exclusion / grade logic is unaffected. This makes even a bare feature name in a model's `optimal_features` unambiguous.
 
 ## Verify before handing back
 - Production files md5 unchanged after running the fork; shared modules untouched; fork imports clean and points only to fork dirs; lag audit clean (`tools/audit_feature_lag_fujiwara.py`). Then validate any result through the GATED sim (see /validate-research). Don't auto-launch the long HRST — ask.
