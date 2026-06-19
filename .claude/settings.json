@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat .claude/skills/rules/PREFLIGHT_REMINDER.txt",
+            "statusMessage": "Loading Alex's pre-flight rules"
+          }
+        ]
+      }
+    ]
+  }
+}
