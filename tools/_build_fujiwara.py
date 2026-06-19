@@ -148,13 +148,12 @@ _ASSET_DEFS = [
     # ── 6. Download timeframe ──
     t = _rep(t, "    timeframe = '1h'", "    timeframe = CANDLE_TIMEFRAME", 'timeframe')
 
-    # ── 7. Default windows scaled by granularity (only used when --replay omitted) ──
-    t = _rep(t, "MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)",
-             "MODE_G_REPLAY_HOURS = 1440 * PERIODS_PER_HOUR   # FUJIWARA: candle count (~2mo calendar)",
-             'mode-g-replay')
-    t = _rep(t, "        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24",
-             "        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24 * PERIODS_PER_HOUR",
-             'max-diag-fallback')
+    # ── 7. Window/cap constants: KEEP BASE PERIOD COUNTS (do NOT scale by PERIODS_PER_HOUR).
+    # The engine's caps are period counts (the "maximum"), not a fixed calendar. Keeping them
+    # at base means the same COMPUTE per fit + the max training window = 4320 periods (= 3
+    # months @30m, 1.5mo @15m) — fast and "linked to the maximum", per the owner. Earlier I
+    # PPH-scaled these to preserve 6-month *calendar* -> 2-4x bigger windows + slow. Reverted.
+    # (MODE_G_REPLAY_HOURS / MAX_DIAG fallback left at faye base, untouched.)
 
     # ── 8. Do NOT create production models/ + config/ dirs (wall) ──
     t = _rep(t, """    os.path.join(_SCRIPT_DIR, 'models'),
@@ -246,7 +245,7 @@ _ASSET_DEFS = [
              "            results, pysr_rows = _discover_features_parallel(asset, h)",
              "            results, pysr_rows = _discover_features_parallel(\n"
              "                asset, h, load_data_fn=load_data, build_features_fn=build_all_features,\n"
-             "                horizon_suffix=f'p_{CANDLE_TAG}', max_diag_hours=6 * 30 * 24 * PERIODS_PER_HOUR)",
+             "                horizon_suffix=f'p_{CANDLE_TAG}', max_diag_hours=6 * 30 * 24)",
              'runmodep-discover')
     t = _rep(t,
              "                save_results(asset, h, results, all_cols, pysr_rows=pysr_rows)",

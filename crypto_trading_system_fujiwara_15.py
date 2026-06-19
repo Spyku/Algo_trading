@@ -967,7 +967,7 @@ LABEL_THRESHOLD_PCT = None
 META_FILTER_THRESHOLD = None
 
 # Mode V: live backtest validation of top 6 candidates
-MODE_G_REPLAY_HOURS = 1440 * PERIODS_PER_HOUR   # FUJIWARA: candle count (~2mo calendar)
+MODE_G_REPLAY_HOURS = 1440      # default 2 months (was 336=2wks)
 MODE_G_CONF_THRESHOLDS = [65, 70, 75, 80, 85, 90]
 MODE_G_PRIMARY_CONF = 80        # confidence threshold used to rank live performance
 PRODUCTION_CSV = f'{FAYE_MODELS_DIR}/crypto_fujiwara_15_production.csv'
@@ -4550,7 +4550,7 @@ def run_mode_p(assets_list, horizons):
 
             results, pysr_rows = _discover_features_parallel(
                 asset, h, load_data_fn=load_data, build_features_fn=build_all_features,
-                horizon_suffix=f'p_{CANDLE_TAG}', max_diag_hours=6 * 30 * 24 * PERIODS_PER_HOUR)
+                horizon_suffix=f'p_{CANDLE_TAG}', max_diag_hours=6 * 30 * 24)
 
             if results:
                 df_raw = load_data(asset)
@@ -5289,7 +5289,7 @@ def run_mode_d_optuna(assets_list, horizon=PREDICTION_HORIZON, n_trials=DEKU_DEF
             continue
 
         # Step 1: Build ALL features, cap at replay_hours or 2 months default
-        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24 * PERIODS_PER_HOUR
+        MAX_DIAG_HOURS = replay_hours if replay_hours else 60 * 24
         period_label = f"{replay_hours}h" if replay_hours else "last 2mo"
         print(f"\n  Building all features (horizon={horizon}h, period={period_label})...")
         t0 = time.time()
