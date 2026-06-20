@@ -23,8 +23,18 @@ description: >
    CSV, `regime_config_ed.json`, logs, data — and answer **with the numbers/values you
    found, never memory/gut.** If you can't verify, say "unverified." (This applies even to
    rule content: I once asserted TODO numbering was "DDMM" from memory — it's MMDD. Check.)
+1b. **A DIAGNOSIS is a hypothesis until a discriminating test confirms it (Rule 0's twin).**
+   When explaining *why* something happens (a root cause, not just a fact): (a) list ≥2
+   plausible causes; (b) run the test that DISTINGUISHES them — one that could prove your
+   favorite *wrong*, not one that merely fits it; (c) state the conclusion with explicit
+   confidence + "what would change my mind"; (d) NEVER present a cause as settled while an
+   untested alternative remains. Default to REFUTING your current hypothesis, not confirming
+   it. Citing a number that *fits* your guess is not proof — that's confirmation bias.
+   (Failure 2026-06-20 sanity-drift: asserted "benign" → "off-by-one" → "data revision" as
+   settled, each overturned by the very test I should have run first; the user had to insist
+   each time. The fix is to test-to-break BEFORE asserting.) [[feedback-diagnosis-discipline]]
 2. **Classify → fire the matching family → STOP if a gate fails.**
-3. **Universal checks:** verified with numbers? · flat-before-promote? · leakage clean? ·
+3. **Universal checks:** verified with numbers? · **diagnosis ruled-out alternatives (not just confirmed one)?** · flat-before-promote? · leakage clean? ·
    isolated from production? · liveness by mtimes not processes? · gated-sim not screen?
 
 This skill set MIRRORS the canonical classification in [CLAUDE.md](../../../CLAUDE.md) "## Critical Rules" (2026-06-14: Rule 0 + 21 gates in 6 families + 8 demoted-to-reference). The "Gates" column below is the authoritative CLAUDE.md gate numbers each skill covers — keep them in sync.
