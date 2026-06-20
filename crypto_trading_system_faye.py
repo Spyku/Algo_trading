@@ -90,7 +90,9 @@ Pipeline (all modes):
   Chains: HRS = H+R+S | HRST = H+R+S+T(+G) | RST = R+S+T standalone
           HRSTC = HRST + C (gate the just-built challenger vs live prod;
                   C is BYPASSED if no incumbent prod model exists; the C leg
-                  honors --replay-c, else --replay, else 2880)
+                  honors --replay-c, else --replay, else 2880. C auto-fits its
+                  720h-window step to yield >=5 windows at the given replay, so
+                  it works at the 1440h modelling horizon — no need to extend.)
 
 Core contract:
   - Embargo: train_end = i - horizon (dynamic, kills label overlap)
@@ -8213,9 +8215,10 @@ def main():
                 pass
 
     # Parse --replay-c N (HRSTC: the Mode-C promotion-gate evaluation window,
-    # independent of the H training window. C wants >= 2880h (>= 5 rolling 720h
-    # windows) for a robust verdict; if unset the C leg falls back to --replay,
-    # then to C's own 2880 default).
+    # independent of the H training window. C auto-fits its 720h-window step so
+    # >=5 windows fit at the given replay (e.g. 1440h -> ~7 windows), so the
+    # modelling horizon works without extending. If unset the C leg falls back to
+    # --replay, then to C's own 2880 default).
     flag_replay_c = 0
     for i, a in enumerate(sys.argv[1:], 1):
         if a == '--replay-c' and i < len(sys.argv) - 1:
@@ -10556,6 +10559,13 @@ def run_mode_c(assets_list, args=None):
         dts = sorted(common); N = len(dts)
         if N < WIN_H + 1:
             print(f"  {asset}: only {N} common bars (< {WIN_H}) — not enough for a window. ABORT."); continue
+        # Auto-fit the slide so a SHORT replay (e.g. the 1440h modelling horizon) still
+        # yields >= MIN_ROBUST_WINDOWS overlapping 720h windows WITHOUT extending replay.
+        # windows = floor((N-WIN_H)/STEP)+1. Target ~7 windows: STEP = (N-WIN_H)//6.
+        # Floor at 120h so a genuinely-too-short replay (e.g. 960h -> 3 windows) still
+        # FAILS the >=5 guard (don't manufacture fake-independent windows from no data);
+        # cap at the 240h default so long replays (>=2880h) keep their original behaviour.
+        STEP_H = min(STEP_H, max(120, (N - WIN_H) // 6))
         wins = [(s, s + WIN_H) for s in range(0, N - WIN_H + 1, STEP_H)]
 
         def _xwin(sp):
@@ -10601,7 +10611,7 @@ def run_mode_c(assets_list, args=None):
         promote = enough and (beats >= need_w) and (margin >= HYST_MARGIN)
         print(f"\n  HYSTERESIS: PROMOTE iff >={MIN_ROBUST_WINDOWS} windows AND challenger beats incumbent in >={need_w}/{nwin} AND margin >= +{HYST_MARGIN:.0f}pp (downside-weighted med+worst)")
         if not enough:
-            print(f"  ⚠️  only {nwin} window(s) (< {MIN_ROBUST_WINDOWS}) — NOT robust. A single recent window over-fits; rerun with a longer --replay (>= 2880 for ~9 windows).")
+            print(f"  ⚠️  only {nwin} window(s) (< {MIN_ROBUST_WINDOWS}) — NOT robust ({N} common bars too few even at the 120h min step). Need ~>=1200 common bars (≈1440h replay) for >=5 windows.")
         if promote:
             print(f"  >>> VERDICT: PROMOTE — challenger is robustly better across windows.")
         elif not enough:
