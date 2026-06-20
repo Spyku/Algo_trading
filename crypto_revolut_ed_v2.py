@@ -1434,6 +1434,28 @@ def _rally_cfg_for_regime(trading_cfg, regime_label):
     return trading_cfg.get('rally_cooldown')
 
 
+# Threshold above which the long leg is a dead sentinel (single-gate configs write
+# t_long_pct=9999, manual single-gate bear used 999) — never fires, so don't display it.
+GATE_DEAD_LEG_THR = 900.0
+
+
+def _fmt_gate(rc):
+    """Format a rally-cooldown gate for display, hiding a dead long leg.
+
+    Single-gate configs (faye/ed Mode T since 2026-06-20) store the disabled long
+    leg as h_long==h_short / t_long_pct>=sentinel for schema-compat. Render those as
+    one leg (`rrXh≥Y%`) instead of the bogus `... OR rrXh≥9999%` second gate."""
+    hs = rc.get('h_short'); ts = rc.get('t_short_pct')
+    hl = rc.get('h_long'); tl = rc.get('t_long_pct')
+    try:
+        dead = float(tl) >= GATE_DEAD_LEG_THR
+    except (TypeError, ValueError):
+        dead = False
+    if dead:
+        return f"rr{hs}h≥{ts}%"
+    return f"rr{hs}h≥{ts}% OR rr{hl}h≥{tl}%"
+
+
 def _gate_on_for_regime(cfg_asset, regime_label):
     """True if the rally-cooldown gate is enabled for the given regime.
     Checks per-regime block first, falls back to asset-level."""
@@ -2554,10 +2576,8 @@ def _handle_status_command(with_charts=False):
             rc = _rally_cfg_for_regime(cfg, r_lbl)
             on = _gate_on_for_regime(cfg, r_lbl)
             if rc and on:
-                hs = rc.get('h_short', '?'); hl = rc.get('h_long', '?')
-                ts = rc.get('t_short_pct', '?'); tl = rc.get('t_long_pct', '?')
                 cd = rc.get('cd_hours', '?')
-                lines.append(f"  🚦 {r_short}: rr{hs}h≥{ts}% OR rr{hl}h≥{tl}% cd={cd}h ON")
+                lines.append(f"  🚦 {r_short}: {_fmt_gate(rc)} cd={cd}h ON")
             elif rc:
                 lines.append(f"  🚦 {r_short}: configured but DISABLED")
             else:
@@ -4084,9 +4104,9 @@ def _handle_gate_command(msg, trading_cfg):
             bull_rc = (cfg_a.get('bull') or {}).get('rally_cooldown') or cfg_a.get('rally_cooldown') or {}
             bear_rc = (cfg_a.get('bear') or {}).get('rally_cooldown') or cfg_a.get('rally_cooldown') or {}
             if bull_rc:
-                lines.append(f"   bull: rr{bull_rc.get('h_short')}h≥{bull_rc.get('t_short_pct')}% OR rr{bull_rc.get('h_long')}h≥{bull_rc.get('t_long_pct')}% → {bull_rc.get('cd_hours')}h")
+                lines.append(f"   bull: {_fmt_gate(bull_rc)} → {bull_rc.get('cd_hours')}h")
             if bear_rc:
-                lines.append(f"   bear: rr{bear_rc.get('h_short')}h≥{bear_rc.get('t_short_pct')}% OR rr{bear_rc.get('h_long')}h≥{bear_rc.get('t_long_pct')}% → {bear_rc.get('cd_hours')}h")
+                lines.append(f"   bear: {_fmt_gate(bear_rc)} → {bear_rc.get('cd_hours')}h")
             row = [
                 (f"{a} bull {'OFF' if bull_on else 'ON'}", f"/gate {a} bull {'off' if bull_on else 'on'}"),
                 (f"{a} bear {'OFF' if bear_on else 'ON'}", f"/gate {a} bear {'off' if bear_on else 'on'}"),

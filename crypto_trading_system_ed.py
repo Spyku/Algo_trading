@@ -6971,26 +6971,33 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
     print(f"  {asset} | baselines V0  H1={b_h1['pnl_pct']:+.2f}%  "
           f"H2={b_h2['pnl_pct']:+.2f}%  REF={b_ref['pnl_pct']:+.2f}%")
 
-    pairs = [(a, b) for i, a in enumerate(HORIZONS) for b in HORIZONS[i+1:]]
-    total = sum(len(thr_for(a)) * len(thr_for(b)) for a, b in pairs) * len(CD_GRID)
-    print(f"  {asset} | sweeping {total:,} configs ...")
+    # SINGLE-GATE sweep (ported from faye 2026-06-20). Each candidate is ONE
+    # condition `rr[h] >= t`, NOT the old 2-window `rr[h_s]>=t_s OR rr[h_l]>=t_l`
+    # double. Idea-1 study showed only ONE leg ever earns its keep; the 2nd leg
+    # was dead weight or net-harmful. The 5-key config schema is preserved for
+    # trader-compat by writing the disabled long leg as h_long=h_short /
+    # t_long_pct=DEAD_TL (the same never-fires sentinel the V0 baseline uses) — so
+    # the produced gate is single but the trader's _update_rally_cooldown and every
+    # downstream consumer stay unchanged.
+    DEAD_TL = 9999.0
+    total = sum(len(thr_for(h)) for h in HORIZONS) * len(CD_GRID)
+    print(f"  {asset} | sweeping {total:,} single-gate configs ...")
 
     rows = []
     t0 = time.time()
-    for h_s, h_l in pairs:
-        for t_s in thr_for(h_s):
-            for t_l in thr_for(h_l):
-                for cd in CD_GRID:
-                    r1 = simulate(sigs_h1, rr_h1, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    r2 = simulate(sigs_h2, rr_h2, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    rR = simulate(sigs_ref, rr_ref, h_s, h_l, t_s, t_l, cd, asset_cfg)
-                    rows.append(dict(
-                        h_short=h_s, h_long=h_l, t_short=t_s, t_long=t_l, cd=cd,
-                        pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
-                        dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
-                        tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
-                        sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
-                    ))
+    for h in HORIZONS:
+        for t in thr_for(h):
+            for cd in CD_GRID:
+                r1 = simulate(sigs_h1, rr_h1, h, h, t, DEAD_TL, cd, asset_cfg)
+                r2 = simulate(sigs_h2, rr_h2, h, h, t, DEAD_TL, cd, asset_cfg)
+                rR = simulate(sigs_ref, rr_ref, h, h, t, DEAD_TL, cd, asset_cfg)
+                rows.append(dict(
+                    h_short=h, h_long=h, t_short=t, t_long=DEAD_TL, cd=cd,
+                    pnl_H1=r1['pnl_pct'], pnl_H2=r2['pnl_pct'], pnl_REF=rR['pnl_pct'],
+                    dd_H1=r1['dd_pct'], dd_H2=r2['dd_pct'], dd_REF=rR['dd_pct'],
+                    tr_H1=r1['trades'], tr_H2=r2['trades'], tr_REF=rR['trades'],
+                    sk_H1=r1['skipped'], sk_H2=r2['skipped'], sk_REF=rR['skipped'],
+                ))
     print(f"  {asset} | sweep done in {time.time()-t0:.1f}s")
 
     df = pd.DataFrame(rows)
@@ -7009,40 +7016,32 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
                    float(r['t_long']), int(r['cd'])): i for i, r in df.iterrows()}
     beats3 = df['beats_3of3'].values
 
-    def nb_idx(hs, hl, ts, tl, cd, dim, step):
+    # Single-gate plateau: only 3 live dims (h, t, cd). h_long/t_long are inert
+    # (h_long==h_short, t_long==DEAD_TL) so they are not perturbed. Neighbor keys
+    # mirror the stored 5-tuple shape (h, h, t, DEAD_TL, cd).
+    def nb_idx(hs, ts, cd, dim, step):
         if dim == 'hs':
             i = h_idx[hs] + step
             if not (0 <= i < len(HORIZONS)): return None
             new = HORIZONS[i]
-            if new >= hl: return None
-            key = (new, hl, ts, tl, cd)
-        elif dim == 'hl':
-            i = h_idx[hl] + step
-            if not (0 <= i < len(HORIZONS)): return None
-            new = HORIZONS[i]
-            if new <= hs or tl not in thr_for(new): return None
-            key = (hs, new, ts, tl, cd)
+            if ts not in thr_for(new): return None
+            key = (new, new, ts, DEAD_TL, cd)
         elif dim == 'ts':
             new = round(ts + 0.5 * step, 2)
             if new not in thr_for(hs): return None
-            key = (hs, hl, new, tl, cd)
-        elif dim == 'tl':
-            new = round(tl + 0.5 * step, 2)
-            if new not in thr_for(hl): return None
-            key = (hs, hl, ts, new, cd)
+            key = (hs, hs, new, DEAD_TL, cd)
         elif dim == 'cd':
             i = cd_idx[cd] + step
             if not (0 <= i < len(CD_GRID)): return None
-            key = (hs, hl, ts, tl, CD_GRID[i])
+            key = (hs, hs, ts, DEAD_TL, CD_GRID[i])
         return key_to_idx.get(key)
 
     plateau = np.zeros(len(df))
     for i, r in df.iterrows():
         nbrs = []
-        for dim in ('hs', 'hl', 'ts', 'tl', 'cd'):
+        for dim in ('hs', 'ts', 'cd'):
             for step in (-1, 1):
-                j = nb_idx(int(r['h_short']), int(r['h_long']), float(r['t_short']),
-                           float(r['t_long']), int(r['cd']), dim, step)
+                j = nb_idx(int(r['h_short']), float(r['t_short']), int(r['cd']), dim, step)
                 if j is not None: nbrs.append(j)
         plateau[i] = sum(beats3[j] for j in nbrs) / len(nbrs) if nbrs else 0.0
     df['plateau_score'] = plateau
@@ -7061,7 +7060,7 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         print(f"  {asset} | NO STRICT WINNER — config not modified.")
         return None
 
-    cols = ['h_short','h_long','t_short','t_long','cd',
+    cols = ['h_short','t_short','cd',
             'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_recent','score_dd_aware','plateau_score']
     print(f"  {asset} | top 5 STRICT:")
     print(strict[cols].head(5).to_string(index=False,
@@ -7069,8 +7068,8 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
                       if c.startswith(('pnl_','score_','plateau','worst'))}))
 
     win = strict.iloc[0]
-    print(f"\n  {asset} WINNER: rr{int(win['h_short'])}h>={win['t_short']}% "
-          f"OR rr{int(win['h_long'])}h>={win['t_long']}%, cd={int(win['cd'])}h")
+    print(f"\n  {asset} WINNER (single gate): rr{int(win['h_short'])}h>={win['t_short']}%, "
+          f"cd={int(win['cd'])}h")
 
     winner_dict = {
         'enabled': True,
