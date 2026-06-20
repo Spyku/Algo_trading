@@ -85,7 +85,12 @@ Pipeline (all modes):
   Mode T: Rally-cooldown convergence + chains G internally
   Mode G: Standalone rally-cooldown sweep
   Mode P: PySR symbolic-regression feature discovery
+  Mode C: Choice / promotion gate — live prod (incumbent) vs challenger config,
+          cross-window + hysteresis, report-only (never writes live)
   Chains: HRS = H+R+S | HRST = H+R+S+T(+G) | RST = R+S+T standalone
+          HRSTC = HRST + C (gate the just-built challenger vs live prod;
+                  C is BYPASSED if no incumbent prod model exists; the C leg
+                  honors --replay-c, else --replay, else 2880)
 
 Core contract:
   - Embargo: train_end = i - horizon (dynamic, kills label overlap)
@@ -8154,7 +8159,7 @@ def main():
     #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
     #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
     # ================================================================
-    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'R', 'RS', 'RST', 'T', 'G', 'F', 'C'}
+    VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'HRSTC', 'R', 'RS', 'RST', 'T', 'G', 'F', 'C'}
 
     # ── CLI shortcuts (added 2026-05-02) ─────────────────────────────
     # `--<integer>` → `--replay <integer>` (e.g. --1440 ≡ --replay 1440)
@@ -8204,6 +8209,18 @@ def main():
         if a == '--replay-v' and i < len(sys.argv) - 1:
             try:
                 flag_replay_v = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
+    # Parse --replay-c N (HRSTC: the Mode-C promotion-gate evaluation window,
+    # independent of the H training window. C wants >= 2880h (>= 5 rolling 720h
+    # windows) for a robust verdict; if unset the C leg falls back to --replay,
+    # then to C's own 2880 default).
+    flag_replay_c = 0
+    for i, a in enumerate(sys.argv[1:], 1):
+        if a == '--replay-c' and i < len(sys.argv) - 1:
+            try:
+                flag_replay_c = int(sys.argv[i + 1])
             except ValueError:
                 pass
 
@@ -8704,7 +8721,7 @@ Examples:
             horizons = [HORIZON_SHORT]
         print(f"Horizon(s): {', '.join(str(h)+'h' for h in horizons)}")
 
-        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS', 'HRST'):
+        if mode in ('D', 'DV', 'DVS', 'DVRS', 'HRS', 'HRST', 'HRSTC'):
             try:
                 trials_input = input(f"Number of Optuna trials [{DEKU_DEFAULT_TRIALS}]: ").strip()
                 if trials_input:
@@ -8822,7 +8839,7 @@ Examples:
         run_mode_s(assets_list, horizons, _r_args)
         if mode == 'RST':
             run_mode_t(assets_list, _r_args)
-    elif mode in ('HRS', 'DVRS', 'HRST'):
+    elif mode in ('HRS', 'DVRS', 'HRST', 'HRSTC'):
         run_mode_h(assets_list, horizons, n_trials=n_trials, resume=flag_resume, skip_d=flag_skip,
                    replay_hours=flag_replay or None,
                    replay_v_hours=flag_replay_v or None)
@@ -8835,8 +8852,34 @@ Examples:
         r_results = _run_mode_r(assets_list, horizons, _r_args)
         _apply_mode_r_to_config(r_results)
         run_mode_s(assets_list, horizons, _r_args)
-        if mode == 'HRST':
+        if mode in ('HRST', 'HRSTC'):
             run_mode_t(assets_list, _r_args)
+        if mode == 'HRSTC':
+            # ── Mode C leg: promotion gate, LIVE production (incumbent) vs the
+            # challenger H→R→S→T just produced. The challenger paths are exactly
+            # what T wrote — REGIME_CONFIG_PATH / PRODUCTION_CSV (globals; redirected
+            # to *_noprod under --no-persist, so this works in both persist and
+            # sandbox modes). BYPASS if there is no incumbent production model to
+            # compare against (e.g. a brand-new asset/timeframe with no live prod).
+            _inc_cfg = os.path.join(_SCRIPT_DIR, 'config', 'regime_config_ed.json')
+            _inc_csv = os.path.join(_SCRIPT_DIR, 'models', 'crypto_ed_production.csv')
+            _have_inc = False
+            if os.path.exists(_inc_cfg) and os.path.exists(_inc_csv):
+                try:
+                    _idf = pd.read_csv(_inc_csv)
+                    _have_inc = 'coin' in _idf.columns and any((_idf['coin'] == a).any() for a in assets_list)
+                except Exception:
+                    _have_inc = False
+            if not _have_inc:
+                print(f"\n[HRSTC] No incumbent production model for {assets_list} in "
+                      f"{_inc_csv} — BYPASSING Mode C (nothing to compare against).")
+            else:
+                # C wants a longer window than H training: prefer --replay-c,
+                # else --replay, else C's own 2880 default (run_mode_c guards <5 windows).
+                _r_args.replay = flag_replay_c or flag_replay or 2880
+                _r_args.chal_config = REGIME_CONFIG_PATH
+                _r_args.chal_models = PRODUCTION_CSV
+                run_mode_c(assets_list, _r_args)
     elif mode == 'G':
         class _Args: pass
         _r_args = _Args()
@@ -8904,7 +8947,7 @@ Examples:
     # --no-persist AND --noprod runs write *_noprod.* and must NEVER drop the marker
     # -> stay fully sandboxed (2026-06-16: --noprod was missing from this gate, so a
     # research --noprod run still staged a promote pointing at stale live faye files).
-    _PROMOTE_MODES = {'RST', 'HRST', 'HRS', 'RS', 'DVRS', 'R', 'S', 'T', 'G'}
+    _PROMOTE_MODES = {'RST', 'HRST', 'HRSTC', 'HRS', 'RS', 'DVRS', 'R', 'S', 'T', 'G'}
     if '--no-persist' not in sys.argv and '--noprod' not in sys.argv and mode in _PROMOTE_MODES:
         try:
             import datetime as _dt
