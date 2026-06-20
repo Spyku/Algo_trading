@@ -554,6 +554,11 @@ def load_best_config(asset_name, horizon=None):
 # size-based rotation; NEVER raises — telemetry must not affect trading.
 INFERENCE_SNAPSHOT_JSONL = os.path.join(os.path.dirname(__file__), 'output', 'inference_snapshots.jsonl')
 _INFERENCE_SNAPSHOT_MAX_BYTES = 50 * 1024 * 1024  # rotate to .1 past 50 MB
+# 2026-06-20: sibling append-only log of the FULL training matrix (X_train/y_train) used
+# per decision, so a from-scratch REFIT can reproduce the model exactly later (the main
+# snapshot only stores the inference row + probas). Separate file to keep the replay file
+# lean; same 50 MB rotation; NEVER raises (telemetry-only, must not affect trading).
+INFERENCE_TRAIN_SNAPSHOT_JSONL = os.path.join(os.path.dirname(__file__), 'output', 'inference_train_snapshots.jsonl')
 
 # Fix #2 (2026-06-03): infer on the last FULLY-CLOSED hourly bar rather than the
 # still-forming current-hour candle (the OHLCV download keeps the in-progress bar
@@ -566,6 +571,28 @@ def _log_inference_snapshot(snapshot):
     """Append one inference snapshot (dict) as a JSON line. Swallows every error."""
     try:
         path = INFERENCE_SNAPSHOT_JSONL
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > _INFERENCE_SNAPSHOT_MAX_BYTES:
+                bak = path + '.1'
+                if os.path.exists(bak):
+                    os.remove(bak)
+                os.rename(path, bak)
+        except Exception:
+            pass
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(snapshot, default=str) + '\n')
+    except Exception:
+        pass
+
+
+def _log_train_snapshot(snapshot):
+    """Append one training-matrix snapshot (dict) as a JSON line to the sibling file.
+    Mirrors _log_inference_snapshot (50 MB rotation, swallows every error). Telemetry-only:
+    enables a from-scratch refit-replay (tools/validate_refit_replay.py) to reproduce the
+    model bit-for-bit (modulo ~3pt device) — the part raw-data rebuilds can't recover."""
+    try:
+        path = INFERENCE_TRAIN_SNAPSHOT_JSONL
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
             if os.path.exists(path) and os.path.getsize(path) > _INFERENCE_SNAPSHOT_MAX_BYTES:
@@ -956,6 +983,25 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
             'probas': {model_names[k]: float(p) for k, p in enumerate(probas) if k < len(model_names)},
             'close': float(row['close']) if pd.notna(row.get('close')) else None,
             'features': {f: (float(_feat_vals[f]) if pd.notna(_feat_vals[f]) else None) for f in feature_cols},
+        })
+    except Exception:
+        pass
+
+    # 2026-06-20: also persist the FULL training matrix (no-overwrite sibling) so a
+    # from-scratch refit can reproduce this exact decision later. Full precision +
+    # 50 MB rotation. Telemetry-only; swallows all errors — never affects trading.
+    try:
+        _log_train_snapshot({
+            'inference_row_dt': str(row['datetime']),
+            'asset': asset_name,
+            'horizon': int(horizon),
+            'window': int(window),
+            'gamma': float(gamma),
+            'models': list(model_names),
+            'feature_cols': list(feature_cols),
+            'X_train': X_train.values.astype(float).tolist(),
+            'y_train': [int(v) for v in y_train],
+            'X_test': X_test.values.astype(float).tolist(),
         })
     except Exception:
         pass
