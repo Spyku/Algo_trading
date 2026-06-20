@@ -100,7 +100,20 @@ def parity_check(samples):
     n_eval, n_diff, n_real = len(ev), len(diffs), len(real)
     flips = [f"{row['timestamp']} live={row['live_action']}({row['live_confidence']}) "
              f"core={row['core_action']}({row['core_confidence']})" for _, row in real.iterrows()]
-    msg = f"{n_eval-n_diff}/{n_eval} match | {n_diff} DIFF ({n_diff-n_real} HOLD-boundary, {n_real} real BUY-vs-SELL)"
+    # Honest split of the non-flip diffs (2026-06-20): a HOLD<->directional disagreement
+    # with a large |dConf| is NOT a near-gate "boundary" wobble — it's decisive drift from
+    # the model refitting on later-settled current-period data (verified this session: device
+    # only ~3pt, within-device deterministic, historical data frozen 0/185k cells). Surface it
+    # instead of hiding it under "boundary"; parity is recent-only + non-reproducible by design.
+    rest = diffs.drop(real.index)
+    _dc = (pd.to_numeric(rest.get("core_confidence"), errors="coerce")
+           - pd.to_numeric(rest.get("live_confidence"), errors="coerce")).abs()
+    n_drift = int((_dc >= 10).sum())          # decisive HOLD<->dir (refit/data-settle drift)
+    n_bound = int(len(rest) - n_drift)        # genuine near-gate wobble (|dConf|<10)
+    msg = (f"{n_eval-n_diff}/{n_eval} match | {n_real} real BUY<->SELL | "
+           f"{n_drift} decisive HOLD<->dir (|dConf|>=10, data-settle drift) | "
+           f"{n_bound} near-gate wobble  "
+           f"[recent-window, NON-reproducible: informational; verdict=shadow+snapshot]")
     status = "PASS" if n_real == 0 else "ATTENTION"
     return status, msg, flips
 
