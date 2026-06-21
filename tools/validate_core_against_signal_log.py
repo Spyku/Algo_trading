@@ -176,26 +176,24 @@ def replay_hour(df_raw_truncated, config, asset, csc, engine, lt, verbose=False,
 
 
 def detect_regime_simple(df_truncated, detector_name="sma24>sma100"):
-    """Replicate the live trader's named regime detector
-    (crypto_live_trader_ed.py::_evaluate_named_detector). The active detector is
-    read from regime_config_ed.json, NOT hardcoded — picking the wrong regime
-    selects the wrong horizon config and produces false DIFFs.
-    df_truncated must have a 'close' column sorted by time. Returns 'bull'/'bear'."""
-    import numpy as _np
-    closes = df_truncated["close"].astype(float)
+    """Determine the regime for a truncated price frame using the LIVE trader's
+    OWN detector (crypto_live_trader_ed._evaluate_named_detector) — the single
+    source of truth, so this can never drift from production.
 
-    if detector_name == "tsmom_672h":
-        # 28-day time-series momentum: bull if log(close_now / close_672h_ago) > 0
-        if len(closes) < 680:
-            return "bull"  # live default for insufficient history
-        return "bull" if _np.log(closes.iloc[-1] / closes.iloc[-672]) > 0 else "bear"
+    df_truncated must have a 'close' column (and 'datetime' for vol_calm) sorted
+    ascending by time; the last row is the inference bar. Returns 'bull'/'bear'.
 
-    # default: sma24 > sma100
-    if len(closes) < 100:
-        return "bull"  # default
-    sma24 = closes.rolling(24).mean().iloc[-1]
-    sma100 = closes.rolling(100).mean().iloc[-1]
-    return "bull" if sma24 > sma100 else "bear"
+    HISTORY (2026-06-21 fix): this used to re-implement a SUBSET — only `tsmom_672h`
+    plus a hardcoded **sma24>sma100** default. When the live detector moved to
+    `sma48>sma100` (2026-06-16) it fell through to that default and computed sma24
+    (faster MA), which crossed above sma100 during recoveries where the real sma48
+    stayed below → it labelled BEAR hours as BULL → wrong horizon model → spurious
+    BUY<->SELL DIFFs in the daily sanity (the 19/30 false alarm)."""
+    import crypto_live_trader_ed as lt
+    res = lt._evaluate_named_detector(detector_name, df_truncated)
+    # _evaluate_named_detector: True=bull, False=bear, None=unknown/cold-start.
+    # None (unknown name / insufficient data) -> live cold-start default is bull.
+    return "bull" if (res is None or res) else "bear"
 
 
 def apply_confidence_gate(signal, confidence, min_conf):
