@@ -155,6 +155,32 @@ _ASSET_DEFS = [
     # PPH-scaled these to preserve 6-month *calendar* -> 2-4x bigger windows + slow. Reverted.
     # (MODE_G_REPLAY_HOURS / MAX_DIAG fallback left at faye base, untouched.)
 
+    # ── 7b. Rally-cooldown H1/H2 split: CANDLE-AGNOSTIC (2026-06-21 bug fix) ──
+    # faye's _sweep_rally_cooldown did `days = replay_h / 24` (assumes hourly bars),
+    # then split the signal stream with end_t - Timedelta(days=...). On sub-hourly
+    # forks replay_h is a PERIOD count, so days was 4x (15m) / 2x (30m) too large ->
+    # the H2 window fell entirely before the data -> "H2 has only 0 signals. SKIPPING"
+    # -> the rally-cooldown sweep was silently SKIPPED (gates never optimized). Derive
+    # the split span from the signals' ACTUAL datetimes so it is correct for any candle.
+    old_rally = '''    if replay_h < 720:
+        print(f"  Rally-cooldown sweep: --replay must be >= 720h (30d). Got {replay_h}")
+        return None
+    days = replay_h / 24.0
+    half_days = days / 2.0'''
+    new_rally = '''    if replay_h < 720:
+        print(f"  Rally-cooldown sweep: --replay must be >= 720 periods. Got {replay_h}")
+        return None
+    # FUJIWARA FIX (2026-06-21): replay_h is a PERIOD count (candles), NOT hours.
+    # faye's `days = replay_h/24` assumed hourly bars; on sub-hourly data it made the
+    # H2 window empty (the sweep silently SKIPPED -- "window=120d" on 30 days of data).
+    # Derive the split span from the signal stream's ACTUAL datetimes so the
+    # end_t - Timedelta(days=...) thresholds below split at the true midpoint,
+    # candle-agnostic (identical to faye's result on contiguous hourly data).
+    _span = pd.Timestamp(signals[-1]['datetime']) - pd.Timestamp(signals[0]['datetime'])
+    days = _span.total_seconds() / 86400.0
+    half_days = days / 2.0'''
+    t = _rep(t, old_rally, new_rally, 'rally-cd-candle-agnostic-split')
+
     # ── 8. Do NOT create production models/ + config/ dirs (wall) ──
     t = _rep(t, """    os.path.join(_SCRIPT_DIR, 'models'),
     os.path.join(_SCRIPT_DIR, 'config'),""",

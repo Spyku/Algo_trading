@@ -7823,9 +7823,16 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
         AND the gate only fires on that regime's bars during the sim.
     """
     if replay_h < 720:
-        print(f"  Rally-cooldown sweep: --replay must be >= 720h (30d). Got {replay_h}")
+        print(f"  Rally-cooldown sweep: --replay must be >= 720 periods. Got {replay_h}")
         return None
-    days = replay_h / 24.0
+    # FUJIWARA FIX (2026-06-21): replay_h is a PERIOD count (candles), NOT hours.
+    # faye's `days = replay_h/24` assumed hourly bars; on sub-hourly data it made the
+    # H2 window empty (the sweep silently SKIPPED — "window=120d" on 30 days of data).
+    # Derive the split span from the signal stream's ACTUAL datetimes so the
+    # end_t - Timedelta(days=...) thresholds below split at the true midpoint,
+    # candle-agnostic (identical to faye's result on contiguous hourly data).
+    _span = pd.Timestamp(signals[-1]['datetime']) - pd.Timestamp(signals[0]['datetime'])
+    days = _span.total_seconds() / 86400.0
     half_days = days / 2.0
     rank_col = 'score_recent' if rank == 'recent' else 'score_dd_aware'
 
