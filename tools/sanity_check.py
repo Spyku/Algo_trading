@@ -81,40 +81,45 @@ def shadow_check():
     return status, msg
 
 
-def parity_check(samples):
-    print(f"  running engine-vs-trader parity ({samples} recent samples, ~{samples*0.5:.0f} min)...", flush=True)
+def refit_check(samples):
+    """[3] Engine REFIT from the trader's FROZEN training matrices
+    (output/inference_train_snapshots.jsonl) — NON-revised, point-in-time, and
+    reproducible by construction (the matrices are what the trader ACTUALLY trained
+    on). This REPLACES the old rebuild-from-CURRENT-data parity
+    (validate_core_against_signal_log), which rebuilt features from now-revised data
+    and false-alarmed: on 2026-06-21 it reported "19/30 real BUY<->SELL" that was
+    NOT a live error — partly a validator regime bug (sma24 vs live sma48, fixed
+    8947862) and partly the revised-data rebuild + cross-machine snapshot diffs.
+    Refit-from-frozen on the same hours was 30/30. Per the owner's directive:
+    the validator MUST compute on non-revised data. (The backtester already does —
+    all sources route through _dedup_preserve_history / _merge_preserve_history.)"""
+    import re
+    print(f"  running engine REFIT-from-frozen replay ({samples} samples)...", flush=True)
     r = subprocess.run(
-        [sys.executable, os.path.join(ENG, "tools", "validate_core_against_signal_log.py"),
-         "--samples", str(samples), "--recent-only"],  # GPU (Rule 24): mirrors live device='gpu', collapses the -4.6 CPU conf bias -> ~97%
-        cwd=ENG, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [sys.executable, os.path.join(ENG, "tools", "validate_refit_replay.py"),
+         "--samples", str(samples)],
+        cwd=ENG, capture_output=True, text=True,
     )
-    csvs = glob.glob(os.path.join(ENG, "output", "core_validation_*.csv"))
-    if not csvs:
-        return "WARN", "validator produced no output CSV", []
-    d = pd.read_csv(max(csvs, key=os.path.getmtime))
-    ev = d[d["error"].isna()] if "error" in d.columns else d
-    diffs = ev[~_truthy(ev["match"])] if "match" in ev.columns else ev.iloc[0:0]
-    dirset = {"BUY", "SELL"}
-    real = diffs[diffs["live_action"].isin(dirset) & diffs["core_action"].isin(dirset)
-                 & (diffs["live_action"] != diffs["core_action"])]
-    n_eval, n_diff, n_real = len(ev), len(diffs), len(real)
-    flips = [f"{row['timestamp']} live={row['live_action']}({row['live_confidence']}) "
-             f"core={row['core_action']}({row['core_confidence']})" for _, row in real.iterrows()]
-    # Honest split of the non-flip diffs (2026-06-20): a HOLD<->directional disagreement
-    # with a large |dConf| is NOT a near-gate "boundary" wobble — it's decisive drift from
-    # the model refitting on later-settled current-period data (verified this session: device
-    # only ~3pt, within-device deterministic, historical data frozen 0/185k cells). Surface it
-    # instead of hiding it under "boundary"; parity is recent-only + non-reproducible by design.
-    rest = diffs.drop(real.index)
-    _dc = (pd.to_numeric(rest.get("core_confidence"), errors="coerce")
-           - pd.to_numeric(rest.get("live_confidence"), errors="coerce")).abs()
-    n_drift = int((_dc >= 10).sum())          # decisive HOLD<->dir (refit/data-settle drift)
-    n_bound = int(len(rest) - n_drift)        # genuine near-gate wobble (|dConf|<10)
-    msg = (f"{n_eval-n_diff}/{n_eval} match | {n_real} real BUY<->SELL | "
-           f"{n_drift} decisive HOLD<->dir (|dConf|>=10, data-settle drift) | "
-           f"{n_bound} near-gate wobble  "
-           f"[recent-window, NON-reproducible: informational; verdict=shadow+snapshot]")
-    status = "PASS" if n_real == 0 else "ATTENTION"
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 2 or "not found yet" in out:
+        return "WARN", ("no frozen training snapshots yet "
+                        "(output/inference_train_snapshots.jsonl) — trader needs the "
+                        "patched code + a restart; falls back to shadow+snapshot verdict"), []
+    m = re.search(r"signal match:\s*(\d+)/(\d+)\s*\(([\d.]+)%\)", out)
+    if not m:
+        return "WARN", "refit-replay produced no parseable result", []
+    n_ok, n_tot, pct = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    # A real BUY<->SELL on FROZEN data is a genuine non-reproducibility (real bug),
+    # since revision/cross-machine noise is eliminated by using the frozen matrix.
+    flips = []
+    for ln in out.splitlines():
+        fm = re.search(r"refit (BUY|SELL)\([^)]*\) vs logged (BUY|SELL)\(", ln)
+        if fm and fm.group(1) != fm.group(2):
+            flips.append(ln.strip())
+    n_real = len(flips)
+    status = "PASS" if (n_real == 0 and pct >= 99.0) else "ATTENTION"
+    msg = (f"{n_ok}/{n_tot} refit==logged ({pct:.0f}%) | {n_real} real BUY<->SELL "
+           f"[frozen training matrix — non-revised, REPRODUCIBLE]")
     return status, msg, flips
 
 
@@ -145,7 +150,7 @@ def main():
     args = ap.parse_args()
 
     print("=" * 64)
-    print("  LIVE SANITY CHECK | [1] engine-vs-trader LIVE + [2] snapshot (deterministic) + [3] engine offline re-run (info)")
+    print("  LIVE SANITY CHECK | [1] engine-vs-trader LIVE + [2] snapshot + [3] engine REFIT from frozen (all non-revised / reproducible)")
     print("=" * 64)
 
     bad = False
@@ -164,19 +169,23 @@ def main():
     if sn_status == "FAIL":
         bad = True
 
-    # [3] ENGINE-vs-TRADER parity — INFORMATIONAL ONLY. Non-reproducible (data revision +
-    #     shifting tail-N window); real flips are listed but do NOT set the verdict.
+    # [3] ENGINE REFIT from FROZEN training matrices — non-revised + reproducible, so
+    #     unlike the old rebuild-from-now parity it CAN drive the verdict: a real
+    #     BUY<->SELL here is genuine non-reproducibility, not revision noise. WARN
+    #     (no frozen snapshots yet) does NOT fail — falls back to shadow+snapshot.
     if args.quick:
-        print("\n[3] ENGINE re-run offline : SKIPPED (--quick; [1] above is the live engine-vs-trader check)")
+        print("\n[3] ENGINE REFIT (frozen) : SKIPPED (--quick; [1]+[2] are deterministic and drive the verdict)")
     else:
-        p_status, p_msg, flips = parity_check(args.samples)
-        print(f"\n[3] ENGINE-vs-TRADER offline : {p_status}  (re-runs the engine over the last N hours; informational, non-reproducible)")
+        p_status, p_msg, flips = refit_check(args.samples)
+        print(f"\n[3] ENGINE REFIT (frozen, non-revised) : {p_status}  (refits from the trader's own frozen training matrices — reproducible)")
         print(f"    {p_msg}")
         for fl in flips:
-            print(f"      REAL FLIP (likely data-revision artifact): {fl}")
+            print(f"      REAL non-reproducibility (frozen data — investigate): {fl}")
+        if p_status == "ATTENTION":
+            bad = True
 
     print("\n" + "=" * 64)
-    print(f"  RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}  (verdict = shadow + snapshot replay; parity is informational)")
+    print(f"  RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}  (verdict = shadow + snapshot + frozen-refit; all non-revised)")
     print("=" * 64)
     sys.exit(1 if bad else 0)
 
