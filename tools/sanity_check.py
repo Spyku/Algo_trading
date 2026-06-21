@@ -118,7 +118,10 @@ def refit_check(samples):
             flips.append(ln.strip())
     n_real = len(flips)
     status = "PASS" if (n_real == 0 and pct >= 99.0) else "ATTENTION"
-    msg = (f"{n_ok}/{n_tot} refit==logged ({pct:.0f}%) | {n_real} real BUY<->SELL "
+    # NOTE: keep the substring "match" here — the trader's Telegram output filter
+    # (crypto_revolut_ed_v2._run_sanity_and_alert) greps for SHADOW/SNAPSHOT/ENGINE/
+    # REAL FLIP/RESULT/match to decide which lines to show.
+    msg = (f"{n_ok}/{n_tot} signal match (refit==logged, {pct:.0f}%) | {n_real} real BUY<->SELL "
            f"[frozen training matrix — non-revised, REPRODUCIBLE]")
     return status, msg, flips
 
@@ -180,7 +183,8 @@ def main():
         print(f"\n[3] ENGINE REFIT (frozen, non-revised) : {p_status}  (refits from the trader's own frozen training matrices — reproducible)")
         print(f"    {p_msg}")
         for fl in flips:
-            print(f"      REAL non-reproducibility (frozen data — investigate): {fl}")
+            # keep "REAL FLIP" substring — trader Telegram filter greps for it
+            print(f"      REAL FLIP (frozen-data non-reproducibility — investigate): {fl}")
         if p_status == "ATTENTION":
             bad = True
 
