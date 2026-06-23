@@ -8046,8 +8046,42 @@ def _sweep_rally_cooldown(asset, signals, asset_cfg, replay_h, rank='recent',
     print(f"  {asset} | beats_3of3={int(df['beats_3of3'].sum())}  "
           f"STRICT (3of3 + plateau>={PLATEAU_THR})={len(strict)}")
     if len(strict) == 0:
-        print(f"  {asset} | NO STRICT WINNER — config not modified.")
-        return None
+        # (a) 2026-06-23: no-winner is a DECISION, not a no-op. Previously this
+        # branch did `return None` and left whatever gate was already in the config
+        # untouched — so a stale `enabled:true` (e.g. a pre-existing double) could
+        # survive every run and get promoted to live (the 06-22 double-gate incident).
+        # Now we WRITE an explicit disabled, single-form gate: the config always
+        # reflects the sweep's actual conclusion ("no gate beats no-gate → no gate").
+        # The best-found single config is recorded (enabled=False) for transparency /
+        # easy re-enable, never as an active double.
+        best = df.sort_values(rank_col, ascending=False).iloc[0]
+        print(f"  {asset} | NO STRICT WINNER — no single gate beats no-gate. "
+              f"DISABLING gate (best-found single rr{int(best['h_short'])}h>="
+              f"{best['t_short']}% cd={int(best['cd'])}h recorded, enabled=False).")
+        disabled_dict = {
+            'enabled': False,
+            'h_short': int(best['h_short']),
+            'h_long': int(best['h_short']),      # single-form: long leg == short leg
+            't_short_pct': float(best['t_short']),
+            't_long_pct': 9999.0,                # sentinel: long leg never fires
+            'cd_hours': int(best['cd']),
+        }
+        if write_config:
+            cfg = {}
+            if os.path.exists(REGIME_CONFIG_PATH):
+                with open(REGIME_CONFIG_PATH) as f:
+                    cfg = json.load(f)
+            if asset not in cfg:
+                cfg[asset] = {'enabled': False, 'symbol': f'{asset}-USD'}
+            if regime_filter in ('bull', 'bear'):
+                cfg[asset].setdefault(regime_filter, {})['rally_cooldown'] = disabled_dict
+                write_loc = f"{asset}.{regime_filter}.rally_cooldown"
+            else:
+                cfg[asset]['rally_cooldown'] = disabled_dict
+                write_loc = f"{asset}.rally_cooldown"
+            _atomic_write_json(REGIME_CONFIG_PATH, cfg)
+            print(f"  {asset} | wrote DISABLED {write_loc} to {REGIME_CONFIG_PATH}")
+        return disabled_dict
 
     cols = ['h_short','t_short','cd',
             'pnl_H1','pnl_H2','pnl_REF','worst_dd','score_recent','score_dd_aware','plateau_score']
