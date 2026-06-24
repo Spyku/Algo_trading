@@ -3914,6 +3914,21 @@ def _setup_finish(trading_cfg):
     print("  Config updated via Telegram /setup")
     _rerun_event.set()
 
+def _setup_commit(cfg, trading_cfg):
+    """Persist a /setup edit IMMEDIATELY + sync live in-memory config.
+
+    Fix (2026-06-25): setup mutations previously lived only in the
+    `_setup_state['cfg']` snapshot and were written to regime_config_ed.json
+    *solely* on /cfg_save (`_setup_finish`). So a toggle "didn't stick" if the
+    user didn't finish, and the snapshot disagreed with the live config the main
+    keyboard / status render from. Now every toggle/setter saves the snapshot to
+    disk (atomic, via save_trading_config) AND copies it into the live
+    `trading_cfg` so all views agree."""
+    save_trading_config(cfg)
+    for _a in cfg:
+        trading_cfg[_a] = cfg[_a]
+
+
 def _setup_handle(text, trading_cfg):
     """Process button callbacks during interactive setup."""
     global _setup_state
@@ -3940,6 +3955,7 @@ def _setup_handle(text, trading_cfg):
                 _setup_state.pop('awaiting_custom_max', None)
                 _setup_state.pop('awaiting_custom_max_regime', None)
                 send_telegram(f"✅ {awaiting_asset} {awaiting_regime} max position → ${val:,}")
+                _setup_commit(cfg, trading_cfg)  # persist + sync immediately
                 _setup_send_menu(awaiting_asset, cfg[awaiting_asset])
                 return
         except ValueError:
@@ -3966,9 +3982,8 @@ def _setup_handle(text, trading_cfg):
         # /cfg_{ASSET}_toggle — toggle enabled
         if text_l == f'/cfg_{asset}_toggle':
             cfg[asset]['enabled'] = not cfg[asset].get('enabled', False)
-            st = "🔵 ON" if cfg[asset]['enabled'] else "🔴 OFF"
-            send_telegram(f"✅ {asset} → {st}")
-            _setup_send_menu(asset, cfg[asset])
+            _setup_commit(cfg, trading_cfg)  # persist + sync immediately (was snapshot-only)
+            _setup_send_menu(asset, cfg[asset])  # menu shows new state (one message, not 2)
             return
 
         # /cfg_{ASSET}_auto — toggle auto-trade
@@ -3995,21 +4010,15 @@ def _setup_handle(text, trading_cfg):
         # /cfg_{ASSET}_tp — toggle take-profit
         if text_l == f'/cfg_{asset}_tp':
             current_tp = cfg[asset].get('take_profit_pct', 0)
-            if current_tp > 0:
-                cfg[asset]['take_profit_pct'] = 0
-                send_telegram(f"TP OFF for {asset}")
-            else:
-                cfg[asset]['take_profit_pct'] = 1.0
-                send_telegram(f"TP ON for {asset} (1%)")
+            cfg[asset]['take_profit_pct'] = 0 if current_tp > 0 else 1.0
+            _setup_commit(cfg, trading_cfg)  # persist + sync immediately
             _setup_send_menu(asset, cfg[asset])
             return
 
         # /cfg_{ASSET}_maker — toggle maker orders
         if text_l == f'/cfg_{asset}_maker':
-            current = cfg[asset].get('use_maker_orders', False)
-            cfg[asset]['use_maker_orders'] = not current
-            status = 'ON (0% fee)' if not current else 'OFF (market)'
-            send_telegram(f"Maker orders {status} for {asset}")
+            cfg[asset]['use_maker_orders'] = not cfg[asset].get('use_maker_orders', False)
+            _setup_commit(cfg, trading_cfg)  # persist + sync immediately
             _setup_send_menu(asset, cfg[asset])
             return
 
@@ -4029,7 +4038,7 @@ def _setup_handle(text, trading_cfg):
                 try:
                     val = int(text_l.split('_')[-1])
                     cfg[asset].setdefault(regime, {})['min_confidence'] = val
-                    send_telegram(f"✅ {asset} {regime} confidence → {val}%")
+                    _setup_commit(cfg, trading_cfg)  # persist + sync immediately
                     _setup_send_menu(asset, cfg[asset])
                 except ValueError:
                     pass
@@ -4051,7 +4060,7 @@ def _setup_handle(text, trading_cfg):
                 try:
                     val = int(text_l.split('_')[-1])
                     cfg[asset].setdefault(regime, {})['max_position_usd'] = val
-                    send_telegram(f"✅ {asset} {regime} max position → ${val:,}")
+                    _setup_commit(cfg, trading_cfg)  # persist + sync immediately
                     _setup_send_menu(asset, cfg[asset])
                 except ValueError:
                     pass
