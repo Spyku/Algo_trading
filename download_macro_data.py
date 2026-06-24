@@ -51,6 +51,35 @@ FRESHNESS_SECONDS = 21600  # 6 hours
 
 
 # ============================================================
+# Atomic CSV write (B — 2026-06-24, the "No columns to parse" race fix)
+# ============================================================
+# PROBLEM: a bare `df.to_csv(outfile)` truncates the target to 0 bytes, then
+# streams the new contents. A concurrent reader (the other trader instance, or
+# Drive mid-sync) that opens the file during that window sees an EMPTY file ->
+# pandas raises EmptyDataError "No columns to parse from file", which broke a
+# live cycle on 2026-06-24 (IV/orderbook snapshot reads).
+#
+# FIX: write to a temp file in the same directory, then os.replace() it over the
+# target. os.replace is atomic on the same filesystem (Windows + POSIX), so a
+# reader sees either the OLD complete file or the NEW complete file — never an
+# empty/half-written one. Pair this with the read-side guards (A) so a truly
+# corrupt/empty pre-existing file still self-heals instead of crashing.
+def _atomic_to_csv(df, outfile, **to_csv_kwargs):
+    """Write df to outfile atomically (temp file + os.replace)."""
+    tmp = f"{outfile}.tmp.{os.getpid()}"
+    try:
+        df.to_csv(tmp, **to_csv_kwargs)
+        os.replace(tmp, outfile)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ============================================================
 # Point-in-time dedup helper (added 2026-05-27 for TODO 0526 data drift fix)
 # ============================================================
 # PROBLEM: every call site that used `drop_duplicates(keep='last')` or
@@ -1519,17 +1548,23 @@ def download_options_iv_skew():
 
     df = pd.DataFrame(rows)
     outfile = os.path.join(MACRO_DIR, 'options_iv_snapshot.csv')
-    # Append to existing file
-    if os.path.exists(outfile):
-        existing = pd.read_csv(outfile)
-        # TODO 0526 data drift fix (2026-05-27): preserve historical IV snapshots —
-        # was keep='last' which let a re-snapshot within the same hour overwrite
-        # the first reading. Now first reading per (hour, asset) is frozen.
-        df = _dedup_preserve_history(
-            pd.concat([existing, df], ignore_index=True),
-            freq='1h', subset=['datetime', 'asset'],
-        )
-    df.to_csv(outfile, index=False)
+    # Append to existing file. A (2026-06-24): guard the read — an empty/corrupt
+    # existing file (interrupted write / Drive-sync race) must self-heal to a
+    # fresh snapshot, not crash the cycle with EmptyDataError.
+    if os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+        try:
+            existing = pd.read_csv(outfile)
+            # TODO 0526 data drift fix (2026-05-27): preserve historical IV snapshots —
+            # was keep='last' which let a re-snapshot within the same hour overwrite
+            # the first reading. Now first reading per (hour, asset) is frozen.
+            df = _dedup_preserve_history(
+                pd.concat([existing, df], ignore_index=True),
+                freq='1h', subset=['datetime', 'asset'],
+            )
+        except Exception as _e:
+            print(f"  [snapshot] could not merge existing {os.path.basename(outfile)} "
+                  f"({_e}); writing fresh snapshot this cycle")
+    _atomic_to_csv(df, outfile, index=False)
     print(f"  Saved: {outfile} ({len(df)} rows)")
     return df
 
@@ -1585,14 +1620,19 @@ def download_orderbook_snapshot(assets=None):
 
     df = pd.DataFrame(rows)
     outfile = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
-    if os.path.exists(outfile):
-        existing = pd.read_csv(outfile)
-        # TODO 0526 data drift fix (2026-05-27): preserve historical orderbook snapshots
-        df = _dedup_preserve_history(
-            pd.concat([existing, df], ignore_index=True),
-            freq='1h', subset=['datetime', 'asset'],
-        )
-    df.to_csv(outfile, index=False)
+    # A (2026-06-24): guard the read — empty/corrupt file self-heals to fresh.
+    if os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+        try:
+            existing = pd.read_csv(outfile)
+            # TODO 0526 data drift fix (2026-05-27): preserve historical orderbook snapshots
+            df = _dedup_preserve_history(
+                pd.concat([existing, df], ignore_index=True),
+                freq='1h', subset=['datetime', 'asset'],
+            )
+        except Exception as _e:
+            print(f"  [snapshot] could not merge existing {os.path.basename(outfile)} "
+                  f"({_e}); writing fresh snapshot this cycle")
+    _atomic_to_csv(df, outfile, index=False)
     print(f"  Saved: {outfile} ({len(df)} rows)")
     return df
 
@@ -1656,10 +1696,15 @@ def download_whale_flows():
             print(f"    {len(txns)} large txns | exchange_in=${exchange_in/1e6:.1f}M | exchange_out=${exchange_out/1e6:.1f}M")
 
             outfile = os.path.join(MACRO_DIR, 'whale_flows.csv')
-            if os.path.exists(outfile):
-                existing = pd.read_csv(outfile)
-                df = pd.concat([existing, df], ignore_index=True)
-            df.to_csv(outfile, index=False)
+            # A (2026-06-24): guard the read — empty/corrupt file self-heals to fresh.
+            if os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+                try:
+                    existing = pd.read_csv(outfile)
+                    df = pd.concat([existing, df], ignore_index=True)
+                except Exception as _e:
+                    print(f"  [snapshot] could not read existing {os.path.basename(outfile)} "
+                          f"({_e}); writing fresh")
+            _atomic_to_csv(df, outfile, index=False)
             print(f"  Saved: {outfile}")
             return df
         else:
