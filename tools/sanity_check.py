@@ -146,6 +146,57 @@ def snapshot_check():
     return status, f"{frac} bookkeeping match (frozen replay, reproducible)"
 
 
+# Critical historical CSVs and their sane floors. A HISTORY CLOBBER (the 2026-06-28
+# cross_asset 1637->9 silent truncation: a concurrent reader caught the file mid-write,
+# read it as empty, and _yf_merge_with_existing returned the tiny incremental slice over
+# the full history) ALWAYS collapses the date span — so (min_rows, min_span_days) catches
+# it deterministically without hardcoding absolute dates. Add a file here when wiring a
+# new long-history source. Path is relative to data/macro_data/.
+_INTEGRITY_REGISTRY = {
+    # file                  (min_rows, min_span_days)
+    "cross_asset.csv":      (1400, 1200),   # daily, since 2022 — the file that clobbered
+    "macro_daily.csv":      (1000, 1200),   # daily, since 2022
+    "fear_greed.csv":       (2500, 2500),   # daily, since 2018
+    "onchain_eth.csv":      (1200, 1000),   # daily on-chain (live ETH)
+    "onchain_btc.csv":      (1200, 1000),
+    "derivatives_eth.csv":  (30000, 1000),  # hourly (live ETH)
+}
+
+
+def data_integrity_check():
+    """[4] DATA INTEGRITY — deterministic & instant. Verifies critical historical CSVs
+    have NOT been truncated/collapsed (the 2026-06-28 cross_asset 1637->9 clobber, which
+    silently NaN'd every xa_*_corr* feature and zeroed the 8h PySR). A clobber collapses
+    both the row count and the date span, so we floor both. FAIL = a real data-loss event
+    -> restore via the source's full re-pull (e.g. download_cross_asset(full=True))."""
+    mdir = os.path.join(ENG, "data", "macro_data")
+    fails, oks = [], 0
+    for fname, (min_rows, min_span_days) in _INTEGRITY_REGISTRY.items():
+        path = os.path.join(mdir, fname)
+        if not os.path.exists(path):
+            fails.append(f"{fname}: MISSING")
+            continue
+        if os.path.getsize(path) == 0:
+            fails.append(f"{fname}: EMPTY (0 bytes)")
+            continue
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            fails.append(f"{fname}: UNREADABLE ({type(e).__name__})")
+            continue
+        n = len(df)
+        dts = pd.to_datetime(df[df.columns[0]], errors="coerce").dropna()
+        span = (dts.max() - dts.min()).days if len(dts) else 0
+        if n < min_rows or span < min_span_days:
+            fails.append(f"{fname}: COLLAPSED rows={n}(min {min_rows}) span={span}d(min {min_span_days}d) "
+                         f"start={str(dts.min())[:10] if len(dts) else '?'}")
+        else:
+            oks += 1
+    if fails:
+        return "FAIL", f"{len(fails)} file(s) collapsed/missing: " + " | ".join(fails)
+    return "PASS", f"{oks}/{len(_INTEGRITY_REGISTRY)} critical CSVs intact (row+span floors)"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="deterministic checks only (shadow + snapshot); skip the ~15min parity")
@@ -157,6 +208,15 @@ def main():
     print("=" * 64)
 
     bad = False
+
+    # [4] DATA INTEGRITY — deterministic & instant; catches history-collapse of the
+    #     critical macro CSVs (the 2026-06-28 cross_asset 1637->9 clobber). Runs first
+    #     because a collapsed source silently corrupts every downstream feature/signal.
+    di_status, di_msg = data_integrity_check()
+    print(f"\n[4] DATA INTEGRITY : {di_status}")
+    print(f"    {di_msg}")
+    if di_status == "FAIL":
+        bad = True
 
     # [1] SHADOW — deterministic, drives verdict
     s_status, s_msg = shadow_check()

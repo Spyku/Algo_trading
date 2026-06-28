@@ -521,8 +521,36 @@ def _yf_merge_with_existing(new_df, outfile, mode_label):
     except Exception as e:
         print(f"  [!] Existing {outfile} unreadable during merge ({e}); writing new slice only.")
         return new_df
-    if len(existing) == 0 or len(new_df) == 0:
-        return new_df if len(new_df) else existing
+    if len(new_df) == 0:
+        return existing
+    if len(existing) == 0:
+        # HISTORY-CLOBBER GUARD (2026-06-28). We are in INCREMENTAL mode, which means
+        # _yf_resolve_window read a NON-empty existing file moments ago. An empty read
+        # HERE means the file was caught mid-write by a concurrent process / Drive sync
+        # (the cross_asset 1637->9 silent truncation: empty existing -> the tiny new
+        # slice was returned and overwrote 4yr of history with NO alert). RETRY the read
+        # — a concurrent bare write completes in ms, so an atomic-era race recovers within
+        # ~1s — and re-merge on the recovered file.
+        for _ in range(3):
+            time.sleep(0.4)
+            try:
+                _re = pd.read_csv(outfile, index_col=0, parse_dates=True)
+            except Exception:
+                _re = existing
+            if len(_re) > 0:
+                return _yf_merge_with_existing(new_df, outfile, mode_label)  # re-merge on recovered file
+        # Still empty after ~1.2s -> genuinely empty (no history to preserve) OR a real
+        # loss. The SILENT version of this is what hid the original clobber, so ALERT
+        # loudly; the daily DATA-INTEGRITY check (tools/sanity_check.py) will also catch
+        # any resulting collapse on the next run.
+        _alert_partial_download(
+            f'history_clobber_{os.path.basename(outfile)}',
+            f"🚨 {os.path.basename(outfile)}: existing read EMPTY during incremental merge "
+            f"(concurrent-write race / corruption). Wrote a {len(new_df)}-row slice — if this "
+            f"file should have full history, restore via a full re-pull "
+            f"(e.g. download_cross_asset(full=True)).",
+            severity='critical')
+        return new_df
     # Align column sets — if upstream tickers were added/removed since the
     # existing file was written, fall back to full pull semantics (the new
     # slice alone won't cover history but at least won't smear schemas).
