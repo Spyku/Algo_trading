@@ -1015,12 +1015,40 @@ def download_onchain_data(asset='btc'):
 # ============================================================
 # 6. DERIVATIVES DATA (funding rate + open interest from Binance)
 # ============================================================
-def download_derivatives_data(assets=None):
+def _deriv_incremental_start_ms(outfile, full_start_ms, overlap_days=3):
+    """Pagination start (ms) for an INCREMENTAL derivatives pull: the last existing
+    row minus an overlap, floored at the full-history start. Falls back to a FULL pull
+    (full_start_ms) if the CSV is missing / empty / unreadable — so the output is always
+    correct, just slower. The existing _merge_preserve_history then stitches the recent
+    slice onto the preserved history, giving byte-identical output to a full pull.
+    (2026-06-29: kills the ~33s P1 derivatives re-pull — perp klines were 40 pages back
+    to 2022 every 2h; incremental is ~1-2 pages. See the Backtest-vs-Live Fidelity work.)"""
+    try:
+        if not (os.path.exists(outfile) and os.path.getsize(outfile) > 0):
+            return full_start_ms
+        _df = pd.read_csv(outfile, parse_dates=[0], index_col=0)
+        if len(_df) == 0:
+            return full_start_ms
+        last = _df.index.max()
+        if getattr(last, 'tz', None) is not None:
+            last = last.tz_localize(None)
+        start = last - pd.Timedelta(days=overlap_days)
+        return max(full_start_ms, int(start.timestamp() * 1000))
+    except Exception:
+        return full_start_ms  # any read issue -> safe full pull
+
+
+def download_derivatives_data(assets=None, full=False, incremental_overlap_days=3):
     """
     Download derivatives data from Binance Futures public API (free, no key).
-    - Funding rate: every 8h, paginated from 2022-01-01
-    - Open interest: hourly, max 30 days per request, paginated
+    - Funding rate: every 8h, paginated from `eff_start` (incremental by default)
+    - Open interest: hourly, max 30 days per request, paginated backward
+    - Perp klines: hourly, paginated from `eff_start`
     Saves to data/macro_data/derivatives_{asset}.csv per asset (hourly frequency).
+
+    full=False (default): INCREMENTAL — paginate only from (last CSV row - overlap),
+      then merge onto the preserved history via _merge_preserve_history. ~1-2s vs ~33s.
+    full=True: legacy full backfill from 2022-01-01 (first run / deliberate refresh).
     """
     import urllib.request
     import ssl
@@ -1036,12 +1064,17 @@ def download_derivatives_data(assets=None):
 
     for asset in assets:
         symbol = f"{asset}USDT"
-        print(f"\n  Downloading {asset} derivatives data from Binance...")
+        outfile = os.path.join(MACRO_DIR, f'derivatives_{asset.lower()}.csv')
+        eff_start_ms = start_ms if full else _deriv_incremental_start_ms(
+            outfile, start_ms, incremental_overlap_days)
+        _mode = 'full backfill' if eff_start_ms == start_ms else \
+            f'incremental from {pd.Timestamp(eff_start_ms, unit="ms").strftime("%Y-%m-%d")}'
+        print(f"\n  Downloading {asset} derivatives data from Binance... [{_mode}]")
 
         # --- Funding Rate (8h intervals, paginate with limit=1000) ---
         print(f"    Funding rate (8h intervals)...", end=' ')
         all_funding = []
-        cursor_ms = start_ms
+        cursor_ms = eff_start_ms
         try:
             while True:
                 url = (f"https://fapi.binance.com/fapi/v1/fundingRate"
@@ -1118,7 +1151,7 @@ def download_derivatives_data(assets=None):
             # expected boundary failure.
             while data and len(data) > 1:
                 earliest_ts = data[0]['timestamp']
-                if earliest_ts <= start_ms:
+                if earliest_ts <= eff_start_ms:
                     break
                 end_ms = earliest_ts - 1
                 url = (f"https://fapi.binance.com/futures/data/openInterestHist"
@@ -1156,7 +1189,7 @@ def download_derivatives_data(assets=None):
         print(f"    Perp hourly klines...", end=' ')
         all_klines = []
         try:
-            cursor_ms = start_ms
+            cursor_ms = eff_start_ms
             while True:
                 url = (f"https://fapi.binance.com/fapi/v1/klines"
                        f"?symbol={symbol}&interval=1h&startTime={cursor_ms}&limit=1000")
