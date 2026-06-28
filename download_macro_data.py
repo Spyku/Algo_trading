@@ -653,7 +653,7 @@ def download_yfinance_data(full=False):
     macro_df = macro_df.ffill()
 
     # Save
-    macro_df.to_csv(outfile)
+    _atomic_to_csv(macro_df, outfile)
     print(f"\n  Saved: {outfile} ({len(macro_df)} rows, {len(macro_df.columns)} columns)")
     print(f"  Columns: {list(macro_df.columns)}")
     print(f"  Date range: {macro_df.index[0].date()} to {macro_df.index[-1].date()}")
@@ -713,7 +713,7 @@ def download_fear_greed():
                 fg_df = _merge_preserve_history(fg_df, existing, freq='D')
             except Exception as e:
                 print(f"  [!] Could not merge with existing fear_greed.csv ({e}); writing fresh.")
-        fg_df.to_csv(outfile)
+        _atomic_to_csv(fg_df, outfile)
         print(f"  Saved: {outfile} ({len(fg_df)} rows)")
         print(f"  Date range: {fg_df.index[0].date()} to {fg_df.index[-1].date()}")
         print(f"  Current: {fg_df.iloc[-1]['fear_greed']} ({fg_df.iloc[-1]['fear_greed_label']})")
@@ -813,7 +813,7 @@ def download_cross_asset(full=False):
                 cross_df = cross_df.loc[:has_close[has_close].index[-1]]
         cross_df = cross_df.ffill()
 
-        cross_df.to_csv(outfile)
+        _atomic_to_csv(cross_df, outfile)
         print(f"\n  Saved: {outfile} ({len(cross_df)} rows)")
         return cross_df
 
@@ -972,7 +972,7 @@ def download_onchain_data(asset='btc'):
             print(f"  [drift-fix] could not merge with existing onchain CSV ({_e}); "
                   f"writing fresh download (historical drift NOT prevented this cycle)")
 
-    onchain_df.to_csv(outfile)
+    _atomic_to_csv(onchain_df, outfile)
     print(f"\n  Saved: {outfile} ({len(onchain_df)} rows, {len(onchain_df.columns)} columns)")
     print(f"  Columns: {list(onchain_df.columns)}")
     print(f"  Date range: {onchain_df.index[0].date()} to {onchain_df.index[-1].date()}")
@@ -1287,7 +1287,7 @@ def download_derivatives_data(assets=None):
                 print(f"  [drift-fix] could not merge with existing derivatives CSV ({_e}); "
                       f"writing fresh download (historical drift NOT prevented this cycle)")
 
-        deriv_df.to_csv(outfile)
+        _atomic_to_csv(deriv_df, outfile)
         print(f"  Saved: {outfile} ({len(deriv_df)} rows, {len(deriv_df.columns)} columns)")
         print(f"  Date range: {deriv_df.index[0]} to {deriv_df.index[-1]}")
         all_results[asset] = deriv_df
@@ -1423,7 +1423,7 @@ def download_gdelt_geopolitical():
 
     # Save
     outfile = os.path.join(MACRO_DIR, 'gdelt_geopolitical.csv')
-    hourly.to_csv(outfile)
+    _atomic_to_csv(hourly, outfile)
     print(f"  Saved: {outfile} ({len(hourly)} rows, {list(hourly.columns)})")
     print(f"  Date range: {hourly.index[0]} to {hourly.index[-1]}")
 
@@ -1478,7 +1478,7 @@ def download_stablecoin_flows():
     combined['total_stable_mcap'] = combined.sum(axis=1)
 
     outfile = os.path.join(MACRO_DIR, 'stablecoin_flows.csv')
-    combined.to_csv(outfile)
+    _atomic_to_csv(combined, outfile)
     print(f"  Saved: {outfile} ({len(combined)} rows)")
     return combined
 
