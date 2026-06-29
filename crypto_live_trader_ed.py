@@ -902,6 +902,19 @@ def generate_live_signal(asset_name, config, df_raw=None, verbose=True, metrics_
         return None
 
     # Train on labelled rows only; predict on freshest bar from df.
+    # LEAKAGE-FREE EDGE (2026-06-29): df_train (= dropna(label) on df_full) ends at
+    # (n-1)-horizon. df_full carries the FORMING bar, so when the closed-bar stepback
+    # moved inference to i<n-1, that last df_train row's label window peeks at the
+    # forming bar (a consistent 1-row leak — confirmed 162/162 hours). Drop the rows
+    # whose label uses bars AFTER the inference bar i, so the last training row is
+    # i-horizon (its label [i-horizon, i] uses only the closed inference bar i). This
+    # is NOT an embargo (Rule F2): the dropped rows had labels computed from the
+    # incomplete forming bar — invalid, not "purged valid data". Diagnosed via the
+    # backtest-vs-live divergence (75%->99% once the edges matched).
+    _leak_rows = (n - 1) - i
+    if _leak_rows > 0:
+        df_train = df_train.iloc[:max(0, len(df_train) - _leak_rows)]
+        n_train = len(df_train)
     train_start = max(0, n_train - window)
     train = df_train.iloc[train_start:]
     X_train = train[feature_cols]

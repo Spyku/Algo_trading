@@ -3103,15 +3103,15 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         row = df_features.iloc[i]
         dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
-        # FAYE_FAITHFUL_WINDOW (2026-06-29): replicate generate_live_signal's EXACT
-        # training-window edge so the backtest reproduces the live trader. The live
-        # df_full carries the forming bar (i+1), so dropna(label) leaves labels valid
-        # up to (i+1)-horizon = i-horizon+1; df_train ends there -> last training row =
-        # i-horizon+1, exclusive train_end = i-horizon+2. (Diagnosed 2026-06-29: the
-        # default [i-window, i-embargo] differs from live by ~1-2 edge rows -> ~25%
-        # signal divergence. This flag is for backtest<->live parity; default unchanged.)
+        # FAYE_FAITHFUL_WINDOW (2026-06-29): replicate the LEAKAGE-FREE live edge so the
+        # backtest reproduces the (forming-bar-leak-FIXED) live trader. Last training row
+        # = i-horizon (its label [i-horizon, i] uses only the closed inference bar i),
+        # so exclusive train_end = i-horizon+1. NOTE: pre-leak-fix this was i-horizon+2
+        # (matched the old leaky live at 99%); after the 2026-06-29 live leak fix
+        # (generate_live_signal drops the forming-bar-labelled row) the faithful edge is
+        # i-horizon+1. Use this flag for any live-prediction backtest / the HRST.
         if os.environ.get('FAYE_FAITHFUL_WINDOW'):
-            train_end = max(1, i - horizon + 2)
+            train_end = max(1, i - horizon + 1)
             train_start = max(0, train_end - window_size)
         else:
             train_start = max(0, i - window_size)

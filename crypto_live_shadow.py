@@ -212,18 +212,9 @@ def shadow_compare(
             _write_row(row)
             return
 
-        # Train window: live trader uses [n_train-window, n_train] — NO embargo
-        train_start = max(0, n_train - window)
-        X_train = df_train.iloc[train_start:][feature_cols].values
-        y_train = df_train.iloc[train_start:]["label"].values
-
         # Inference row: replicate the live trader EXACTLY, INCLUDING Fix #2
-        # (2026-06-03) closed-bar step-back. Before Fix #2 the live trader inferred on
-        # the freshest (often forming) bar — which this module mirrored. Fix #2 changed
-        # generate_live_signal to step back to the last fully-CLOSED bar when df.iloc[-1]
-        # is still open, but this shadow path was NOT updated, so it kept inferring on the
-        # forming bar -> shadow match crashed 100% -> ~50% on 2026-06-03. Mirror of
-        # crypto_live_trader_ed.py:706-727. 2026-06-05.
+        # (2026-06-03) closed-bar step-back. Mirror of crypto_live_trader_ed.py.
+        # 2026-06-29: MOVED ABOVE the training slice so the leakage-free trim can use i.
         i = len(df) - 1
         if getattr(_live_trader, "USE_CLOSED_BAR_FOR_INFERENCE", True) and i >= 1:
             try:
@@ -234,6 +225,21 @@ def shadow_compare(
                     i -= 1
             except Exception:
                 pass
+
+        # LEAKAGE-FREE EDGE (2026-06-29): mirror of generate_live_signal. df_train ends
+        # at (n-1)-horizon; when the stepback moved inference to i<n-1, the last row's
+        # label peeks at the forming bar (1-row leak). Drop rows whose label uses bars
+        # AFTER i, so the last training row is i-horizon. (Must mirror live exactly —
+        # Rule F2; an un-mirrored change silently tanks the shadow match rate.)
+        _leak_rows = (len(df) - 1) - i
+        if _leak_rows > 0:
+            df_train = df_train.iloc[:max(0, len(df_train) - _leak_rows)]
+        n_train = len(df_train)
+
+        # Train window: live trader uses [n_train-window, n_train] — NO embargo
+        train_start = max(0, n_train - window)
+        X_train = df_train.iloc[train_start:][feature_cols].values
+        y_train = df_train.iloc[train_start:]["label"].values
         X_test = df.iloc[i : i + 1][feature_cols].values
         row["inference_row_dt"] = str(df.iloc[i].get("datetime", ""))
         row["n_train"] = len(y_train)
