@@ -64,8 +64,49 @@ FRESHNESS_SECONDS = 21600  # 6 hours
 # reader sees either the OLD complete file or the NEW complete file — never an
 # empty/half-written one. Pair this with the read-side guards (A) so a truly
 # corrupt/empty pre-existing file still self-heals instead of crashing.
-def _atomic_to_csv(df, outfile, **to_csv_kwargs):
-    """Write df to outfile atomically (temp file + os.replace)."""
+# History shrink-guard (2026-06-29) — single chokepoint vs the data-clobber class.
+# The cross_asset (1637->9) and orderbook (1351->34) clobbers had the same shape: a racing
+# READ of the existing file failed, the except wrote ONLY this cycle's few rows, and that
+# short-but-complete file overwrote history. Atomic writes don't help (the file is valid,
+# just short) and per-file read-guards get forgotten on new files. So guard at the ONE place
+# every data write funnels through: refuse to replace a large file with a drastically smaller
+# one unless the caller explicitly opts in (allow_shrink=True for genuine full-rewrites).
+_SHRINK_GUARD_MIN_ROWS = 100   # only guard files that have accumulated past this
+_SHRINK_GUARD_FRAC = 0.5       # refuse a write with < 50% of the rows already on disk
+
+
+def _count_csv_data_rows(path):
+    """Raw newline count minus header (no CSV parse -> robust to schema quirks).
+    Retries a transient read (atomic writes make this reliable). -1 if unreadable."""
+    for _ in range(3):
+        try:
+            with open(path, 'rb') as f:
+                return max(0, f.read().count(b'\n') - 1)
+        except Exception:
+            time.sleep(0.3)
+    return -1
+
+
+def _atomic_to_csv(df, outfile, allow_shrink=False, **to_csv_kwargs):
+    """Write df to outfile atomically (temp file + os.replace), with a history shrink-guard.
+
+    Refuses (alerts + returns False, leaving the file untouched) when a much-smaller df would
+    replace a large existing file — the data-clobber class. Pass allow_shrink=True for
+    intentional full-rewrites / dedups. Fail-closed: a large file that can't be counted blocks
+    a tiny write rather than risk a silent clobber.
+    """
+    if not allow_shrink and os.path.exists(outfile) and os.path.getsize(outfile) > 0:
+        prev = _count_csv_data_rows(outfile)
+        if prev < 0 and os.path.getsize(outfile) > _SHRINK_GUARD_MIN_ROWS * 40:
+            prev = _SHRINK_GUARD_MIN_ROWS + 1   # unreadable but big on disk -> treat as large
+        if prev > _SHRINK_GUARD_MIN_ROWS and len(df) < prev * _SHRINK_GUARD_FRAC:
+            _alert_partial_download(
+                f'shrink_guard_{os.path.basename(outfile)}',
+                f"🚨 REFUSED write to {os.path.basename(outfile)}: {len(df)} rows would replace "
+                f"{prev} on disk (~{round(100 * (1 - len(df) / max(1, prev)))}% shrink). "
+                f"Pass allow_shrink=True if intended.",
+                severity='critical')
+            return False
     tmp = f"{outfile}.tmp.{os.getpid()}"
     try:
         df.to_csv(tmp, **to_csv_kwargs)
@@ -77,6 +118,7 @@ def _atomic_to_csv(df, outfile, **to_csv_kwargs):
         except OSError:
             pass
         raise
+    return True
 
 
 # ============================================================
