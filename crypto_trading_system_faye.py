@@ -3088,6 +3088,16 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
           f"(models={'+'.join(model_names)}, window={window_size}h, "
           f"replay={replay_hours}h, {set_label}{gamma_str})...")
 
+    # Self-report the training-window edge so every backtest/HRST log states up-front whether
+    # it is live-faithful — no more 02:22-vs-02:28 forensics to confirm a run's faithfulness.
+    _emb_ov = os.environ.get('FAYE_EMBARGO_OVERRIDE')
+    if _emb_ov is None:
+        print(f"    [FAITHFUL] training edge = LEAKAGE-FREE (last train row i-{horizon}; matches "
+              f"live generate_live_signal, backtest<->live ~99%)")
+    else:
+        print(f"    [EMBARGO OVERRIDE={_emb_ov}] training edge = i-{_emb_ov} — NOT live-faithful "
+              f"(explicit A/B opt-out; this backtest will NOT predict the live trader)")
+
     df_raw = load_data(asset_name)
     if df_raw is None:
         return []

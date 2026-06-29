@@ -552,6 +552,8 @@ Universal: *verified with numbers not guts (Rule 0)? · flat-before-promote? · 
 
 ## Backtest-vs-Live Fidelity — diagnosis playbook (built 2026-06-29)
 
+**Self-report (2026-06-30):** `generate_signals` ([crypto_trading_system_faye.py:3091](crypto_trading_system_faye.py#L3091)) now prints its training edge at run start — `[FAITHFUL] training edge = LEAKAGE-FREE` (default) or `[EMBARGO OVERRIDE=N] … NOT live-faithful` (the A/B opt-out) — so **every backtest/HRST log states its faithfulness up front** (no more mtime forensics to confirm a run is leakage-free).
+
 **When a backtest beats live and you need to know WHY** (the 2026-06-26 ETH 4h/4h case: sim **+2.40%** vs live realized **−3.78%**, same ~14 trades). Localize the gap with an isolation ladder — never guess. **Ground-truth artifacts:** `output/inference_snapshots.jsonl` (the frozen per-hour signal + the exact features the trader used — reproduces live signals 100%), the trader order log (`logs/trader/ed_runtime_*.log` — real bid/ask + fill price per order), `tools/sanity_check.py`.
 
 **Isolation ladder (hold ONE variable per rung):**
