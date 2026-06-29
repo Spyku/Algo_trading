@@ -197,6 +197,32 @@ def data_integrity_check():
     return "PASS", f"{oks}/{len(_INTEGRITY_REGISTRY)} critical CSVs intact (row+span floors)"
 
 
+def backtest_vs_live_check(min_pct=95.0):
+    """[5] BACKTEST-vs-LIVE faithfulness — the tripwire that was MISSING when the
+    2026-06-29 training-window-edge divergence sat at 75% backtest-vs-live, undetected
+    (snapshot/refit/shadow all test the LIVE path or live's frozen matrix — none ran
+    generate_signals' own window construction vs live). Runs generate_signals (the backtest
+    path, leakage-free default) for the live config's horizon(s) over the snapshot window
+    and compares to what the trader logged. <min_pct => the backtest does NOT predict live
+    => a train-window/inference divergence that taints every backtest config decision.
+    ~3min (one retrain per live horizon). WARN if no snapshots yet."""
+    import re
+    script = os.path.join(ENG, "tools", "validate_backtest_vs_live.py")
+    if not os.path.exists(script):
+        return "WARN", "validate_backtest_vs_live.py not found"
+    r = subprocess.run([sys.executable, script, "--min", str(min_pct)],
+                       cwd=ENG, capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 2 or "cannot validate" in out:
+        return "WARN", "no live snapshots yet (trader needs to run)"
+    m = re.search(r"overall ([\d.]+)% \| worst-horizon ([\d.]+)%", out)
+    if not m:
+        return "WARN", "backtest-vs-live produced no parseable result"
+    overall, worst = float(m.group(1)), float(m.group(2))
+    status = "PASS" if worst >= min_pct else "FAIL"
+    return status, f"BACKTEST<->live overall {overall:.0f}% / worst-horizon {worst:.0f}% (threshold {min_pct:.0f}%)"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="deterministic checks only (shadow + snapshot); skip the ~15min parity")
@@ -248,8 +274,22 @@ def main():
         if p_status == "ATTENTION":
             bad = True
 
+    # [5] BACKTEST-vs-LIVE FAITHFULNESS — the tripwire that was MISSING for the
+    #     2026-06-29 training-window-edge divergence (generate_signals sat at 75% vs
+    #     live, undetected — [1]/[2]/[3] all test the live path or live's frozen matrix).
+    #     Runs the backtest engine's OWN window construction vs the logged live signal.
+    #     ~3min retrain -> full mode only. Drives the verdict.
+    if args.quick:
+        print("\n[5] BACKTEST-vs-LIVE : SKIPPED (--quick; ~3min retrain)")
+    else:
+        bl_status, bl_msg = backtest_vs_live_check()
+        print(f"\n[5] BACKTEST-vs-LIVE faithfulness : {bl_status}  (generate_signals vs the logged live trader)")
+        print(f"    {bl_msg}")
+        if bl_status == "FAIL":
+            bad = True
+
     print("\n" + "=" * 64)
-    print(f"  RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}  (verdict = shadow + snapshot + frozen-refit; all non-revised)")
+    print(f"  RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}  (verdict = shadow + snapshot + frozen-refit + backtest-vs-live; all non-revised)")
     print("=" * 64)
     sys.exit(1 if bad else 0)
 
