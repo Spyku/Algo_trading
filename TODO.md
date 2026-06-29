@@ -1,5 +1,13 @@
 ## ⚡ TODO — Active work only
 
+> 🔥 **P0 — 0629b — DATA CLOBBER: `orderbook_snapshots.csv` history lost (1351→34 rows)** · 2026-06-29
+> **What:** live `data/macro_data/orderbook_snapshots.csv` clobbered to **34 rows** (only 06-28 18:00→now); 04-19→06-28 history GONE → `ob_imbalance` NaN → stale 5h/8h prod configs emit **0 signals** (found chasing the [5] validator; user called the NaN). **Live 4h SAFE** (no `ob_imbalance`). The running HRST selected **ob_imbalance-FREE** configs (clobber predates the 02:28 run) → **HRST results valid, NO rerun needed** (`ob_imbalance` is a marginal 2/8 feature; restore has a 06-14→06-28 hole anyway; only `ob_imbalance`+already-quarantined `spread_bps` come from this file).
+> **Cause:** `download_orderbook_snapshot` except wrote ONLY the cycle's snapshot on a read-race ([download_macro_data.py:1683](download_macro_data.py#L1683)) — same family as the cross_asset clobber (`3bd053e`).
+> ✅ **(2) HARDENED 2026-06-29:** the except now retries 3× → `_alert_partial_download` critical → **SKIPS the write to preserve history** (never clobbers), mirroring `_yf_merge_with_existing`. ⚠️ Takes effect **on next trader restart** (running trader still has the old code).
+> 🔴 **DO AT NEXT TRADER RESTART ("when I go into prod again"):** **(1) RESTORE** orderbook history from `data/_v2_snapshot_ablate58_20260614_135510/macro_data/orderbook_snapshots.csv` (1351 rows) + `_merge_preserve_history` the live 34 — **MUST be at restart**, else the old-code trader re-clobbers it next cycle. **(3) AUDIT** `options_iv_snapshot` ([download_macro_data.py:1611](download_macro_data.py#L1611)) + whale saves for the SAME except-writes-fresh bug. **(4) ADD** orderbook(+iv/whale) to `_INTEGRITY_REGISTRY` so [4] catches a future clobber.
+> **Follow-up (non-urgent):** teach `validate_backtest_vs_live.py` / sanity [5] to test **POST-FIX / recent-only** — it false-FAILs ~85% for ~8d as pre-fix snapshots age out of its 200h window. **NB the leak fix itself is VERIFIED: post-fix backtest==live 15/15 = 100%, 0 flips.**
+
+
 **Companion file**: [ARCHIVED_LOG.md](ARCHIVED_LOG.md) — historical audit trail, canonical scoreboard C01-C82, MERGED TOPICS, IDEA QUEUE drop-list (closed/shipped/STUB items with verdicts).
 
 ## 📊 At-a-glance — active TODO dashboard (2026-06-05)

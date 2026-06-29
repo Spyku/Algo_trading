@@ -1681,18 +1681,34 @@ def download_orderbook_snapshot(assets=None):
 
     df = pd.DataFrame(rows)
     outfile = os.path.join(MACRO_DIR, 'orderbook_snapshots.csv')
-    # A (2026-06-24): guard the read — empty/corrupt file self-heals to fresh.
+    # HISTORY-CLOBBER GUARD (2026-06-29). The OLD except wrote ONLY this cycle's snapshot
+    # when the existing read failed -> history wiped (orderbook 1351->34 rows on 06-28,
+    # killing 5h/8h ob_imbalance signals). getsize>0 means the file HAS content, so a failed
+    # read is a concurrent mid-write/Drive-sync race (same family as the cross_asset 1637->9
+    # clobber). Retry; if still unreadable, SKIP the write to preserve history, never clobber.
     if os.path.exists(outfile) and os.path.getsize(outfile) > 0:
-        try:
-            existing = pd.read_csv(outfile)
+        existing = None
+        for _attempt in range(3):
+            try:
+                existing = pd.read_csv(outfile)
+                break
+            except Exception as _e:
+                existing = _e
+                time.sleep(0.4)
+        if isinstance(existing, pd.DataFrame):
             # TODO 0526 data drift fix (2026-05-27): preserve historical orderbook snapshots
             df = _dedup_preserve_history(
                 pd.concat([existing, df], ignore_index=True),
                 freq='1h', subset=['datetime', 'asset'],
             )
-        except Exception as _e:
-            print(f"  [snapshot] could not merge existing {os.path.basename(outfile)} "
-                  f"({_e}); writing fresh snapshot this cycle")
+        else:
+            _alert_partial_download(
+                f'history_clobber_{os.path.basename(outfile)}',
+                f"🚨 {os.path.basename(outfile)}: existing read FAILED 3x on a "
+                f"{os.path.getsize(outfile)}B file ({existing}); SKIPPED write to preserve "
+                f"history (would have clobbered to {len(df)} rows).",
+                severity='critical')
+            return None
     _atomic_to_csv(df, outfile, index=False)
     print(f"  Saved: {outfile} ({len(df)} rows)")
     return df
