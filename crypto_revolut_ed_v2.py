@@ -4970,8 +4970,9 @@ def _run_sanity_and_alert(quick=False, label='Daily sanity check', edit_id=None)
         out = r.stdout or ''
         keep = [ln.rstrip() for ln in out.splitlines()
                 if any(k in ln for k in ('SHADOW', 'SNAPSHOT', 'ENGINE', 'REAL FLIP', 'RESULT', 'match',
-                                         'DATA INTEGRITY', 'collapsed', 'intact', 'BACKTEST'))]
-        verdict = 'CLEAN ✅' if r.returncode == 0 else 'NEEDS ATTENTION ⚠️'
+                                         'DATA INTEGRITY', 'collapsed', 'intact', 'BACKTEST',
+                                         'HEALTHY', 'SANITY', 'STALE'))]
+        verdict = 'CLEAN 🔵' if r.returncode == 0 else 'NEEDS ATTENTION 🔴'
         body = '\n'.join(keep[-12:]) if keep else (out[-600:] or 'no output')
         out_msg = f"🩺 <b>{label} — {verdict}</b>\n<pre>{html.escape(body)}</pre>"
     except subprocess.TimeoutExpired:

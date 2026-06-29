@@ -223,73 +223,87 @@ def backtest_vs_live_check(min_pct=95.0):
     return status, f"BACKTEST<->live overall {overall:.0f}% / worst-horizon {worst:.0f}% (threshold {min_pct:.0f}%)"
 
 
+def trader_health_check():
+    """[6] TRADER HEALTHY — from output/cycle_metrics.csv: is the live trader cycling, are
+    downloads fast, are inference features clean? Liveness uses file mtime (tz-safe). Hard
+    FAIL only on a hung trader (>90min since last cycle); slow-download / NaN-features /
+    skipped-cycles are surfaced as warnings without failing the verdict."""
+    import time
+    path = os.path.join(ENG, "output", "cycle_metrics.csv")
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return "SKIP", "no cycle_metrics.csv yet"
+    try:
+        df = pd.read_csv(path).tail(12)
+    except Exception as e:
+        return "SKIP", f"cycle_metrics unreadable ({type(e).__name__})"
+    if len(df) == 0:
+        return "SKIP", "cycle_metrics empty"
+    age_min = (time.time() - os.path.getmtime(path)) / 60.0
+    maxp1 = float(df["p1_duration_sec"].max()) if "p1_duration_sec" in df.columns else 0.0
+    maxnan = int(df["n_features_nan_inference"].max()) if "n_features_nan_inference" in df.columns else 0
+    nskip = 0
+    if "skip_reason" in df.columns:
+        sr = df["skip_reason"].astype(str).str.strip()
+        nskip = int(((sr != "") & (sr.str.lower() != "nan") & (sr != "None")).sum())
+    warn = []
+    if maxp1 > 20:
+        warn.append(f"slow download {maxp1:.0f}s")
+    if maxnan > 0:
+        warn.append(f"{maxnan} NaN feature(s) at inference")
+    if nskip:
+        warn.append(f"{nskip} skipped cycle(s)")
+    if age_min > 90:
+        return "FAIL", f"trader STALE — last cycle {age_min:.0f}min ago (not cycling?)"
+    base = f"cycling ({age_min:.0f}min ago) | download {maxp1:.1f}s | {maxnan} NaN | {nskip} skips"
+    return "PASS", base + (("  warn: " + "; ".join(warn)) if warn else "")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="deterministic checks only (shadow + snapshot); skip the ~15min parity")
     ap.add_argument("--samples", type=int, default=30, help="parity sample count (default 30)")
     args = ap.parse_args()
 
-    print("=" * 64)
-    print("  LIVE SANITY CHECK | [1] engine-vs-trader LIVE + [2] snapshot + [3] engine REFIT from frozen (all non-revised / reproducible)")
-    print("=" * 64)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")   # emoji-safe on Windows cp1252 consoles
+    except Exception:
+        pass
 
-    bad = False
-
-    # [4] DATA INTEGRITY — deterministic & instant; catches history-collapse of the
-    #     critical macro CSVs (the 2026-06-28 cross_asset 1637->9 clobber). Runs first
-    #     because a collapsed source silently corrupts every downstream feature/signal.
-    di_status, di_msg = data_integrity_check()
-    print(f"\n[4] DATA INTEGRITY : {di_status}")
-    print(f"    {di_msg}")
-    if di_status == "FAIL":
-        bad = True
-
-    # [1] SHADOW — deterministic, drives verdict
-    s_status, s_msg = shadow_check()
-    print(f"\n[1] ENGINE-vs-TRADER live (shadow) : {s_status}")
-    print(f"    {s_msg}")
-    if s_status == "FAIL":
-        bad = True
-
-    # [2] SNAPSHOT REPLAY — deterministic, reproducible 100%, drives verdict
-    sn_status, sn_msg = snapshot_check()
-    print(f"\n[2] SNAPSHOT REPLAY   : {sn_status}")
-    print(f"    {sn_msg}")
-    if sn_status == "FAIL":
-        bad = True
-
-    # [3] ENGINE REFIT from FROZEN training matrices — non-revised + reproducible, so
-    #     unlike the old rebuild-from-now parity it CAN drive the verdict: a real
-    #     BUY<->SELL here is genuine non-reproducibility, not revision noise. WARN
-    #     (no frozen snapshots yet) does NOT fail — falls back to shadow+snapshot.
+    # --- run all checks (logic unchanged; captured here, printed synthetically below) ---
+    di_status, di_msg = data_integrity_check()      # [4] history files intact
+    s_status, s_msg = shadow_check()                # [1] live == engine (shadow)
+    sn_status, sn_msg = snapshot_check()            # [2] signals reproduce (snapshot)
+    th_status, th_msg = trader_health_check()       # [6] trader healthy (operational)
     if args.quick:
-        print("\n[3] ENGINE REFIT (frozen) : SKIPPED (--quick; [1]+[2] are deterministic and drive the verdict)")
+        p_status, p_msg, flips = "SKIPPED", "skipped (--quick; [1]+[2] drive the verdict)", []
+        bl_status, bl_msg = "SKIPPED", "skipped (--quick; ~3min retrain)"
     else:
-        p_status, p_msg, flips = refit_check(args.samples)
-        print(f"\n[3] ENGINE REFIT (frozen, non-revised) : {p_status}  (refits from the trader's own frozen training matrices — reproducible)")
-        print(f"    {p_msg}")
-        for fl in flips:
-            # keep "REAL FLIP" substring — trader Telegram filter greps for it
-            print(f"      REAL FLIP (frozen-data non-reproducibility — investigate): {fl}")
-        if p_status == "ATTENTION":
-            bad = True
+        p_status, p_msg, flips = refit_check(args.samples)   # [3] engine refit (frozen)
+        bl_status, bl_msg = backtest_vs_live_check()         # [5] backtest == live
 
-    # [5] BACKTEST-vs-LIVE FAITHFULNESS — the tripwire that was MISSING for the
-    #     2026-06-29 training-window-edge divergence (generate_signals sat at 75% vs
-    #     live, undetected — [1]/[2]/[3] all test the live path or live's frozen matrix).
-    #     Runs the backtest engine's OWN window construction vs the logged live signal.
-    #     ~3min retrain -> full mode only. Drives the verdict.
-    if args.quick:
-        print("\n[5] BACKTEST-vs-LIVE : SKIPPED (--quick; ~3min retrain)")
-    else:
-        bl_status, bl_msg = backtest_vs_live_check()
-        print(f"\n[5] BACKTEST-vs-LIVE faithfulness : {bl_status}  (generate_signals vs the logged live trader)")
-        print(f"    {bl_msg}")
-        if bl_status == "FAIL":
-            bad = True
+    bad = any(st in ("FAIL", "ATTENTION") for st in
+              (di_status, s_status, sn_status, th_status, p_status, bl_status))
 
+    # --- synthetic, verdict-first output. Colour: 🔵 good · 🔴 bad · ⚪ neutral/skipped.
+    #     Mode keywords (ENGINE/SNAPSHOT/intact/BACKTEST/RESULT/HEALTHY/REAL FLIP) are kept
+    #     in the labels so the trader's Telegram grep still forwards every line.
+    def _ic(st):
+        return {"PASS": "🔵", "FAIL": "🔴", "ATTENTION": "🔴"}.get(st, "⚪")
+    vic = "🔴" if bad else "🔵"
+    sep = "  " + "─" * 58
     print("\n" + "=" * 64)
-    print(f"  RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}  (verdict = shadow + snapshot + frozen-refit + backtest-vs-live; all non-revised)")
+    print(f"  {vic}  SANITY RESULT: {'NEEDS ATTENTION' if bad else 'CLEAN'}   (ETH live · daily verdict)")
+    print(sep)
+    print(f"  {_ic(s_status)} LIVE SIGNALS == ENGINE (shadow) : {s_msg}")
+    print(f"  {_ic(sn_status)} SIGNALS REPRODUCE (SNAPSHOT)    : {sn_msg}")
+    print(f"  {_ic(di_status)} HISTORY FILES INTACT           : {di_msg}")
+    print(f"  {_ic(th_status)} TRADER HEALTHY                 : {th_msg}")
+    print(f"  {_ic(p_status)} ENGINE REFIT (frozen)          : {p_msg}")
+    for fl in flips:
+        print(f"        REAL FLIP (frozen-data non-reproducibility — investigate): {fl}")
+    print(f"  {_ic(bl_status)} BACKTEST == LIVE               : {bl_msg}")
+    print(sep)
+    print("  ⓘ the SHADOW 'all-time %' is pre-fix history — the VERDICT is the recent-48 number above.")
     print("=" * 64)
     sys.exit(1 if bad else 0)
 
