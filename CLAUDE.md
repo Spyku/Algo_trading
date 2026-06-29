@@ -13,6 +13,8 @@ Doohan V1.7.1, Deku, CASCA and all prior versions archived (Doohan retired 2026-
 
 **Owner:** Alex (CET/CEST timezone)
 
+**Display convention (always apply):** in any status output, Telegram label, dashboard, or mockup — **🔵 BLUE = good/pass · 🔴 RED = bad/fail** (NEVER green for "good"); grey/white = neutral/skipped.
+
 ---
 
 ## Engine Reference Card (built 2026-04-17, kept current — H75 live state inline)
