@@ -3103,13 +3103,24 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         row = df_features.iloc[i]
         dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
-        train_start = max(0, i - window_size)
-        # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets the embargo A/B
-        # test (tools/embargo_ab_test.py) force embargo=N instead of horizon.
-        # Default = horizon (original honest-backtest behavior). Set to 0 to
-        # match the live trader's no-embargo training cutoff.
-        _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
-        train_end = max(train_start, i - _embargo)  # embargo: prevent label overlap leakage (override-able)
+        # FAYE_FAITHFUL_WINDOW (2026-06-29): replicate generate_live_signal's EXACT
+        # training-window edge so the backtest reproduces the live trader. The live
+        # df_full carries the forming bar (i+1), so dropna(label) leaves labels valid
+        # up to (i+1)-horizon = i-horizon+1; df_train ends there -> last training row =
+        # i-horizon+1, exclusive train_end = i-horizon+2. (Diagnosed 2026-06-29: the
+        # default [i-window, i-embargo] differs from live by ~1-2 edge rows -> ~25%
+        # signal divergence. This flag is for backtest<->live parity; default unchanged.)
+        if os.environ.get('FAYE_FAITHFUL_WINDOW'):
+            train_end = max(1, i - horizon + 2)
+            train_start = max(0, train_end - window_size)
+        else:
+            train_start = max(0, i - window_size)
+            # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets the embargo A/B
+            # test (tools/embargo_ab_test.py) force embargo=N instead of horizon.
+            # Default = horizon (original honest-backtest behavior). Set to 0 to
+            # match the live trader's no-embargo training cutoff.
+            _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
+            train_end = max(train_start, i - _embargo)  # embargo: prevent label overlap leakage (override-able)
         train = df_features.iloc[train_start:train_end]
         X_train = train[feature_cols]
         y_train = train['label'].values
