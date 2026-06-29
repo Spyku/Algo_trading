@@ -3103,24 +3103,22 @@ def generate_signals(asset_name, model_names, window_size, replay_hours=REPLAY_H
         row = df_features.iloc[i]
         dt_str = row['datetime'].strftime('%Y-%m-%d %H:%M')
 
-        # FAYE_FAITHFUL_WINDOW (2026-06-29): replicate the LEAKAGE-FREE live edge so the
-        # backtest reproduces the (forming-bar-leak-FIXED) live trader. Last training row
-        # = i-horizon (its label [i-horizon, i] uses only the closed inference bar i),
-        # so exclusive train_end = i-horizon+1. NOTE: pre-leak-fix this was i-horizon+2
-        # (matched the old leaky live at 99%); after the 2026-06-29 live leak fix
-        # (generate_live_signal drops the forming-bar-labelled row) the faithful edge is
-        # i-horizon+1. Use this flag for any live-prediction backtest / the HRST.
-        if os.environ.get('FAYE_FAITHFUL_WINDOW'):
-            train_end = max(1, i - horizon + 1)
-            train_start = max(0, train_end - window_size)
-        else:
+        # Training-window edge. DEFAULT (2026-06-29) = LEAKAGE-FREE, matching the live
+        # trader (generate_live_signal) so backtests PREDICT live. Last training row =
+        # i-horizon, whose label [i-horizon, i] uses only the closed inference bar i (no
+        # forming-bar leak). This made backtest<->live signal agreement 99% (the old
+        # over-embargo default [i-window, i-horizon] was 75% — that 1-2 row edge mismatch
+        # was the entire backtest-vs-live divergence; diagnosed 2026-06-29). FAYE_FAITHFUL_
+        # WINDOW is now a redundant no-op (kept so old launch commands don't break).
+        # FAYE_EMBARGO_OVERRIDE still forces a specific embargo edge for the embargo A/B
+        # test (tools/embargo_ab_test.py) — explicit opt-out of the faithful default.
+        _emb_override = os.environ.get('FAYE_EMBARGO_OVERRIDE')
+        if _emb_override is not None:
             train_start = max(0, i - window_size)
-            # FAYE 2026-05-31: FAYE_EMBARGO_OVERRIDE env var lets the embargo A/B
-            # test (tools/embargo_ab_test.py) force embargo=N instead of horizon.
-            # Default = horizon (original honest-backtest behavior). Set to 0 to
-            # match the live trader's no-embargo training cutoff.
-            _embargo = int(os.environ.get('FAYE_EMBARGO_OVERRIDE', horizon))
-            train_end = max(train_start, i - _embargo)  # embargo: prevent label overlap leakage (override-able)
+            train_end = max(train_start, i - int(_emb_override))
+        else:
+            train_end = max(1, i - horizon + 1)            # leakage-free edge (default)
+            train_start = max(0, train_end - window_size)
         train = df_features.iloc[train_start:train_end]
         X_train = train[feature_cols]
         y_train = train['label'].values
