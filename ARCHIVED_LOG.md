@@ -4573,3 +4573,34 @@ that were "lit-endorsed" and feasible tonight.
 - ~~V1.7.2 Regularization~~ — Wash. Minimal reg won but inconsistent across confidence levels. V1.7.1 unregularized baseline kept.
 - ~~TabPFN / tabular transformers~~ — Tested and failed.
 - ~~V1.8 LSTM~~ — LSTM solo: 0 valid results (all failed). LSTM+LGBM/XGB: identical to RF+LGBM/XGB (LSTM votes randomly, partner model carries all signal). Confirms LGBM dominance.
+
+---
+
+## 2026-07-01 — TODO cleanup (dashboard reset to active-only)
+
+Full pre-cleanup TODO preserved verbatim in `TODO_pre_cleanup_20260701.md` + git history. The ~30 closed/stale/superseded dashboard rows below were moved out of TODO.md; one-line verdicts here, full detail in the backup + the commits cited.
+
+**Big arcs (2026-06):**
+- **P0-0629 backtest≠live — DONE.** Root cause = the backtest (`generate_signals`) and live (`generate_live_signal`) built different TRAINING WINDOWS on identical data (~1-2 edge rows; the top-γ row flips ~25% of signals → 75% backtest↔live agreement). NOT execution/lag/data-revision/device (each ruled out by test). Fixes (6 commits): `30c270e` atomic writes, `3bd053e` cross_asset clobber + new [4] DATA INTEGRITY sanity check, `08ddb27` incremental deriv download (P1 latency 33s→4s), `2460937` FAYE_FAITHFUL_WINDOW (75→99%), `da57e72` F2 leak fix (last train row → i-horizon, trader+shadow), `a2f553e` leakage-free DEFAULT. Leakage-free HRST → promoted ETH `sma168>sma480` bull 6h@80/bear 4h@65 (2026-06-30 00:32). See CLAUDE.md "Backtest-vs-Live Fidelity playbook".
+- **P0-0629b data clobber — RESOLVED.** orderbook (1350→34) + options_iv (2358→48) clobbered ~06-28 (except-writes-fresh on a read-race). Fixed systemically via `_atomic_to_csv` shrink-guard (refuses replacing a >100-row file with <50% its size; `tools/test_shrink_guard.py` 6/6). Impact ~zero (affected feats quarantined/marginal). ⚠️ orderbook/IV HISTORY RESTORE still pending → tracked in the live G1/G2 TODO row.
+
+**2026-07-01 session:**
+- **[5] backtest-vs-live recent-only — DONE** (`358a415`). Filters the sanity [5] check to post-promotion hours (boundary = prod-CSV mtime, UTC epoch); `--all-hours` + WARMING-UP guard. Killed the config-straddle false FAIL (4h 59.5% → 39/39 = 100% PASS, 161 pre-boundary hrs excluded). [5] drives the daily verdict, so it was flipping the whole sanity to ATTENTION.
+- **Mode-V refine-dispatch deadlock — FIXED 0614, VERIFIED 0701.** loky `get_reusable_executor().shutdown` before the fresh refine ProcessPool ([faye.py:10282](crypto_trading_system_faye.py#L10282)) + `_refine_top_configs_serial` fallback. Standalone `V ETH 5h` confirmed no-hang (ProcessPool dispatched + `multiprocessing.spawn` workers refining live @19:45, loky coexisting). TODO row was stale (fix landed 06-14, never marked). Op-gotcha saved: faye's `os.execv` re-exec detaches stdout under a bg shell → set `_FAYE_WARNINGS_BAKED=1`.
+- **6h-bull Grid-vs-Refined — answered, NOT a bug.** HRST log: refine ran 3/3 configs on all 5 horizons (120-205 min); 6h/7h/8h legitimately picked Grid over *higher-APF* refined configs (6h refined APF=2.969 lost to Grid D#2) because selection = `return×WR` while refine optimizes `APF` — they diverge on long horizons. CLAUDE.md "refined-only selection" claim corrected. Open design Q: align the refine objective with the selection metric.
+
+**2026-06 closed items:**
+- **SHADOW DOWN 2.5d (0618) — DONE** (`b24e91a`). `_TeeStream` lacked `reconfigure` → shadow `import_failed` 06-15→18 (silent). Fixed + sanity now escalates monitor-down. Trader signals verified correct throughout (snapshot replay 368/368 = 100%).
+- **Mode C "Choice" (0617) — DONE, verdict HOLD** (`b24e91a`). Native cross-window+hysteresis promotion gate; 2880h/9-window: challenger (tsmom_168h bull8h/bear5h w300) won only 5/9 (<6/9 bar) → HOLD. `MIN_ROBUST_WINDOWS=5` guard added.
+- **Trader UX (0616) — DONE** (`b24e91a`). `/gate off` wipes the timer, `/gate clear` stamps `rally_cd_cleared_at`, `/help` shows live setup.
+- **Gate-simplicity study (0616) — DONE.** Double-condition rally gate wasn't earning its keep: on 04-16→06-15 one leg (bear rr8≥2.5) carried the whole +7.67pp; engine now sweeps SINGLE-window gates only ([faye.py:7951], `h_long=h_short`/`t_long=9999` sentinel). Superseded by the 06-30 promote (single-form gates live).
+- **GB/LGBM combo + hyperparam sweep (0609) — REJECTED.** GB+LGBM lost the gated engine to RF+LGBM (+43.5% vs +51.2%); LGBM-reg tune reversed. Removed from GRID_COMBOS. Screen rewarded conviction-erasing regularization ([[feedback_screen_vs_gated_engine]]).
+- **Sanity made deterministic (0611) — DONE.** snapshot-replay (202/202) drives the verdict; parity demoted to informational (data-revision artifacts).
+- **C61/C62/C67/C75 feature A/B (0611) — CLOSED, no signal.** Every "PASS" rode one horizon's overfit APF outlier; per-horizon deltas swing +20 to −5. Feature-add family exhausted. C61 moot (vol_of_vol_8h/24h already native).
+
+**2026-06-05 / stale-config watches:**
+- **Embargo-sensitivity 1-4h (0605) — DEAD.** Forward dry-run (`tools/dryrun_1_4h.py`, 5d): 1h −1.99%, 2h −0.54%, 3h +0.98% (noise), 4h −1.05% — the high DV WR was leak/overfit. Whole 1-4h band dead; production 5-8h unaffected.
+- **2mo-vs-4mo HRST decision (0605) — resolved:** 2mo (`--replay 1440`) is the standard (the leakage-free HRST default).
+- **May-31 FAYE-config watches** (live WR/P&L monitor + engine-vs-trader parity verification) — **superseded** by the 06-30 promote + shadow (100%) / snapshot-replay (368/368) validation.
+- **SESSION 0620 (ed.py T bull-double fix) — moot:** the 06-30 promote replaced the `sma48>sma100` config entirely; the HRSTC half folds into the G1/G2 TODO row.
+- **Re-run HRST on refactored engine (Step 6) — moot:** FAYE unified the backtest+live paths and is live.
