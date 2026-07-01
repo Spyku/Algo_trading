@@ -127,9 +127,8 @@ Promotion to production (one-time, after FAYE validated; trader flat — Rule 19
   Copy-Item "config_faye\\regime_config_faye.json"   "config\\regime_config_ed.json"     -Force
   Copy-Item "models_faye\\eth_models_*.pkl"          "models\\" -Recurse -Force
   Copy-Item "models_faye\\pysr_*.json"               "models\\" -Force   # lagged-discovered PySR
-  # ALSO mirror the daily-availability lag into crypto_trading_system_ed.py's
-  # build_all_features (DAILY_MERGE_LAG_DAYS=1 / ONCHAIN_MERGE_LAG_DAYS=2) THEN restart
-  # the trader — else live feeds non-lagged features to lagged-trained models (Rule 14).
+  # (ed.py retired 2026-07-01 — faye is the SOLE live builder, already daily-lagged
+  # DAILY_MERGE_LAG_DAYS=1 / ONCHAIN_MERGE_LAG_DAYS=2, so no ed-mirror step is needed.)
   # Trader (crypto_revolut_ed_v2.py) picks up new winners on next hourly cycle.
 
 Verifying the consolidation:
@@ -1723,9 +1722,8 @@ def _compute_cross_asset_features(cross_df, target_col, prefix='xa_'):
 # to -0.59% once May 31 on-chain published at 14:01). Shifting the hour's merge key
 # back this many days makes each hour see only strictly-prior daily rows; the ffill
 # below then carries the last AVAILABLE prior row (robust to >1-day publish lag).
-# Mirror this in crypto_trading_system_ed.py's build_all_features ONLY at promotion
-# (after models are retrained on lagged features), else current live models hit a
-# feature mismatch.
+# (ed.py retired 2026-07-01 — faye is the sole live builder; the trader + shadow both
+# build features via this lagged path, so there is no second builder to mirror.)
 DAILY_MERGE_LAG_DAYS = 1
 # On-chain (CoinMetrics) publishes day D's metrics ~midday D+1 (observed: the May 31 row
 # was written 14:01 Jun 1), so a *morning* decision on day D only has data through D-2.
@@ -4549,7 +4547,7 @@ def run_mode_p(assets_list, horizons):
                 _, all_cols = build_all_features(df_raw, asset_name=asset, horizon=h, verbose=False)
                 save_results(asset, h, results, all_cols, pysr_rows=pysr_rows)
                 print(f"\n  Done! Now run Mode DV to test:")
-                print(f"  python crypto_trading_system_ed.py DV {asset} {h}h")
+                print(f"  python crypto_trading_system_faye.py DV {asset} {h}h")
             else:
                 print(f"\n  No useful expressions found for {asset} {h}h. Try increasing --iterations.")
 
@@ -7280,10 +7278,10 @@ def run_mode_h(assets_list, horizons, n_trials=None, resume=False, skip_d=False,
     across horizons to find the best one per asset.
 
     Usage:
-        python crypto_trading_system_ed.py H BTC 4,5,6,7,8h          # full D+G per horizon
-        python crypto_trading_system_ed.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
-        python crypto_trading_system_ed.py H ETH 5,6,7,8h --replay 2880 # 4-month window
-        python crypto_trading_system_ed.py H ETH 5,6,7,8h --replay 2880 --replay-v 1440
+        python crypto_trading_system_faye.py H BTC 4,5,6,7,8h          # full D+G per horizon
+        python crypto_trading_system_faye.py H BTC,ETH 5,6,7,8h --skip # skip D where results exist
+        python crypto_trading_system_faye.py H ETH 5,6,7,8h --replay 2880 # 4-month window
+        python crypto_trading_system_faye.py H ETH 5,6,7,8h --replay 2880 --replay-v 1440
             # train on 4mo, live-validate on 2mo (cuts Mode V cost ~2x)
 
     Flow per asset:
@@ -8204,15 +8202,15 @@ def main():
     has_macro = os.path.exists(MACRO_DIR)
 
     # ================================================================
-    # CLI: python crypto_trading_system_ed.py D BTC 4,8h
+    # CLI: python crypto_trading_system_faye.py D BTC 4,8h
     # ================================================================
     # Order-independent CLI parser
     # Any order works: MODE ASSETS HORIZONS, ASSETS MODE HORIZONS, etc.
     # Examples:
-    #   python crypto_trading_system_ed.py D BTC 4,8h
-    #   python crypto_trading_system_ed.py BTC D 4,8h --trials 150
-    #   python crypto_trading_system_ed.py H 5,6,7,8h BTC --skip
-    #   python crypto_trading_system_ed.py DF BTC,ETH 4,8h
+    #   python crypto_trading_system_faye.py D BTC 4,8h
+    #   python crypto_trading_system_faye.py BTC D 4,8h --trials 150
+    #   python crypto_trading_system_faye.py H 5,6,7,8h BTC --skip
+    #   python crypto_trading_system_faye.py DF BTC,ETH 4,8h
     # ================================================================
     VALID_MODES = {'P', 'D', 'DS', 'DV', 'DVS', 'DVRS', 'S', 'V', 'H', 'HRS', 'HRST', 'HRSTC', 'R', 'RS', 'RST', 'T', 'G', 'F', 'C'}
 
@@ -8563,7 +8561,7 @@ def main():
     # --help
     if '--help' in sys.argv or '-h' in sys.argv:
         print("""
-Usage: python crypto_trading_system_ed.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
+Usage: python crypto_trading_system_faye.py [MODE] [ASSETS] [HORIZONS] [OPTIONS]
 
   Arguments are order-independent — MODE, ASSETS, HORIZONS can appear in any order.
 
@@ -8630,17 +8628,17 @@ Options:
   --help, -h          Show this help
 
 Examples:
-  python crypto_trading_system_ed.py HRS BTC 5,6,7,8h          # full Ed pipeline
-  python crypto_trading_system_ed.py DVRS BTC 5,6,7,8h         # same as HRS
-  python crypto_trading_system_ed.py RS BTC 5,6,7,8h            # regime pair + confidence (skip D/V)
-  python crypto_trading_system_ed.py S BTC                       # optimize confidence only (uses current config)
-  python crypto_trading_system_ed.py R BTC 5,6,7,8h --replay 2880 --conf 85 --top 20
-  python crypto_trading_system_ed.py P BTC 6h                  # discover PySR features (~30-120 min)
-  python crypto_trading_system_ed.py H BTC 5,6,7,8h          # horizon sweep (D+V only)
-  python crypto_trading_system_ed.py H BTC 5,6,7h --skip     # skip D, re-run V only
-  python crypto_trading_system_ed.py DV ETH 6h               # optimize + validate ETH 6h
-  python crypto_trading_system_ed.py D BTC,ETH 8h --trials 200
-  python crypto_trading_system_ed.py V BTC 6h                 # re-validate existing results
+  python crypto_trading_system_faye.py HRS BTC 5,6,7,8h          # full Ed pipeline
+  python crypto_trading_system_faye.py DVRS BTC 5,6,7,8h         # same as HRS
+  python crypto_trading_system_faye.py RS BTC 5,6,7,8h            # regime pair + confidence (skip D/V)
+  python crypto_trading_system_faye.py S BTC                       # optimize confidence only (uses current config)
+  python crypto_trading_system_faye.py R BTC 5,6,7,8h --replay 2880 --conf 85 --top 20
+  python crypto_trading_system_faye.py P BTC 6h                  # discover PySR features (~30-120 min)
+  python crypto_trading_system_faye.py H BTC 5,6,7,8h          # horizon sweep (D+V only)
+  python crypto_trading_system_faye.py H BTC 5,6,7h --skip     # skip D, re-run V only
+  python crypto_trading_system_faye.py DV ETH 6h               # optimize + validate ETH 6h
+  python crypto_trading_system_faye.py D BTC,ETH 8h --trials 200
+  python crypto_trading_system_faye.py V BTC 6h                 # re-validate existing results
 """)
         return
 

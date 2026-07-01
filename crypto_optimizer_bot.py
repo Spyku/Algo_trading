@@ -50,7 +50,7 @@ else:
 if not os.path.exists(PYTHON_EXE):
     PYTHON_EXE = sys.executable
 
-SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_ed.py')
+SCRIPT_PATH = os.path.join(ENGINE_DIR, 'crypto_trading_system_faye.py')  # 2026-07-01: ed retired, faye is THE engine (same CLI). NB faye jobs write to models_faye/ (staging) → manual promote.
 PRODUCTION_CSV = os.path.join(ENGINE_DIR, 'models', 'crypto_ed_production.csv')
 TRADING_CONFIG = os.path.join(ENGINE_DIR, 'config', 'regime_config_ed.json')
 OPTIMIZER_CONFIG_FILE = os.path.join(ENGINE_DIR, 'config', 'telegram_optimizer_config.json')
@@ -686,12 +686,16 @@ def _run_job(job):
     if sys.platform == 'win32':
         creation_flags = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
 
+    # _FAYE_WARNINGS_BAKED=1: skip faye's os.execv re-exec so its stdout stays connected to
+    # our PIPE (the re-exec detaches stdout → progress-parsing would see the job 'finish' early).
+    _sub_env = {**os.environ, '_FAYE_WARNINGS_BAKED': '1'}
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         creationflags=creation_flags,
         cwd=ENGINE_DIR,
+        env=_sub_env,
     )
     job.process = proc
 

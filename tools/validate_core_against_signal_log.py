@@ -74,15 +74,12 @@ for v in ("V2_DATA_SNAPSHOT", "H_STRICT_MODELS_DIR", "H_STRICT_CONFIG_DIR",
 os.environ.setdefault("FAYE_MODELS_DIR", "models")
 
 
-def _load_with_imports(engine_name="ed"):
+def _load_with_imports(engine_name="faye"):
     """Import everything lazily so any import error has a clear message.
     engine_name='faye' uses the lagged FAYE engine (build_all_features +
     _compute_pysr_features reading models_faye/) — tests the daily-lag fix."""
     import crypto_signal_core as csc
-    if engine_name == "faye":
-        import crypto_trading_system_faye as engine
-    else:
-        import crypto_trading_system_ed as engine
+    import crypto_trading_system_faye as engine   # ed retired 2026-07-01 — faye is the only engine
     import crypto_live_trader_ed as lt
     return csc, engine, lt
 
@@ -236,7 +233,7 @@ def main():
     parser.add_argument("--recent-only", action="store_true",
                         help="Sample only the most recent N hours (default: random sample across all)")
     parser.add_argument("--asset", default="ETH")
-    parser.add_argument("--engine", default="faye", choices=["ed", "faye"],
+    parser.add_argument("--engine", default="faye", choices=["faye"],
                         help="Engine whose build_all_features/PySR + production config to use. "
                              "'faye' = lagged FAYE engine + models_faye/ config (tests the daily-lag fix).")
     parser.add_argument("--cpu-lgbm", action="store_true",

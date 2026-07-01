@@ -40,8 +40,11 @@ import pandas as pd
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ENGINE_DIR)
 
-# Import primary pipeline bits
-from crypto_trading_system_ed import (
+# Import primary pipeline bits from FAYE (the engine; ed retired 2026-07-01).
+os.environ.setdefault('FAYE_LIBRARY_MODE', '1')       # skip faye's main-mode + os.execv re-exec on import
+os.environ.setdefault('_FAYE_WARNINGS_BAKED', '1')
+os.environ.setdefault('FAYE_MODELS_DIR', 'models')
+from crypto_trading_system_faye import (
     load_data,
     build_all_features,
     generate_signals,
