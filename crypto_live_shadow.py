@@ -62,22 +62,19 @@ import numpy as np
 import pandas as pd
 
 # Lazy import — only at first use, so import errors don't crash live trader on startup
-_engine = None
 _live_trader = None
 _core = None
 
 
 def _lazy_import():
     """Import dependencies on first use. Returns True if successful."""
-    global _engine, _live_trader, _core
+    global _live_trader, _core
     if _core is not None:
         return True
     try:
         import crypto_signal_core as _core_mod
-        import crypto_trading_system_ed as _engine_mod
-        import crypto_live_trader_ed as _lt_mod
+        import crypto_live_trader_ed as _lt_mod   # re-exports faye's build_all_features/_compute_pysr_features
         _core = _core_mod
-        _engine = _engine_mod
         _live_trader = _lt_mod
         return True
     except Exception as e:
@@ -183,10 +180,15 @@ def shadow_compare(
             _write_row(row)
             return
 
-        df_full, all_cols = _engine.build_all_features(
+        # Mirror the live path EXACTLY (Rule 23 / F2): build features via the LIVE TRADER's
+        # faye-imported builder (FAYE_MODELS_DIR=models set at its import so PySR reads models/),
+        # NOT ed.py. Was `_engine` (crypto_trading_system_ed) — ed's builder can diverge from
+        # faye's (daily-availability lag) and was the last live dependency keeping ed.py alive.
+        # crypto_live_trader_ed re-exports faye's build_all_features/_compute_pysr_features.
+        df_full, all_cols = _live_trader.build_all_features(
             df_raw, asset_name=asset, horizon=horizon, verbose=False, keep_label_nan_tail=True
         )
-        _engine._compute_pysr_features(df_full, all_cols, asset, horizon, verbose=False)
+        _live_trader._compute_pysr_features(df_full, all_cols, asset, horizon, verbose=False)
 
         feature_cols = [f for f in feature_list if f in all_cols]
         if not feature_cols:
