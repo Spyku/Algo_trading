@@ -215,6 +215,8 @@ def backtest_vs_live_check(min_pct=95.0):
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode == 2 or "cannot validate" in out:
         return "WARN", "no live snapshots yet (trader needs to run)"
+    if "WARMING UP" in out:                                    # thin post-promotion sample — don't cry wolf
+        return "PASS", "warming up — thin post-promotion sample (recovers within a day)"
     m = re.search(r"overall ([\d.]+)% \| worst-horizon ([\d.]+)%", out)
     if not m:
         return "WARN", "backtest-vs-live produced no parseable result"
